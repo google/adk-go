@@ -73,9 +73,7 @@ func TestIdentityReadsRaceTheInvocationMutators(t *testing.T) {
 
 	for _, tc := range targets {
 		for range readers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				for range rounds {
 					id, ok := agent.IdentityFromContext(tc.ctx)
 					if !ok || id != want {
@@ -86,26 +84,22 @@ func TestIdentityReadsRaceTheInvocationMutators(t *testing.T) {
 						return
 					}
 				}
-			}()
+			})
 		}
 	}
 
 	// The writers the layout argument rests on, running throughout.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range rounds {
 			ic.EndInvocation()
 		}
-	}()
+	})
 	if setter, ok := ic.(interface{ SetLiveSessionResumptionHandle(string) }); ok {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range rounds {
 				setter.SetLiveSessionResumptionHandle(string(rune('a' + i%26)))
 			}
-		}()
+		})
 	} else {
 		t.Error("InvocationContext no longer has SetLiveSessionResumptionHandle; this test " +
 			"exists to race the identity read against the params writers, so find the new ones")

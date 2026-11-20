@@ -16,7 +16,7 @@ package workflow
 
 import (
 	"errors"
-	"sort"
+	"slices"
 	"sync"
 	"testing"
 
@@ -64,7 +64,7 @@ func TestParallelWorker_PerItemSubBranch(t *testing.T) {
 
 	// Parent (mockCtx) is on root branch "" — each worker's
 	// sub-branch is the bare "<wrappedName>@<i+1>".
-	sort.Strings(seenBranches)
+	slices.Sort(seenBranches)
 	wantBranches := []string{
 		wrappedName + "@1",
 		wrappedName + "@2",
@@ -104,11 +104,10 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 
 	// Simulate ParallelWorker running under a parent branch
 	// "outer@1" (e.g. one branch of a static fan-out).
-	branch := "outer@1"
 	exCtx := agent.PromoteWithDelta(newMockCtx(t),
 		&agent.CommonContextDelta{
 			InvocationContextDelta: &agent.InvocationContextDelta{
-				Branch: &branch,
+				Branch: new("outer@1"),
 			},
 		})
 
@@ -122,7 +121,7 @@ func TestParallelWorker_SubBranchUnderNonRootParent(t *testing.T) {
 	if got, want := len(seenBranches), 2; got != want {
 		t.Fatalf("seenBranches len = %d, want %d", got, want)
 	}
-	sort.Strings(seenBranches)
+	slices.Sort(seenBranches)
 	wantBranches := []string{
 		"outer@1." + wrappedName + "@1",
 		"outer@1." + wrappedName + "@2",

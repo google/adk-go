@@ -80,12 +80,27 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure exporters: %w", err)
 	}
-	cfg.spanProcessors = append(cfg.spanProcessors, exp.spanProcessors...)
-	cfg.logProcessors = append(cfg.logProcessors, exp.logProcessors...)
-	// A periodic reader runs from construction, so readers are built only
-	// once nothing else can fail; one built earlier would outlive the error.
+	// Batch processors and periodic readers run from construction, so they
+	// are built only once nothing else can fail; one built earlier would
+	// outlive the error.
+	for _, e := range exp.spanExporters {
+		cfg.spanProcessors = append(cfg.spanProcessors, sdktrace.NewBatchSpanProcessor(e))
+	}
+	for _, e := range exp.logExporters {
+		cfg.logProcessors = append(cfg.logProcessors, sdklog.NewBatchProcessor(e))
+	}
 	for _, m := range exp.metricExporters {
-		cfg.metricReaders = append(cfg.metricReaders, newPeriodicReader(m.exporter, m.opts...))
+		var reader sdkmetric.Reader
+		if m.exportOnShutdown {
+			// adk-python disables automatic meter-provider shutdown at exit.
+			// Explicit Go shutdown flushes the env-configured OTLP endpoint,
+			// which is not assumed to enforce Cloud Monitoring's minimum interval.
+			// Google Cloud readers still skip the final export.
+			reader = sdkmetric.NewPeriodicReader(&guardedExporter{Exporter: m.exporter}, m.opts...)
+		} else {
+			reader = newNoFinalExportReader(m.exporter, m.opts...)
+		}
+		cfg.metricReaders = append(cfg.metricReaders, reader)
 	}
 	return cfg, nil
 }
@@ -205,21 +220,22 @@ func serviceInstanceID() string {
 }
 
 type exporters struct {
-	spanProcessors  []sdktrace.SpanProcessor
-	logProcessors   []sdklog.Processor
+	spanExporters   []sdktrace.SpanExporter
+	logExporters    []sdklog.Exporter
 	metricExporters []metricExporter
 }
 
 // metricExporter is a metric exporter and the options of the periodic reader
 // that will drive it.
 type metricExporter struct {
-	exporter sdkmetric.Exporter
-	opts     []sdkmetric.PeriodicReaderOption
+	exporter         sdkmetric.Exporter
+	opts             []sdkmetric.PeriodicReaderOption
+	exportOnShutdown bool
 }
 
 func (e *exporters) add(other exporters) {
-	e.spanProcessors = append(e.spanProcessors, other.spanProcessors...)
-	e.logProcessors = append(e.logProcessors, other.logProcessors...)
+	e.spanExporters = append(e.spanExporters, other.spanExporters...)
+	e.logExporters = append(e.logExporters, other.logExporters...)
 	e.metricExporters = append(e.metricExporters, other.metricExporters...)
 }
 
@@ -262,21 +278,21 @@ func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
 		}
-		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+		exp.spanExporters = append(exp.spanExporters, exporter)
 	}
 	if own.meter && endpointSet("METRICS") {
 		exporter, err := otlpmetrichttp.New(ctx)
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP metric exporter: %w", err)
 		}
-		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter})
+		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter, exportOnShutdown: true})
 	}
 	if own.logger && endpointSet("LOGS") {
 		exporter, err := otlploghttp.New(ctx)
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
 		}
-		exp.logProcessors = append(exp.logProcessors, sdklog.NewBatchProcessor(exporter))
+		exp.logExporters = append(exp.logExporters, exporter)
 	}
 	return exp, nil
 }
@@ -294,7 +310,7 @@ func gcpExporters(ctx context.Context, cfg *config, own ownProviders) (exporters
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create GCP span exporter: %w", err)
 		}
-		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+		exp.spanExporters = append(exp.spanExporters, exporter)
 	}
 	if own.meter {
 		exporter, err := otlpmetrichttp.New(ctx,

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package agentanalytics implements the BigQuery Agent Analytics Plugin.
 package agentanalytics
 
 import (
@@ -252,16 +251,20 @@ type pluginState struct {
 	enabled bool
 	// defs and defsErr are the views of the plugin's Config, or why it has
 	// none, from [Config.ViewDefinitions].
-	defs           []ViewDefinition
-	defsErr        error
-	runner         viewRunner
-	viewGate       chan struct{}
-	viewsMu        sync.Mutex
-	lifeCtx        context.Context
-	lifeCancel     context.CancelFunc
-	viewsCancel    context.CancelFunc
-	asyncViewsDone chan struct{}
-	closed         bool
+	defs            []ViewDefinition
+	defsErr         error
+	evalDefs        []ViewDefinition
+	evalDefsErr     error
+	evalConfigErr   error
+	createEvalViews bool
+	runner          viewRunner
+	viewGate        chan struct{}
+	viewsMu         sync.Mutex
+	lifeCtx         context.Context
+	lifeCancel      context.CancelFunc
+	viewsCancel     context.CancelFunc
+	asyncViewsDone  chan struct{}
+	closed          bool
 }
 
 // BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
@@ -275,10 +278,10 @@ type BigQueryAgentAnalyticsPlugin struct {
 
 // DropStats returns cumulative event-drop and formatter-failure counts.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 func (p *BigQueryAgentAnalyticsPlugin) DropStats() DropStats {
 	if p == nil || p.stats == nil {
 		return DropStats{}
@@ -332,7 +335,10 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // config.Enabled is false, and before it returns any error, such as an invalid
 // config or a table that cannot be read, created or upgraded. bqClient and a
 // supplied GCSOffloader remain caller-owned, and the caller is responsible for
-// closing them.
+// closing them. Closing the plugin is idempotent across concurrent and repeated
+// calls: shutdown runs once, converts any panic on the calling goroutine in a
+// cleanup step into an error so remaining cleanup still executes, and returns
+// the cached error result on every call.
 //
 // Register the plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results or agent content. ADK runs the
@@ -466,14 +472,20 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	defs, defsErr := config.ViewDefinitions()
+	evalDefs, evalDefsErr := config.EvalViewDefinitions()
+	evalConfigErr := validateEvalViewConfig(config, deniedColumns, false)
 	state := &pluginState{
-		counters:   processor.counters,
-		enabled:    true,
-		defs:       defs,
-		defsErr:    defsErr,
-		viewGate:   make(chan struct{}, 1),
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
+		counters:        processor.counters,
+		enabled:         true,
+		defs:            defs,
+		defsErr:         defsErr,
+		evalDefs:        evalDefs,
+		evalDefsErr:     evalDefsErr,
+		evalConfigErr:   evalConfigErr,
+		createEvalViews: config.CreateEvalViews,
+		viewGate:        make(chan struct{}, 1),
+		lifeCtx:         lifeCtx,
+		lifeCancel:      lifeCancel,
 	}
 	state.viewGate <- struct{}{}
 	if bqClient != nil {
@@ -500,31 +512,60 @@ func newBigQueryAgentAnalyticsPlugin(
 		AfterToolCallback:   p.afterTool,
 		OnToolErrorCallback: p.onToolError,
 
-		CloseFunc: func() error {
-			state.stopAsyncViewCreation()
-			// The processor uploads while it flushes, so it goes first.
-			processor.Close()
+		CloseFunc: sync.OnceValue(func() (err error) {
 			var closeErrs []error
-			if ownedOffloader != nil {
-				if err := ownedOffloader.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close GCS offloader: %w", err))
+			defer func() {
+				// The view runner refers to bqClient only weakly, so this function,
+				// which the plugin holds, keeps the client alive for the plugin.
+				runtime.KeepAlive(bqClient)
+				err = errors.Join(closeErrs...)
+			}()
+			runCloseStep := func(step string, fn func() error) {
+				defer func() {
+					if r := recover(); r != nil {
+						panicType := fmt.Sprintf("%T", r)
+						closeErrs = append(closeErrs, fmt.Errorf("agentanalytics: %s panicked of type %s", step, panicType))
+					}
+				}()
+				if stepErr := fn(); stepErr != nil {
+					closeErrs = append(closeErrs, stepErr)
 				}
+			}
+			runCloseStep("stop async view creation", func() error {
+				state.stopAsyncViewCreation()
+				return nil
+			})
+			// The processor uploads while it flushes, so it goes first.
+			runCloseStep("close batch processor", func() error {
+				processor.Close()
+				return nil
+			})
+			if ownedOffloader != nil {
+				runCloseStep("close GCS offloader", func() error {
+					if err := ownedOffloader.Close(); err != nil {
+						return fmt.Errorf("failed to close GCS offloader: %w", err)
+					}
+					return nil
+				})
 			}
 			if writeClient != nil {
-				if err := writeClient.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery write client: %w", err))
-				}
+				runCloseStep("close BigQuery write client", func() error {
+					if err := writeClient.Close(); err != nil {
+						return fmt.Errorf("failed to close BigQuery write client: %w", err)
+					}
+					return nil
+				})
 			}
 			if ownBQClient && bqClient != nil {
-				if err := closeBQClient(bqClient); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery client: %w", err))
-				}
+				runCloseStep("close BigQuery client", func() error {
+					if err := closeBQClient(bqClient); err != nil {
+						return fmt.Errorf("failed to close BigQuery client: %w", err)
+					}
+					return nil
+				})
 			}
-			// The view runner refers to bqClient only weakly, so this function,
-			// which the plugin holds, keeps the client alive for the plugin.
-			runtime.KeepAlive(bqClient)
-			return errors.Join(closeErrs...)
-		},
+			return nil
+		}),
 	})
 	if err != nil {
 		processor.Close()
@@ -534,15 +575,36 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	registerPlugin(adkPlugin, state)
 
-	if config.createViews() && state.runner != nil {
+	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
 		logf := config.viewLogf()
-		if defsErr != nil {
-			if logf != nil {
-				logf("agentanalytics: skipping view creation: %v", defsErr)
+		var startupDefs []ViewDefinition
+		hasPerEventViews := false
+		if config.createViews() {
+			if defsErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", defsErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, defs...)
+				hasPerEventViews = true
 			}
-		} else {
+		}
+		if config.CreateEvalViews {
+			if evalErr := cmp.Or(evalConfigErr, evalDefsErr); evalErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", evalErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, evalDefs...)
+			}
+		}
+		if len(startupDefs) > 0 {
+			retryMethod := "SyncViews"
+			if !hasPerEventViews {
+				retryMethod = "SyncEvalViews"
+			}
 			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient)
 		}
 	}
 	return adkPlugin, nil
@@ -581,6 +643,11 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	}
 	if c.ViewPrefix != "" && !isValidIdentifier(c.ViewPrefix) {
 		return nil, fmt.Errorf("invalid config: invalid ViewPrefix %q", c.ViewPrefix)
+	}
+	if c.CreateEvalViews {
+		if err := validateEvalViewConfig(c, denied, true); err != nil {
+			return nil, err
+		}
 	}
 	return denied, nil
 }
@@ -647,9 +714,10 @@ type eventData struct {
 	// customMetadataScrubbed reports that customMetadata was already run
 	// through scrubA2ACustomMetadata.
 	customMetadataScrubbed bool
-	// customMetadataTruncated reports that scrubbing customMetadata hit a
-	// safety cap or placeholder.
-	customMetadataTruncated bool
+	// customMetadataLost holds the keys of customMetadata whose values lost
+	// content to a safety cap or placeholder when scrubbed (see
+	// scrubA2ACustomMetadata).
+	customMetadataLost map[string]bool
 	// timestamp overrides span.timestamp when non-zero. Live callbacks leave
 	// it zero and set span.timestamp from the trace manager's clock; a
 	// mid-run purged activation (see purgeActivationLocked) sets it to
@@ -695,14 +763,22 @@ func (p *analyticsPlugin) denied(column string) bool {
 	return ok
 }
 
+func (p *analyticsPlugin) recordPanic(format string, args ...any) {
+	if p.config.Enabled && p.processor != nil {
+		p.processor.recordAppendFailureDrop(1)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		p.config.logf(format, args...)
+	}()
+}
+
 // recoverCallback logs and suppresses panics raised inside plugin callbacks so
 // that analytics logging never breaks the agent run.
 func (p *analyticsPlugin) recoverCallback(eventType string) {
 	if r := recover(); r != nil {
-		if p.config.Enabled && p.processor != nil {
-			p.processor.recordAppendFailureDrop(1)
-		}
-		p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
+		panicType := fmt.Sprintf("%T", r)
+		p.recordPanic("agentanalytics: dropped %s event: recovered panic of type %s", eventType, panicType)
 	}
 }
 
@@ -734,9 +810,8 @@ func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, even
 
 // logSessionSpanEvent runs spanFn before consulting shouldLogSessionEvent, so
 // session-event rows emitted outside OnEventCallback (such as user-message HITL
-// completions, resumed TOOL_COMPLETED rows, and finalResponseTools
-// AGENT_RESPONSE rows) honor the legacy "EVENT" filter alias while keeping
-// trace manager span side effects intact.
+// completions and resumed TOOL_COMPLETED rows) honor the legacy "EVENT" filter
+// alias while keeping trace manager span side effects intact.
 func (p *analyticsPlugin) logSessionSpanEvent(ctx context.Context, id identity, eventType string, spanFn func() rowSpan, build func(*eventData)) {
 	defer p.recoverCallback(eventType)
 	var span rowSpan
@@ -826,7 +901,23 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
+	target := p.traces.captureRunEndTarget(id.invocationID)
+	var terminalEnded, flushed bool
+	// Register the run-end flush before endInvocationSafe so LIFO defer order
+	// runs endInvocationSafe first while still running flushRunEndSafe even if
+	// afterRun panics before reaching the terminal logEvent.
+	defer func() {
+		if p.config.flushOnRunEnd() && !flushed {
+			p.flushRunEndSafe()
+		}
+	}()
+	defer func() {
+		if !terminalEnded {
+			p.endInvocationSafe(ctx, id, target)
+		}
+	}()
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
+	target = p.traces.refreshRunEndTarget(id.invocationID, target)
 	if unrecErr == nil && ctx != nil {
 		// A canceled invocation failed even when no span is left open, for
 		// example when canceled before any agent started or while post-run
@@ -837,7 +928,9 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 
 	if unrecErr != nil || len(unclosed) > 0 {
 		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocationTarget(ctx, id, &target)
+			terminalEnded = true
+			return span
 		}, func(d *eventData) {
 			d.failed = true
 			if unrecErr != nil {
@@ -847,12 +940,49 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 		})
 	} else {
 		p.logEvent(ctx, id, EventInvocationCompleted, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocationTarget(ctx, id, &target)
+			terminalEnded = true
+			return span
 		}, nil)
+	}
+	if !terminalEnded {
+		terminalEnded = true
+		p.endInvocationSafe(ctx, id, target)
 	}
 
 	if p.config.flushOnRunEnd() {
-		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
+		flushed = true
+		p.flushRunEndSafe() // flush queue synchronously under ShutdownTimeout
+	}
+}
+
+func (p *analyticsPlugin) endInvocationSafe(ctx context.Context, id identity, target runEndTarget) {
+	defer func() {
+		if r := recover(); r != nil {
+			if id.invocationID != "" && p.traces != nil {
+				func() {
+					defer func() { _ = recover() }()
+					p.traces.forceEndInvocationTarget(id, target)
+				}()
+			}
+			panicType := fmt.Sprintf("%T", r)
+			p.recordPanic("agentanalytics: endInvocation fallback: recovered panic of type %s", panicType)
+		}
+	}()
+	if p.traces != nil {
+		p.traces.endInvocationRetry(ctx, id, target)
+	}
+}
+
+func (p *analyticsPlugin) flushRunEndSafe() {
+	defer func() {
+		if r := recover(); r != nil {
+			panicType := fmt.Sprintf("%T", r)
+			p.recordPanic("agentanalytics: flushRunEnd fallback: recovered panic of type %s", panicType)
+		}
+	}()
+	if p.processor != nil {
+		p.processor.flushRunEnd()
 	}
 }
 
@@ -931,12 +1061,28 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
 		p.emitSessionEventSignals(ctx, ev)
-		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
-			taskID := evID
-			taskID.agentName = ev.Author
-			taskID.branch = ev.Branch
-			if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content)); ok {
-				p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
+			// ADK ends a task-mode LLM agent on the completion sentinel alone,
+			// so a finish_task response that also reports a tool result error
+			// ends the activation too, and it gets AGENT_ERROR instead of
+			// AGENT_COMPLETED.
+			if ends, failed, errMsg := taskEndResponse(ev.Content); ends {
+				taskID := evID
+				taskID.agentName = ev.Author
+				taskID.branch = ev.Branch
+				if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content), failed); ok {
+					if failed {
+						p.logAgentErrors(ctx, taskID, []unclosedAgentSpan{{
+							span:      span,
+							agentName: taskID.agentName,
+							branch:    taskID.branch,
+							path:      taskID.path,
+							err:       errors.New(taskFailedPrefix + errMsg),
+						}}, nil)
+					} else {
+						p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+					}
+				}
 			}
 		}
 	}
@@ -952,7 +1098,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 // path, the parent of the event's node path, under its workflow agent's name
 // (see workflowBasePathPrefix), as it does on the events of the nodes that it
 // runs, which therefore also carry the base paths of enclosing workflows. An
-// event whose node path has no unique such workflow is not attributed.
+// event whose node path has no unique such workflow is not attributed. The
+// record that the scheduler writes when a resumed run ends with an output
+// carries adk.workflow.node_resume_completed instead, and is not counted.
 func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 	if ev == nil || ev.Partial || ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
 		return "", false, false
@@ -986,23 +1134,41 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed."), which ends a
-// task-mode LLM agent in ADK without running its AfterAgentCallback.
-func hasTaskCompletedResponse(c *genai.Content) bool {
+// taskFailedPrefix starts the error message of the AGENT_ERROR row of a
+// task-mode LLM agent activation that a finish_task response with a classified
+// tool result error ended (see taskEndResult).
+const taskFailedPrefix = "finish_task ended the task with a tool result error: "
+
+// taskEndResult reports whether ADK ends a task-mode LLM agent on the
+// finish_task response map resp, which it does when resp carries the
+// completion sentinel ("result": "Task completed."), and whether resp also
+// carries a classified tool result error (such as top-level boolean isError or
+// is_error), with its diagnostic. A task that ends with such an error has
+// failed rather than completed.
+func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
+	if res, ok := resp["result"].(string); !ok || res != "Task completed." {
+		return false, false, ""
+	}
+	errMsg, failed = classifyToolResultError(resp)
+	return true, failed, errMsg
+}
+
+// taskEndResponse applies taskEndResult to the first finish_task function
+// response in c, which is the one that decides whether ADK ends a task-mode
+// LLM agent.
+func taskEndResponse(c *genai.Content) (ends, failed bool, errMsg string) {
 	if c == nil {
-		return false
+		return false, false, ""
 	}
 	for _, part := range c.Parts {
 		if part == nil || part.FunctionResponse == nil {
 			continue
 		}
 		if part.FunctionResponse.Name == finishTaskToolName {
-			result, ok := part.FunctionResponse.Response["result"].(string)
-			return ok && result == "Task completed."
+			return taskEndResult(part.FunctionResponse.Response)
 		}
 	}
-	return false
+	return false, false, ""
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,
@@ -1189,9 +1355,16 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
-// logging TOOL_ERROR.
+// logging TOOL_ERROR. If inspecting err panics (for example, Unwrap on a typed
+// nil *fs.PathError), it reports false so the caller records an ordinary tool
+// failure.
 func isToolConfirmationOutcome(err error) bool {
-	return errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected)
+	if err == nil {
+		return false
+	}
+	return orZero(func() bool {
+		return errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected)
+	})
 }
 
 func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
@@ -1218,12 +1391,27 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		return nil, nil
 	}
+	if !confirmationOutcome {
+		msg, failed := classifyToolResultError(result)
+		if name == finishTaskToolName {
+			if ends, _, _ := taskEndResult(result); ends {
+				// The finish_task response event that follows reaches
+				// OnEventCallback without the context of the activation that
+				// made the call. A failed call that does not end the task, such
+				// as one whose arguments failed validation, is not noted: the
+				// model can retry it.
+				p.traces.noteTaskFinished(ctx, id, callID, failed)
+			}
+		}
+		if failed {
+			if !closedByError {
+				p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+			}
+			return nil, nil
+		}
+	}
 	if confirmationOutcome {
 		result = map[string]any{"error": err.Error()}
-	} else if name == finishTaskToolName {
-		// The finish_task response event that follows reaches OnEventCallback
-		// without the context of the activation that made the call.
-		p.traces.noteTaskFinished(ctx, id, callID)
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -1266,16 +1454,71 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 	return nil, nil
 }
 
+const mcpToolErrorMessage = "Tool returned an MCP result with isError=true."
+
 func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.Tool, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
 	p.logEvent(ctx, id, EventToolError, spanFn, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
 		d.content = toolContent(name, "args", args, origin)
 		d.failed = true
 		if err != nil {
-			d.errMsg = err.Error()
+			// An error whose Error method returns "" or panics, as a typed nil
+			// pointer to a type with a value receiver Error method does, is
+			// recorded by its bare type name to match adk-python.
+			d.errMsg = cmp.Or(orZero(err.Error), errorTypeName(err))
 		}
 		d.functionCallID = callID
 	})
+}
+
+// errorTypeName returns the bare type name of err, matching adk-python's
+// type(err).__name__ fallback when Error() is empty or panics.
+func errorTypeName(err error) string {
+	return valueTypeName(err)
+}
+
+// valueTypeName returns the bare type name of v after unwrapping pointers,
+// stopping on self-referential pointer chains such as `type P *P` and falling
+// back to t.String() for unnamed types.
+func valueTypeName(v any) string {
+	t := reflect.TypeOf(v)
+	if t == nil {
+		return ""
+	}
+	var seen map[reflect.Type]bool
+	for t.Kind() == reflect.Pointer {
+		elem := t.Elem()
+		if elem == t || seen[elem] {
+			break
+		}
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		seen[t] = true
+		t = elem
+	}
+	return cmp.Or(t.Name(), t.String())
+}
+
+// classifyToolResultError reports whether a tool result map that came without
+// a Go error marks a failure, and if so the diagnostic to record for it. A
+// result fails when its top-level isError or is_error key is the boolean true,
+// as an MCP CallToolResult reports a failed tool call. The diagnostic is a
+// fixed message, so the result's payload is not copied into error_message.
+func classifyToolResultError(result map[string]any) (string, bool) {
+	return mcpResultError(result)
+}
+
+func mcpResultError(result map[string]any) (string, bool) {
+	if len(result) == 0 {
+		return "", false
+	}
+	for _, k := range []string{"isError", "is_error"} {
+		if v, ok := result[k].(bool); ok && v {
+			return mcpToolErrorMessage, true
+		}
+	}
+	return "", false
 }
 
 // toolName returns the name of t, or "" if t is nil or its Name method
@@ -1582,8 +1825,9 @@ func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
 // agent a, matching adk-python: the static instruction of an LLM agent as
 // content, and its description, model, sub-agent names and, when an
 // instruction provider builds the instruction, instruction_source ("provider",
-// with nil content). An agent that inherits its model from an ancestor has no
-// model attribute, because ADK Go exposes no parent link on agent.Agent.
+// with nil content). ADK Go neither inherits models from ancestor agents nor
+// exposes a parent link on agent.Agent, so only a's own configured Model is
+// recorded.
 func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	attrs = map[string]any{}
 	if a == nil {
@@ -1645,7 +1889,7 @@ func agentConfig(a agent.Agent) any {
 		if !inner.IsValid() || !inner.CanInterface() {
 			return nil
 		}
-		next, ok := inner.Interface().(agent.Agent)
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
 		if !ok {
 			return nil
 		}
@@ -2047,8 +2291,9 @@ func (p *analyticsPlugin) jsonColumn(v any) (string, bool) {
 }
 
 // attributes assembles the attributes column: the event-specific attributes
-// followed by the common ones, plus whether scrubbing custom_metadata lost
-// content to a safety cap.
+// followed by the common ones, plus whether scrubbing lost content of an
+// entry that custom_metadata keeps to a safety cap or placeholder (see
+// eventData.customMetadataLost).
 func (p *analyticsPlugin) attributes(eventID string, id identity, agentName string, span trace.SpanContext, d *eventData) (map[string]any, bool) {
 	attrs := make(map[string]any, len(d.attributes)+6)
 	maps.Copy(attrs, d.attributes)
@@ -2069,6 +2314,12 @@ func (p *analyticsPlugin) attributes(eventID string, id identity, agentName stri
 	metaTrunc := false
 	if md := p.customMetadata.apply(d.customMetadata); md != nil {
 		attrs["custom_metadata"] = md
+		for k := range d.customMetadataLost {
+			if _, ok := md[k]; ok {
+				metaTrunc = true
+				break
+			}
+		}
 	}
 	return attrs, metaTrunc
 }
@@ -2202,11 +2453,7 @@ func stateSnapshot(s session.ReadonlyState) map[string]any {
 	if s == nil {
 		return nil
 	}
-	state := map[string]any{}
-	for k, v := range s.All() {
-		state[k] = v
-	}
-	return state
+	return maps.Collect(s.All())
 }
 
 // adkVersion returns the version of the ADK module linked into the binary,

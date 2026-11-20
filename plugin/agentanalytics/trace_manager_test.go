@@ -43,6 +43,7 @@ import (
 	"weak"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
@@ -1008,6 +1009,322 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 }
 
+// TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan runs a call of a
+// tool that does not exist, which ADK ends with OnToolErrorCallback alone, and
+// then, in the next model response, a call of an existing tool that reuses the
+// function call ID. A plugin registered before this one answers the
+// BeforeToolCallback of the later call, so this plugin sees neither its start
+// nor an error. The record that OnToolErrorCallback left for the failed call
+// belongs to the attempt that it ended: the later call's TOOL_COMPLETED row
+// gets a span of its own, and the call keeps its AGENT_RESPONSE row.
+func TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan(t *testing.T) {
+	p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+		c.FinalResponseToolNames = []string{"lookup"}
+	})
+	lookupTool, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "Looks up"},
+		func(agent.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	// cache answers every call of lookup before the tool runs.
+	cache, err := baseplugin.New(baseplugin.Config{
+		Name: "cache",
+		BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+			if tl.Name() == "lookup" {
+				return map[string]any{"cached": true}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	llm := &scriptedLLM{responses: []*model.LLMResponse{
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"x": 1}},
+		}}, genai.RoleModel)},
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{"q": "x"}},
+		}}, genai.RoleModel)},
+		{Content: textContent("model", "done"), TurnComplete: true},
+	}}
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: llm, Tools: []tool.Tool{lookupTool}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	for _, runErr := range newTestRunner(t, bot, cache, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if got := len(rowsOfType(rows, EventToolStarting)); got != 1 {
+		t.Errorf("got %d TOOL_STARTING rows, want 1 for the failed call; event types: %v", got, eventTypes(rows))
+	}
+	failed := onlyRowOfType(t, rows, EventToolError)
+	completed := onlyRowOfType(t, rows, EventToolCompleted)
+	if got := functionCallIDOf(t, completed); got != "call_0" {
+		t.Errorf("TOOL_COMPLETED function_call_id = %q, want %q", got, "call_0")
+	}
+	failedAt, completedAt := placeOf(failed), placeOf(completed)
+	if completedAt.span == failedAt.span {
+		t.Errorf("TOOL_COMPLETED of the later call reuses the span %q of the failed call", failedAt.span)
+	}
+	if completedAt.parent != failedAt.parent {
+		t.Errorf("TOOL_COMPLETED of the later call is under %q, want the agent span %q", completedAt.parent, failedAt.parent)
+	}
+	responses := 0
+	for _, row := range rowsOfType(rows, EventAgentResponse) {
+		if source, _ := lookup(jsonObjectColumn(t, row, "attributes"), "source_tool"); source == "lookup" {
+			responses++
+		}
+	}
+	if responses != 1 {
+		t.Errorf("got %d AGENT_RESPONSE rows with source_tool lookup, want 1; event types: %v", responses, eventTypes(rows))
+	}
+}
+
+// attemptInvocationContext is an InvocationContext to build tool contexts
+// over. Its WithICDelta returns the context itself, so that
+// agent.Context.WithDelta can derive contexts from such a tool context; the
+// mock alone panics there.
+type attemptInvocationContext struct{ *mockInvocationContext }
+
+func (c *attemptInvocationContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+// newAttemptInvocationContext returns an attemptInvocationContext of the
+// agent "agent" in the invocation "inv".
+func newAttemptInvocationContext() *attemptInvocationContext {
+	return &attemptInvocationContext{&mockInvocationContext{ctx: context.Background(), agentName: "agent", invocationID: "inv"}}
+}
+
+// actionsContext is a context whose Actions method runs actions.
+type actionsContext struct {
+	context.Context
+	actions func() *session.EventActions
+}
+
+func (c actionsContext) Actions() *session.EventActions { return c.actions() }
+
+// TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt ends a tool
+// call with OnToolErrorCallback and then runs AfterToolCallback for the same
+// call key, each through a context of the table, for a call whose start this
+// plugin saw and for one whose start it did not see. A call that
+// OnToolErrorCallback ended answers only the AfterToolCallback of its own
+// attempt: of a context with the same EventActions, which every context that
+// ADK derives from a tool context keeps. The AfterToolCallback of another
+// attempt is a call of its own and leaves the record to its own attempt.
+// Contexts that expose no EventActions match each other by call key alone,
+// and never a tool context.
+func TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	newToolContext := func(actions *session.EventActions) agent.Context {
+		return agent.NewToolContext(ic, "call-1", actions, nil)
+	}
+	type valueKey struct{}
+	tests := []struct {
+		name string
+		// contexts returns the contexts of OnToolErrorCallback and of
+		// AfterToolCallback.
+		contexts func(t *testing.T) (onError, after context.Context)
+		// sameAttempt reports that AfterToolCallback runs for the attempt
+		// that OnToolErrorCallback ended.
+		sameAttempt bool
+	}{
+		{
+			name: "same tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				return c, c
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentTimeout",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentTimeout(time.Minute)
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentCancel",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentCancel()
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithValue context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithValue(c, valueKey{}, 1)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithoutCancel context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithoutCancel(c)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over the same EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				actions := &session.EventActions{}
+				return newToolContext(actions), newToolContext(actions)
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over distinct EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), newToolContext(&session.EventActions{})
+			},
+		},
+		{
+			name: "contexts without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return context.Background(), withFunctionCall(ic.mockInvocationContext, "call-1")
+			},
+			sameAttempt: true,
+		},
+		// In the next two rows, ic is the context without EventActions: unlike
+		// context.Background(), it has the call key of the tool contexts over
+		// it, so these rows compare attempts rather than keys.
+		{
+			name: "tool context, then a context without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), ic
+			},
+		},
+		{
+			name: "context without EventActions, then a tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return ic, newToolContext(&session.EventActions{})
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, started := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/started=%t", tt.name, started), func(t *testing.T) {
+				onError, after := tt.contexts(t)
+				ctx := context.Background()
+				tm := newTraceManager()
+				id := identity{invocationID: "inv", agentName: "agent"}
+				key := toolKey(id, "call-1", "lookup")
+				tm.invocationSpan(ctx, id, nil)
+				agentSpan, _ := tm.pushAgentSpan(ctx, id)
+				var start rowSpan
+				if started {
+					start = tm.pushToolSpan(onError, id, key)
+				}
+				errorEnd, _, closedByError := tm.popToolSpan(onError, id, key, true)
+				if closedByError {
+					t.Fatal("OnToolErrorCallback found the call ended by an earlier error")
+				}
+				if started && errorEnd.spanID != start.spanID {
+					t.Fatalf("TOOL_ERROR at span %q, want the span of the call %q", errorEnd.spanID, start.spanID)
+				}
+				afterEnd, _, closedByError := tm.popToolSpan(after, id, key, false)
+				if closedByError != tt.sameAttempt {
+					t.Fatalf("AfterToolCallback found the call ended by its error: %t, want %t", closedByError, tt.sameAttempt)
+				}
+				if afterEnd.latency != nil {
+					t.Errorf("AfterToolCallback has latency %v, want none", afterEnd.latency)
+				}
+				if tt.sameAttempt {
+					if afterEnd.spanID != errorEnd.spanID {
+						t.Errorf("AfterToolCallback at span %q, want the span of the error %q", afterEnd.spanID, errorEnd.spanID)
+					}
+					return
+				}
+				if afterEnd.spanID == errorEnd.spanID || afterEnd.parentSpanID != agentSpan.spanID {
+					t.Errorf("AfterToolCallback of another attempt at span %q under %q, want a span of its own under the agent %q, not the span of the error %q", afterEnd.spanID, afterEnd.parentSpanID, agentSpan.spanID, errorEnd.spanID)
+				}
+				ownEnd, _, closedByError := tm.popToolSpan(onError, id, key, false)
+				if !closedByError || ownEnd.spanID != errorEnd.spanID {
+					t.Errorf("AfterToolCallback of the failed attempt at span %q (found ended by its error: %t), want the span of the error %q", ownEnd.spanID, closedByError, errorEnd.spanID)
+				}
+			})
+		}
+	}
+}
+
+// TestToolAttempt_WeakAndNeverReused checks the identity of attempts: an
+// attempt leaves its EventActions collectable, and never equals the attempt
+// of other EventActions, even once the runtime has reused the memory of
+// collected ones. The attempt is that of the EventActions whatever the
+// context that returns them, and the zero attempt when the context has no
+// Actions method, or the method panics or returns nil, as that of ADK's
+// callback context does.
+func TestToolAttempt_WeakAndNeverReused(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	var zero toolAttempt
+	const attempts = 2000
+	held := make(map[toolAttempt]int, attempts)
+	for i := range attempts {
+		at := attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)))
+		if at == zero {
+			t.Fatalf("attempt %d of a tool context is the zero attempt", i)
+		}
+		if j, ok := held[at]; ok {
+			t.Fatalf("attempt %d equals attempt %d", i, j)
+		}
+		held[at] = i
+		if i%100 == 99 {
+			// Collect the EventActions so far, so that the later ones can
+			// reuse their memory.
+			runtime.GC()
+		}
+	}
+	runtime.GC()
+	collected := 0
+	for at := range held {
+		if at.Value() == nil {
+			collected++
+		}
+	}
+	// The runtime does not promise to collect every unreachable object.
+	if collected < attempts/2 {
+		t.Errorf("%d of %d EventActions were collected while their attempts were held, want most of them", collected, attempts)
+	}
+
+	actions := &session.EventActions{}
+	direct := actionsContext{context.Background(), func() *session.EventActions { return actions }}
+	if attemptOf(toolActionsOf(direct)) != attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", actions, nil))) {
+		t.Error("a context that returns the EventActions of a tool context has another attempt")
+	}
+	// The Actions method of ADK's callback context logs that it has none.
+	origOut := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+	for name, ctx := range map[string]context.Context{
+		"no Actions method":   context.Background(),
+		"Actions panics":      actionsContext{context.Background(), func() *session.EventActions { panic("no actions") }},
+		"Actions returns nil": actionsContext{context.Background(), func() *session.EventActions { return nil }},
+		"callback context":    agent.NewCallbackContext(ic, &session.EventActions{}),
+	} {
+		if attemptOf(toolActionsOf(ctx)) != zero {
+			t.Errorf("%s: got an attempt, want the zero attempt", name)
+		}
+	}
+}
+
 // TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
 // failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
 // in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
@@ -1324,7 +1641,7 @@ func TestAgentStartingData(t *testing.T) {
 			wantAttrs: map[string]any{"model": "scripted-model", "instruction_source": "provider"},
 		},
 		{
-			name:      "LLM agent that inherits its model",
+			name:      "LLM agent with nil Model omits model attribute",
 			agent:     helper,
 			wantAttrs: map[string]any{"agent_description": "Helps"},
 		},
@@ -2122,10 +2439,8 @@ func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
 
 	const workers = 32
 	var wg sync.WaitGroup
-	wg.Add(workers)
 	for i := range workers {
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			subID := identity{
 				invocationID: "inv-concurrent",
 				agentName:    fmt.Sprintf("worker-%d", i),
@@ -2155,7 +2470,7 @@ func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
 			if agentEnd.spanID != agentSpan.spanID {
 				t.Errorf("worker %d agentEnd = %+v, want span %q", i, agentEnd, agentSpan.spanID)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -2177,10 +2492,8 @@ func TestTraceManager_ConcurrentInvocations(t *testing.T) {
 	tm := newTraceManager()
 	const workers = 32
 	var wg sync.WaitGroup
-	wg.Add(workers)
 	for i := range workers {
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			id := identity{
 				invocationID: fmt.Sprintf("inv-%d", i),
 				agentName:    "planner",
@@ -2195,7 +2508,7 @@ func TestTraceManager_ConcurrentInvocations(t *testing.T) {
 			if ag.parentSpanID != inv.spanID || llm.parentSpanID != ag.spanID || llmEnd.spanID != llm.spanID || agEnd.spanID != ag.spanID || invEnd.spanID != inv.spanID {
 				t.Errorf("invocation %d spans inconsistent: inv=%+v ag=%+v llm=%+v", i, inv, ag, llm)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	if got := trackedInvocations(tm); len(got) != 0 {
@@ -2228,10 +2541,8 @@ func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
 			tm.maxTracked = capLimit
 			const workers = 24
 			var wg sync.WaitGroup
-			wg.Add(workers)
 			for i := range workers {
-				go func(i int) {
-					defer wg.Done()
+				wg.Go(func() {
 					id := identity{
 						invocationID: fmt.Sprintf("inv-evict-%d", i),
 						agentName:    "root",
@@ -2249,7 +2560,7 @@ func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
 					if end.rootAgentName != "root" {
 						t.Errorf("invocation %d rootAgentName = %q, want %q", i, end.rootAgentName, "root")
 					}
-				}(i)
+				})
 			}
 			wg.Wait()
 		})
@@ -2323,13 +2634,11 @@ func TestTraceManager_RunnerConcurrentWorkflowRunNodeSameAgent(t *testing.T) {
 		func(ctx agent.Context, _ any, _ func(*session.Event) error) (string, error) {
 			errs := make(chan error, 2)
 			var wg sync.WaitGroup
-			wg.Add(2)
 			for idx := range 2 {
-				go func(idx int) {
-					defer wg.Done()
+				wg.Go(func() {
 					_, runErr := workflow.RunNode[any](ctx, workerNodes[idx], fmt.Sprintf("task-%d", idx))
 					errs <- runErr
-				}(idx)
+				})
 			}
 			wg.Wait()
 			close(errs)
@@ -6840,7 +7149,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 	}
 
 	// Pop the task span as popTaskAgentSpan does (finish_task completion).
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify seq was NOT marked taskDelegated (defensive guard).
 	inv.mu.Lock()
@@ -6912,7 +7221,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator WAS marked taskDelegated.
 	inv.mu.Lock()
@@ -6972,7 +7281,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
 	tm.mu.Lock()
@@ -7774,7 +8083,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 				tm.popLLMSpan(ctx, child, true)
 			},
 			touchFunc: func(tm *traceManager) {
-				tm.popTaskAgentSpan(ctx, child, nil)
+				tm.popTaskAgentSpan(ctx, child, nil, false)
 			},
 		},
 		{
@@ -11543,7 +11852,7 @@ var adkStopsSequentialOnSubAgentError = sync.OnceValue(func() bool {
 	if err != nil {
 		return true
 	}
-	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe's failing sub-agent yields the error by design; the probe reports through afterRan
 	}
 	return !afterRan.Load()
 })
@@ -11624,7 +11933,7 @@ var adkResolvesAgentModeWithoutMutation = sync.OnceValue(func() bool {
 	if err != nil {
 		return true
 	}
-	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe only observes PrepareLLMAgentInput; it reports through got
 	}
 	return got == nil
 })
@@ -11674,7 +11983,7 @@ var adkEmitsNodeCompletionEvents = sync.OnceValue(func() bool {
 		return true
 	}
 	var emitted bool
-	for ev := range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for ev := range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe's flaky node yields errors by design; it reports through emitted
 		if ev == nil {
 			continue
 		}
@@ -13231,7 +13540,7 @@ func TestTraceManager_ContentlessEventCancelAndSiblingFailureEndInvocationRace(t
 				t.Fatalf("parallelagent.New(par): %v", err)
 			}
 
-			for range newTestRunner(t, par, hold, p).Run(runCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			for range newTestRunner(t, par, hold, p).Run(runCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the held sub-agents yield errors by design; the rows below carry the outcome
 			}
 			if heldTooLong.Load() {
 				t.Fatal("ender did not unblock while its contentless event was held")
@@ -13326,9 +13635,7 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 								cachedErr  error
 								stoppedOut bool
 							)
-							wg.Add(2)
-							go func() {
-								defer wg.Done()
+							wg.Go(func() {
 								if siblingEnds {
 									select {
 									case <-siblingStarted:
@@ -13344,9 +13651,8 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 										cachedErr = runErr
 									}
 								}
-							}()
-							go func() {
-								defer wg.Done()
+							})
+							wg.Go(func() {
 								if !siblingEnds {
 									select {
 									case <-child1Answered:
@@ -13361,7 +13667,7 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 										return
 									}
 								}
-							}()
+							})
 							wg.Wait()
 							if !stoppedOut && cachedErr != nil {
 								yield(nil, cachedErr)
@@ -13515,17 +13821,14 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 							cachedErr  error
 							stoppedOut bool
 						)
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							select {
 							case <-siblingAnswered:
 							case <-time.After(10 * time.Second):
 								cachedErr = errors.New("sibling did not answer")
 								return
 							}
-							nested := "nested"
-							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
 							// Drop cached_child's event so only contextEnded
 							// settled after parent joins can mark it responded.
 							for _, runErr := range cachedChild.Run(nestedCtx) {
@@ -13533,16 +13836,15 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 									cachedErr = runErr
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							for ev, runErr := range sibling.Run(ctx) {
 								if !yield(ev, runErr) {
 									stoppedOut = true
 									return
 								}
 							}
-						}()
+						})
 						wg.Wait()
 						if !stoppedOut && cachedErr != nil {
 							yield(nil, cachedErr)
@@ -13655,7 +13957,6 @@ func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
 							// its ended state, settled after parent joins it,
 							// marks it responded.
 							run := func(i int, forward bool) {
-								defer wg.Done()
 								if i == 1 {
 									select {
 									case <-firstEntered:
@@ -13677,9 +13978,12 @@ func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
 									}
 								}
 							}
-							wg.Add(2)
-							go run(0, !cachedFirst)
-							go run(1, cachedFirst)
+							wg.Go(func() {
+								run(0, !cachedFirst)
+							})
+							wg.Go(func() {
+								run(1, cachedFirst)
+							})
 							wg.Wait()
 							if err := errors.Join(runErrs[0], runErrs[1]); !stoppedOut && err != nil {
 								yield(nil, err)
@@ -14055,34 +14359,29 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 							cachedErr  error
 							stoppedOut bool
 						)
-						nestedS := "nested"
-						sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nestedS})
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
+						wg.Go(func() {
 							select {
 							case <-siblingAnswered:
 							case <-time.After(10 * time.Second):
 								cachedErr = errors.New("sibling did not answer")
 								return
 							}
-							nested := "nested"
-							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
 							for _, runErr := range cachedChild.Run(nestedCtx) {
 								if runErr != nil && cachedErr == nil {
 									cachedErr = runErr
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							for ev, runErr := range sibling.Run(sibCtx) {
 								if !yield(ev, runErr) {
 									stoppedOut = true
 									return
 								}
 							}
-						}()
+						})
 						wg.Wait()
 						if !stoppedOut && cachedErr != nil {
 							yield(nil, cachedErr)
@@ -14176,34 +14475,29 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 					cachedErr  error
 					stoppedOut bool
 				)
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					select {
 					case <-siblingAnswered:
 					case <-time.After(10 * time.Second):
 						cachedErr = errors.New("sibling did not answer")
 						return
 					}
-					nested := "b1.nested"
-					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("b1.nested")})
 					for _, runErr := range cachedChild.Run(nestedCtx) {
 						if runErr != nil && cachedErr == nil {
 							cachedErr = runErr
 						}
 					}
-				}()
-				go func() {
-					defer wg.Done()
-					b1 := "b1"
-					b1Ctx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &b1})
+				})
+				wg.Go(func() {
+					b1Ctx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("b1")})
 					for ev, runErr := range sibling.Run(b1Ctx) {
 						if !yield(ev, runErr) {
 							stoppedOut = true
 							return
 						}
 					}
-				}()
+				})
 				wg.Wait()
 				if !stoppedOut && cachedErr != nil {
 					yield(nil, cachedErr)
@@ -14299,10 +14593,8 @@ func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerRespons
 						done := make(chan struct{})
 						defer close(done)
 						var wg sync.WaitGroup
-						for idx := range 2 {
-							wg.Add(1)
-							go func(idx int) {
-								defer wg.Done()
+						for range 2 {
+							wg.Go(func() {
 								var sawEv bool
 								for ev, err := range child.Run(ctx) {
 									if ev != nil {
@@ -14329,7 +14621,7 @@ func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerRespons
 								if sawEv {
 									close(run1Done)
 								}
-							}(idx)
+							})
 						}
 						go func() {
 							wg.Wait()
@@ -14429,16 +14721,14 @@ func TestConcurrencyRace_ConcurrentSilentCustomAgentRuns_EmitsInvocationComplete
 				errs := make(chan error, 2)
 				var wg sync.WaitGroup
 				for range 2 {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+					wg.Go(func() {
 						for _, runErr := range silentChild.Run(ctx) {
 							if runErr != nil {
 								errs <- runErr
 								return
 							}
 						}
-					}()
+					})
 				}
 				wg.Wait()
 				close(errs)
@@ -14629,9 +14919,7 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 								wg   sync.WaitGroup
 								err1 error
 							)
-							wg.Add(2)
-							go func() {
-								defer wg.Done()
+							wg.Go(func() {
 								defer failReadyOnce.Do(func() { close(failReady) })
 								if !failingFirst {
 									select {
@@ -14660,9 +14948,8 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 										}
 									}
 								}
-							}()
-							go func() {
-								defer wg.Done()
+							})
+							wg.Go(func() {
 								if failingFirst {
 									select {
 									case <-firstStarted:
@@ -14687,7 +14974,7 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 									}
 									ch <- item{ev: ev, err: e}
 								}
-							}()
+							})
 							go func() {
 								wg.Wait()
 								close(ch)
@@ -14902,17 +15189,14 @@ func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclar
 					return true
 				}
 				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					for ev, err := range guard.Run(ctx) {
 						if !send(ev, err) {
 							return
 						}
 					}
-				}()
-				go func() {
-					defer wg.Done()
+				})
+				wg.Go(func() {
 					select {
 					case <-guardStarted:
 					case <-time.After(10 * time.Second):
@@ -14924,7 +15208,7 @@ func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclar
 							return
 						}
 					}
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(ch)
@@ -15262,11 +15546,8 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 				done := make(chan struct{})
 				defer close(done)
 				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
-					sibBranch := "parent.sibling"
-					sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &sibBranch})
+				wg.Go(func() {
+					sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("parent.sibling")})
 					for ev, runErr := range sibling.Run(sibCtx) {
 						if ev != nil {
 							ack := make(chan bool, 1)
@@ -15283,17 +15564,15 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 						}
 						ch <- item{ev: ev, err: runErr}
 					}
-				}()
-				go func() {
-					defer wg.Done()
+				})
+				wg.Go(func() {
 					select {
 					case <-siblingReady:
 					case <-time.After(10 * time.Second):
 						ch <- item{err: errors.New("sibling did not start")}
 						return
 					}
-					nestedBranch := "parent.sibling.nested"
-					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nestedBranch})
+					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("parent.sibling.nested")})
 					// Drop cached_child's event so settlement relies on contextEnded.
 					for _, runErr := range cachedChild.Run(nestedCtx) {
 						if runErr != nil {
@@ -15301,7 +15580,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 							return
 						}
 					}
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(ch)
@@ -15384,7 +15663,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							}
 							go func() {
 								defer close(childDone)
-								for range child.Run(ctx) {
+								for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15480,7 +15759,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							// Start the cached child without joining it.
 							go func() {
 								defer close(cachedDone)
-								for range cachedChild.Run(ctx) {
+								for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15554,7 +15833,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							// event, and wait for it to finish (join).
 							go func() {
 								defer close(cachedDone)
-								for range cachedChild.Run(ctx) {
+								for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15651,8 +15930,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 						if !yield(answer, nil) {
 							return
 						}
-						subPath := "custom@1"
-						promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath})
+						promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("custom@1")})
 						type item struct {
 							ev  *session.Event
 							err error
@@ -15662,9 +15940,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 						done := make(chan struct{})
 						defer close(done)
 						var wg sync.WaitGroup
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							if !cachedFirst {
 								select {
 								case <-firstEntered:
@@ -15680,9 +15956,8 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 									return
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							if cachedFirst {
 								select {
 								case <-firstEntered:
@@ -15707,7 +15982,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 								}
 								ch <- item{ev: ev, err: runErr}
 							}
-						}()
+						})
 						go func() {
 							wg.Wait()
 							close(ch)
@@ -15810,8 +16085,7 @@ func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocat
 	runHelper, err := functiontool.New(functiontool.Config{Name: "run_helper", Description: "Runs helper twice concurrently"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 			// Promote the context to helper@1, as a Live tool would.
-			subPath := "helper@1"
-			promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath})
+			promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")})
 
 			// Each run creates its own runCtx via WithICDelta(nil) so each
 			// has a distinct activation pointer (rec.activation !=
@@ -15835,20 +16109,17 @@ func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocat
 				}
 			}
 			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				run(secondEntered)
-			}()
-			go func() {
-				defer wg.Done()
+			})
+			wg.Go(func() {
 				select {
 				case <-entered:
 				case <-time.After(10 * time.Second):
 					return
 				}
 				run(nil)
-			}()
+			})
 			wg.Wait()
 			return map[string]any{"ok": true}, nil
 		})
@@ -16040,10 +16311,8 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 							wg   sync.WaitGroup
 							err1 error
 						)
-						wg.Add(2)
 						// Failing activation.
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							defer failReadyOnce.Do(func() { close(failReady) })
 							failCtx := ctx.WithContext(context.WithValue(ctx, concurrentFailRunKey{}, true))
 							for _, e := range worker.Run(failCtx) {
@@ -16052,10 +16321,9 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 									break
 								}
 							}
-						}()
+						})
 						// Succeeding activation.
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							for ev, e := range worker.Run(ctx) {
 								if ev != nil {
 									ack := make(chan bool, 1)
@@ -16072,7 +16340,7 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 								}
 								ch <- item{ev: ev, err: e}
 							}
-						}()
+						})
 						go func() {
 							wg.Wait()
 							close(ch)
@@ -16200,13 +16468,10 @@ func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.
 		}
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[0] = runChild(secondEntered)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			select {
 			case <-entered:
 			case <-time.After(10 * time.Second):
@@ -16214,7 +16479,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.
 				return
 			}
 			errs[1] = runChild(nil)
-		}()
+		})
 		wg.Wait()
 		return "fanned out", errors.Join(errs...)
 	}, workflow.NodeConfig{})
@@ -16295,13 +16560,10 @@ func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *test
 		}
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[0] = runChild(secondEntered)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			select {
 			case <-entered:
 			case <-time.After(10 * time.Second):
@@ -16309,7 +16571,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *test
 				return
 			}
 			errs[1] = runChild(nil)
-		}()
+		})
 		wg.Wait()
 		return "fanned out", errors.Join(errs...)
 	}, workflow.NodeConfig{})
@@ -16362,7 +16624,7 @@ func TestConcurrencyRace_FunctionNodeReturnsBeforeUnjoinedCachedChild(t *testing
 	fan := workflow.NewFunctionNode("fan", func(ctx agent.Context, _ any) (string, error) {
 		go func() {
 			defer close(childDone)
-			for range child.Run(ctx) {
+			for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 				select {
 				case <-rootDone:
 				case <-time.After(10 * time.Second):
@@ -16449,7 +16711,7 @@ func runUnjoinedLateChild(t *testing.T, build func(sub agent.Agent, after agent.
 					case <-time.After(10 * time.Second):
 						return
 					}
-					for range child.Run(ctx) {
+					for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 						select {
 						case <-parentDone:
 						case <-time.After(10 * time.Second):
@@ -17680,11 +17942,10 @@ func TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild(t *testing.T) 
 	}
 	startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-			subPath := "helper@1"
-			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(runCtx) {
+				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 					select {
 					case <-toolDone:
 					case <-time.After(10 * time.Second):
@@ -17800,7 +18061,7 @@ func TestConcurrencyRace_FunctionToolReturnsBeforeUnjoinedCachedChild(t *testing
 			childCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path}).WithICDelta(nil)
 			go func() {
 				defer close(childDone)
-				for range child.Run(childCtx) {
+				for range child.Run(childCtx) { //nolint:errcheck // a detached child's error cannot be reported from the tool; the rows below carry the outcome
 					select {
 					case <-toolDone:
 					case <-time.After(10 * time.Second):
@@ -17899,7 +18160,7 @@ func TestRunner_ToolRunCustomParentWithUnjoinedCachedChild_EmitsNoAgentError(t *
 					return func(yield func(*session.Event, error) bool) {
 						go func() {
 							defer close(childDone)
-							for range cachedChild.Run(ctx) {
+							for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 							}
 						}()
 						select {
@@ -18213,7 +18474,7 @@ func TestRunner_ToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.
 			helperCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(helperCtx) {
+				for range helper.Run(helperCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 				}
 			}()
 			select {
@@ -18437,20 +18698,18 @@ func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
 				results := make(chan result)
 				var wg sync.WaitGroup
 				runTask := func() {
-					defer wg.Done()
 					for ev, err := range llmagent.RunLLMAgentAsNode(task, nodeCtx, "do the task") {
 						results <- result{ev: ev, err: err}
 					}
 				}
-				wg.Add(2)
-				go runTask()
-				go func() {
+				wg.Go(runTask)
+				wg.Go(func() {
 					select {
 					case <-modelCalled:
 					case <-time.After(10 * time.Second):
 					}
 					runTask()
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(results)
@@ -19658,11 +19917,9 @@ func TestTraceManager_CallbacksAcrossEndOfRun(t *testing.T) {
 			return realNow()
 		}
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			tm.recordFirstToken(ctx, id)
-		}()
+		})
 		select {
 		case <-ready:
 		case <-time.After(5 * time.Second):
@@ -20290,7 +20547,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 	// Call popTaskAgentSpan on the non-task child at t2. It should return
 	// false and NOT advance parent.lastActivity.
 	clock = t2
-	_, ok := tm.popTaskAgentSpan(ctx, child, nil)
+	_, ok := tm.popTaskAgentSpan(ctx, child, nil, false)
 	if ok {
 		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
 	}
@@ -20397,7 +20654,7 @@ func TestRepro_FailedModelCallsPinCompletedCache(t *testing.T) {
 	}
 	rg := newTestRunner(t, guarded, p)
 	for i := range limit + 6 {
-		for range rg.Run(t.Context(), "u1", fmt.Sprintf("g%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+		for range rg.Run(t.Context(), "u1", fmt.Sprintf("g%d", i), textContent("user", "hi"), agent.RunConfig{}) { //nolint:errcheck // the guardrail blocks every run by design; the pinned count below carries the outcome
 		}
 	}
 	tm.mu.Lock()
@@ -20848,14 +21105,14 @@ func TestRunner_UnjoinedSubAgentCallOutlivesAfterRun(t *testing.T) {
 			start := func(ctx agent.InvocationContext) {
 				go func() {
 					defer close(done)
-					for range sub.Run(ctx) {
+					for range sub.Run(ctx) { //nolint:errcheck // a detached sub-agent's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 			}
 			// Return once the model call started, without waiting for it.
 			wait := func() { <-gate.entered }
 			var invID string
-			for ev := range newTestRunner(t, tc.root(t, sub, start, wait), p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+			for ev := range newTestRunner(t, tc.root(t, sub, start, wait), p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) { //nolint:errcheck // the root returns while its sub-agent runs on; the completed trace below carries the outcome
 				if ev != nil && invID == "" {
 					invID = ev.InvocationID
 				}
@@ -21021,7 +21278,7 @@ func TestRepro_UnjoinedCallStartedAfterLauncherReturnedMovesToLate(t *testing.T)
 			return func(yield func(*session.Event, error) bool) {
 				go func() {
 					defer close(sDone)
-					for range s.Run(ctx) {
+					for range s.Run(ctx) { //nolint:errcheck // a detached sub-agent's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 				<-sStarted
@@ -21223,11 +21480,10 @@ func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
 	helperDone := make(chan struct{})
 	startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-			subPath := "helper@1"
-			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(runCtx) {
+				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 				}
 			}()
 			select {
@@ -21346,11 +21602,10 @@ func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *test
 			}
 			startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 				func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-					subPath := "helper@1"
-					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 					go func() {
 						defer close(helperDone)
-						for range helper.Run(runCtx) {
+						for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 						}
 					}()
 					select {
@@ -21600,7 +21855,7 @@ func TestRunner_AgentStartingAcrossAfterRunStartsInLateState(t *testing.T) {
 				go func() {
 					defer close(childDone)
 					childGoroutine.Store(currentGoroutineID())
-					for range child.Run(ctx) {
+					for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 				select {
@@ -21961,11 +22216,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 	run := func(path string, calls ...string) *spanRecord {
 		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, finishedTasks: calls}
 	}
+	failedRun := func(path string, calls ...string) *spanRecord {
+		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, failedTasks: calls}
+	}
 	for _, tc := range []struct {
-		name  string
-		path  string
-		stack []*spanRecord
-		want  int
+		name   string
+		path   string
+		failed bool
+		stack  []*spanRecord
+		want   int
 	}{
 		{name: "run on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("right/task@1", "call_0")}, want: 1},
 		{name: "run on another path only", path: "left/task@1", stack: []*spanRecord{run("right/task@1", "call_0")}, want: -1},
@@ -21973,11 +22232,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 		{name: "one of two runs on the event path saw the call", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
 		{name: "event without a node path", path: "", stack: []*spanRecord{run("left/task@1", "call_0")}, want: 1},
 		{name: "run without a node path", path: "left/task@1", stack: []*spanRecord{run("", "call_0")}, want: 1},
+		{name: "agent callback added error after completed call", path: "left/task@1", failed: true, stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "agent callback cleared error after failed call", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "same call ID disambiguated by failed classification", path: "left/task@1", failed: true, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1},
+		{name: "same call ID disambiguated by completed classification", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &invocationTrace{agentStack: append([]*spanRecord{{kind: spanKindAgent, name: "root"}}, tc.stack...)}
 			id := identity{agentName: "task", branch: "b", path: tc.path}
-			if got := inv.finishedTaskLocked(id, []string{"call_0"}); got != tc.want {
+			if got := inv.finishedTaskLocked(id, []string{"call_0"}, tc.failed); got != tc.want {
 				t.Errorf("finishedTaskLocked = %d, want %d", got, tc.want)
 			}
 		})
@@ -22234,7 +22497,7 @@ func TestParallelAgentBranchFailureAfterContent_EmitsInvocationError(t *testing.
 	}
 	p, requests, _ := setupTestPlugin(t)
 	r := newTestRunner(t, par, p)
-	for range r.Run(ctx, "u1", "s1", textContent("user", "hello"), agent.RunConfig{}) {
+	for range r.Run(ctx, "u1", "s1", textContent("user", "hello"), agent.RunConfig{}) { //nolint:errcheck // the failing branch yields the error by design; the INVOCATION_ERROR row below carries it
 	}
 
 	rows := collectRows(t, requests, untilInvocationEnd)
@@ -22554,5 +22817,6901 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 	defer late.mu.Unlock()
 	if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
+	}
+}
+
+// TestLateCancelThroughRetiredParent verifies that a context.Canceled error
+// that a sub-agent records after the agent whose context it runs on ended,
+// once another cause canceled that context, is collateral in the late state
+// as in the live state: the open model call of the sub-agent keeps the
+// retired record of that agent as its parent, and that record keeps the
+// context of its callback for the cancellation checks to read until the
+// sub-agent retires too (see dropRetiredLateContextsLocked).
+func TestLateCancelThroughRetiredParent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		late bool
+	}{
+		{name: "live", late: false},
+		{name: "late", late: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-cancel-retired-parent"
+			if tc.late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, identity{invocationID: invID, agentName: "live_agent"}, nil)
+			}
+			o := identity{invocationID: invID, agentName: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			x := identity{invocationID: invID, agentName: "x", path: "g", branch: "g"}
+			gErr := errors.New("g canceled")
+			tm.pushAgentSpan(ctx, o)
+			gctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(gctx, g)
+			tm.pushAgentSpan(gctx, x)
+			tm.pushLLMSpan(gctx, x)
+			var gRec *spanRecord
+			if tc.late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+			}
+			cancel(gErr)
+			tm.popAgentSpan(gctx, g) // x's open model call keeps x open.
+			tm.recordError(gctx, x, llmKey(x), context.Canceled)
+			var inv *invocationTrace
+			if tc.late {
+				inv = lateReviewTrace(t, tm, invID)
+			} else {
+				tm.mu.Lock()
+				inv = tm.invocations[invID]
+				tm.mu.Unlock()
+			}
+			inv.mu.Lock()
+			e, ok := inv.unrecoveredErrors[llmKey(x)]
+			inv.mu.Unlock()
+			if !ok || !e.collateral || !errors.Is(e.err, gErr) {
+				t.Errorf("recorded model error of x = {err: %v, collateral: %v}, want collateral, wrapping %v", e.err, e.collateral, gErr)
+			}
+			if !tc.late {
+				return
+			}
+			tm.popLLMSpan(gctx, x, false)
+			tm.popAgentSpan(gctx, x)
+			checkLateRecordDropped(t, inv, gRec)
+		})
+	}
+}
+
+// TestLateCollateralErrorRetiresActivation verifies that a late activation
+// that ended its InvocationContext, and that records a context.Canceled model
+// error after its parent, a parallel branch whose context a failing sibling
+// canceled, ended, leaves the late state with the agent above it: the error
+// is collateral, as when it is recorded before the parent ends or in the live
+// state, so it does not keep the activation as failed. The retired record of
+// the parent, which the activation kept reachable, then drops the context of
+// its callback too.
+func TestLateCollateralErrorRetiresActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		late      bool
+		errAfterP bool
+	}{
+		{name: "late, error after p ended", late: true, errAfterP: true},
+		{name: "late, error before p ended", late: true, errAfterP: false},
+		{name: "live, error after p ended", late: false, errAfterP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-collateral-retired-parent"
+			o := identity{invocationID: invID, agentName: "o"}
+			if tc.late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, o, nil)
+			}
+			// p is a parallel branch below o (see isParallelBranch), so a
+			// stop point; x runs under p on p's branch and node path, so x is
+			// not one.
+			p := identity{invocationID: invID, agentName: "p", branch: "o.p"}
+			x := identity{invocationID: invID, agentName: "x", branch: "o.p"}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushAgentSpan(ctx, o)
+			pctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(pctx, p)
+			// x ends its own InvocationContext, so it gets no
+			// AfterAgentCallback.
+			xctx := &endedContext{Context: pctx, end: true}
+			tm.pushAgentSpan(xctx, x)
+			tm.pushLLMSpan(xctx, x)
+			cancel(siblingErr)
+			if !tc.errAfterP {
+				tm.recordError(xctx, x, llmKey(x), context.Canceled)
+			}
+			var pRec *spanRecord
+			if tc.late {
+				pRec = lateReviewAgent(t, tm, invID, "p")
+			}
+			tm.popAgentSpan(pctx, p) // x's open model call keeps x open.
+			if tc.errAfterP {
+				tm.recordError(xctx, x, llmKey(x), context.Canceled)
+			}
+			var inv *invocationTrace
+			if tc.late {
+				inv = lateReviewTrace(t, tm, invID)
+			} else {
+				tm.mu.Lock()
+				inv = tm.invocations[invID]
+				tm.mu.Unlock()
+			}
+			inv.mu.Lock()
+			e, ok := inv.unrecoveredErrors[llmKey(x)]
+			inv.mu.Unlock()
+			if !ok || !e.collateral || !errors.Is(e.err, siblingErr) {
+				t.Errorf("recorded model error of x = {err: %v, collateral: %v}, want collateral, wrapping %v", e.err, e.collateral, siblingErr)
+			}
+			if !tc.late {
+				return
+			}
+			xRec := lateReviewAgent(t, tm, invID, "x")
+			tm.popLLMSpan(xctx, x, false)
+			tm.popAgentSpan(ctx, o)
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after o ended = %v, want none: x's run is over and it ended its InvocationContext", got)
+			}
+			if inv.openAgents.Load() {
+				t.Error("late.openAgents = true after o ended, want false")
+			}
+			checkLateRecordDropped(t, inv, xRec)
+			checkLateRecordDropped(t, inv, pRec)
+		})
+	}
+}
+
+// TestLateRecoveryEventRetiresSettledActivation verifies that a response
+// event of an author that has no open span, here the recovery content that
+// c's own AfterAgentCallback returns after this plugin retired c, retires a
+// late activation that only the cause that the event clears kept while o, an
+// agent above it, is still open: nothing else can end the activation anymore
+// (see retireLateSettledLocked).
+func TestLateRecoveryEventRetiresSettledActivation(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-recovery"
+	lateReviewEnded(tm, invID)
+	o := identity{invocationID: invID, agentName: "o"}
+	p := identity{invocationID: invID, agentName: "p", path: "p"}
+	x := identity{invocationID: invID, agentName: "x", path: "p/x"}
+	c := identity{invocationID: invID, agentName: "c", path: "p/x/c"}
+	// b is a parallel branch below c, as in TestLateReviewToolRunFailedGrandchild.
+	b := identity{invocationID: invID, agentName: "b", path: "p/x/c/b", branch: "c.b"}
+	branchErr := errors.New("branch failed")
+	tm.pushAgentSpan(ctx, o)
+	tm.pushAgentSpan(ctx, p)
+	xctx := &endedContext{Context: ctx, end: true}
+	tm.pushAgentSpan(xctx, x)
+	tm.pushAgentSpan(ctx, c)
+	bctx, cancel := context.WithCancelCause(ctx)
+	tm.pushAgentSpan(bctx, b)
+	cancel(branchErr)
+	tm.popAgentSpan(bctx, b)
+	tm.popAgentSpan(ctx, c)
+	// x's open model call keeps it open when p ends, and then the cause
+	// that it carries keeps it while o is open.
+	tm.pushLLMSpan(xctx, x)
+	tm.popAgentSpan(ctx, p)
+	tm.popLLMSpan(xctx, x, true)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "x"}) {
+		t.Fatalf("late agents before c's recovery event = %v, want [o x]", got)
+	}
+	xRec := lateReviewAgent(t, tm, invID, "x")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	settled := xRec.runDone && xRec.contextEnded
+	cause := xRec.openFailureCause()
+	swallowable := len(xRec.retiredCauses) == 1 && xRec.retiredCauses[0].swallowableBySelf && xRec.retiredCauses[0].name == "c"
+	late.mu.Unlock()
+	if !settled || !errors.Is(cause, branchErr) || !swallowable {
+		t.Fatalf("x settled = %v, cause = %v, swallowable by c = %v; want true, %v, true", settled, cause, swallowable, branchErr)
+	}
+
+	tm.completeResponse(ctx, identity{invocationID: invID, agentName: "live_agent"}, "c", "", nil)
+	late.mu.Lock()
+	cleared := len(xRec.retiredCauses) == 0
+	late.mu.Unlock()
+	if !cleared {
+		t.Fatal("c's recovery event did not clear the cause that x carries")
+	}
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+		t.Errorf("late agents after c's recovery event = %v, want [o]: nothing can end x anymore", got)
+	}
+	checkLateRecordDropped(t, late, xRec)
+
+	tm.popAgentSpan(ctx, o)
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after o ended = %v, want none", got)
+	}
+	if late.openAgents.Load() {
+		t.Error("late.openAgents = true after o ended, want false")
+	}
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	if got := late.agentStack[0].firstRetiredCause(); got != nil {
+		t.Errorf("failure cause that reached the invocation span = %v, want none: c's recovery event cleared it", got)
+	}
+}
+
+// liveInvocation is the InvocationContext of an agent activation that has not
+// marked it as ended.
+type liveInvocation struct{ agent.InvocationContext }
+
+func (*liveInvocation) Ended() bool { return false }
+
+func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
+	t.Run("popLLMSpan recovered model response early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popllm-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		late.mu.Unlock()
+
+		tm.pushLLMSpan(aIC, aID)
+		// OnModelErrorCallback records the model error and pops the LLM span
+		// with responded=false, storing it in completedModels while keeping a
+		// open on the late stack due to the unrecovered model error.
+		tm.recordError(aIC, aID, llmKey(aID), errors.New("transient model failure"))
+		tm.popLLMSpan(aIC, aID, false)
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a"}) {
+			t.Fatalf("late agentStack while awaiting recovered model response = %v, want [a]", got)
+		}
+
+		// Subsequent AfterModelCallback for the recovered call clears the error
+		// and takes the early return in popLLMSpan (rec == nil &&
+		// completedModels[key] != nil), retiring a once nothing holds it open.
+		tm.clearError(aIC, aID, llmKey(aID))
+		tm.popLLMSpan(aIC, aID, true)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after recovered popLLMSpan = %v, want empty", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true after recovered popLLMSpan, want false")
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popLLMSpan unknown call early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popllm-unknown"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		tm.popLLMSpan(ctx, unknownID, true)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after unknown popLLMSpan = %v, want empty", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true after unknown popLLMSpan, want false")
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popAgentSpan unknown agent early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popagent-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		tm.popAgentSpan(ctx, unknownID)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after unknown popAgentSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popTaskAgentSpan rejected calls leave settled late activation untouched and valid pop retires it", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-poptask"
+		lateReviewEnded(tm, invID)
+
+		// Settled late activation a directly under invocation (not in task subtree).
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		// Non-task agent owning its own finish_task tool.
+		nonTaskID := identity{invocationID: invID, agentName: "non_task", path: "non_task", branch: "non_task"}
+		nonTaskIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(nonTaskIC, nonTaskID)
+
+		// 1. Unknown/no-open-span popTaskAgentSpan must leave settled activation a untouched.
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		if _, ok := tm.popTaskAgentSpan(ctx, unknownID, []string{"call_missing"}, false); ok {
+			t.Fatal("popTaskAgentSpan(unknownID) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
+			t.Fatalf("late agentStack after no-open-span popTaskAgentSpan = %v, want [a non_task]", got)
+		}
+
+		// 2. Non-task agent popTaskAgentSpan must leave settled activation a untouched.
+		if _, ok := tm.popTaskAgentSpan(ctx, nonTaskID, []string{finishTaskToolName}, false); ok {
+			t.Fatal("popTaskAgentSpan(nonTaskID) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
+			t.Fatalf("late agentStack after non-task popTaskAgentSpan = %v, want [a non_task]", got)
+		}
+
+		// 3. Valid task-mode popTaskAgentSpan must retire both taskRec and settled late activation a.
+		taskID := identity{invocationID: invID, agentName: "task_worker", path: "task_worker", branch: "task_worker"}
+		taskIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(taskIC, taskID)
+		taskRec := lateReviewAgent(t, tm, invID, "task_worker")
+		late.mu.Lock()
+		taskRec.taskMode = true
+		late.mu.Unlock()
+
+		if _, ok := tm.popTaskAgentSpan(ctx, taskID, []string{"call_task"}, false); !ok {
+			t.Fatal("popTaskAgentSpan(taskID) ok = false, want true")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"non_task"}) {
+			t.Fatalf("late agentStack after valid popTaskAgentSpan = %v, want [non_task]", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popDelegatingAgentSpan no-op leaves settled late activation untouched and valid pop retires it", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popdelegating"
+		lateReviewEnded(tm, invID)
+
+		// Settled late activation a directly under invocation (not in coord subtree).
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		// Coordinator agent initially without taskDelegated.
+		coordID := identity{invocationID: invID, agentName: "coord", path: "coord", branch: "coord"}
+		coordIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(coordIC, coordID)
+		coordRec := lateReviewAgent(t, tm, invID, "coord")
+
+		// 1. Rejected popDelegatingAgentSpan (not taskDelegated) leaves a untouched.
+		if _, ok := tm.popDelegatingAgentSpan(ctx, coordID); ok {
+			t.Fatal("popDelegatingAgentSpan(not delegated) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "coord"}) {
+			t.Fatalf("late agentStack after rejected popDelegatingAgentSpan = %v, want [a coord]", got)
+		}
+
+		// 2. Valid popDelegatingAgentSpan (taskDelegated=true) retires coord and settled late activation a.
+		late.mu.Lock()
+		coordRec.taskDelegated = true
+		late.mu.Unlock()
+
+		if _, ok := tm.popDelegatingAgentSpan(ctx, coordID); !ok {
+			t.Fatal("popDelegatingAgentSpan(delegated) ok = false, want true")
+		}
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after valid popDelegatingAgentSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popToolSpan retires settled late activation before parenting synthesized tool span", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-poptool-parent"
+		lateReviewEnded(tm, invID)
+
+		pID := identity{invocationID: invID, agentName: "p", path: "p", branch: "a"}
+		tm.pushAgentSpan(ctx, pID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "p/a", branch: "a"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		tm.pushLLMSpan(aIC, aID)
+		// Retire p while a's open LLM call keeps a on agentStack, so a.parentSpanID
+		// points to the retired p rather than late.rootSpanID (skipped by endToolRunsLocked).
+		tm.popAgentSpan(ctx, pID)
+		tm.popLLMSpan(aIC, aID, true)
+
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		late.mu.Unlock()
+
+		bID := identity{invocationID: invID, agentName: "b", path: "p/a/b", branch: "a"}
+		span, _, _ := tm.popToolSpan(ctx, bID, "unknown-tool-call", false)
+
+		if span.parentSpanID == aRec.spanID {
+			t.Fatalf("synthesized tool span parentSpanID = %q (settled activation a), want invocation root %q", span.parentSpanID, late.rootSpanID)
+		}
+		if span.parentSpanID != late.rootSpanID {
+			t.Fatalf("synthesized tool span parentSpanID = %q, want invocation root %q", span.parentSpanID, late.rootSpanID)
+		}
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after popToolSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+}
+
+type panickingRandReader struct{}
+
+func (panickingRandReader) Read([]byte) (int, error) {
+	panic("boom inside rand reader")
+}
+
+func TestEndInvocation_PanicWhileMutexHeldUnlocksTraceManager(t *testing.T) {
+	t.Run("first tm.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-first-tmmu-panic", agentName: "root"}
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside first tm.mu block")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside first tm.mu block of endInvocation")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("row inv.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-row-invmu-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+		inv.mu.Lock()
+		inv.agentStack = nil
+		inv.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside row inv.mu block")
+		}
+		if !inv.mu.TryLock() {
+			t.Fatal("inv.mu remained locked after panic inside row inv.mu block of endInvocation")
+		}
+		inv.mu.Unlock()
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu locked unexpectedly after panic inside row inv.mu block")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("inv.mu block in rememberCompletedAtLocked", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-remember-invmu-panic", agentName: "root"}
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, tm.traceIDFor(id.invocationID), time.Now())
+		inv.agentStack = nil
+
+		var recovered any
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			defer func() { recovered = recover() }()
+			tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, time.Now())
+		}()
+		if recovered == nil {
+			t.Fatal("expected rememberCompletedAtLocked to panic inside inv.mu block")
+		}
+		if !inv.mu.TryLock() {
+			t.Fatal("inv.mu remained locked after panic inside rememberCompletedAtLocked")
+		}
+		inv.mu.Unlock()
+	})
+
+	t.Run("late.mu block in rememberCompletedAtLocked", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-remember-latemu-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushLLMSpan(ctx, id)
+
+		late := &invocationTrace{} // nil llmSpans causes maps.Copy to panic while late.mu is held.
+		tm.mu.Lock()
+		tm.completed[id.invocationID] = &completedTrace{
+			position: tm.completionOrder.PushBack(id.invocationID),
+			late:     late,
+		}
+		tm.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside late.mu block of rememberCompletedAtLocked")
+		}
+		if !late.mu.TryLock() {
+			t.Fatal("late.mu remained locked after panic inside rememberCompletedAtLocked")
+		}
+		late.mu.Unlock()
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside late.mu block of rememberCompletedAtLocked")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("lookupInvocation tm.mu block", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-lookup-tmmu-panic", agentName: "root"}
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.lookupInvocation(ctx, id, true, false)
+		}()
+		if recovered == nil {
+			t.Fatal("expected lookupInvocation to panic inside tm.mu block")
+		}
+		uuid.SetRand(nil)
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside lookupInvocation")
+		}
+		tm.mu.Unlock()
+
+		// Subsequent endInvocation must complete without deadlocking on tm.mu.
+		tm.endInvocation(ctx, id)
+	})
+
+	t.Run("final tm.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-panic-unlock", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		started := tm.pushLLMSpan(ctx, id)
+
+		// Seed enough completed entries with a nil entry in tm.completionOrder so
+		// pruneWaitingLocked panics inside endInvocation's final tm.mu block
+		// after handover has completed.
+		tm.mu.Lock()
+		tm.maxTracked = 1
+		for i := range 64 {
+			cid := fmt.Sprintf("completed-%d", i)
+			tm.completed[cid] = &completedTrace{position: tm.completionOrder.PushBack(cid)}
+		}
+		tm.completed["stale-nil"] = nil
+		tm.completionOrder.PushBack("stale-nil")
+		tm.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside final tm.mu block")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside endInvocation")
+		}
+		_, stillActive := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+		if stillActive {
+			t.Fatal("finished invocation remained in tm.invocations after panic in final tm.mu block")
+		}
+
+		popped := tm.popLLMSpan(ctx, id, true)
+		if popped.spanID != started.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", popped.spanID, started.spanID)
+		}
+		if popped.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from handed-over open call")
+		}
+	})
+}
+
+func TestHalfEndedInvocation(t *testing.T) {
+	t.Run("endInvocation passes captured now without calling tm.now again", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-half", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		started := tm.pushLLMSpan(ctx, id)
+
+		var n atomic.Int32
+		tm.now = func() time.Time {
+			if n.Add(1) == 2 {
+				panic("boom")
+			}
+			return time.Now()
+		}
+		func() {
+			defer func() { _ = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		tm.now = time.Now
+
+		if got := n.Load(); got != 1 {
+			t.Fatalf("endInvocation called tm.now %d times, want 1", got)
+		}
+		popped := tm.popLLMSpan(ctx, id, true)
+		if popped.spanID != started.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", popped.spanID, started.spanID)
+		}
+		if popped.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from late state")
+		}
+	})
+
+	t.Run("panic in rememberCompletedLocked unlinks finished invocation and hands open calls to late state", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-half-remember", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+
+		tm.now = func() time.Time { panic("boom in rememberCompletedLocked") }
+		var recovered any
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			defer func() { recovered = recover() }()
+			tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
+		}()
+		tm.now = time.Now
+
+		if recovered == nil {
+			t.Fatal("expected rememberCompletedLocked to panic when tm.now panics")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic in rememberCompletedLocked")
+		}
+		_, stillActive := tm.invocations[id.invocationID]
+		completed := tm.completed[id.invocationID]
+		tm.mu.Unlock()
+
+		if stillActive {
+			t.Fatal("invocation with finished=true remained reachable from tm.invocations after panic")
+		}
+		if completed == nil || completed.late == nil {
+			t.Fatalf("completed entry = %+v, want non-nil late state holding handed-over open calls", completed)
+		}
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", poppedLLM.spanID, startedLLM.spanID)
+		}
+		if poppedLLM.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from late state")
+		}
+
+		poppedTool, _, closedByError := tm.popToolSpan(ctx, id, "call-1", false)
+		if closedByError {
+			t.Error("popToolSpan closedByError = true, want false")
+		}
+		if poppedTool.spanID != startedTool.spanID {
+			t.Errorf("popToolSpan spanID = %q, want started spanID %q", poppedTool.spanID, startedTool.spanID)
+		}
+		if poppedTool.latency == nil {
+			t.Error("popToolSpan latency = nil, want non-nil latency from late state")
+		}
+	})
+}
+
+// TestLateRetiredActivationDropsInvocationContext verifies that a late
+// activation whose record still holds its InvocationContext when it retires,
+// because the activation did not mark it as ended, keeps none of it (see
+// dropRetiredLateContextsLocked). The other callers of checkLateRecordDropped
+// retire records that never held one, or that dropped it when they settled.
+func TestLateRetiredActivationDropsInvocationContext(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-ic"
+	lateReviewEnded(tm, invID)
+	o := identity{invocationID: invID, agentName: "o"}
+	a := identity{invocationID: invID, agentName: "a", path: "a"}
+	tm.pushAgentSpan(ctx, o)
+	ic := &liveInvocation{}
+	actx := deltaContext{Context: ctx, derive: func() agent.InvocationContext { return ic }}
+	tm.pushAgentSpan(actx, a)
+	aRec := lateReviewAgent(t, tm, invID, "a")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	ended, activation := aRec.ended != nil, aRec.activation != nil
+	late.mu.Unlock()
+	if !ended || !activation {
+		t.Fatalf("late activation a holds ended = %t and activation = %t before it ends, want both", ended, activation)
+	}
+	tm.popAgentSpan(actx, a)
+	checkLateRecordDropped(t, late, aRec)
+}
+
+// TestLateRetiredChainDropsWithLastReachingSpan verifies that the records of
+// late agents that ended while an activation under them still ran keep the
+// context of their callbacks and the spans that they ran under only while an
+// open span reaches them: once the last such span retires, they drop both,
+// however far above it they are, while a record that another open span still
+// reaches, and an agent that is still open, keep both (see
+// dropRetiredLateContextsLocked).
+func TestLateRetiredChainDropsWithLastReachingSpan(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-retired-chain"
+	lateReviewEnded(tm, invID)
+	// a runs under o, b under a, m under b and c under m, and d under a.
+	ids := map[string]identity{
+		"o": {invocationID: invID, agentName: "o"},
+		"a": {invocationID: invID, agentName: "a", path: "a"},
+		"b": {invocationID: invID, agentName: "b", path: "a/b"},
+		"m": {invocationID: invID, agentName: "m", path: "a/b/m"},
+		"c": {invocationID: invID, agentName: "c", path: "a/b/m/c"},
+		"d": {invocationID: invID, agentName: "d", path: "a/d"},
+	}
+	recs := map[string]*spanRecord{}
+	for _, name := range []string{"o", "a", "b", "m", "c", "d"} {
+		tm.pushAgentSpan(ctx, ids[name])
+		recs[name] = lateReviewAgent(t, tm, invID, name)
+	}
+	late := lateReviewTrace(t, tm, invID)
+	// keeps reports whether the record of name keeps the context of its
+	// callback and the record of parent, or the invocation span if parent
+	// is empty, as the span that it ran under.
+	keeps := func(name, parent string) bool {
+		late.mu.Lock()
+		defer late.mu.Unlock()
+		want := late.agentStack[0]
+		if parent != "" {
+			want = recs[parent]
+		}
+		return recs[name].canceled != nil && recs[name].parent == want
+	}
+	// The open model calls of c and d keep them open when the agents above
+	// them end, and keep the records of those agents for their cancellation
+	// checks.
+	tm.pushLLMSpan(ctx, ids["c"])
+	tm.pushLLMSpan(ctx, ids["d"])
+	for _, name := range []string{"m", "b", "a"} {
+		tm.popAgentSpan(ctx, ids[name])
+	}
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "c", "d"}) {
+		t.Fatalf("late agents after m, b and a ended = %v, want [o c d]", got)
+	}
+	if !keeps("m", "b") || !keeps("b", "a") || !keeps("a", "o") {
+		t.Fatal("the retired records above c do not keep the chain above its open model call")
+	}
+
+	tm.popLLMSpan(ctx, ids["c"], true)
+	tm.popAgentSpan(ctx, ids["c"])
+	for _, name := range []string{"c", "m", "b"} {
+		checkLateRecordDropped(t, late, recs[name])
+	}
+	if !keeps("a", "o") {
+		t.Error("retired a dropped the context of its callback or o after c ended, want both kept: d still runs under it")
+	}
+
+	tm.popLLMSpan(ctx, ids["d"], true)
+	tm.popAgentSpan(ctx, ids["d"])
+	for _, name := range []string{"d", "a"} {
+		checkLateRecordDropped(t, late, recs[name])
+	}
+	if !keeps("o", "") {
+		t.Error("open agent o dropped the context of its callback or the invocation span after d ended")
+	}
+}
+
+// TestLateCauseRetiresInAnyCallOrder verifies that a late activation that
+// carries a failure cause leaves the late state whether its last call ends
+// before or after the agents above it end (see retireLateSettledLocked): x
+// ended its InvocationContext and runs on the branch of p, a parallel branch
+// below o whose context a failing sibling canceled, so x carries the
+// sibling's cause through p. Once its call ended, the cause keeps x on the
+// late agentStack only while o is still open, and each order leaves the same
+// cause on the invocation span.
+func TestLateCauseRetiresInAnyCallOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// endedBefore is how many of p and o, in that order, end before x's
+		// model call does.
+		endedBefore int
+		// wantAfterCall is the late agentStack right after x's model call
+		// ended.
+		wantAfterCall []string
+	}{
+		{name: "call ends before p", endedBefore: 0, wantAfterCall: []string{"o", "p", "x"}},
+		{name: "call ends after p, before o", endedBefore: 1, wantAfterCall: []string{"o", "x"}},
+		{name: "call ends after p and o", endedBefore: 2, wantAfterCall: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-late-cause-order"
+			lateReviewEnded(tm, invID)
+			o := identity{invocationID: invID, agentName: "o"}
+			p := identity{invocationID: invID, agentName: "p", branch: "o.p"}
+			x := identity{invocationID: invID, agentName: "x", branch: "o.p"}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushAgentSpan(ctx, o)
+			pctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(pctx, p)
+			xctx := &endedContext{Context: pctx, end: true}
+			tm.pushAgentSpan(xctx, x)
+			tm.pushLLMSpan(xctx, x)
+			cancel(siblingErr)
+			recs := []*spanRecord{
+				lateReviewAgent(t, tm, invID, "o"),
+				lateReviewAgent(t, tm, invID, "p"),
+				lateReviewAgent(t, tm, invID, "x"),
+			}
+			ends := []func(){
+				func() { tm.popAgentSpan(pctx, p) },
+				func() { tm.popAgentSpan(ctx, o) },
+			}
+			for _, end := range ends[:tc.endedBefore] {
+				end()
+			}
+			tm.popLLMSpan(xctx, x, true)
+			if got := lateReviewStack(t, tm, invID); !slices.Equal(got, tc.wantAfterCall) {
+				t.Errorf("late agents after x's model call ended = %v, want %v", got, tc.wantAfterCall)
+			}
+			for _, end := range ends[tc.endedBefore:] {
+				end()
+			}
+			late := lateReviewTrace(t, tm, invID)
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after p, o and x's model call ended = %v, want none", got)
+			}
+			if late.openAgents.Load() {
+				t.Error("late.openAgents = true after p, o and x's model call ended, want false")
+			}
+			for _, rec := range recs {
+				checkLateRecordDropped(t, late, rec)
+			}
+			late.mu.Lock()
+			defer late.mu.Unlock()
+			if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
+				t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
+			}
+		})
+	}
+}
+
+// TestLateCauseKeepsNoAgentAbove verifies that the failure cause that a late
+// activation carries keeps none of the agents above it once nothing above
+// them can read the cause, so that they and then the activation itself leave
+// the late state once nothing else keeps them (see retireLateSettledLocked):
+// x runs on the branch of p, a parallel branch below o whose context a
+// failing sibling canceled, and carries the sibling's cause through p, which
+// left the same cause on o when it retired. o ended its InvocationContext, so
+// once g, the agent above it, ended, only o's open tool call keeps o, and o
+// is the only agent above x that is still open. When the call returns, o
+// retires, as nothing above it can read the cause, and then so does x, as
+// nothing above it is open anymore.
+func TestLateCauseKeepsNoAgentAbove(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-cause-above"
+	lateReviewEnded(tm, invID)
+	g := identity{invocationID: invID, agentName: "g"}
+	o := identity{invocationID: invID, agentName: "o"}
+	p := identity{invocationID: invID, agentName: "p", branch: "o.p"}
+	x := identity{invocationID: invID, agentName: "x", branch: "o.p"}
+	siblingErr := errors.New("sibling branch failed")
+	tm.pushAgentSpan(ctx, g)
+	octx := &endedContext{Context: ctx, end: true}
+	tm.pushAgentSpan(octx, o)
+	pctx, cancel := context.WithCancelCause(ctx)
+	tm.pushAgentSpan(pctx, p)
+	xctx := &endedContext{Context: pctx, end: true}
+	tm.pushAgentSpan(xctx, x)
+	tm.pushLLMSpan(xctx, x)
+	// o's tool call starts after x, so it cannot have run x (see
+	// launcherOpenLocked).
+	call := toolKey(o, "call-1", "t")
+	tm.pushToolSpan(octx, o, call)
+	cancel(siblingErr)
+	recs := []*spanRecord{
+		lateReviewAgent(t, tm, invID, "g"),
+		lateReviewAgent(t, tm, invID, "o"),
+		lateReviewAgent(t, tm, invID, "p"),
+		lateReviewAgent(t, tm, invID, "x"),
+	}
+	oRec, xRec := recs[1], recs[3]
+	tm.popAgentSpan(pctx, p)
+	tm.popAgentSpan(ctx, g)
+	tm.popLLMSpan(xctx, x, true)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "x"}) {
+		t.Fatalf("late agents before o's tool call returned = %v, want [o x]", got)
+	}
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	oSettled, oCause := oRec.runDone && oRec.contextEnded, oRec.openFailureCause()
+	xSettled, xCause := xRec.runDone && xRec.contextEnded, xRec.openFailureCause()
+	late.mu.Unlock()
+	if !oSettled || !errors.Is(oCause, siblingErr) || !xSettled || !errors.Is(xCause, siblingErr) {
+		t.Fatalf("o settled = %v with failure cause %v, x settled = %v with failure cause %v; want both settled with %v",
+			oSettled, oCause, xSettled, xCause, siblingErr)
+	}
+
+	tm.popToolSpan(octx, o, call, false)
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after o's tool call returned = %v, want none: nothing can end o or x anymore", got)
+	}
+	if late.openAgents.Load() {
+		t.Error("late.openAgents = true after o's tool call returned, want false")
+	}
+	for _, rec := range recs {
+		checkLateRecordDropped(t, late, rec)
+	}
+}
+
+// TestLateCauseHeldWhileRootToolCallOpen verifies that a late activation
+// right under the invocation span that carries a failure cause stays on the
+// late agentStack while a tool call under the invocation span is still open,
+// as the root agent's calls are in RunLive, so that the end of the last such
+// call writes its AGENT_ERROR row whichever call ends last (see
+// retireLateSettledLocked and endToolRunsLocked): the root agent's call-1
+// runs g, which ended its InvocationContext and carries the cause that b, a
+// parallel branch below it whose context a failing sibling canceled, left on
+// it when b ended. g runs on a branch of its own, as an agent that a tool
+// runs with agent.InvocationContextDelta.Branch does, so call-2, which the
+// root agent starts after g, runs under the invocation span rather than under
+// g (see parentFor) and cannot have run g (see launcherOpenLocked).
+func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// first and second are the root agent's tool calls in the order in
+		// which they end.
+		first, second string
+	}{
+		{name: "call-1 ends first", first: "call-1", second: "call-2"},
+		{name: "call-2 ends first", first: "call-2", second: "call-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-late-cause-root-call"
+			lateReviewEnded(tm, invID)
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			// In direct traceManager tests, an agent on a branch of its own
+			// counts as a parallel branch (see isParallelBranch), whose
+			// context failure moves up to the agent above it when it ends.
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			calls := map[string]string{
+				"call-1": toolKey(live, "call-1", "t"),
+				"call-2": toolKey(live, "call-2", "t"),
+			}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushToolSpan(ctx, live, calls["call-1"])
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			gRec := lateReviewAgent(t, tm, invID, "g")
+			late := lateReviewTrace(t, tm, invID)
+			late.mu.Lock()
+			gCause := gRec.openFailureCause()
+			late.mu.Unlock()
+			if !errors.Is(gCause, siblingErr) {
+				t.Fatalf("failure cause of g after b ended = %v, want %v", gCause, siblingErr)
+			}
+			tm.pushToolSpan(ctx, live, calls["call-2"])
+			rows := func(purged []unclosedAgentSpan) []string {
+				var got []string
+				for _, p := range purged {
+					got = append(got, fmt.Sprintf("%s: %v", p.agentName, p.err))
+				}
+				return got
+			}
+
+			_, purged, _ := tm.popToolSpan(ctx, live, calls[tc.first], false)
+			if len(purged) != 0 {
+				t.Errorf("AGENT_ERROR rows after %s returned = %q, want none: %s is still open", tc.first, rows(purged), tc.second)
+			}
+			if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"g"}) {
+				t.Errorf("late agents after %s returned = %v, want [g]: the end of %s reads g's failure cause", tc.first, got, tc.second)
+			}
+
+			_, purged, _ = tm.popToolSpan(ctx, live, calls[tc.second], false)
+			if len(purged) != 1 || purged[0].agentName != "g" || !errors.Is(purged[0].err, siblingErr) {
+				t.Errorf("AGENT_ERROR rows after %s returned = %q, want only g, with %v", tc.second, rows(purged), siblingErr)
+			}
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after both tool calls returned = %v, want none", got)
+			}
+			if late.openAgents.Load() {
+				t.Error("late.openAgents = true after both tool calls returned, want false")
+			}
+			checkLateRecordDropped(t, late, gRec)
+		})
+	}
+}
+
+// TestLateSubNodeCauseHeldUntilRootToolCall verifies that the failure cause of
+// a late activation right under the invocation span on a sub-node path keeps
+// it directly on agentStack even after o's tool call returns with no other tool
+// call open (see retireLateSettledLocked): o's tool call runs g on a branch
+// outside o's, as a tool that runs an agent with
+// agent.InvocationContextDelta.Branch does, so g runs under the invocation span
+// (see parentFor), and g carries the cause that b, a parallel branch below it
+// whose context a failing sibling canceled, left on it when b ended. Once o's
+// call returns, g stays directly on agentStack (preserving its lineage, context,
+// and cause) so that a tool call under the invocation span that starts and ends
+// after o's call returned, as a call of the root agent in RunLive may, writes
+// g's AGENT_ERROR row once and retires g, as on a live trace (see
+// endToolRunsLocked).
+func TestLateSubNodeCauseHeldUntilRootToolCall(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-cause-no-root-call"
+	lateReviewEnded(tm, invID)
+	live := identity{invocationID: invID, agentName: "live_agent"}
+	o := identity{invocationID: invID, agentName: "o", branch: "o"}
+	g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+	b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+	call := toolKey(o, "call-1", "t")
+	siblingErr := errors.New("sibling branch failed")
+	tm.pushAgentSpan(ctx, o)
+	tm.pushToolSpan(ctx, o, call)
+	tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+	bctx, cancel := context.WithCancelCause(ctx)
+	tm.pushAgentSpan(bctx, b)
+	cancel(siblingErr)
+	tm.popAgentSpan(bctx, b)
+	gRec := lateReviewAgent(t, tm, invID, "g")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	underInvocation, gCause := gRec.parent == late.agentStack[0], gRec.openFailureCause()
+	late.mu.Unlock()
+	if !underInvocation || !errors.Is(gCause, siblingErr) {
+		t.Fatalf("g runs under the invocation span = %v with failure cause %v, want true with %v", underInvocation, gCause, siblingErr)
+	}
+
+	tm.popToolSpan(ctx, o, call, false)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g"}) {
+		t.Errorf("late agents after o's tool call returned = %v, want [o g]: direct sub-node cause keeps g on agentStack", got)
+	}
+
+	call2 := toolKey(live, "call-2", "t")
+	tm.pushToolSpan(ctx, live, call2)
+	_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+	checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+		t.Errorf("late agents after call-2 drained g = %v, want [o]", got)
+	}
+	checkLateRecordDropped(t, late, gRec)
+
+	call3 := toolKey(live, "call-3", "t")
+	tm.pushToolSpan(ctx, live, call3)
+	if _, purged, _ = tm.popToolSpan(ctx, live, call3, false); len(purged) != 0 {
+		t.Errorf("%d AGENT_ERROR rows after call-3 returned, want none", len(purged))
+	}
+}
+
+// TestLateRootToolCallAfterSubNodeCause verifies that when o's tool call
+// returns with no other tool call open, keeping a settled activation right
+// under the invocation span on a sub-node path carrying a failure cause (and
+// its failed lineage) directly on agentStack, a subsequent tool call under the
+// invocation span (call-2) writes the same AGENT_ERROR rows on a late trace as
+// on a live trace and retires the kept activations (dropping their callback
+// contexts), recovery clears them and lets them retire cleanly, and a third
+// tool call (call-3) does not repeat the rows.
+func TestLateRootToolCallAfterSubNodeCause(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, tc := range []struct {
+		name              string
+		startSub          func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord
+		wantStackOnReturn []string
+		wantRows          []string
+	}{
+		{
+			name: "direct cause on g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				if !late {
+					return nil
+				}
+				return []*spanRecord{lateReviewAgent(t, tm, invID, "g")}
+			},
+			wantStackOnReturn: []string{"o", "g"},
+			wantRows:          []string{"g"},
+		},
+		{
+			name: "context cause of x under g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g.p"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/p/x", branch: "g.p"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				pctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(pctx, p)
+				xctx := &endedContext{Context: pctx, end: true}
+				tm.pushAgentSpan(xctx, x)
+				tm.pushLLMSpan(xctx, x)
+				var recs []*spanRecord
+				if late {
+					for _, name := range []string{"g", "p", "x"} {
+						recs = append(recs, lateReviewAgent(t, tm, invID, name))
+					}
+				}
+				tm.popAgentSpan(pctx, p)
+				cancel(siblingErr)
+				tm.popLLMSpan(xctx, x, true)
+				return recs
+			},
+			wantStackOnReturn: []string{"o", "g", "x"},
+			wantRows:          []string{"g"},
+		},
+		{
+			name: "cause that b left on x under g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/x/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, x)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				if !late {
+					return nil
+				}
+				return []*spanRecord{
+					lateReviewAgent(t, tm, invID, "g"),
+					lateReviewAgent(t, tm, invID, "x"),
+				}
+			},
+			wantStackOnReturn: []string{"o", "g", "x"},
+			wantRows:          []string{"x", "g"},
+		},
+		{
+			name: "lineage m and x under g after intermediate p ended",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g"}
+				m := identity{invocationID: invID, agentName: "m", path: "g/p/m", branch: "g"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/p/m/x", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/p/m/x/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(ctx, p)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, m)
+				xctx := &endedContext{Context: ctx, end: true}
+				tm.pushAgentSpan(xctx, x)
+				tm.pushLLMSpan(xctx, x)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				var recs []*spanRecord
+				if late {
+					for _, name := range []string{"g", "p", "m", "x"} {
+						recs = append(recs, lateReviewAgent(t, tm, invID, name))
+					}
+				}
+				tm.popAgentSpan(ctx, p)
+				tm.popLLMSpan(xctx, x, true)
+				return recs
+			},
+			wantStackOnReturn: []string{"o", "g", "m", "x"},
+			wantRows:          []string{"x", "m"},
+		},
+	} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/late=%v", tc.name, late), func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-subsequent-root-call"
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				o := identity{invocationID: invID, agentName: "o", branch: "o"}
+				if late {
+					lateReviewEnded(tm, invID)
+				} else {
+					tm.invocationSpan(ctx, live, nil)
+				}
+				tm.pushAgentSpan(ctx, o)
+				call1 := toolKey(o, "call-1", "t")
+				tm.pushToolSpan(ctx, o, call1)
+				recs := tc.startSub(t, tm, invID, late)
+				if _, purged, _ := tm.popToolSpan(ctx, o, call1, false); len(purged) != 0 {
+					t.Fatalf("%d AGENT_ERROR rows after o's call-1 returned, want none", len(purged))
+				}
+				if late {
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, tc.wantStackOnReturn) {
+						t.Errorf("late agents after o's call-1 returned = %v, want %v", got, tc.wantStackOnReturn)
+					}
+				}
+
+				call2 := toolKey(live, "call-2", "t")
+				tm.pushToolSpan(ctx, live, call2)
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, tc.wantRows, siblingErr)
+				if late {
+					lateInv := lateReviewTrace(t, tm, invID)
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+						t.Errorf("late agents after call-2 drained = %v, want [o]", got)
+					}
+					for _, rec := range recs {
+						checkLateRecordDropped(t, lateInv, rec)
+					}
+				}
+
+				call3 := toolKey(live, "call-3", "t")
+				tm.pushToolSpan(ctx, live, call3)
+				if _, purged, _ = tm.popToolSpan(ctx, live, call3, false); len(purged) != 0 {
+					t.Errorf("%d AGENT_ERROR rows after call-3 returned, want none", len(purged))
+				}
+			})
+		}
+	}
+
+	for _, late := range []bool{false, true} {
+		for _, bothRetired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("g1 with child x1 started after g2/bothRetired=%v/late=%v", bothRetired, late), func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-retired-then-held"
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				o := identity{invocationID: invID, agentName: "o", branch: "o"}
+				g1 := identity{invocationID: invID, agentName: "g1", path: "g1", branch: "g1"}
+				x1 := identity{invocationID: invID, agentName: "x1", path: "g1/x1", branch: "g1"}
+				b1 := identity{invocationID: invID, agentName: "b1", path: "g1/x1/b1", branch: "g1.b1"}
+				g2 := identity{invocationID: invID, agentName: "g2", path: "g2", branch: "g2"}
+				b2 := identity{invocationID: invID, agentName: "b2", path: "g2/b2", branch: "g2.b2"}
+				if late {
+					lateReviewEnded(tm, invID)
+				} else {
+					tm.invocationSpan(ctx, live, nil)
+				}
+				tm.pushAgentSpan(ctx, o)
+				call1 := toolKey(o, "call-1", "t")
+				tm.pushToolSpan(ctx, o, call1)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g2)
+				b2ctx, cancel2 := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(b2ctx, b2)
+				cancel2(siblingErr)
+				tm.popAgentSpan(b2ctx, b2)
+				x1ctx := &endedContext{Context: ctx, end: true}
+				tm.pushAgentSpan(x1ctx, x1)
+				b1ctx, cancel1 := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(b1ctx, b1)
+				cancel1(siblingErr)
+				tm.popAgentSpan(b1ctx, b1)
+				if !bothRetired {
+					// Keep g2's subtree open across call-1 via an open model call on g2.
+					tm.pushLLMSpan(&endedContext{Context: ctx, end: true}, g2)
+				}
+				var g1Rec, x1Rec, g2Rec *spanRecord
+				if late {
+					g1Rec = lateReviewAgent(t, tm, invID, "g1")
+					x1Rec = lateReviewAgent(t, tm, invID, "x1")
+					g2Rec = lateReviewAgent(t, tm, invID, "g2")
+				}
+				tm.popToolSpan(ctx, o, call1, false)
+				if late {
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g1", "g2", "x1"}) {
+						t.Errorf("late agents after o's call-1 returned = %v, want [o g1 g2 x1]", got)
+					}
+				}
+
+				call2 := toolKey(live, "call-2", "t")
+				tm.pushToolSpan(ctx, live, call2)
+				if !bothRetired {
+					tm.popLLMSpan(&endedContext{Context: ctx, end: true}, g2, true)
+					if late {
+						if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g1", "g2", "x1"}) {
+							t.Errorf("late agents while call-2 is open = %v, want [o g1 g2 x1]", got)
+						}
+					}
+				}
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, []string{"g2", "x1", "g1"}, siblingErr)
+				if late {
+					lateInv := lateReviewTrace(t, tm, invID)
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+						t.Errorf("late agents after call-2 drained = %v, want [o]", got)
+					}
+					checkLateRecordDropped(t, lateInv, g1Rec)
+					checkLateRecordDropped(t, lateInv, x1Rec)
+					checkLateRecordDropped(t, lateInv, g2Rec)
+				}
+			})
+		}
+
+		t.Run(fmt.Sprintf("two subtrees held sequentially before call-2/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-two-held-subtrees"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g1 := identity{invocationID: invID, agentName: "g1", path: "g1", branch: "g1"}
+			b1 := identity{invocationID: invID, agentName: "b1", path: "g1/b1", branch: "g1.b1"}
+			g2 := identity{invocationID: invID, agentName: "g2", path: "g2", branch: "g2"}
+			b2 := identity{invocationID: invID, agentName: "b2", path: "g2/b2", branch: "g2.b2"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+			b1ctx, cancel1 := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(b1ctx, b1)
+			cancel1(siblingErr)
+			tm.popAgentSpan(b1ctx, b1)
+			var g1Rec *spanRecord
+			if late {
+				g1Rec = lateReviewAgent(t, tm, invID, "g1")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g1"}) {
+					t.Errorf("late agents after call-1 = %v, want [o g1]", got)
+				}
+			}
+
+			call1b := toolKey(o, "call-1b", "t")
+			tm.pushToolSpan(ctx, o, call1b)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g2)
+			b2ctx, cancel2 := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(b2ctx, b2)
+			cancel2(siblingErr)
+			tm.popAgentSpan(b2ctx, b2)
+			var g2Rec *spanRecord
+			if late {
+				g2Rec = lateReviewAgent(t, tm, invID, "g2")
+			}
+			tm.popToolSpan(ctx, o, call1b, false)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g1", "g2"}) {
+					t.Errorf("late agents after call-1b = %v, want [o g1 g2]", got)
+				}
+			}
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g2", "g1"}, siblingErr)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+					t.Errorf("late agents after call-2 = %v, want [o]", got)
+				}
+				checkLateRecordDropped(t, lateInv, g1Rec)
+				checkLateRecordDropped(t, lateInv, g2Rec)
+			}
+		})
+
+		t.Run(fmt.Sprintf("open child p under settled g with cause before call-1 returns/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-open-child-under-settled-g"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/p/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			tm.pushAgentSpan(ctx, p)
+			tm.pushLLMSpan(ctx, p)
+			tm.popLLMSpan(ctx, p, true)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			var gRec, pRec *spanRecord
+			if late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+				pRec = lateReviewAgent(t, tm, invID, "p")
+			}
+			if _, purged, _ := tm.popToolSpan(ctx, o, call1, false); len(purged) != 0 {
+				t.Fatalf("%d AGENT_ERROR rows after o's call-1 returned, want none", len(purged))
+			}
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g", "p"}) {
+					t.Errorf("late agents while p is still open = %v, want [o g p]", got)
+				}
+			}
+			tm.popAgentSpan(ctx, p)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g"}) {
+					t.Errorf("late agents after p ended = %v, want [o g]", got)
+				}
+				checkLateRecordDropped(t, lateInv, pRec)
+			}
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+					t.Errorf("late agents after call-2 drained = %v, want [o]", got)
+				}
+				checkLateRecordDropped(t, lateInv, gRec)
+			}
+		})
+
+		t.Run(fmt.Sprintf("open ancestor a with settled m above open q/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-open-ancestor-settled-m-open-q"
+			a := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+			p := identity{invocationID: invID, agentName: "p", path: "a/p", branch: "a"}
+			m := identity{invocationID: invID, agentName: "m", path: "a/p/m", branch: "a"}
+			q := identity{invocationID: invID, agentName: "q", path: "a/p/m/q", branch: "a"}
+			b := identity{invocationID: invID, agentName: "b", path: "a/p/m/q/b", branch: "a.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, a, nil)
+			}
+			tm.pushAgentSpan(ctx, a)
+			call1 := toolKey(a, "call-1", "t")
+			tm.pushToolSpan(ctx, a, call1)
+			tm.pushAgentSpan(ctx, p)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, m)
+			tm.pushAgentSpan(ctx, q)
+			tm.pushLLMSpan(ctx, q)
+			tm.popAgentSpan(ctx, p)
+			tm.popLLMSpan(ctx, q, true)
+			tm.popToolSpan(ctx, a, call1, false)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "q"}) {
+					t.Errorf("late agents while q is still open = %v, want [a q]", got)
+				}
+			}
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popAgentSpan(ctx, q)
+			call2 := toolKey(a, "call-2", "t")
+			tm.pushToolSpan(ctx, a, call2)
+			_, purged, _ := tm.popToolSpan(ctx, a, call2, false)
+			if len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows on a's call-2, want none", len(purged))
+			}
+			tm.popAgentSpan(ctx, a)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				lateInv.mu.Lock()
+				gotCause := lateInv.agentStack[0].firstRetiredCause()
+				lateInv.mu.Unlock()
+				if !errors.Is(gotCause, siblingErr) {
+					t.Errorf("failure cause on invocation span after a ended = %v, want %v", gotCause, siblingErr)
+				}
+			}
+		})
+
+		t.Run(fmt.Sprintf("custom agent c recovery event while g held/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-held-custom-recovery"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			c := identity{invocationID: invID, agentName: "c", path: "g/c", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/c/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			tm.pushAgentSpan(ctx, c)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popAgentSpan(ctx, c)
+			var gRec *spanRecord
+			if late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g"}) {
+					t.Errorf("late agents while g held before recovery = %v, want [o g]", got)
+				}
+			}
+			// c's own AfterAgentCallback returns recovery content while g is held on agentStack.
+			tm.completeResponse(ctx, live, "c", "g", nil)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+					t.Errorf("late agents after c recovery event = %v, want [o]", got)
+				}
+				checkLateRecordDropped(t, lateInv, gRec)
+			}
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after c recovered, want none: %v", len(purged), purged)
+			}
+		})
+
+		t.Run(fmt.Sprintf("x recovery event after popLLMSpan while g and x held/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-held-llm-recovery"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/x/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			xctx := &endedContext{Context: ctx, end: true}
+			tm.pushAgentSpan(xctx, x)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.pushLLMSpan(xctx, x)
+			var gRec, xRec *spanRecord
+			if late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+				xRec = lateReviewAgent(t, tm, invID, "x")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			// AfterModelCallback runs popLLMSpan before OnEventCallback runs completeResponse.
+			tm.popLLMSpan(xctx, x, true)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g", "x"}) {
+					t.Errorf("late agents before x recovery event = %v, want [o g x]", got)
+				}
+			}
+			tm.completeResponse(ctx, x, "x", "g", nil)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+					t.Errorf("late agents after x recovery event = %v, want [o]", got)
+				}
+				checkLateRecordDropped(t, lateInv, gRec)
+				checkLateRecordDropped(t, lateInv, xRec)
+			}
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after x's recovery event, want none: %v", len(purged), purged)
+			}
+		})
+	}
+}
+
+// lateCallOrders are the orders in which call-1, a late tool call that runs
+// the activations under test, and call-2, another tool call of the same agent
+// that starts after them and so cannot have run them (see
+// launcherOpenLocked), end. In the last one, no other call is open when
+// call-1 ends, so the end of call-1 reports the failures of the runs that it
+// made right away (see endToolRunsLocked), and the other orders must write
+// the same rows.
+var lateCallOrders = []struct {
+	name string
+	ends []string
+}{
+	{name: "call-1 ends first", ends: []string{"call-1", "call-2"}},
+	{name: "call-2 ends first", ends: []string{"call-2", "call-1"}},
+	{name: "no other call", ends: []string{"call-1"}},
+}
+
+// endLateToolCalls starts call-2 of caller, unless ends has call-1 end alone,
+// and ends the tool calls of caller in the order of ends (see
+// lateCallOrders). It checks that each call but the last writes no
+// AGENT_ERROR row and leaves wantHeld on the late agentStack of invID, and
+// returns the AGENT_ERROR rows that the end of the last call writes.
+func endLateToolCalls(t *testing.T, tm *traceManager, invID string, caller identity, ends, wantHeld []string) []unclosedAgentSpan {
+	t.Helper()
+	ctx := context.Background()
+	if len(ends) > 1 {
+		tm.pushToolSpan(ctx, caller, toolKey(caller, "call-2", "t"))
+	}
+	for _, call := range ends[:len(ends)-1] {
+		if _, purged, _ := tm.popToolSpan(ctx, caller, toolKey(caller, call, "t"), false); len(purged) != 0 {
+			var got []string
+			for _, p := range purged {
+				got = append(got, fmt.Sprintf("%s: %v", p.agentName, p.err))
+			}
+			t.Errorf("AGENT_ERROR rows after %s returned = %q, want none: another call is still open", call, got)
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, wantHeld) {
+			t.Errorf("late agents after %s returned = %v, want %v", call, got, wantHeld)
+		}
+	}
+	_, purged, _ := tm.popToolSpan(ctx, caller, toolKey(caller, ends[len(ends)-1], "t"), false)
+	return purged
+}
+
+// checkAgentErrorRows fails t unless purged are the AGENT_ERROR rows of the
+// agents in want, in that order, each with an error that wraps wantErr.
+func checkAgentErrorRows(t *testing.T, purged []unclosedAgentSpan, want []string, wantErr error) {
+	t.Helper()
+	var got []string
+	for _, p := range purged {
+		got = append(got, p.agentName)
+		if !errors.Is(p.err, wantErr) {
+			t.Errorf("AGENT_ERROR row of %s has error %v, want %v", p.agentName, p.err, wantErr)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("AGENT_ERROR rows after the last call returned = %v, want %v", got, want)
+	}
+}
+
+// TestLateDescendantCauseHeldWhileRootToolCallOpen verifies that a failure
+// cause that a late activation carries keeps the activation right under the
+// invocation span that it runs under, which carries none, on the late
+// agentStack while a tool call under the invocation span is still open, as
+// the root agent's calls are in RunLive: the end of the last such call reads
+// the causes in the subtree of that activation through it (see
+// endToolRunsLocked and failuresLocked), so it writes the same AGENT_ERROR
+// rows whichever call ends last as when no other call is open (see
+// retireLateSettledLocked). The root agent's call-1 runs g, which ended its
+// InvocationContext and runs x and y, and only x carries a cause: its own,
+// as a parallel branch whose context a failing sibling canceled after x
+// responded, or the one that b, such a branch below x, left on it when b
+// ended. y carries none, and stays while g, the agent that it runs under, is
+// open, and then leaves with it without a row. g runs on a branch of its
+// own, as in TestLateCauseHeldWhileRootToolCallOpen, so call-2 runs under
+// the invocation span rather than under g.
+func TestLateDescendantCauseHeldWhileRootToolCallOpen(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, cause := range []struct {
+		name string
+		// startX starts x under g, with siblingErr as its failure cause.
+		startX func(tm *traceManager, invID string)
+		// wantRows are the agents of the AGENT_ERROR rows that the end of the
+		// last call writes, each with siblingErr.
+		wantRows []string
+	}{
+		{
+			name: "context cause of x",
+			startX: func(tm *traceManager, invID string) {
+				// In direct traceManager tests, an agent on a branch of its
+				// own counts as a parallel branch (see isParallelBranch). x's
+				// context does not show its InvocationContext, so x responds
+				// through its model call.
+				x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g.x"}
+				xctx, cancel := context.WithCancelCause(context.Background())
+				tm.pushAgentSpan(xctx, x)
+				tm.pushLLMSpan(xctx, x)
+				tm.popLLMSpan(xctx, x, true)
+				cancel(siblingErr)
+			},
+			// x did not fail, so g, the run of the call, gets the row, with
+			// the cause of its subtree (see failuresLocked).
+			wantRows: []string{"g"},
+		},
+		{
+			name: "cause that b left on x",
+			startX: func(tm *traceManager, invID string) {
+				ctx := context.Background()
+				x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/x/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, x)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+			},
+			// x carries the cause as a failure of its own, so x and g, the
+			// agent that it runs under, get rows (see failuresLocked).
+			wantRows: []string{"x", "g"},
+		},
+	} {
+		for _, order := range lateCallOrders {
+			t.Run(cause.name+", "+order.name, func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-late-descendant-cause"
+				lateReviewEnded(tm, invID)
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				y := identity{invocationID: invID, agentName: "y", path: "g/y", branch: "g"}
+				tm.pushToolSpan(ctx, live, toolKey(live, "call-1", "t"))
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				cause.startX(tm, invID)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, y)
+				names := []string{"g", "x", "y"}
+				recs := make([]*spanRecord, len(names))
+				for i, name := range names {
+					recs[i] = lateReviewAgent(t, tm, invID, name)
+				}
+				late := lateReviewTrace(t, tm, invID)
+				late.mu.Lock()
+				causes := make([]error, len(recs))
+				for i, rec := range recs {
+					causes[i] = rec.openFailureCause()
+				}
+				late.mu.Unlock()
+				if causes[0] != nil || !errors.Is(causes[1], siblingErr) || causes[2] != nil {
+					t.Fatalf("failure causes of g, x and y = %v, want only x's, %v", causes, siblingErr)
+				}
+
+				purged := endLateToolCalls(t, tm, invID, live, order.ends, names)
+				checkAgentErrorRows(t, purged, cause.wantRows, siblingErr)
+				if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+					t.Errorf("late agents after the last call returned = %v, want none", got)
+				}
+				if late.openAgents.Load() {
+					t.Error("late.openAgents = true after the last call returned, want false")
+				}
+				for _, rec := range recs {
+					checkLateRecordDropped(t, late, rec)
+				}
+			})
+		}
+	}
+}
+
+// TestLateRootToolCallHoldsOnlyCausesItReads verifies that a tool call under
+// the invocation span that is still open, as the root agent's calls are in
+// RunLive, keeps a settled late activation right under the invocation span on
+// the late agentStack only while the end of the last such call can read a
+// failure cause through it (see heldByCause and endToolRunsLocked): any other
+// such activation retires while the call is still open. The root
+// agent's call-1 runs the activations under test, which ended their
+// InvocationContext and run on branches of their own, so call-2, which the
+// root agent starts after them, runs under the invocation span and cannot
+// have run them (see launcherOpenLocked). call-1 returns first, which settles
+// them while call-2 is still open:
+//
+//   - g and h run on node paths of their own below the invocation span's, and
+//     only h carries a cause: the one that b, a parallel branch below h whose
+//     context a failing sibling canceled, left on h when b ended. The end of
+//     call-2 reads the causes in the subtree of each of them through it (see
+//     failuresLocked), and h is not in g's, so g retires while call-2 is
+//     still open, although h starts after g and so follows it on agentStack,
+//     as the activations under g do. Only h stays, and the end of call-2
+//     writes its AGENT_ERROR row.
+//   - g carries such a cause but runs on the invocation span's own node path,
+//     not below it as an agent that runs as a tool through workflow.RunNode
+//     does, so the end of a tool call under the invocation span does not read
+//     it (see endToolRunsLocked). g retires while call-2 is still open, and
+//     the end of call-2 writes no AGENT_ERROR row.
+func TestLateRootToolCallHoldsOnlyCausesItReads(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	// leaveCause starts b and ends it once a failing sibling canceled its
+	// context, which leaves siblingErr on the activation that b runs under.
+	// In direct traceManager tests, an agent on a branch of its own counts as
+	// a parallel branch (see isParallelBranch), whose context failure moves
+	// up to the agent above it when it ends.
+	leaveCause := func(tm *traceManager, b identity) {
+		bctx, cancel := context.WithCancelCause(context.Background())
+		tm.pushAgentSpan(bctx, b)
+		cancel(siblingErr)
+		tm.popAgentSpan(bctx, b)
+	}
+	for _, tc := range []struct {
+		name string
+		// start starts, under call-1, the activations named in names, and
+		// leaves siblingErr on carrier, the only one of them that carries a
+		// failure cause.
+		start   func(tm *traceManager, invID string)
+		names   []string
+		carrier string
+		// wantHeld is the late agentStack while call-2 is still open, and
+		// wantRows are the agents of the AGENT_ERROR rows that the end of
+		// call-2 writes, each with siblingErr.
+		wantHeld, wantRows []string
+	}{
+		{
+			name: "cause outside the subtree",
+			start: func(tm *traceManager, invID string) {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				h := identity{invocationID: invID, agentName: "h", path: "h", branch: "h"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, h)
+				leaveCause(tm, identity{invocationID: invID, agentName: "b", path: "h/b", branch: "h.b"})
+			},
+			names:    []string{"g", "h"},
+			carrier:  "h",
+			wantHeld: []string{"h"},
+			wantRows: []string{"h"},
+		},
+		{
+			name: "cause on the invocation span's node path",
+			start: func(tm *traceManager, invID string) {
+				g := identity{invocationID: invID, agentName: "g", path: "", branch: "g"}
+				tm.pushAgentSpan(&endedContext{Context: context.Background(), end: true}, g)
+				leaveCause(tm, identity{invocationID: invID, agentName: "b", path: "", branch: "g.b"})
+			},
+			names:   []string{"g"},
+			carrier: "g",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-late-unread-cause"
+			lateReviewEnded(tm, invID)
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			tm.pushToolSpan(ctx, live, toolKey(live, "call-1", "t"))
+			tc.start(tm, invID)
+			recs := make([]*spanRecord, len(tc.names))
+			for i, name := range tc.names {
+				recs[i] = lateReviewAgent(t, tm, invID, name)
+			}
+			late := lateReviewTrace(t, tm, invID)
+			late.mu.Lock()
+			underInvocation := make([]bool, len(recs))
+			causes := make([]error, len(recs))
+			for i, rec := range recs {
+				underInvocation[i], causes[i] = rec.parent == late.agentStack[0], rec.openFailureCause()
+			}
+			late.mu.Unlock()
+			for i, rec := range recs {
+				var wantCause error
+				if rec.name == tc.carrier {
+					wantCause = siblingErr
+				}
+				if !underInvocation[i] || !errors.Is(causes[i], wantCause) {
+					t.Fatalf("%s runs under the invocation span = %v with failure cause %v, want true with %v", rec.name, underInvocation[i], causes[i], wantCause)
+				}
+			}
+
+			tm.pushToolSpan(ctx, live, toolKey(live, "call-2", "t"))
+			if _, purged, _ := tm.popToolSpan(ctx, live, toolKey(live, "call-1", "t"), false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after call-1 returned, want none: call-2 is still open", len(purged))
+			}
+			if got := lateReviewStack(t, tm, invID); !slices.Equal(got, tc.wantHeld) {
+				t.Errorf("late agents while call-2 is still open = %v, want %v", got, tc.wantHeld)
+			}
+			if got, want := late.openAgents.Load(), len(tc.wantHeld) > 0; got != want {
+				t.Errorf("late.openAgents = %v while call-2 is still open, want %v", got, want)
+			}
+			for _, rec := range recs {
+				if !slices.Contains(tc.wantHeld, rec.name) {
+					checkLateRecordDropped(t, late, rec)
+				}
+			}
+
+			_, purged, _ := tm.popToolSpan(ctx, live, toolKey(live, "call-2", "t"), false)
+			checkAgentErrorRows(t, purged, tc.wantRows, siblingErr)
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after both tool calls returned = %v, want none", got)
+			}
+			if late.openAgents.Load() {
+				t.Error("late.openAgents = true after both tool calls returned, want false")
+			}
+			for _, rec := range recs {
+				checkLateRecordDropped(t, late, rec)
+			}
+		})
+	}
+}
+
+// TestLateCauseKeepsLineageWhileReaderOpen verifies that a failure cause that
+// a late activation carries keeps each activation between it and the span
+// through which it is read on the late agentStack while that span can still
+// read it (see retireLateSettledLocked): failure reporting writes the rows of
+// the activations that failed along their lineage on agentStack (see
+// failuresLocked), so the rows would change if one of them retired first.
+// call-1 runs g, which runs p, which runs m, which runs x, and x carries the
+// cause that b, a parallel branch below it, left on it when b ended. p ends
+// while x's model call keeps m and x open, so once call-1 returns, m is
+// settled and the agent that it runs under is no longer open. The cause is
+// read through g by the end of the last tool call under the invocation span
+// when call-1 is a call of the root agent in RunLive, so that g runs right
+// under the invocation span, or by the end of the last tool call of a when
+// call-1 is a call of a, an agent that is still open. Either way, m stays
+// until that end writes the rows of x and m, as when no other call is open.
+// Once g ended before call-1 returned, nothing can read the cause anymore,
+// and m and x leave the late state while call-2 is still open.
+func TestLateCauseKeepsLineageWhileReaderOpen(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	// startChain makes call-1 of caller, which runs g on branch at the node
+	// path base+"g", and under g, p, m, x and b as above, ends b, and then
+	// ends p while x's model call keeps m and x open. It returns the records
+	// of g, p, m and x.
+	startChain := func(t *testing.T, tm *traceManager, invID string, caller identity, base, branch string) []*spanRecord {
+		t.Helper()
+		ctx := context.Background()
+		node := func(name, path, branch string) identity {
+			return identity{invocationID: invID, agentName: name, path: base + path, branch: branch}
+		}
+		g, p, m, x := node("g", "g", branch), node("p", "g/p", branch), node("m", "g/p/m", branch), node("x", "g/p/m/x", branch)
+		// In direct traceManager tests, an agent on a branch of its own
+		// counts as a parallel branch (see isParallelBranch), whose context
+		// failure moves up to the agent above it when it ends.
+		b := node("b", "g/p/m/x/b", branch+".b")
+		tm.pushToolSpan(ctx, caller, toolKey(caller, "call-1", "t"))
+		tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+		tm.pushAgentSpan(ctx, p)
+		tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, m)
+		xctx := &endedContext{Context: ctx, end: true}
+		tm.pushAgentSpan(xctx, x)
+		tm.pushLLMSpan(xctx, x)
+		bctx, cancel := context.WithCancelCause(ctx)
+		tm.pushAgentSpan(bctx, b)
+		cancel(siblingErr)
+		tm.popAgentSpan(bctx, b)
+		var recs []*spanRecord
+		for _, name := range []string{"g", "p", "m", "x"} {
+			recs = append(recs, lateReviewAgent(t, tm, invID, name))
+		}
+		tm.popAgentSpan(ctx, p)
+		tm.popLLMSpan(xctx, x, true)
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		xCause := recs[3].openFailureCause()
+		late.mu.Unlock()
+		if !errors.Is(xCause, siblingErr) {
+			t.Fatalf("failure cause of x after b ended = %v, want %v", xCause, siblingErr)
+		}
+		return recs
+	}
+
+	for _, reader := range []struct {
+		name string
+		// owner reports whether call-1 is a call of a, an agent that is still
+		// open, rather than of the root agent in RunLive.
+		owner bool
+		// wantHeld is the late agentStack while call-2 is still open.
+		wantHeld []string
+	}{
+		{name: "root agent's calls", wantHeld: []string{"g", "m", "x"}},
+		{name: "calls of open agent a", owner: true, wantHeld: []string{"a", "g", "m", "x"}},
+	} {
+		for _, order := range lateCallOrders {
+			t.Run(reader.name+", "+order.name, func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-late-cause-lineage"
+				lateReviewEnded(tm, invID)
+				// g runs on a branch of its own under the invocation span, as
+				// in TestLateCauseHeldWhileRootToolCallOpen, so call-2 runs
+				// under the invocation span rather than under g.
+				caller, base, branch := identity{invocationID: invID, agentName: "live_agent"}, "", "g"
+				if reader.owner {
+					caller, base, branch = identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}, "a/", "a"
+					tm.pushAgentSpan(ctx, caller)
+				}
+				recs := startChain(t, tm, invID, caller, base, branch)
+
+				purged := endLateToolCalls(t, tm, invID, caller, order.ends, reader.wantHeld)
+				// x carries the cause as a failure of its own, and m is the
+				// rest of its lineage on agentStack, as p retired.
+				checkAgentErrorRows(t, purged, []string{"x", "m"}, siblingErr)
+				if reader.owner {
+					tm.popAgentSpan(ctx, caller)
+				}
+				late := lateReviewTrace(t, tm, invID)
+				if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+					t.Errorf("late agents after the last call returned = %v, want none", got)
+				}
+				if late.openAgents.Load() {
+					t.Error("late.openAgents = true after the last call returned, want false")
+				}
+				for _, rec := range recs {
+					checkLateRecordDropped(t, late, rec)
+				}
+			})
+		}
+	}
+
+	t.Run("root agent's calls, g ended first", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-cause-no-reader"
+		lateReviewEnded(tm, invID)
+		live := identity{invocationID: invID, agentName: "live_agent"}
+		recs := startChain(t, tm, invID, live, "", "g")
+		// call-1, which may have run m and x, keeps them when g ends.
+		tm.popAgentSpan(ctx, identity{invocationID: invID, agentName: "g", path: "g", branch: "g"})
+		tm.pushToolSpan(ctx, live, toolKey(live, "call-2", "t"))
+		tm.popToolSpan(ctx, live, toolKey(live, "call-1", "t"), false)
+		late := lateReviewTrace(t, tm, invID)
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Errorf("late agents while call-2 is still open = %v, want none: g ended, so nothing can read x's failure cause anymore", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true while call-2 is still open, want false")
+		}
+		for _, rec := range recs {
+			checkLateRecordDropped(t, late, rec)
+		}
+		if _, purged, _ := tm.popToolSpan(ctx, live, toolKey(live, "call-2", "t"), false); len(purged) != 0 {
+			t.Errorf("%d AGENT_ERROR rows after call-2 returned, want none", len(purged))
+		}
+	})
+}
+
+// TestRetiredCallerReadsCause verifies that a tool call whose agent ended
+// before the call did resolves its owner to the invocation span upon completion
+// (see endToolRunsLocked) and reports failure causes of settled activations
+// right under the invocation span, whether the caller ends before or after
+// earlier tool calls return (see heldByCause and retireLateSettledLocked).
+func TestRetiredCallerReadsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		callerEndsBeforeCall1 bool
+	}{
+		{name: "caller ends before call-1 returns", callerEndsBeforeCall1: true},
+		{name: "call-1 returns before caller ends", callerEndsBeforeCall1: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-retired-caller"
+			lateReviewEnded(tm, invID)
+			o := identity{invocationID: invID, agentName: "o", path: "o", branch: "o"}
+			q := identity{invocationID: invID, agentName: "q", path: "q", branch: "q"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushAgentSpan(ctx, o)
+			tm.pushAgentSpan(ctx, q)
+			c1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, c1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			cq := toolKey(q, "call-q", "t") // starts after g, so it did not run g
+			tm.pushToolSpan(ctx, q, cq)
+
+			var p1, p2 []unclosedAgentSpan
+			if tc.callerEndsBeforeCall1 {
+				tm.popAgentSpan(ctx, q) // q ends while call-q is open
+				_, p1, _ = tm.popToolSpan(ctx, o, c1, false)
+				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
+			} else {
+				_, p1, _ = tm.popToolSpan(ctx, o, c1, false)
+				tm.popAgentSpan(ctx, q) // q ends while call-q is open
+				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
+			}
+			formatRows := func(rows []unclosedAgentSpan) string {
+				parts := make([]string, len(rows))
+				for i, r := range rows {
+					parts[i] = fmt.Sprintf("%s (%v)", r.agentName, r.err)
+				}
+				return "[" + strings.Join(parts, ", ") + "]"
+			}
+			if len(p1) != 0 {
+				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %s", len(p1), formatRows(p1))
+			}
+			// o is on its own node path, so ending call-q, whose owner resolves to
+			// the invocation span, also ends o as a failed run.
+			wantOErr := fmt.Sprintf("agent %q execution failed before completion", "o")
+			if len(p2) != 2 ||
+				p2[0].agentName != "g" || p2[0].err != siblingErr ||
+				p2[1].agentName != "o" || p2[1].err == nil || p2[1].err.Error() != wantOErr {
+				t.Errorf("AGENT_ERROR rows on call-q end = %s, want [g (%v), o (%s)]", formatRows(p2), siblingErr, wantOErr)
+			}
+		})
+	}
+}
+
+// TestLaterChildUnderRootSubNodeCause verifies that when a settled sub-node
+// activation g right under the invocation span keeps a failure cause directly
+// on agentStack across o's tool call return, a later child activation h
+// starting on g's branch under a subsequent root tool call still parents under
+// g (rather than falling through to the invocation span) and emits both h's
+// and g's AGENT_ERROR rows identically on live and late traces.
+func TestLaterChildUnderRootSubNodeCause(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	childErr := errors.New("child h failed")
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-later-child-under-root-subnode"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			h := identity{invocationID: invID, agentName: "h", branch: "g"}
+			hb := identity{invocationID: invID, agentName: "hb", branch: "g.hb"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			if _, purged, _ := tm.popToolSpan(ctx, o, call1, false); len(purged) != 0 {
+				t.Fatalf("%d AGENT_ERROR rows after o's call-1 returned, want none", len(purged))
+			}
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, h)
+			hbctx, cancelH := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(hbctx, hb)
+			cancelH(childErr)
+			tm.popAgentSpan(hbctx, hb)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			if len(purged) != 2 || purged[0].agentName != "h" || purged[1].agentName != "g" {
+				t.Fatalf("AGENT_ERROR rows = %v, want [h g]", purged)
+			}
+			if !errors.Is(purged[0].err, childErr) || !errors.Is(purged[1].err, siblingErr) {
+				t.Errorf("AGENT_ERROR causes = [%v, %v], want [%v, %v]", purged[0].err, purged[1].err, childErr, siblingErr)
+			}
+		})
+	}
+}
+
+// TestSecondActivationAndSameNamedOpenBranchWithHeldRootCause verifies response
+// routing parity between live and late traces while a settled activation g1 on
+// branch "g" is held on agentStack: a response from a second activation of g
+// targets the newer activation without clearing g1's cause, an event with an
+// empty branch hits a later open same-named agent on another branch just as on
+// a live trace, and an event on branch "g" finds held g1 directly on
+// agentStack rather than touching the other branch's open activation.
+func TestSecondActivationAndSameNamedOpenBranchWithHeldRootCause(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("second activation response preserves held g1/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-second-activation-held-g"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g1 := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b1 := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b1)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b1)
+			tm.popToolSpan(ctx, o, call1, false)
+
+			// Start a distinct second activation of g on the same path and branch.
+			ic2 := &liveInvocation{}
+			g2ctx := deltaContext{Context: ctx, derive: func() agent.InvocationContext { return ic2 }}
+			g2 := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			tm.pushAgentSpan(g2ctx, g2)
+			tm.completeResponse(g2ctx, g2, "g", "g", nil)
+			tm.popAgentSpan(g2ctx, g2)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+		})
+
+		t.Run(fmt.Sprintf("response on branch g picks held g1 over open g on other branch/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-other-branch-held-g"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g1 := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b1 := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			oOther := identity{invocationID: invID, agentName: "oOther", branch: "other"}
+			gOther := identity{invocationID: invID, agentName: "g", path: "other/g", branch: "other"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			tm.pushAgentSpan(ctx, oOther)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b1)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b1)
+			tm.pushAgentSpan(ctx, gOther)
+			tm.popToolSpan(ctx, o, call1, false)
+
+			// An event for g with branch "g" matches held g1 directly on agentStack,
+			// clearing its cause and letting g1 retire rather than touching gOther.
+			tm.completeResponse(ctx, g1, "g", "g", nil)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "oOther", "g"}) {
+					t.Errorf("late agents after g1 recovered with open gOther = %v, want [o oOther g]", got)
+				}
+			}
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after g1 recovered, want none: %v", len(purged), purged)
+			}
+		})
+
+		t.Run(fmt.Sprintf("empty branch response hits newer open gOther without clearing held g1/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-empty-branch-open-gother"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g1 := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b1 := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			oOther := identity{invocationID: invID, agentName: "oOther", branch: "other"}
+			gOther := identity{invocationID: invID, agentName: "g", path: "other/g", branch: "other"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			tm.pushAgentSpan(ctx, oOther)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b1)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b1)
+			tm.pushAgentSpan(ctx, gOther)
+			tm.popToolSpan(ctx, o, call1, false)
+
+			tm.completeResponse(ctx, identity{invocationID: invID, agentName: "g"}, "g", "", nil)
+			tm.popAgentSpan(ctx, gOther)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+		})
+	}
+}
+
+// TestRecordErrorOnHeldRootSubNodeCause verifies that when a model error is
+// recorded on a held sub-node activation g before a later root tool call ends,
+// recordError finds g directly on agentStack so the subsequent drain reports
+// the recorded error rather than the sibling cause, matching live and late.
+func TestRecordErrorOnHeldRootSubNodeCause(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	modelErr := errors.New("model failed on held g")
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-record-error-held-g"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popToolSpan(ctx, o, call1, false)
+
+			tm.recordError(ctx, g, llmKey(g), modelErr)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g"}, modelErr)
+		})
+	}
+}
+
+// TestRetryHeldRootSubNodeCause verifies that retrying a held sub-node
+// activation g via pushAgentSpan finds g directly on agentStack, emits g's
+// AGENT_ERROR row immediately from pushAgentSpan (not waiting for the next root
+// tool call), and writes no duplicate row when a later root tool call ends.
+func TestRetryHeldRootSubNodeCause(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-retry-held-g"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popToolSpan(ctx, o, call1, false)
+
+			_, purgedOnRetry := tm.pushAgentSpan(ctx, g)
+			checkAgentErrorRows(t, purgedOnRetry, []string{"g"}, siblingErr)
+			tm.completeResponse(ctx, g, "g", "g", nil)
+			tm.popAgentSpan(ctx, g)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows on call-2 after retry already reported g, want none: %v", len(purged), purged)
+			}
+		})
+	}
+}
+
+// TestHasOpenLateSpansAndPruneWhileRootSubNodeHeld verifies that while a
+// settled sub-node activation g is held by cause on the late agentStack,
+// hasOpenLateSpans reports true and pruneCompletedLocked retains the completed
+// trace across completion pressure, and once drained by a later root tool call
+// or cleared by recovery, hasOpenLateSpans reports false and pruning drops it.
+func TestHasOpenLateSpansAndPruneWhileRootSubNodeHeld(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, recoverByEvent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recoverByEvent=%v", recoverByEvent), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			tm.maxTracked = 1
+			const invID = "inv-prune-held-subnode"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			lateReviewEnded(tm, invID)
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancelB := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancelB(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popToolSpan(ctx, o, call1, false)
+			tm.popAgentSpan(ctx, o)
+
+			late := lateReviewTrace(t, tm, invID)
+			if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"g"}) {
+				t.Fatalf("late agents after o ended = %v, want [g]", got)
+			}
+			if !late.hasOpenLateSpans() {
+				t.Fatal("hasOpenLateSpans() = false while g is held on agentStack, want true")
+			}
+
+			// Completion pressure beyond limit skips invID while g is held.
+			for i := range 66 {
+				other := identity{invocationID: fmt.Sprintf("other-%d", i), agentName: "root"}
+				tm.invocationSpan(ctx, other, nil)
+				tm.endInvocation(ctx, other)
+			}
+			tm.mu.Lock()
+			kept := tm.completed[invID] != nil
+			tm.mu.Unlock()
+			if !kept {
+				t.Fatal("pruneCompletedLocked dropped completed trace while g was held on agentStack")
+			}
+
+			if recoverByEvent {
+				tm.completeResponse(ctx, g, "g", "g", nil)
+			} else {
+				call2 := toolKey(live, "call-2", "t")
+				tm.pushToolSpan(ctx, live, call2)
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+			}
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after g released = %v, want empty", got)
+			}
+			if late.hasOpenLateSpans() {
+				t.Error("hasOpenLateSpans() = true after g released, want false")
+			}
+
+			// Releasing g touched invID (moving it to the back of completionOrder);
+			// running > limit ordinary runs flushes invID through pruneCompletedLocked.
+			for i := range 66 {
+				extra := identity{invocationID: fmt.Sprintf("other-after-%d", i), agentName: "root"}
+				tm.invocationSpan(ctx, extra, nil)
+				tm.endInvocation(ctx, extra)
+			}
+			tm.mu.Lock()
+			stillThere := tm.completed[invID] != nil
+			tm.mu.Unlock()
+			if stillThere {
+				t.Error("pruneCompletedLocked still retained completed trace after g released and open spans cleared")
+			}
+		})
+	}
+}
+
+// TestLateSettledActivationWithoutCauseRetiresAboveOpenChild verifies that when
+// o runs settled g and g runs open p with no failure cause anywhere, once g
+// settles (leaving [o p]) and o ends while p stays open, agentStack holds
+// only [p] rather than [g p].
+func TestLateSettledActivationWithoutCauseRetiresAboveOpenChild(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-no-cause-settled-g-above-p"
+	lateReviewEnded(tm, invID)
+	o := identity{invocationID: invID, agentName: "o", branch: "o"}
+	g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+	p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g"}
+	tm.pushAgentSpan(ctx, o)
+	call1 := toolKey(o, "call-1", "t")
+	tm.pushToolSpan(ctx, o, call1)
+	tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+	tm.pushAgentSpan(ctx, p)
+	tm.popToolSpan(ctx, o, call1, false)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "p"}) {
+		t.Errorf("late agents after o's call-1 returned while p stays open = %v, want [o p]", got)
+	}
+	tm.popAgentSpan(ctx, o)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"p"}) {
+		t.Errorf("late agents after o ended while p stays open = %v, want [p]", got)
+	}
+}
+
+// TestParentForRunLocked_LookalikeGoroutineResolution pins the order in which
+// parentForRunLocked tells concurrent activations of one agent apart: the
+// innermost one running on the goroutine first, then the innermost one running
+// on the goroutine that started it, then the nearest open enclosing span when
+// multiple concurrent lookalikes exist, and otherwise p.
+func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
+	const g0, g2, g3, g4 = 100, 200, 300, 400
+	setup := func(goroutines ...uint64) (*invocationTrace, *spanRecord, []*spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lookalike", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: g0 - 1}
+		inv.agentStack = append(inv.agentStack, root)
+		var recs []*spanRecord
+		for i, g := range goroutines {
+			rec := &spanRecord{spanID: fmt.Sprintf("inner-%d", i+1), kind: spanKindAgent, name: "inner", parent: root, goroutineID: g, seq: uint64(i + 1)}
+			inv.agentStack = append(inv.agentStack, rec)
+			recs = append(recs, rec)
+		}
+		return inv, root, recs
+	}
+	const (
+		// wantP expects p, the last record in recs.
+		wantP = -1
+		// wantEnclosing expects root, which every record runs under.
+		wantEnclosing = -2
+	)
+	childID := identity{agentName: "leaf"}
+	for _, tc := range []struct {
+		name       string
+		goroutines []uint64
+		origin     goroutineOrigin
+		// want is the index of the expected record, wantP or wantEnclosing.
+		want int
+	}{
+		{"one runs on the goroutine (not p)", []uint64{g2, g3}, goroutineOrigin{parent: g0}, 0},
+		{"one runs on the goroutine, a later one on the goroutine that started it", []uint64{g2, g0}, goroutineOrigin{parent: g0}, 0},
+		{"two run on the goroutine (innermost wins over later starter peer)", []uint64{g2, g2, g0}, goroutineOrigin{parent: g0}, 1},
+		{"two run on the goroutine (innermost wins over later unrelated peer)", []uint64{g2, g2, g3}, goroutineOrigin{parent: g0}, 1},
+		{"one runs on the starter goroutine (not p)", []uint64{g0, g3}, goroutineOrigin{parent: g0}, 0},
+		{"two run on the starter goroutine (innermost starter wins over later peer)", []uint64{g0, g0, g3}, goroutineOrigin{parent: g0}, 1},
+		{"helper goroutine falls back to enclosing span", []uint64{g3, g4}, goroutineOrigin{parent: g0}, wantEnclosing},
+		{"unknown goroutine lookalike with parent==0 does not falsely match starter", []uint64{0, g3}, goroutineOrigin{parent: 0}, wantEnclosing},
+		{"only p, which neither runs on nor started the goroutine", []uint64{g3}, goroutineOrigin{parent: g0}, wantP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, root, recs := setup(tc.goroutines...)
+			p := recs[len(recs)-1]
+			var want *spanRecord
+			switch tc.want {
+			case wantP:
+				want = p
+			case wantEnclosing:
+				want = root
+			default:
+				want = recs[tc.want]
+			}
+			if got := inv.parentForRunLocked(childID, nil, g2, tc.origin, nil); got != want {
+				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, want.spanID)
+			}
+		})
+	}
+	t.Run("helper goroutine picks nearest enclosing agent span over root", func(t *testing.T) {
+		inv, root, recs := setup(g3, g4)
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root}
+		inv.agentStack = slices.Insert(inv.agentStack, 2, mid)
+		for _, rec := range recs {
+			rec.parent = mid
+		}
+		if got := inv.parentForRunLocked(childID, nil, g2, goroutineOrigin{parent: g0}, nil); got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+		}
+	})
+	t.Run("an excluded lookalike leaves only p", func(t *testing.T) {
+		inv, _, recs := setup(g3, g4)
+		if got := inv.parentForRunLocked(childID, map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}, nil); got != recs[1] {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
+		}
+	})
+	t.Run("an unknown goroutine leaves p", func(t *testing.T) {
+		inv, _, recs := setup(g3, g4)
+		if got := inv.parentForRunLocked(childID, nil, 0, goroutineOrigin{}, nil); got != recs[1] {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
+		}
+	})
+	t.Run("enclosing span skips retired spans and falls back to invocation", func(t *testing.T) {
+		inv, root, recs := setup(g3, g4)
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root}
+		for _, rec := range recs {
+			rec.parent = mid
+		}
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != root {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, root.spanID)
+		}
+		inv.agentStack = slices.Insert(inv.agentStack, 2, mid)
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != mid {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, mid.spanID)
+		}
+		for _, rec := range recs {
+			rec.parent = inv.agentStack[0]
+		}
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != inv.agentStack[0] {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, inv.agentStack[0].spanID)
+		}
+	})
+}
+
+// TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID verifies end
+// to end through runner.Run that concurrent lookalike activations of a custom
+// agent place the sub-agents that each runs with its own context under that
+// activation's own span_id (not the last-started peer's), whether the
+// sub-agent runs on the activation's goroutine, on a goroutine that it starts
+// directly, or across an intermediate helper goroutine.
+func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T) {
+	t.Run("own goroutine and directly started child goroutine", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		newLeaf := func(name string) agent.Agent {
+			a, err := agent.New(agent.Config{
+				Name: name,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = name
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", name+" ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(%s): %v", name, err)
+			}
+			return a
+		}
+		subInline := newLeaf("sub_inline")
+		subDirect := newLeaf("sub_direct")
+
+		worker1Open := make(chan struct{})
+		worker2Open := make(chan struct{})
+		worker1SubDone := make(chan struct{})
+		worker2SubDone := make(chan struct{})
+		var workerCalls atomic.Int32
+
+		worker, err := agent.New(agent.Config{
+			Name: "worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					idx := workerCalls.Add(1)
+					if idx == 1 {
+						close(worker1Open)
+						select {
+						case <-worker2Open:
+						case <-time.After(10 * time.Second):
+							yield(nil, errors.New("worker 2 never opened"))
+							return
+						}
+					} else {
+						close(worker2Open)
+						select {
+						case <-worker1SubDone:
+						case <-time.After(10 * time.Second):
+							yield(nil, errors.New("worker 1 sub-agents timed out"))
+							return
+						}
+					}
+
+					// Run sub_inline directly on the worker activation's own goroutine.
+					for ev, runErr := range subInline.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+
+					// Run sub_direct on a child goroutine started directly by this worker goroutine.
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 4)
+					go func() {
+						defer close(ch)
+						for ev, runErr := range subDirect.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+
+					if idx == 1 {
+						close(worker1SubDone)
+						select {
+						case <-worker2SubDone:
+						case <-time.After(10 * time.Second):
+							yield(nil, errors.New("worker 2 sub-agents timed out"))
+							return
+						}
+					} else {
+						close(worker2SubDone)
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 16)
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					<-worker1Open
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
+		if w1Span == "" || w2Span == "" || w1Span == w2Span {
+			t.Fatalf("distinct worker span_ids required, got %q and %q", w1Span, w2Span)
+		}
+
+		for _, subName := range []string{"sub_inline", "sub_direct"} {
+			starts := agentRowsOfType(rows, EventAgentStarting, subName)
+			if len(starts) != 2 {
+				t.Fatalf("%s AGENT_STARTING count = %d, want 2", subName, len(starts))
+			}
+			if got, _ := starts[0]["parent_span_id"].(string); got != w1Span {
+				t.Errorf("%s[0] parent_span_id = %q, want %q (first worker activation)", subName, got, w1Span)
+			}
+			if got, _ := starts[1]["parent_span_id"].(string); got != w2Span {
+				t.Errorf("%s[1] parent_span_id = %q, want %q (second worker activation)", subName, got, w2Span)
+			}
+		}
+	})
+
+	t.Run("simultaneously open sub-agents under concurrent workers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+
+		var (
+			tagMu      sync.Mutex
+			workerTags = make(map[uint64]string)
+		)
+		tagForSub := func() string {
+			goid, origin, _ := currentGoroutine()
+			tagMu.Lock()
+			defer tagMu.Unlock()
+			if tag, ok := workerTags[goid]; ok {
+				return tag
+			}
+			if tag, ok := workerTags[origin.parent]; ok {
+				return tag
+			}
+			return ""
+		}
+
+		subInlineBarrier := make(chan struct{})
+		subDirectBarrier := make(chan struct{})
+		var subInlineEntered, subDirectEntered atomic.Int32
+
+		newConcurrentLeaf := func(name string, entered *atomic.Int32, barrier chan struct{}) agent.Agent {
+			a, err := llmagent.New(llmagent.Config{
+				Name: name,
+				Mode: llmagent.ModeSingleTurn,
+				Model: &callbackLLM{
+					name: name + "-model",
+					fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+						tag := tagForSub()
+						if entered.Add(1) == 2 {
+							close(barrier)
+						}
+						select {
+						case <-barrier:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return &model.LLMResponse{Content: textContent("model", "tag="+name+":"+tag), TurnComplete: true}, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(%s): %v", name, err)
+			}
+			return a
+		}
+		subInline := newConcurrentLeaf("sub_inline", &subInlineEntered, subInlineBarrier)
+		subDirect := newConcurrentLeaf("sub_direct", &subDirectEntered, subDirectBarrier)
+
+		worker1Open := make(chan struct{})
+		worker2Open := make(chan struct{})
+		var workerCalls atomic.Int32
+
+		worker, err := agent.New(agent.Config{
+			Name:      "worker",
+			SubAgents: []agent.Agent{subInline, subDirect},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					idx := workerCalls.Add(1)
+					tag := fmt.Sprintf("w%d", idx)
+					goid := currentGoroutineID()
+					tagMu.Lock()
+					workerTags[goid] = tag
+					tagMu.Unlock()
+
+					if idx == 1 {
+						close(worker1Open)
+						select {
+						case <-worker2Open:
+						case <-time.After(10 * time.Second):
+							yield(nil, errors.New("worker 2 never opened"))
+							return
+						}
+					} else {
+						close(worker2Open)
+					}
+
+					// Both workers keep sub_inline open concurrently, then both keep
+					// sub_direct open concurrently on a directly started goroutine.
+					for ev, runErr := range subInline.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+
+					type item struct {
+						ev  *session.Event
+						err error
+						ack chan bool
+					}
+					ch := make(chan item, 4)
+					done := make(chan struct{})
+					defer close(done)
+					go func() {
+						defer close(ch)
+						for ev, runErr := range subDirect.Run(ctx) {
+							ack := make(chan bool, 1)
+							select {
+							case ch <- item{ev: ev, err: runErr, ack: ack}:
+							case <-done:
+								return
+							}
+							select {
+							case cont := <-ack:
+								if !cont {
+									return
+								}
+							case <-done:
+								return
+							}
+						}
+					}()
+					for it := range ch {
+						cont := yield(it.ev, it.err)
+						if it.ack != nil {
+							it.ack <- cont
+						}
+						if !cont || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+						ack chan bool
+					}
+					ch := make(chan item, 16)
+					done := make(chan struct{})
+					defer close(done)
+					forwardWorker := func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ack := make(chan bool, 1)
+							select {
+							case ch <- item{ev: ev, err: runErr, ack: ack}:
+							case <-done:
+								return
+							}
+							select {
+							case cont := <-ack:
+								if !cont {
+									return
+								}
+							case <-done:
+								return
+							}
+						}
+					}
+					var wg sync.WaitGroup
+					wg.Add(2)
+					go func() {
+						defer wg.Done()
+						forwardWorker()
+					}()
+					go func() {
+						defer wg.Done()
+						<-worker1Open
+						forwardWorker()
+					}()
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						cont := yield(it.ev, it.err)
+						if it.ack != nil {
+							it.ack <- cont
+						}
+						if !cont || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
+		if w1Span == "" || w2Span == "" || w1Span == w2Span {
+			t.Fatalf("distinct worker span_ids required, got %q and %q", w1Span, w2Span)
+		}
+		workerSpanByTag := map[string]string{"w1": w1Span, "w2": w2Span}
+
+		for _, subName := range []string{"sub_inline", "sub_direct"} {
+			starts := agentRowsOfType(rows, EventAgentStarting, subName)
+			if len(starts) != 2 {
+				t.Fatalf("%s AGENT_STARTING count = %d, want 2", subName, len(starts))
+			}
+			parentBySpan := make(map[string]string, 2)
+			for _, r := range starts {
+				sid, _ := r["span_id"].(string)
+				pid, _ := r["parent_span_id"].(string)
+				parentBySpan[sid] = pid
+			}
+			llmResps := agentRowsOfType(rows, EventLLMResponse, subName)
+			if len(llmResps) != 2 {
+				t.Fatalf("%s LLM_RESPONSE count = %d, want 2", subName, len(llmResps))
+			}
+			seenTags := make(map[string]bool, 2)
+			for _, r := range llmResps {
+				subSpan, _ := r["parent_span_id"].(string)
+				content, _ := r["content"].(string)
+				var matchedTag string
+				for _, tag := range []string{"w1", "w2"} {
+					if strings.Contains(content, "tag="+subName+":"+tag) {
+						matchedTag = tag
+					}
+				}
+				if matchedTag == "" {
+					t.Fatalf("%s LLM_RESPONSE content is missing tag=%s:w1 or tag=%s:w2", subName, subName, subName)
+				}
+				seenTags[matchedTag] = true
+				if got, want := parentBySpan[subSpan], workerSpanByTag[matchedTag]; got != want {
+					t.Errorf("%s (%s) parent_span_id = %q, want %q", subName, matchedTag, got, want)
+				}
+			}
+			if len(seenTags) != 2 {
+				t.Fatalf("%s seenTags = %v, want both w1 and w2", subName, seenTags)
+			}
+		}
+	})
+
+	t.Run("helper goroutine runs under the worker whose context it was given", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		subHelper, err := agent.New(agent.Config{
+			Name: "sub_helper",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "sub_helper"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "helper ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(sub_helper): %v", err)
+		}
+
+		worker1Open := make(chan struct{})
+		worker2Open := make(chan struct{})
+		bothHelpersDone := make(chan struct{})
+		var workerCalls, helpersDone atomic.Int32
+
+		worker, err := agent.New(agent.Config{
+			Name: "worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					if workerCalls.Add(1) == 1 {
+						close(worker1Open)
+					} else {
+						close(worker2Open)
+					}
+					select {
+					case <-worker1Open:
+					case <-time.After(10 * time.Second):
+						yield(nil, errors.New("worker 1 never opened"))
+						return
+					}
+					select {
+					case <-worker2Open:
+					case <-time.After(10 * time.Second):
+						yield(nil, errors.New("worker 2 never opened"))
+						return
+					}
+
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 4)
+					// Intermediate helper goroutine runs no ADK callback, so
+					// runtime goroutine origin on the grandchild names the helper.
+					go func() {
+						go func() {
+							defer close(ch)
+							for ev, runErr := range subHelper.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						}()
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+					if helpersDone.Add(1) == 2 {
+						close(bothHelpersDone)
+					}
+					select {
+					case <-bothHelpersDone:
+					case <-time.After(10 * time.Second):
+						yield(nil, errors.New("helper barrier timed out"))
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		mid, err := agent.New(agent.Config{
+			Name: "mid",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 8)
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					<-worker1Open
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(mid): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return mid.Run(ctx)
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
+		helperStarts := agentRowsOfType(rows, EventAgentStarting, "sub_helper")
+		if len(helperStarts) != 2 {
+			t.Fatalf("sub_helper AGENT_STARTING count = %d, want 2", len(helperStarts))
+		}
+		// Each worker runs its own sub_helper with its own context, so each
+		// worker holds exactly one of them.
+		var parents []string
+		for _, row := range helperStarts {
+			pid, _ := row["parent_span_id"].(string)
+			parents = append(parents, pid)
+		}
+		slices.Sort(parents)
+		want := []string{w1Span, w2Span}
+		slices.Sort(want)
+		if !slices.Equal(parents, want) {
+			t.Errorf("sub_helper parent_span_ids = %q, want one under each worker %q", parents, want)
+		}
+	})
+
+	t.Run("staggered undeclared sub-agents under concurrent workers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		w2InSubInline := make(chan struct{})
+		w1SubDirectDone := make(chan struct{})
+
+		newLeaf := func(name string, onEnter, wait <-chan struct{}, signal chan struct{}) agent.Agent {
+			a, err := agent.New(agent.Config{
+				Name: name,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if signal != nil {
+							close(signal)
+						}
+						if wait != nil {
+							select {
+							case <-wait:
+							case <-ctx.Done():
+								yield(nil, ctx.Err())
+								return
+							}
+						}
+						_ = onEnter
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = name
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", name+" ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(%s): %v", name, err)
+			}
+			return a
+		}
+		subInline := newLeaf("sub_inline", nil, w1SubDirectDone, w2InSubInline)
+		subDirectInline := newLeaf("sub_direct_inline", nil, nil, nil)
+		subDirectGo := newLeaf("sub_direct_go", nil, nil, nil)
+
+		worker1Open := make(chan struct{})
+		worker2Open := make(chan struct{})
+		var workerCalls atomic.Int32
+
+		// Deliberately leave SubAgents unset on worker so parentFor falls back to
+		// top-of-stack without excluding undeclared sibling spans unless
+		// parentForRunLocked excludes peer lookalike subtrees.
+		worker, err := agent.New(agent.Config{
+			Name: "worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					idx := workerCalls.Add(1)
+					if idx == 1 {
+						close(worker1Open)
+						select {
+						case <-worker2Open:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						select {
+						case <-w2InSubInline:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						for ev, runErr := range subDirectInline.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								close(w1SubDirectDone)
+								return
+							}
+						}
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						ch := make(chan item, 4)
+						go func() {
+							defer close(ch)
+							for ev, runErr := range subDirectGo.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						}()
+						for it := range ch {
+							if !yield(it.ev, it.err) || it.err != nil {
+								close(w1SubDirectDone)
+								return
+							}
+						}
+						close(w1SubDirectDone)
+						return
+					}
+					close(worker2Open)
+					for ev, runErr := range subInline.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 16)
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					<-worker1Open
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
+
+		if starts := agentRowsOfType(rows, EventAgentStarting, "sub_inline"); len(starts) != 1 {
+			t.Fatalf("sub_inline AGENT_STARTING count = %d, want 1", len(starts))
+		} else if got, _ := starts[0]["parent_span_id"].(string); got != w2Span {
+			t.Errorf("sub_inline parent_span_id = %q, want %q (W2 span)", got, w2Span)
+		}
+		for _, subName := range []string{"sub_direct_inline", "sub_direct_go"} {
+			starts := agentRowsOfType(rows, EventAgentStarting, subName)
+			if len(starts) != 1 {
+				t.Fatalf("%s AGENT_STARTING count = %d, want 1", subName, len(starts))
+			}
+			if got, _ := starts[0]["parent_span_id"].(string); got != w1Span {
+				t.Errorf("%s parent_span_id = %q, want %q (W1 span, not W2's open sub_inline)", subName, got, w1Span)
+			}
+		}
+	})
+
+	t.Run("2-hop helper goroutine with peer open child runs under its own worker", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		w2InSubInline := make(chan struct{})
+		w1HelperDone := make(chan struct{})
+
+		subInline, err := agent.New(agent.Config{
+			Name: "sub_inline",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					close(w2InSubInline)
+					select {
+					case <-w1HelperDone:
+					case <-ctx.Done():
+						yield(nil, ctx.Err())
+						return
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "sub_inline"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "sub_inline ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(sub_inline): %v", err)
+		}
+		subHelper, err := agent.New(agent.Config{
+			Name: "sub_helper",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "sub_helper"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "helper ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(sub_helper): %v", err)
+		}
+
+		worker1Open := make(chan struct{})
+		worker2Open := make(chan struct{})
+		var workerCalls atomic.Int32
+
+		worker, err := agent.New(agent.Config{
+			Name: "worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					if workerCalls.Add(1) == 1 {
+						close(worker1Open)
+						select {
+						case <-worker2Open:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						select {
+						case <-w2InSubInline:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						ch := make(chan item, 4)
+						go func() {
+							go func() {
+								defer close(ch)
+								for ev, runErr := range subHelper.Run(ctx) {
+									ch <- item{ev: ev, err: runErr}
+								}
+							}()
+						}()
+						for it := range ch {
+							if !yield(it.ev, it.err) || it.err != nil {
+								close(w1HelperDone)
+								return
+							}
+						}
+						close(w1HelperDone)
+						return
+					}
+					close(worker2Open)
+					for ev, runErr := range subInline.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		mid, err := agent.New(agent.Config{
+			Name: "mid",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 8)
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					<-worker1Open
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(mid): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return mid.Run(ctx)
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		helperStarts := agentRowsOfType(rows, EventAgentStarting, "sub_helper")
+		if len(helperStarts) != 1 {
+			t.Fatalf("sub_helper AGENT_STARTING count = %d, want 1", len(helperStarts))
+		}
+		if got, _ := helperStarts[0]["parent_span_id"].(string); got != w1Span {
+			t.Errorf("sub_helper parent_span_id = %q, want %q (W1, whose context it runs with, not W2's open sub_inline)", got, w1Span)
+		}
+	})
+}
+
+// TestRunner_ConcurrentLookalikeWorkflowRetry_PurgesOwnFailedAttempt verifies
+// end to end through runner.Run that when two concurrent lookalike WorkflowAgent
+// activations ("wf") are open — W1 running a retrying flaky_node and W2 open in
+// other_node — pushAgentSpan filters the retry purge parent check through
+// excludePeerLookalikesLocked so W1's failed attempt is purged (emitting
+// AGENT_ERROR before attempt 2's AGENT_STARTING under W1's span_id) instead of
+// skipping the purge against W2.
+func TestRunner_ConcurrentLookalikeWorkflowRetry_PurgesOwnFailedAttempt(t *testing.T) {
+	requireADKNodeCompletionEvents(t)
+	ctx := t.Context()
+	p, requests, _ := setupTestPlugin(t)
+
+	errTransient := errors.New("transient w1 attempt-1 failure")
+	w1InFlaky := make(chan struct{})
+	w2InOther := make(chan struct{})
+	w1RetryDone := make(chan struct{})
+
+	flakyAgent, err := llmagent.New(llmagent.Config{
+		Name: "flaky_node",
+		Model: &gatedFlakyLLM{
+			enter: func() { close(w1InFlaky) },
+			ready: w2InOther,
+			err:   errTransient,
+			reply: "w1 flaky ok",
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(flaky_node): %v", err)
+	}
+	flakyNode, err := workflow.NewAgentNode(flakyAgent, workflow.NodeConfig{
+		RetryConfig: &workflow.RetryConfig{
+			MaxAttempts:   2,
+			InitialDelay:  time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			BackoffFactor: 1.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(flaky_node): %v", err)
+	}
+	wf1, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: []workflow.Edge{{From: workflow.Start, To: flakyNode}},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf1): %v", err)
+	}
+
+	otherAgent, err := llmagent.New(llmagent.Config{
+		Name: "other_node",
+		Model: &gatedLLM{
+			entered: w2InOther,
+			release: w1RetryDone,
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(other_node): %v", err)
+	}
+	otherNode, err := workflow.NewAgentNode(otherAgent, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(other_node): %v", err)
+	}
+	wf2, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: []workflow.Edge{{From: workflow.Start, To: otherNode}},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf2): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{wf1},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type item struct {
+					ev  *session.Event
+					err error
+					ack chan bool
+				}
+				ch := make(chan item, 16)
+				done := make(chan struct{})
+				defer close(done)
+				forward := func(wf agent.Agent) {
+					for ev, runErr := range wf.Run(ctx) {
+						ack := make(chan bool, 1)
+						select {
+						case ch <- item{ev: ev, err: runErr, ack: ack}:
+						case <-done:
+							return
+						}
+						select {
+						case cont := <-ack:
+							if !cont {
+								return
+							}
+						case <-done:
+							return
+						}
+					}
+				}
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					defer close(w1RetryDone)
+					forward(wf1)
+				})
+				select {
+				case <-w1InFlaky:
+				case <-ctx.Done():
+					return
+				}
+				wg.Go(func() {
+					forward(wf2)
+				})
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					cont := yield(it.ev, it.err)
+					if it.ack != nil {
+						it.ack <- cont
+					}
+					if !cont || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+
+	wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+	if len(wfStarts) != 2 {
+		t.Fatalf("wf AGENT_STARTING count = %d, want 2", len(wfStarts))
+	}
+	w1Span, _ := wfStarts[0]["span_id"].(string)
+	w2Span, _ := wfStarts[1]["span_id"].(string)
+	if w1Span == "" || w2Span == "" || w1Span == w2Span {
+		t.Fatalf("distinct wf span_ids required, got %q and %q", w1Span, w2Span)
+	}
+
+	var w1NodeRows []map[string]any
+	for _, r := range rows {
+		if r["agent"] != "flaky_node" {
+			continue
+		}
+		et, _ := r["event_type"].(string)
+		if et != EventAgentStarting && et != EventAgentError && et != EventAgentCompleted {
+			continue
+		}
+		if parentID, _ := r["parent_span_id"].(string); parentID != w1Span {
+			t.Fatalf("flaky_node %s row has parent_span_id %q, want %q (W1 span)", et, parentID, w1Span)
+		}
+		w1NodeRows = append(w1NodeRows, r)
+	}
+
+	wantW1 := []string{EventAgentStarting, EventAgentError, EventAgentStarting, EventAgentCompleted}
+	if got := eventTypes(w1NodeRows); !slices.Equal(got, wantW1) {
+		t.Fatalf("W1 flaky_node lifecycle = %v, want %v", got, wantW1)
+	}
+	if s1, sErr := w1NodeRows[0]["span_id"], w1NodeRows[1]["span_id"]; s1 == "" || s1 != sErr {
+		t.Errorf("W1 attempt-1 span_id mismatch: start=%v error=%v", s1, sErr)
+	}
+	if s2, sDone := w1NodeRows[2]["span_id"], w1NodeRows[3]["span_id"]; s2 == "" || s2 != sDone {
+		t.Errorf("W1 attempt-2 span_id mismatch: start=%v completed=%v", s2, sDone)
+	}
+	if w1NodeRows[0]["span_id"] == w1NodeRows[2]["span_id"] {
+		t.Errorf("W1 reused attempt-1 span_id %v on attempt 2", w1NodeRows[0]["span_id"])
+	}
+
+	otherStarts := agentRowsOfType(rows, EventAgentStarting, "other_node")
+	if len(otherStarts) != 1 {
+		t.Fatalf("other_node AGENT_STARTING count = %d, want 1", len(otherStarts))
+	}
+	if got, _ := otherStarts[0]["parent_span_id"].(string); got != w2Span {
+		t.Errorf("other_node parent_span_id = %q, want %q (W2 span)", got, w2Span)
+	}
+}
+
+// runConcurrentLookalikeWorkflows runs two concurrent activations of the same
+// WorkflowAgent wf from a custom root agent, starting the second activation
+// once ready closes.
+func runConcurrentLookalikeWorkflows(t *testing.T, p *baseplugin.Plugin, wf agent.Agent, ready <-chan struct{}) {
+	t.Helper()
+	ctx := t.Context()
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{wf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type item struct {
+					ev  *session.Event
+					err error
+					ack chan bool
+				}
+				ch := make(chan item, 16)
+				done := make(chan struct{})
+				defer close(done)
+				forward := func() {
+					for ev, runErr := range wf.Run(ctx) {
+						ack := make(chan bool, 1)
+						select {
+						case ch <- item{ev: ev, err: runErr, ack: ack}:
+						case <-done:
+							return
+						}
+						select {
+						case cont := <-ack:
+							if !cont {
+								return
+							}
+						case <-done:
+							return
+						}
+					}
+				}
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					forward()
+				}()
+				go func() {
+					defer wg.Done()
+					select {
+					case <-ready:
+					case <-ctx.Done():
+						return
+					}
+					forward()
+				}()
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					cont := yield(it.ev, it.err)
+					if it.ack != nil {
+						it.ack <- cont
+					}
+					if !cont || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+}
+
+type callbackLLM struct {
+	name string
+	fn   func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
+}
+
+func (m *callbackLLM) Name() string { return m.name }
+
+func (m *callbackLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.fn(ctx, req)
+		yield(resp, err)
+	}
+}
+
+// TestRunner_ConcurrentLookalikeWorkflow_SequentialNodeSubtreeIsolation verifies
+// that when two concurrent activations W1 and W2 of the same WorkflowAgent run
+// an AgentNode wrapping a SequentialAgent ("seq_node" -> "step1", sharing node
+// path "seq_node"), parentForRunLocked excludes the peer workflow activation's
+// open node subtree both in normal concurrent execution and when RetryConfig
+// retries W1 after an attempt-1 failure while W2 has seq_node -> step1 open.
+func TestRunner_ConcurrentLookalikeWorkflow_SequentialNodeSubtreeIsolation(t *testing.T) {
+	t.Run("normal concurrent execution", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		w1Opened := make(chan struct{})
+		w2Opened := make(chan struct{})
+		w1InStep1 := make(chan struct{})
+		w2InStep1 := make(chan struct{})
+		var wfCalls, stepCalls atomic.Int32
+
+		step1, err := agent.New(agent.Config{
+			Name: "step1",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					n := stepCalls.Add(1)
+					if n == 1 {
+						close(w1InStep1)
+						select {
+						case <-w2InStep1:
+						case <-time.After(10 * time.Second):
+							yield(nil, errors.New("w2 never entered step1"))
+							return
+						}
+					} else {
+						close(w2InStep1)
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "step1"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", fmt.Sprintf("step1-call-%d", n))
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(step1): %v", err)
+		}
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "seq_node",
+				SubAgents: []agent.Agent{step1},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+		seqNode, err := workflow.NewAgentNode(seq, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: seqNode}},
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					if wfCalls.Add(1) == 1 {
+						close(w1Opened)
+						select {
+						case <-w2Opened:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return nil, nil
+					}
+					close(w2Opened)
+					select {
+					case <-w1InStep1:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+
+		runConcurrentLookalikeWorkflows(t, p, wf, w1Opened)
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 2 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 2", len(wfStarts))
+		}
+		w1Span, _ := wfStarts[0]["span_id"].(string)
+		w2Span, _ := wfStarts[1]["span_id"].(string)
+
+		seqStarts := agentRowsOfType(rows, EventAgentStarting, "seq_node")
+		if len(seqStarts) != 2 {
+			t.Fatalf("seq_node AGENT_STARTING count = %d, want 2", len(seqStarts))
+		}
+		if got, _ := seqStarts[0]["parent_span_id"].(string); got != w1Span {
+			t.Errorf("seq_node[0] parent_span_id = %q, want %q (W1 span)", got, w1Span)
+		}
+		if got, _ := seqStarts[1]["parent_span_id"].(string); got != w2Span {
+			t.Errorf("seq_node[1] parent_span_id = %q, want %q (W2 span)", got, w2Span)
+		}
+
+		stepStarts := agentRowsOfType(rows, EventAgentStarting, "step1")
+		if len(stepStarts) != 2 {
+			t.Fatalf("step1 AGENT_STARTING count = %d, want 2", len(stepStarts))
+		}
+		s1Parent, _ := seqStarts[0]["span_id"].(string)
+		s2Parent, _ := seqStarts[1]["span_id"].(string)
+		if got, _ := stepStarts[0]["parent_span_id"].(string); got != s1Parent {
+			t.Errorf("step1[0] parent_span_id = %q, want %q (seq_node[0])", got, s1Parent)
+		}
+		if got, _ := stepStarts[1]["parent_span_id"].(string); got != s2Parent {
+			t.Errorf("step1[1] parent_span_id = %q, want %q (seq_node[1])", got, s2Parent)
+		}
+	})
+
+	t.Run("concurrent retry inside sequential node purges own attempt", func(t *testing.T) {
+		requireADKNodeCompletionEvents(t)
+		p, requests, _ := setupTestPlugin(t)
+		errTransient := errors.New("transient step1 attempt-1 failure")
+		w1InStep1 := make(chan struct{})
+		w2InStep1 := make(chan struct{})
+		w1RetryDone := make(chan struct{})
+
+		var calls atomic.Int32
+		step1Model := &callbackLLM{
+			name: "seq-retry-model",
+			fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				switch calls.Add(1) {
+				case 1:
+					// W1 attempt 1: enter step1, wait for W2 to hold seq_node -> step1 open, then fail.
+					close(w1InStep1)
+					select {
+					case <-w2InStep1:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return nil, errTransient
+				case 2:
+					// W2: hold seq_node -> step1 open until W1's attempt 2 succeeds.
+					close(w2InStep1)
+					select {
+					case <-w1RetryDone:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return &model.LLMResponse{Content: textContent("model", "w2 step1 ok"), TurnComplete: true}, nil
+				default:
+					// W1 attempt 2: succeed while W2 has seq_node -> step1 open, then release W2.
+					close(w1RetryDone)
+					return &model.LLMResponse{Content: textContent("model", "w1 step1 retry ok"), TurnComplete: true}, nil
+				}
+			},
+		}
+		step1, err := llmagent.New(llmagent.Config{
+			Name:  "step1",
+			Model: step1Model,
+			Mode:  llmagent.ModeSingleTurn,
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(step1): %v", err)
+		}
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "seq_node",
+				SubAgents: []agent.Agent{step1},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+		seqNode, err := workflow.NewAgentNode(seq, workflow.NodeConfig{
+			RetryConfig: &workflow.RetryConfig{
+				MaxAttempts:   2,
+				InitialDelay:  time.Millisecond,
+				MaxDelay:      time.Millisecond,
+				BackoffFactor: 1.0,
+			},
+		})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: seqNode}},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+
+		runConcurrentLookalikeWorkflows(t, p, wf, w1InStep1)
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		if got := agentErrorCounts(rows)["seq_node"]; got != 1 {
+			t.Errorf("seq_node AGENT_ERROR count = %d, want 1; counts: %v", got, agentErrorCounts(rows))
+		}
+		if got := agentErrorCounts(rows)["step1"]; got != 1 {
+			t.Errorf("step1 AGENT_ERROR count = %d, want 1; counts: %v", got, agentErrorCounts(rows))
+		}
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 2 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 2", len(wfStarts))
+		}
+		w1Span, _ := wfStarts[0]["span_id"].(string)
+		w2Span, _ := wfStarts[1]["span_id"].(string)
+		seqStarts := agentRowsOfType(rows, EventAgentStarting, "seq_node")
+		if len(seqStarts) != 3 {
+			t.Fatalf("seq_node AGENT_STARTING count = %d, want 3 (W1 att1, W2, W1 att2)", len(seqStarts))
+		}
+		var underW1, underW2 int
+		for _, r := range seqStarts {
+			switch pid, _ := r["parent_span_id"].(string); pid {
+			case w1Span:
+				underW1++
+			case w2Span:
+				underW2++
+			default:
+				t.Errorf("seq_node AGENT_STARTING parent_span_id = %q, want %q or %q", pid, w1Span, w2Span)
+			}
+		}
+		if underW1 != 2 || underW2 != 1 {
+			t.Errorf("seq_node parent counts: underW1=%d, underW2=%d, want 2 and 1", underW1, underW2)
+		}
+	})
+}
+
+// TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAttempt
+// verifies that when two concurrent lookalike WorkflowAgent activations run a
+// built-in workflow.ParallelWorker with RetryConfig, each item runs under its
+// own workflow activation, and retrying the item on the same worker goroutine
+// still purges the failed attempt and completes with INVOCATION_COMPLETED.
+func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		closePeerPreRetry bool
+	}{
+		{name: "peer open across retry"},
+		{name: "peer closes before retry attempt 2", closePeerPreRetry: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			errTransient := errors.New("transient parallel worker item failure")
+			w1Opened := make(chan struct{})
+			w2Opened := make(chan struct{})
+			w2InItem := make(chan struct{})
+			w1Attempt1Failed := make(chan struct{})
+			w1RetryDone := make(chan struct{})
+			w2Exited := make(chan struct{})
+
+			var wfStarts, calls atomic.Int32
+			itemModel := &callbackLLM{
+				name: "pw-retry-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					switch calls.Add(1) {
+					case 1:
+						select {
+						case <-w2InItem:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return nil, errTransient
+					case 2:
+						close(w2InItem)
+						release := w1RetryDone
+						if tc.closePeerPreRetry {
+							release = w1Attempt1Failed
+						}
+						select {
+						case <-release:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return &model.LLMResponse{Content: textContent("model", "w2 item ok"), TurnComplete: true}, nil
+					default:
+						close(w1RetryDone)
+						return &model.LLMResponse{Content: textContent("model", "w1 item retry ok"), TurnComplete: true}, nil
+					}
+				},
+			}
+			itemAgent, err := llmagent.New(llmagent.Config{
+				Name:  "item_agent",
+				Model: itemModel,
+				Mode:  llmagent.ModeSingleTurn,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(item_agent): %v", err)
+			}
+			itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode(item_agent): %v", err)
+			}
+			itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+				return []string{"x"}, nil
+			}, workflow.NodeConfig{})
+			retryCfg := &workflow.RetryConfig{
+				MaxAttempts:   2,
+				InitialDelay:  time.Millisecond,
+				MaxDelay:      time.Millisecond,
+				BackoffFactor: 1.0,
+			}
+			if tc.closePeerPreRetry {
+				testCtx := t.Context()
+				retryCfg.ShouldRetry = func(error) bool {
+					// Attempt 1's OnAgentErrorCallback has already run; release the
+					// peer and wait until its AfterAgentCallback (popAgentSpan) has
+					// completed before attempt 2 enters BeforeAgentCallback.
+					close(w1Attempt1Failed)
+					select {
+					case <-w2Exited:
+						return true
+					case <-testCtx.Done():
+						return false
+					}
+				}
+			}
+			pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{
+				RetryConfig: retryCfg,
+			})
+			if err != nil {
+				t.Fatalf("workflow.NewParallelWorker: %v", err)
+			}
+			var wfExits atomic.Int32
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name:  "wf",
+				Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(ctx agent.Context) (*genai.Content, error) {
+						if wfStarts.Add(1) == 1 {
+							close(w1Opened)
+							select {
+							case <-w2Opened:
+							case <-ctx.Done():
+								return nil, ctx.Err()
+							}
+							return nil, nil
+						}
+						close(w2Opened)
+						return nil, nil
+					},
+				},
+				AfterAgentCallbacks: []agent.AfterAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						if tc.closePeerPreRetry && wfExits.Add(1) == 1 {
+							close(w2Exited)
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New: %v", err)
+			}
+
+			runConcurrentLookalikeWorkflows(t, p, wf, w1Opened)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+
+			if got := agentErrorCounts(rows)["item_agent"]; got != 1 {
+				t.Errorf("item_agent AGENT_ERROR count = %d, want 1; counts: %v", got, agentErrorCounts(rows))
+			}
+			itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+			if len(itemStarts) != 3 {
+				t.Fatalf("item_agent AGENT_STARTING count = %d, want 3", len(itemStarts))
+			}
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "item_agent")); got != 2 {
+				t.Errorf("item_agent AGENT_COMPLETED count = %d, want 2", got)
+			}
+			if tc.closePeerPreRetry {
+				rootStarts := agentRowsOfType(rows, EventAgentStarting, "root")
+				wfStartRows := agentRowsOfType(rows, EventAgentStarting, "wf")
+				if len(rootStarts) != 1 || len(wfStartRows) != 2 {
+					t.Fatalf("unexpected root (%d) or wf (%d) AGENT_STARTING counts", len(rootStarts), len(wfStartRows))
+				}
+				w1Span, _ := wfStartRows[0]["span_id"].(string)
+				w2Span, _ := wfStartRows[1]["span_id"].(string)
+				// Each workflow activation runs its own item with its own
+				// context, so the two first attempts sit one under each.
+				first, _ := itemStarts[0]["parent_span_id"].(string)
+				second, _ := itemStarts[1]["parent_span_id"].(string)
+				if (first != w1Span || second != w2Span) && (first != w2Span || second != w1Span) {
+					t.Errorf("item_agent[0], item_agent[1] parent_span_id = %q, %q, want one under each wf peer (%q, %q)", first, second, w1Span, w2Span)
+				}
+				retryStartIdx := slices.IndexFunc(rows, func(r map[string]any) bool {
+					return r["span_id"] == itemStarts[2]["span_id"] && r["event_type"] == EventAgentStarting
+				})
+				var closedWfSpan, activeWfSpan string
+				for idx, r := range rows {
+					if r["agent"] != "wf" || r["event_type"] != EventAgentCompleted {
+						continue
+					}
+					sid, _ := r["span_id"].(string)
+					if idx < retryStartIdx {
+						closedWfSpan = sid
+					} else {
+						activeWfSpan = sid
+					}
+				}
+				if closedWfSpan == "" || activeWfSpan == "" || closedWfSpan == activeWfSpan {
+					t.Fatalf("expected distinct closed (%q) and active (%q) wf spans around retry start idx %d", closedWfSpan, activeWfSpan, retryStartIdx)
+				}
+				if (closedWfSpan != w1Span && closedWfSpan != w2Span) || (activeWfSpan != w1Span && activeWfSpan != w2Span) {
+					t.Fatalf("closed/active wf spans (%q, %q) do not match starts (%q, %q)", closedWfSpan, activeWfSpan, w1Span, w2Span)
+				}
+				if got, _ := itemStarts[2]["parent_span_id"].(string); got != activeWfSpan {
+					t.Errorf("item_agent[2] parent_span_id = %q, want active retry wf span %q (not closed peer %q)", got, activeWfSpan, closedWfSpan)
+				}
+				if got, _ := onlyAgentRow(t, rows, EventAgentError, "item_agent")["parent_span_id"].(string); got != activeWfSpan {
+					t.Errorf("failed item_agent attempt parent_span_id = %q, want the wf span %q that retried it", got, activeWfSpan)
+				}
+			}
+		})
+	}
+}
+
+// TestRunner_ConcurrentLookalikeLLMCoordinators_TransferParentSpanID verifies
+// that when two concurrent lookalike llmagent coordinators share
+// (name, branch, path) with SubAgents declared and C2 holds spec_b open while
+// C1 transfers to spec_a, spec_a parents under C1 (not C2's open spec_b), and
+// purging a failing workflow retry of C2 leaves C1's live spec_a untouched.
+func TestRunner_ConcurrentLookalikeLLMCoordinators_TransferParentSpanID(t *testing.T) {
+	transferTo := func(target string) *model.LLMResponse {
+		return &model.LLMResponse{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				genai.NewPartFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": target}),
+			}, genai.RoleModel),
+		}
+	}
+
+	t.Run("under custom root agent", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		c1Opened := make(chan struct{})
+		c2InSpecB := make(chan struct{})
+		c1SpecADone := make(chan struct{})
+
+		specA, err := llmagent.New(llmagent.Config{
+			Name: "spec_a",
+			Model: &callbackLLM{
+				name: "spec-a-model",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "spec_a ok"), TurnComplete: true}, nil
+				},
+			},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					close(c1SpecADone)
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(spec_a): %v", err)
+		}
+		specB, err := llmagent.New(llmagent.Config{
+			Name: "spec_b",
+			Model: &callbackLLM{
+				name: "spec-b-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					close(c2InSpecB)
+					select {
+					case <-c1SpecADone:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return &model.LLMResponse{Content: textContent("model", "spec_b ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(spec_b): %v", err)
+		}
+
+		var coord1Calls atomic.Int32
+		coord1, err := llmagent.New(llmagent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{specA, specB},
+			Model: &callbackLLM{
+				name: "coord1-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					if coord1Calls.Add(1) == 1 {
+						close(c1Opened)
+						select {
+						case <-c2InSpecB:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return transferTo("spec_a"), nil
+					}
+					return &model.LLMResponse{Content: textContent("model", "coord1 done"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coord1): %v", err)
+		}
+		var coord2Calls atomic.Int32
+		coord2, err := llmagent.New(llmagent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{specA, specB},
+			Model: &callbackLLM{
+				name: "coord2-model",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if coord2Calls.Add(1) == 1 {
+						return transferTo("spec_b"), nil
+					}
+					return &model.LLMResponse{Content: textContent("model", "coord2 done"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coord2): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{coord1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+						ack chan bool
+					}
+					ch := make(chan item, 16)
+					done := make(chan struct{})
+					defer close(done)
+					forward := func(c agent.Agent) {
+						for ev, runErr := range c.Run(ctx) {
+							ack := make(chan bool, 1)
+							select {
+							case ch <- item{ev: ev, err: runErr, ack: ack}:
+							case <-done:
+								return
+							}
+							select {
+							case cont := <-ack:
+								if !cont {
+									return
+								}
+							case <-done:
+								return
+							}
+						}
+					}
+					var wg sync.WaitGroup
+					wg.Go(func() { forward(coord1) })
+					select {
+					case <-c1Opened:
+					case <-ctx.Done():
+						return
+					}
+					wg.Go(func() { forward(coord2) })
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						cont := yield(it.ev, it.err)
+						if it.ack != nil {
+							it.ack <- cont
+						}
+						if !cont || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coord")
+		if len(coordStarts) != 2 {
+			t.Fatalf("coord AGENT_STARTING count = %d, want 2", len(coordStarts))
+		}
+		c1Span, _ := coordStarts[0]["span_id"].(string)
+		c2Span, _ := coordStarts[1]["span_id"].(string)
+
+		specAStarts := agentRowsOfType(rows, EventAgentStarting, "spec_a")
+		if len(specAStarts) != 1 {
+			t.Fatalf("spec_a AGENT_STARTING count = %d, want 1", len(specAStarts))
+		}
+		if got, _ := specAStarts[0]["parent_span_id"].(string); got != c1Span {
+			t.Errorf("spec_a parent_span_id = %q, want %q (C1 span, not C2's open spec_b)", got, c1Span)
+		}
+		specBStarts := agentRowsOfType(rows, EventAgentStarting, "spec_b")
+		if len(specBStarts) != 1 {
+			t.Fatalf("spec_b AGENT_STARTING count = %d, want 1", len(specBStarts))
+		}
+		if got, _ := specBStarts[0]["parent_span_id"].(string); got != c2Span {
+			t.Errorf("spec_b parent_span_id = %q, want %q (C2 span)", got, c2Span)
+		}
+	})
+
+	t.Run("under concurrent lookalike workflow agents with retry isolation", func(t *testing.T) {
+		requireADKNodeCompletionEvents(t)
+		p, requests, _ := setupTestPlugin(t)
+		errTransient := errors.New("transient coord2 spec_b failure")
+		c1Opened := make(chan struct{})
+		c2InSpecB := make(chan struct{})
+		c1InSpecA := make(chan struct{})
+		w2RetryDone := make(chan struct{})
+
+		specA, err := llmagent.New(llmagent.Config{
+			Name: "spec_a",
+			Model: &callbackLLM{
+				name: "wf-spec-a-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					close(c1InSpecA)
+					select {
+					case <-w2RetryDone:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return &model.LLMResponse{Content: textContent("model", "spec_a ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(spec_a): %v", err)
+		}
+		specB, err := llmagent.New(llmagent.Config{
+			Name: "spec_b",
+			Model: &callbackLLM{
+				name: "wf-spec-b-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					close(c2InSpecB)
+					select {
+					case <-c1InSpecA:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return nil, errTransient
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(spec_b): %v", err)
+		}
+
+		var coord1Calls atomic.Int32
+		coord1, err := llmagent.New(llmagent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{specA, specB},
+			Model: &callbackLLM{
+				name: "wf-coord1-model",
+				fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					if coord1Calls.Add(1) == 1 {
+						close(c1Opened)
+						select {
+						case <-c2InSpecB:
+						case <-ctx.Done():
+							return nil, ctx.Err()
+						}
+						return transferTo("spec_a"), nil
+					}
+					return &model.LLMResponse{Content: textContent("model", "coord1 done"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coord1): %v", err)
+		}
+		var coord2Calls atomic.Int32
+		coord2, err := llmagent.New(llmagent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{specA, specB},
+			Model: &callbackLLM{
+				name: "wf-coord2-model",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if coord2Calls.Add(1) == 1 {
+						return transferTo("spec_b"), nil
+					}
+					close(w2RetryDone)
+					return &model.LLMResponse{Content: textContent("model", "coord2 retry ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coord2): %v", err)
+		}
+
+		node1, err := workflow.NewAgentNode(coord1, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(coord1): %v", err)
+		}
+		node2, err := workflow.NewAgentNode(coord2, workflow.NodeConfig{
+			RetryConfig: &workflow.RetryConfig{
+				MaxAttempts:   2,
+				InitialDelay:  time.Millisecond,
+				MaxDelay:      time.Millisecond,
+				BackoffFactor: 1.0,
+			},
+		})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(coord2): %v", err)
+		}
+		wf1, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: node1}},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(wf1): %v", err)
+		}
+		wf2, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: node2}},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(wf2): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{wf1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+						ack chan bool
+					}
+					ch := make(chan item, 16)
+					done := make(chan struct{})
+					defer close(done)
+					forward := func(wf agent.Agent) {
+						for ev, runErr := range wf.Run(ctx) {
+							ack := make(chan bool, 1)
+							select {
+							case ch <- item{ev: ev, err: runErr, ack: ack}:
+							case <-done:
+								return
+							}
+							select {
+							case cont := <-ack:
+								if !cont {
+									return
+								}
+							case <-done:
+								return
+							}
+						}
+					}
+					var wg sync.WaitGroup
+					wg.Go(func() { forward(wf1) })
+					select {
+					case <-c1Opened:
+					case <-ctx.Done():
+						return
+					}
+					wg.Go(func() { forward(wf2) })
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						cont := yield(it.ev, it.err)
+						if it.ack != nil {
+							it.ack <- cont
+						}
+						if !cont || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coord")
+		if len(coordStarts) != 3 {
+			t.Fatalf("coord AGENT_STARTING count = %d, want 3 (coord1, coord2 att1, coord2 att2)", len(coordStarts))
+		}
+		c1Span, _ := coordStarts[0]["span_id"].(string)
+
+		specAStarts := agentRowsOfType(rows, EventAgentStarting, "spec_a")
+		if len(specAStarts) != 1 {
+			t.Fatalf("spec_a AGENT_STARTING count = %d, want 1", len(specAStarts))
+		}
+		if got, _ := specAStarts[0]["parent_span_id"].(string); got != c1Span {
+			t.Errorf("spec_a parent_span_id = %q, want %q (coord1, not coord2's open spec_b)", got, c1Span)
+		}
+		if got := agentErrorCounts(rows)["spec_a"]; got != 0 {
+			t.Errorf("spec_a AGENT_ERROR count = %d, want 0 (live peer must not be purged)", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "spec_a")); got != 1 {
+			t.Errorf("spec_a AGENT_COMPLETED count = %d, want 1", got)
+		}
+		if got := agentErrorCounts(rows)["spec_b"]; got != 1 {
+			t.Errorf("spec_b AGENT_ERROR count = %d, want 1", got)
+		}
+		if got := agentErrorCounts(rows)["coord"]; got != 1 {
+			t.Errorf("coord AGENT_ERROR count = %d, want 1", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coord")); got != 2 {
+			t.Errorf("coord AGENT_COMPLETED count = %d, want 2", got)
+		}
+	})
+}
+
+// TestParentForRunLocked_PreservesCallerExclude verifies that parentForRunLocked
+// never mutates the caller's exclude map and keeps callerExcluded isolated from
+// internal peer exclusions added during resolution.
+func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
+	const gOuter1, gOuter2, gInner1, gInner2, gChild = 101, 102, 201, 202, 301
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-caller-exclude", time.Unix(1_700_000_000, 0))
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+	wfOuter1 := &spanRecord{spanID: "wf-outer-1", kind: spanKindAgent, name: "wf_outer", isWorkflow: true, nonLLM: true, parent: root, goroutineID: gOuter1}
+	wfOuter2 := &spanRecord{spanID: "wf-outer-2", kind: spanKindAgent, name: "wf_outer", isWorkflow: true, nonLLM: true, parent: root, goroutineID: gOuter2}
+	wfInner1 := &spanRecord{
+		spanID: "wf-inner-1", kind: spanKindAgent, name: "wf_inner", isWorkflow: true, nonLLM: true,
+		parent: wfOuter1, goroutineID: gInner1, origin: goroutineOrigin{creator: schedulerCreator, parent: gOuter1},
+	}
+	wfInner2 := &spanRecord{
+		spanID: "wf-inner-2", kind: spanKindAgent, name: "wf_inner", isWorkflow: true, nonLLM: true,
+		parent: wfOuter2, goroutineID: gInner2, origin: goroutineOrigin{creator: schedulerCreator, parent: gOuter2},
+	}
+	sub2 := &spanRecord{spanID: "sub-2", kind: spanKindAgent, name: "sub_other", parent: wfInner2, goroutineID: gInner2}
+	inv.agentStack = append(inv.agentStack, root, wfOuter1, wfOuter2, wfInner1, wfInner2, sub2)
+
+	callerExclude := map[string]bool{"unrelated-span": true}
+	got := inv.parentForRunLocked(
+		identity{agentName: "wf_inner"},
+		callerExclude,
+		gChild,
+		goroutineOrigin{creator: schedulerCreator, parent: gOuter1},
+		nil,
+	)
+	if got != wfOuter1 {
+		t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wfOuter1.spanID)
+	}
+	wantCaller := map[string]bool{"unrelated-span": true}
+	if !maps.Equal(callerExclude, wantCaller) {
+		t.Fatalf("callerExclude mutated: got %v, want %v", callerExclude, wantCaller)
+	}
+
+	// Excluding wf-outer-1's subtree as caller leaves wf-outer-2 and wf-inner-2
+	// as the only remaining activations, returning wf-outer-2 without mutating
+	// callerExcludeOuter.
+	callerExcludeOuter := maps.Clone(inv.subtreeLocked(2)) // wf-outer-1 subtree (wf-outer-1 + wf-inner-1)
+	wantCallerOuter := maps.Clone(callerExcludeOuter)
+	gotNoOuter1 := inv.parentForRunLocked(
+		identity{agentName: "wf_inner"},
+		callerExcludeOuter,
+		gChild,
+		goroutineOrigin{creator: schedulerCreator, parent: gOuter2},
+		nil,
+	)
+	if gotNoOuter1 != wfOuter2 {
+		t.Fatalf("parentForRunLocked with wf-outer-1 excluded = %s, want %s", gotNoOuter1.spanID, wfOuter2.spanID)
+	}
+	if !maps.Equal(callerExcludeOuter, wantCallerOuter) {
+		t.Fatalf("callerExcludeOuter mutated: got %v, want %v", callerExcludeOuter, wantCallerOuter)
+	}
+}
+
+// TestRunner_NonConcurrentLookalike_NestedTransferChain verifies that
+// sequential nested lookalikes (e.g. planner -> helper -> planner via transfer
+// back) followed by a WorkflowAgent with a ParallelWorker or NewWorkflowNode
+// still parent the child under wf and propagate AGENT_ERROR up the full chain.
+func TestRunner_NonConcurrentLookalike_NestedTransferChain(t *testing.T) {
+	transferTo := func(target string) *model.LLMResponse {
+		return &model.LLMResponse{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				genai.NewPartFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": target}),
+			}, genai.RoleModel),
+		}
+	}
+
+	t.Run("succeeding ParallelWorker item", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "item-ok",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+			return []string{"a"}, nil
+		}, workflow.NodeConfig{})
+		pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewParallelWorker: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		helper, err := llmagent.New(llmagent.Config{
+			Name:  "helper",
+			Model: &transferModel{script: []string{"planner"}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			Model:     &transferModel{script: []string{"helper", "wf"}},
+			SubAgents: []agent.Agent{helper, wf},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		assertAgentSpansClosed(t, rows)
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+	})
+
+	t.Run("failing ParallelWorker item propagates AGENT_ERROR", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errBoom := errors.New("item boom")
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "item-fail",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return nil, errBoom
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+			return []string{"a"}, nil
+		}, workflow.NodeConfig{})
+		pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewParallelWorker: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		helper, err := llmagent.New(llmagent.Config{
+			Name:  "helper",
+			Model: &transferModel{script: []string{"planner"}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			Model:     &transferModel{script: []string{"helper", "wf"}},
+			SubAgents: []agent.Agent{helper, wf},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		var gotRunErr error
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				gotRunErr = runErr
+			}
+		}
+		if gotRunErr == nil {
+			t.Fatal("expected runner.Run error from failing item_agent")
+		}
+		rows := collectRows(t, requests, untilEventType(EventInvocationError))
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+		errCounts := agentErrorCounts(rows)
+		for name, want := range map[string]int{
+			"item_agent": 1,
+			"wf":         1,
+			"helper":     1,
+			"planner":    2,
+		} {
+			if errCounts[name] != want {
+				t.Errorf("%s AGENT_ERROR count = %d, want %d (all counts: %v)", name, errCounts[name], want, errCounts)
+			}
+			if gotComp := len(agentRowsOfType(rows, EventAgentCompleted, name)); gotComp != 0 {
+				t.Errorf("%s AGENT_COMPLETED count = %d, want 0", name, gotComp)
+			}
+		}
+	})
+
+	t.Run("NewWorkflowNode under nested transfer chain", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "wf-node-item",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "nested node ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		wfNode, err := workflow.NewWorkflowNode("sub_wf", []workflow.Edge{{From: workflow.Start, To: itemNode}})
+		if err != nil {
+			t.Fatalf("workflow.NewWorkflowNode: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: wfNode}},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		var helperCalls atomic.Int32
+		helper, err := llmagent.New(llmagent.Config{
+			Name: "helper",
+			Model: &callbackLLM{
+				name: "helper-transfer",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if helperCalls.Add(1) == 1 {
+						return transferTo("planner"), nil
+					}
+					return &model.LLMResponse{Content: textContent("model", "done"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		var plannerCalls atomic.Int32
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			SubAgents: []agent.Agent{helper, wf},
+			Model: &callbackLLM{
+				name: "planner-transfer",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if plannerCalls.Add(1) == 1 {
+						return transferTo("helper"), nil
+					}
+					return transferTo("wf"), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		assertAgentSpansClosed(t, rows)
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+	})
+}
+
+// TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow verifies that
+// when an earlier run of a WorkflowAgent on the same goroutine exits without
+// an AfterAgentCallback (e.g. BeforeAgentCallback short-circuit or failure) and
+// a fresh run of the same agent runs sequentially on that goroutine, its
+// ParallelWorker item still parents under the fresh WorkflowAgent span.
+func TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		shortCircuit bool
+	}{
+		{name: "after BeforeAgentCallback short-circuit", shortCircuit: true},
+		{name: "after failed earlier run", shortCircuit: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			var wfRun, itemCalls atomic.Int32
+			itemAgent, err := llmagent.New(llmagent.Config{
+				Name: "item_agent",
+				Mode: llmagent.ModeSingleTurn,
+				Model: &callbackLLM{
+					name: "stale-seq-item",
+					fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+						if !tc.shortCircuit && itemCalls.Add(1) == 1 {
+							return nil, errors.New("run 1 transient item failure")
+						}
+						return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(item_agent): %v", err)
+			}
+			itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode: %v", err)
+			}
+			itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+				return []string{"x"}, nil
+			}, workflow.NodeConfig{})
+			pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewParallelWorker: %v", err)
+			}
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name:  "wf",
+				Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						if tc.shortCircuit && wfRun.Add(1) == 1 {
+							return textContent("model", "cached wf"), nil
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New: %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{wf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						// Run 1: either short-circuits in BeforeAgentCallback or fails without AfterAgentCallback.
+						for ev, runErr := range wf.Run(ctx) {
+							if runErr != nil {
+								break
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+						// Run 2 on the exact same goroutine.
+						for ev, runErr := range wf.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if tc.shortCircuit {
+				onlyRowOfType(t, rows, EventInvocationCompleted)
+			} else {
+				onlyRowOfType(t, rows, EventInvocationError)
+			}
+
+			wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+			if len(wfStarts) != 2 {
+				t.Fatalf("wf AGENT_STARTING count = %d, want 2", len(wfStarts))
+			}
+			wf2Span, _ := wfStarts[1]["span_id"].(string)
+
+			itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+			var lastItem map[string]any
+			if tc.shortCircuit {
+				if len(itemStarts) != 1 {
+					t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+				}
+				lastItem = itemStarts[0]
+			} else {
+				if len(itemStarts) != 2 {
+					t.Fatalf("item_agent AGENT_STARTING count = %d, want 2", len(itemStarts))
+				}
+				lastItem = itemStarts[1]
+			}
+			if got, _ := lastItem["parent_span_id"].(string); got != wf2Span {
+				t.Errorf("fresh item_agent parent_span_id = %q, want %q (second wf span)", got, wf2Span)
+			}
+		})
+	}
+}
+
+// TestRunner_NonConcurrentLookalike_SuspendedIterator verifies that when an
+// outer custom agent ("worker") declaring sub-agent "sub" iterates an inner
+// custom agent also named "worker" (not declaring "sub") on the same goroutine
+// and invokes "sub" from inside the loop body while inner sits suspended in
+// yield, "sub" is parented to outer (the declaring activation), both alone and
+// alongside a concurrent peer "worker" on another goroutine.
+func TestRunner_NonConcurrentLookalike_SuspendedIterator(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		concurrentPeer bool
+	}{
+		{name: "sequential suspended iterator"},
+		{name: "suspended iterator with concurrent peer", concurrentPeer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			sub, err := agent.New(agent.Config{
+				Name: "sub",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "sub"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "sub ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(sub): %v", err)
+			}
+
+			innerWorker, err := agent.New(agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "inner step")
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(innerWorker): %v", err)
+			}
+
+			outerInLoop := make(chan struct{})
+			peerOpened := make(chan struct{})
+			subDone := make(chan struct{})
+			var outerEntered bool
+
+			outerWorker, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{sub},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for ev, runErr := range innerWorker.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+							if !outerEntered {
+								outerEntered = true
+								if tc.concurrentPeer {
+									close(outerInLoop)
+									select {
+									case <-peerOpened:
+									case <-ctx.Done():
+										yield(nil, ctx.Err())
+										return
+									}
+								}
+								for subEv, subErr := range sub.Run(ctx) {
+									if !yield(subEv, subErr) || subErr != nil {
+										return
+									}
+								}
+								if tc.concurrentPeer {
+									close(subDone)
+								}
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(outerWorker): %v", err)
+			}
+
+			peerWorker, err := agent.New(agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						close(peerOpened)
+						select {
+						case <-subDone:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "peer ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(peerWorker): %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{outerWorker},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if !tc.concurrentPeer {
+							for ev, runErr := range outerWorker.Run(ctx) {
+								if !yield(ev, runErr) || runErr != nil {
+									return
+								}
+							}
+							return
+						}
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						ch := make(chan item, 16)
+						var wg sync.WaitGroup
+						wg.Go(func() {
+							for ev, runErr := range outerWorker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						})
+						<-outerInLoop
+						wg.Go(func() {
+							for ev, runErr := range peerWorker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						})
+						go func() {
+							wg.Wait()
+							close(ch)
+						}()
+						for it := range ch {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			assertAgentSpansClosed(t, rows)
+
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			wantWorkers := 2
+			if tc.concurrentPeer {
+				wantWorkers = 3
+			}
+			if len(workerStarts) != wantWorkers {
+				t.Fatalf("worker AGENT_STARTING count = %d, want %d", len(workerStarts), wantWorkers)
+			}
+			outerSpan, _ := workerStarts[0]["span_id"].(string)
+			subStarts := agentRowsOfType(rows, EventAgentStarting, "sub")
+			if len(subStarts) != 1 {
+				t.Fatalf("sub AGENT_STARTING count = %d, want 1", len(subStarts))
+			}
+			if got, _ := subStarts[0]["parent_span_id"].(string); got != outerSpan {
+				t.Errorf("sub parent_span_id = %q, want %q (declaring outer worker, not suspended inner)", got, outerSpan)
+			}
+		})
+	}
+}
+
+// TestParentForRunLocked_LookalikeInvariants pins invariants in
+// excludePeerLookalikesLocked and parentForRunLocked:
+//   - keeping an outer cross-goroutine ancestor of the winner unexcluded
+//     alongside a concurrent peer;
+//   - matching a descendant in a lookalike member's subtree when no member runs
+//     directly on goid or origin.parent;
+//   - filtering unmatched groups against final exclusions (including
+//     re-collapsing surviving non-concurrent pairs);
+//   - storing all live group members in unmatched for parent-chain ambiguity
+//     detection and enclosing-span scoping;
+//   - resolving outer ancestor groups before inner descendant groups; and
+//   - preserving direct goroutine matches on cross-goroutine nested ancestors.
+func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
+	t.Run("keeps cross-goroutine nested ancestor of winner", func(t *testing.T) {
+		const gOuter, gInner, gPeer = 101, 102, 103
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancestor-keep", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		outer := &spanRecord{spanID: "planner-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gOuter}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: gInner}
+		inner := &spanRecord{spanID: "planner-inner", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: gInner}
+		peer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gPeer}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, peer)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gInner, goroutineOrigin{parent: gInner}, nil)
+		if got != inner {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner.spanID)
+		}
+	})
+
+	t.Run("matches descendant inside lookalike member subtree", func(t *testing.T) {
+		const g1, g2, gSub1, gSub2 = 201, 202, 211, 212
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-subtree-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 200}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: g1}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: g2}
+		sub1 := &spanRecord{spanID: "sub1", kind: spanKindAgent, name: "sub_a", parent: w1, goroutineID: gSub1}
+		sub2 := &spanRecord{spanID: "sub2", kind: spanKindAgent, name: "sub_b", parent: w2, goroutineID: gSub2}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, sub1, sub2)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gSub1, goroutineOrigin{parent: 999}, nil)
+		if got != sub1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, sub1.spanID)
+		}
+	})
+
+	t.Run("filters unmatched groups against final exclusions", func(t *testing.T) {
+		const gInner1, gInner2, gOuter1, gOuter2, gInner3 = 301, 302, 303, 304, 305
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-filter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 300}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root, goroutineID: 300}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", parent: mid, goroutineID: gInner1}
+		inner2 := &spanRecord{
+			spanID: "inner-2", kind: spanKindAgent, name: "inner",
+			nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: gInner2,
+		}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: gOuter1}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: gOuter2}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", parent: outer2, goroutineID: gInner3}
+		inv.agentStack = append(inv.agentStack, root, mid, inner1, inner2, outer1, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gOuter1, goroutineOrigin{parent: 300}, nil)
+		if got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, mid.spanID, root.spanID)
+		}
+	})
+
+	t.Run("collapses cross-goroutine nested lookalikes without concurrent peer", func(t *testing.T) {
+		const gOuter, gInner, gWorker = 401, 402, 403
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-cross-goid-nested", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 400}
+		outer := &spanRecord{spanID: "planner-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gOuter}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: gInner}
+		inner := &spanRecord{spanID: "planner-inner", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: gInner}
+		wf := &spanRecord{spanID: "wf", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, parent: inner, goroutineID: gInner}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, wf)
+
+		got := inv.parentForRunLocked(identity{agentName: "item"}, nil, gWorker, goroutineOrigin{parent: 999}, nil)
+		if got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+
+	t.Run("unmatched includes collapsed suspended iterator members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-collapsed-iter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		peerWorker := &spanRecord{spanID: "peer-worker", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 102}
+		outerWorker := &spanRecord{spanID: "outer-worker", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 101}
+		innerWorker := &spanRecord{spanID: "inner-worker", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		inv.agentStack = append(inv.agentStack, root, peerWorker, outerWorker, innerWorker)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("unmatched includes collapsed nested ancestor members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-collapsed-nested", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		planner1 := &spanRecord{spanID: "planner-1", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 101}
+		seq := &spanRecord{spanID: "seq", kind: spanKindAgent, name: "seq", nonLLM: true, children: []string{"planner", "item_agent"}, parent: planner1, goroutineID: 101}
+		plannerSub := &spanRecord{spanID: "planner-sub", kind: spanKindAgent, name: "planner", parent: seq, goroutineID: 101}
+		plannerPeer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, planner1, seq, plannerSub, plannerPeer)
+
+		got := inv.parentForRunLocked(identity{agentName: "item_agent"}, nil, 500, goroutineOrigin{parent: 499}, nil)
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("unmatched enclosing span includes collapsed members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-enclosing-scope", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: root, goroutineID: 101}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "w", parent: midA, goroutineID: 101}
+		midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: root, goroutineID: 102}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "w", nonLLM: true, children: []string{"sub"}, parent: midB, goroutineID: 101}
+		w3 := &spanRecord{spanID: "w3", kind: spanKindAgent, name: "w", nonLLM: true, children: []string{"sub"}, parent: midB, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, midA, w1, midB, w2, w3)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, midB.spanID)
+		}
+		if enc := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, []*spanRecord{w1, w2, w3}); enc != root {
+			t.Fatalf("enclosing = %s, want %s", enc.spanID, root.spanID)
+		}
+	})
+
+	t.Run("post-exclusion filter re-collapses surviving non-concurrent pair", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-post-exclusion-collapse", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 103}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: w1, goroutineID: 201}
+		wPeer := &spanRecord{spanID: "w-peer", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: outer1, goroutineID: 104}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 103}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 101}
+		inv.agentStack = append(inv.agentStack, root, w1, outer1, wPeer, w2, outer2)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 101}, nil)
+		if got != w1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w1.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group regardless of second-occurrence order", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-2nd", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 100}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300, origin: goroutineOrigin{parent: 100}}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
+		inv.agentStack = append(inv.agentStack, root, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group even with earlier unrelated inner", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-unrelated", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 100}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300, origin: goroutineOrigin{parent: 100}}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
+		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group in same starter tier", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-starter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 300}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400}
+		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 300}, nil)
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("cross-goroutine nested ancestor keeps direct goroutine match", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-cross-goid-direct-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		coordOuter := &spanRecord{spanID: "coord-outer", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: root, goroutineID: 101}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: coordOuter, goroutineID: 102}
+		coordInner := &spanRecord{spanID: "coord-inner", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, coordOuter, mid, coordInner)
+
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 101, goroutineOrigin{parent: 100}, nil); got != coordOuter {
+			t.Fatalf("goid=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 103, goroutineOrigin{parent: 101}, nil); got != coordOuter {
+			t.Fatalf("starter=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 102, goroutineOrigin{parent: 101}, nil); got != coordInner {
+			t.Fatalf("goid=102 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 500, goroutineOrigin{parent: 499}, nil); got != coordInner {
+			t.Fatalf("helper goid=500 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
+		}
+	})
+
+	t.Run("goid tier resolves before starter tier in mutually recursive groups", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-goid-before-starter-cycle", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		a1 := &spanRecord{spanID: "a1", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101}
+		b1 := &spanRecord{spanID: "b1", kind: spanKindAgent, name: "b", nonLLM: true, parent: a1, goroutineID: 100}
+		a2 := &spanRecord{spanID: "a2", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: b1, goroutineID: 102}
+		b2 := &spanRecord{spanID: "b2", kind: spanKindAgent, name: "b", nonLLM: true, parent: root, goroutineID: 300}
+		a3 := &spanRecord{spanID: "a3", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
+		inv.agentStack = append(inv.agentStack, root, a1, b1, a2, b2, a3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
+		if got != a3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, a3.spanID)
+		}
+	})
+
+	t.Run("Pass 1 matchedScope preserves group ancestor of matching scope", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancm-keeps-ancestor", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 101}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 300}
+		pInner := &spanRecord{spanID: "p-inner", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 400}
+		pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
+		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner, pSibling)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 101}, nil)
+		if got != pInner {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner.spanID)
+		}
+	})
+
+	t.Run("ancM fallback narrows unmatched scope without outer group ancestor", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			twoInner bool
+			goid     uint64
+			parent   uint64
+			wantID   string
+		}{
+			{name: "single inner under goid mid", twoInner: false, goid: 300, parent: 100, wantID: "p-inner-1"},
+			{name: "single inner under starter mid", twoInner: false, goid: 999, parent: 300, wantID: "p-inner-1"},
+			{name: "two inner peers under goid mid", twoInner: true, goid: 300, parent: 100, wantID: "mid"},
+			{name: "two inner peers under starter mid", twoInner: true, goid: 999, parent: 300, wantID: "mid"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancm-fallback", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root, goroutineID: 300}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 401}
+				inv.agentStack = append(inv.agentStack, root, mid, pInner1)
+				if tc.twoInner {
+					pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 402}
+					inv.agentStack = append(inv.agentStack, pInner2)
+				}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
+				inv.agentStack = append(inv.agentStack, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got.spanID != tc.wantID {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantID)
+				}
+			})
+		}
+	})
+
+	t.Run("excludes workflow-lookalike scheduler peers and propagates to subtree", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-wf-lookalike-subtree", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		wf2 := &spanRecord{spanID: "wf-2", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, children: []string{"node"}, parent: root, goroutineID: 102}
+		wf1 := &spanRecord{spanID: "wf-1", kind: spanKindAgent, name: "wf", isWorkflow: true, parent: root, goroutineID: 101}
+		node1 := &spanRecord{spanID: "node-1", kind: spanKindAgent, name: "node", parent: wf1, goroutineID: 201, origin: goroutineOrigin{creator: schedulerCreator, parent: 101}}
+		sub1 := &spanRecord{spanID: "sub-1", kind: spanKindAgent, name: "sub", nonLLM: true, children: []string{"node"}, parent: node1, goroutineID: 202}
+		inv.agentStack = append(inv.agentStack, root, wf2, wf1, node1, sub1)
+
+		got := inv.parentForRunLocked(identity{agentName: "node"}, nil, 0, goroutineOrigin{creator: schedulerCreator, parent: 102}, nil)
+		if got != wf2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, wf2.spanID, sub1.spanID)
+		}
+	})
+
+	t.Run("keptInsideBm scopes unmatched to matched subtree so ancestor lookalike does not demote mid", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			midG   uint64
+			goid   uint64
+			parent uint64
+		}{
+			{name: "mid on own goroutine matching pOuter", midG: 100, goid: 100, parent: 99},
+			{name: "mid on distinct goroutine", midG: 200, goid: 200, parent: 99},
+			{name: "child started by mid goroutine", midG: 200, goid: 500, parent: 200},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-kept-inside-bm-mid", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 100}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", nonLLM: true, children: []string{"planner", "leaf"}, parent: pOuter, goroutineID: tc.midG}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: 302}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 400}
+				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got != mid {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("keptInsideBm demotes unresolved inner peers to matched mid rather than root", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			goid        uint64
+			parent      uint64
+			outerNonLLM bool
+		}{
+			{name: "goid matches mid", goid: 200, parent: 99},
+			{name: "starter matches mid", goid: 500, parent: 200},
+			{name: "goid matches mid while starter matches pOuter and outside branch shares goid", goid: 200, parent: 100, outerNonLLM: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-kept-inside-bm-enclosing", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+				pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", nonLLM: tc.outerNonLLM, parent: root, goroutineID: 100}
+				if tc.outerNonLLM {
+					pOuter.children = []string{"leaf"}
+				}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 200}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 400}
+				other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
+				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling, other)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got != mid {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("countEffectivePeers keeps two live concurrent peers when superseded child shares goroutine with sibling", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			vG   uint64
+		}{
+			{name: "v shares goroutine with sibling w", vG: 102},
+			{name: "v has zero goroutine", vG: 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-effective-peers-superseded", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				u := &spanRecord{spanID: "u", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 101}
+				v := &spanRecord{spanID: "v", kind: spanKindAgent, name: "worker", parent: u, goroutineID: tc.vG}
+				w := &spanRecord{spanID: "w", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 102}
+				inv.agentStack = append(inv.agentStack, root, u, v, w)
+
+				got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
+				if got != root {
+					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, w.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("SCC condensation resolves cyclic outer groups before downstream inner group", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			goid   uint64
+			parent uint64
+		}{
+			{name: "starter match on outer branch", goid: 500, parent: 300},
+			{name: "goid match on outer branch", goid: 300, parent: 50},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-scc-outer-before-inner", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+				inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+				a1 := &spanRecord{spanID: "a1", kind: spanKindAgent, name: "a", parent: root, goroutineID: 100}
+				b1 := &spanRecord{spanID: "b1", kind: spanKindAgent, name: "b", parent: a1, goroutineID: 100}
+				a2 := &spanRecord{spanID: "a2", kind: spanKindAgent, name: "a", parent: b1, goroutineID: 100}
+				inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", parent: a2, goroutineID: 300}
+				inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", parent: a2, goroutineID: 200}
+				a3 := &spanRecord{spanID: "a3", kind: spanKindAgent, name: "a", parent: root, goroutineID: 300}
+				b2 := &spanRecord{spanID: "b2", kind: spanKindAgent, name: "b", parent: a3, goroutineID: 400}
+				inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
+				inv.agentStack = append(inv.agentStack, root, inner0, a1, b1, a2, inner1, inner2, a3, b2, inner3)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got != inner3 {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("recomputes subtree witness after earlier group excludes prior witness", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			goid   uint64
+			parent uint64
+		}{
+			{name: "Pass 1 goid tier", goid: 777, parent: 1},
+			{name: "Pass 2 starter tier", goid: 888, parent: 777},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				const witnessG = 777
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-witness-recompute", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+				m0 := &spanRecord{spanID: "m0", kind: spanKindAgent, name: "g0", parent: root, goroutineID: witnessG}
+				m1 := &spanRecord{spanID: "m1", kind: spanKindAgent, name: "g1", nonLLM: true, children: []string{"leaf"}, parent: m0, goroutineID: witnessG}
+				l0 := &spanRecord{spanID: "l0", kind: spanKindAgent, name: "g0", parent: m1, goroutineID: 200}
+				w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "g1", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 300}
+				v1 := &spanRecord{spanID: "v1", kind: spanKindAgent, name: "v1", parent: w1, goroutineID: witnessG}
+				u0 := &spanRecord{spanID: "u0", kind: spanKindAgent, name: "u0", parent: l0, goroutineID: witnessG}
+				w0 := &spanRecord{spanID: "w0", kind: spanKindAgent, name: "g0", parent: root, goroutineID: witnessG}
+				inv.agentStack = append(inv.agentStack, root, m0, m1, l0, w1, v1, u0, w0)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got != w1 {
+					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, w1.spanID, m1.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("enclosing demotion does not drop wider inner unmatched group beneath narrower outer unmatched ancestor", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			withSubChild bool
+		}{
+			{name: "direct leaf under inner2"},
+			{name: "indirect subChild under inner2", withSubChild: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-wider-inner-unmatched", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: root, goroutineID: 101}
+				inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: midA, goroutineID: 201}
+				midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: root, goroutineID: 102}
+				outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: midB, goroutineID: 301}
+				outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: midB, goroutineID: 302}
+				inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: outer2, goroutineID: 202}
+				inv.agentStack = append(inv.agentStack, root, midA, inner1, midB, outer1, outer2, inner2)
+				if tc.withSubChild {
+					subChild := &spanRecord{spanID: "sub-child", kind: spanKindAgent, name: "sub_child", nonLLM: true, children: []string{"leaf"}, parent: inner2, goroutineID: 202}
+					inv.agentStack = append(inv.agentStack, subChild)
+				}
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 999, goroutineOrigin{parent: 998}, nil)
+				if got != root {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("Pass 2 enclosing goroutine scope ignores later sibling sharing mid goroutine", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			midLists  bool
+			siblingG  uint64
+			goid      uint64
+			parent    uint64
+			wantMidID string
+		}{
+			{name: "inline goid=200 with unrelated pSibling", midLists: true, siblingG: 400, goid: 200, parent: 100, wantMidID: "mid"},
+			{name: "starter parent=200 with unrelated pSibling", midLists: true, siblingG: 400, goid: 500, parent: 200, wantMidID: "mid"},
+			{name: "inline goid=200 blocks starter-matching pSibling", midLists: false, siblingG: 100, goid: 200, parent: 100, wantMidID: "mid"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-enclosing-goid-sibling", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				midChildren := []string{"planner", "step1"}
+				if tc.midLists {
+					midChildren = append(midChildren, "leaf")
+				}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", nonLLM: true, children: midChildren, parent: root, goroutineID: 200}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+				step1 := &spanRecord{spanID: "step1", kind: spanKindAgent, name: "step1", parent: mid, goroutineID: 200}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: tc.siblingG}
+				inv.agentStack = append(inv.agentStack, root, mid, pInner1, pInner2, step1, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got.spanID != tc.wantMidID {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantMidID)
+				}
+			})
+		}
+	})
+
+	t.Run("Pass 2 enclosing goroutine scope ignores unrelated branch sharing goid", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unrelated-branch-goid", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		outer := &spanRecord{spanID: "outer", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: 200}
+		pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+		pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+		pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100}
+		other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, pInner1, pInner2, pSibling, other)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100}, nil)
+		if got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+		}
+	})
+
+	t.Run("Pass 2 pickWinner scopes starter candidates to matchedScope so outer witness does not shadow inner match", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-in-scope-pickwinner", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 200}
+		pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+		s1 := &spanRecord{spanID: "s1", kind: spanKindAgent, name: "s1", parent: pInner1, goroutineID: 100}
+		pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+		s2 := &spanRecord{spanID: "s2", kind: spanKindAgent, name: "s2", parent: pOuter, goroutineID: 100}
+		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, s1, pInner2, s2)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100}, nil)
+		if got != pInner1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner1.spanID)
+		}
+	})
+
+	t.Run("direct winner match excludes cross-goroutine inner lookalike despite inline mid sharing winner goroutine", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			twoInner bool
+			goid     uint64
+			parent   uint64
+		}{
+			{name: "Pass 1 direct goid match with single inner", twoInner: false, goid: 101, parent: 100},
+			{name: "Pass 2 direct starter match with single inner", twoInner: false, goid: 103, parent: 101},
+			{name: "Pass 1 direct goid match with two inner peers", twoInner: true, goid: 101, parent: 100},
+			{name: "Pass 2 direct starter match with two inner peers", twoInner: true, goid: 103, parent: 101},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-direct-winner-inline-mid", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				coordOuter := &spanRecord{spanID: "coord-outer", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: root, goroutineID: 101}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: coordOuter, goroutineID: 101}
+				coordInner1 := &spanRecord{spanID: "coord-inner-1", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 102}
+				inv.agentStack = append(inv.agentStack, root, coordOuter, mid, coordInner1)
+				if tc.twoInner {
+					coordInner2 := &spanRecord{spanID: "coord-inner-2", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 104}
+					inv.agentStack = append(inv.agentStack, coordInner2)
+				}
+
+				got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
+				if got != coordOuter {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+				}
+			})
+		}
+	})
+}
+
+func BenchmarkParentForRunLocked_DistinctOpenSpans(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-distinct", time.Unix(1_700_000_000, 0))
+			root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+			inv.agentStack = append(inv.agentStack, root)
+			for i := range n {
+				inv.agentStack = append(inv.agentStack, &spanRecord{
+					spanID:      fmt.Sprintf("item-%d", i),
+					kind:        spanKindAgent,
+					name:        "item",
+					path:        fmt.Sprintf("pw[%d]", i),
+					parent:      root,
+					goroutineID: uint64(i + 2),
+				})
+			}
+			id := identity{agentName: "leaf", path: fmt.Sprintf("pw[%d]", n-1)}
+			origin := goroutineOrigin{parent: 1}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, 99999, origin, nil); got == nil {
+					b.Fatal("got nil parent")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkParentForRunLocked_LookalikesDeepAncestors(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-lookalikes-deep", time.Unix(1_700_000_000, 0))
+			parent := inv.agentStack[0]
+			ancCount := n / 2
+			for i := range ancCount {
+				anc := &spanRecord{
+					spanID:      fmt.Sprintf("anc-%d", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("anc_%d", i),
+					parent:      parent,
+					goroutineID: uint64(i + 1),
+				}
+				inv.agentStack = append(inv.agentStack, anc)
+				parent = anc
+			}
+			for i := range n - ancCount {
+				inv.agentStack = append(inv.agentStack, &spanRecord{
+					spanID:      fmt.Sprintf("worker-%d", i),
+					kind:        spanKindAgent,
+					name:        "worker",
+					nonLLM:      true,
+					children:    []string{"leaf"},
+					parent:      parent,
+					goroutineID: uint64(ancCount + i + 2),
+				})
+			}
+			id := identity{agentName: "leaf"}
+			origin := goroutineOrigin{parent: 999998}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, 999999, origin, nil); got != parent {
+					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, parent.spanID)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkLookalikeParentScaling(b *testing.B) {
+	for _, n := range []int{100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			const targetGoid = 999999
+			k := max(n/4, 2)
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-cyclic-scaling", time.Unix(1_700_000_000, 0))
+			root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+			inv.agentStack = append(inv.agentStack, root)
+
+			// Build nested chain m_{0,1} -> m_{1,1} -> ... -> m_{k-1,1}.
+			curParent := root
+			for i := range k {
+				rec := &spanRecord{
+					spanID:      fmt.Sprintf("m-%d-1", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", i),
+					parent:      curParent,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, rec)
+				curParent = rec
+			}
+			// Under m_{k-1,1}, attach m_{k-1-j, loser} -> u_j(targetGoid) in
+			// ascending stack order so resolving grp_i excludes the highest
+			// remaining u on every group step.
+			for j := range k {
+				grpIdx := k - 1 - j
+				loser := &spanRecord{
+					spanID:      fmt.Sprintf("loser-%d", grpIdx),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", grpIdx),
+					parent:      curParent,
+					goroutineID: 200,
+				}
+				u := &spanRecord{
+					spanID:      fmt.Sprintf("u-%d", j),
+					kind:        spanKindAgent,
+					name:        "tag",
+					parent:      loser,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, loser, u)
+			}
+			// Under root, attach winners w_0..w_{k-1} on targetGoid.
+			var lastWinner *spanRecord
+			for i := range k {
+				w := &spanRecord{
+					spanID:      fmt.Sprintf("w-%d", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", i),
+					nonLLM:      true,
+					children:    []string{"leaf"},
+					parent:      root,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, w)
+				lastWinner = w
+			}
+
+			id := identity{agentName: "leaf"}
+			origin := goroutineOrigin{parent: 1}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, targetGoid, origin, nil); got != lastWinner {
+					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, lastWinner.spanID)
+				}
+			}
+		})
+	}
+}
+
+// TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent covers
+// a workflow.ParallelWorker item that runs under the only open workflow while
+// two activations of the same agent are open: the second activation runs
+// workflow wf on branch "selected", and the first runs nothing. The item's
+// branch and node path point at wf alone, so the item stays under wf instead
+// of moving up to the span that encloses both activations.
+func TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	itemAgent, err := llmagent.New(llmagent.Config{
+		Name: "item_agent",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &callbackLLM{
+			name: "item-model",
+			fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(item_agent): %v", err)
+	}
+	itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(item_agent): %v", err)
+	}
+	itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+		return []string{"x"}, nil
+	}, workflow.NodeConfig{})
+	pw, err := workflow.NewParallelWorker("items_work", itemNode, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewParallelWorker: %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf): %v", err)
+	}
+
+	worker1Open := make(chan struct{})
+	wfDone := make(chan struct{})
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					close(worker1Open)
+					// Stay open, running nothing, until the second activation's
+					// workflow is done.
+					select {
+					case <-wfDone:
+					case <-ctx.Done():
+						yield(nil, ctx.Err())
+						return
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				defer close(wfDone)
+				selected := "selected"
+				for ev, runErr := range wf.Run(ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selected})) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type item struct {
+					ev  *session.Event
+					err error
+				}
+				ch := make(chan item, 16)
+				var wg sync.WaitGroup
+				forward := func() {
+					for ev, runErr := range worker.Run(ctx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				}
+				wg.Go(forward)
+				select {
+				case <-worker1Open:
+				case <-ctx.Done():
+					return
+				}
+				wg.Go(forward)
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", got)
+	}
+	wfSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "wf")["span_id"].(string)
+	item := onlyAgentRow(t, rows, EventAgentStarting, "item_agent")
+	if got, _ := item["parent_span_id"].(string); got != wfSpan {
+		t.Errorf("item_agent parent_span_id = %q, want %q (the only open workflow)", got, wfSpan)
+	}
+}
+
+// onlyAgentRow returns the only row of eventType that agent wrote.
+func onlyAgentRow(t *testing.T, rows []map[string]any, eventType, agent string) map[string]any {
+	t.Helper()
+	got := agentRowsOfType(rows, eventType, agent)
+	if len(got) != 1 {
+		t.Fatalf("%s %s row count = %d, want 1", agent, eventType, len(got))
+	}
+	return got[0]
+}
+
+// TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation covers a
+// child agent that one activation of worker declares and runs with its own
+// context on a goroutine where another activation named worker is still open
+// without running the child: suspended in yield while root consumes its
+// events, or left open after its BeforeAgentCallback answered for it. The
+// child runs under the activation whose context it was run with, which is
+// also the one that declares it.
+func TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		shortCircuit bool
+	}{
+		{name: "lookalike suspended in yield"},
+		{name: "lookalike left open by its BeforeAgentCallback", shortCircuit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+			type runJob func(yield func(*session.Event, error) bool) bool
+			jobs := make(chan runJob, 1)
+			leafDone := make(chan struct{})
+			// worker1 declares leaf and hands root a run of it with its own
+			// context, which root runs on its own goroutine.
+			worker1, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{leaf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						job := func(yield func(*session.Event, error) bool) bool {
+							defer close(leafDone)
+							for ev, runErr := range leaf.Run(ctx) {
+								if !yield(ev, runErr) || runErr != nil {
+									return false
+								}
+							}
+							return true
+						}
+						select {
+						case jobs <- job:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						select {
+						case <-leafDone:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker 1 ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker1): %v", err)
+			}
+			worker2Cfg := agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker 2 ok")
+						yield(ev, nil)
+					}
+				},
+			}
+			if tc.shortCircuit {
+				worker2Cfg.BeforeAgentCallbacks = []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						return textContent("model", "worker 2 answered early"), nil
+					},
+				}
+			}
+			worker2, err := agent.New(worker2Cfg)
+			if err != nil {
+				t.Fatalf("agent.New(worker2): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name: "root",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						worker1Events := make(chan item, 8)
+						go func() {
+							defer close(worker1Events)
+							for ev, runErr := range worker1.Run(ctx) {
+								worker1Events <- item{ev: ev, err: runErr}
+							}
+						}()
+						var job runJob
+						select {
+						case job = <-jobs:
+						case <-ctx.Done():
+							return
+						}
+						if tc.shortCircuit {
+							for ev, runErr := range worker2.Run(ctx) {
+								if !yield(ev, runErr) {
+									return
+								}
+							}
+							if !job(yield) {
+								return
+							}
+						} else {
+							ran := false
+							for ev, runErr := range worker2.Run(ctx) {
+								if !ran {
+									ran = true
+									// worker2 is suspended in yield below this frame.
+									if !job(yield) {
+										return
+									}
+								}
+								if !yield(ev, runErr) {
+									return
+								}
+							}
+						}
+						for it := range worker1Events {
+							if !yield(it.ev, it.err) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+			}
+			w1Span, _ := workerStarts[0]["span_id"].(string)
+			w2Span, _ := workerStarts[1]["span_id"].(string)
+			if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w1Span {
+				t.Errorf("leaf parent_span_id = %q, want %q (worker 1, not worker 2 %q)", got, w1Span, w2Span)
+			}
+		})
+	}
+}
+
+// TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter covers a
+// dispatcher goroutine that root starts before either activation of worker
+// runs. Worker 1 runs inline on root's goroutine and stays suspended in yield
+// while worker 2 hands the dispatcher a run of leaf with its own context. The
+// goroutine that created the dispatcher is the one worker 1 runs on, but the
+// job is worker 2's, so leaf runs under worker 2.
+func TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	// dispatch is set by root before either activation of worker starts.
+	var dispatch chan<- func()
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				leafEvents := make(chan item, 4)
+				job := func() {
+					defer close(leafEvents)
+					for ev, runErr := range leaf.Run(ctx) {
+						leafEvents <- item{ev: ev, err: runErr}
+					}
+				}
+				select {
+				case dispatch <- job:
+				case <-ctx.Done():
+					yield(nil, ctx.Err())
+					return
+				}
+				for it := range leafEvents {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+				dispatch = jobs
+				for ev, runErr := range worker.Run(ctx) {
+					// Worker 1 is suspended in yield on this goroutine while
+					// worker 2 runs on another.
+					worker2Events := make(chan item, 8)
+					go func() {
+						defer close(worker2Events)
+						for ev, runErr := range worker.Run(ctx) {
+							worker2Events <- item{ev: ev, err: runErr}
+						}
+					}()
+					for it := range worker2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	w1Span, _ := workerStarts[0]["span_id"].(string)
+	w2Span, _ := workerStarts[1]["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w2Span {
+		t.Errorf("leaf parent_span_id = %q, want %q (worker 2, which submitted the job, not worker 1 %q)", got, w2Span, w1Span)
+	}
+}
+
+// lineageContext is a context whose activation chain parentForRunLocked
+// follows: like the contexts that ADK derives for each agent run, it embeds
+// the context that it was derived from.
+type lineageContext struct {
+	context.Context
+}
+
+// lineageKey is the key of a value that a test adds to a lineageContext.
+type lineageKey struct{}
+
+// TestParentForRunLocked_LaunchLineage pins that the activation on the
+// context chain of the starting run decides between concurrent lookalikes
+// ahead of goroutine evidence: an activation on the child's goroutine or on
+// the goroutine that started it is not its parent unless the child's context
+// derives from that activation.
+func TestParentForRunLocked_LaunchLineage(t *testing.T) {
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launch-lineage", time.Unix(1_700_000_000, 0))
+	rootAct := &lineageContext{Context: context.Background()}
+	w1Act := &lineageContext{Context: rootAct}
+	w2Act := &lineageContext{Context: rootAct}
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101, activation: w1Act}
+	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act}
+	inv.agentStack = append(inv.agentStack, root, w1, w2)
+	leaf := identity{agentName: "leaf"}
+	for _, tc := range []struct {
+		name   string
+		from   context.Context
+		goid   uint64
+		origin goroutineOrigin
+		want   *spanRecord
+	}{
+		{name: "run from worker 1 on worker 2's goroutine", from: w1Act, goid: 102, origin: goroutineOrigin{parent: 100}, want: w1},
+		{name: "run from worker 2 on a goroutine worker 1's goroutine started", from: w2Act, goid: 500, origin: goroutineOrigin{parent: 101}, want: w2},
+		{name: "run from root on worker 2's goroutine", from: rootAct, goid: 102, origin: goroutineOrigin{parent: 100}, want: root},
+		{name: "run through a derived context of worker 1", from: context.WithValue(w1Act, lineageKey{}, 1), goid: 102, origin: goroutineOrigin{parent: 100}, want: w1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			act := &lineageContext{Context: tc.from}
+			if got := inv.parentForRunLocked(leaf, nil, tc.goid, tc.origin, act); got != tc.want {
+				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.want.spanID)
+			}
+		})
+	}
+	t.Run("no activation on the chain falls back to goroutine evidence", func(t *testing.T) {
+		act := &lineageContext{Context: context.Background()}
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, act); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
+}
+
+// TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch pins that an
+// unmatched lookalike group above the selected parent moves the parent up
+// only when another member of the group also has an open span that the
+// child's branch and node path fit at or below the selected parent's.
+func TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch(t *testing.T) {
+	item := identity{agentName: "item_agent", branch: "selected.item_agent@1", path: "selected/wf@1/items_work@1"}
+	build := func(peerChild *spanRecord) (*invocationTrace, *spanRecord, *spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unique-branch-path", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, w1, w2)
+		if peerChild != nil {
+			peerChild.parent = w1
+			inv.agentStack = append(inv.agentStack, peerChild)
+		}
+		wf := &spanRecord{spanID: "wf", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, wf)
+		return inv, root, wf
+	}
+	t.Run("only one member hosts the selected parent", func(t *testing.T) {
+		inv, _, wf := build(nil)
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span off the child's path", func(t *testing.T) {
+		inv, _, wf := build(&spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other", path: "other@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span below the selected parent off the child's path", func(t *testing.T) {
+		// The sibling's branch and node path are at or below wf's, and the
+		// child's branch fits it, but the child's node path does not.
+		inv, _, wf := build(&spanRecord{spanID: "sibling", kind: spanKindAgent, name: "other_agent", branch: "selected", path: "selected/wf@1/other@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span above the selected parent", func(t *testing.T) {
+		inv, _, wf := build(&spanRecord{spanID: "outer", kind: spanKindAgent, name: "outer", branch: "selected", path: "selected", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("both members host a span the child fits", func(t *testing.T) {
+		inv, root, _ := build(&spanRecord{spanID: "wf-alt", kind: spanKindAgent, name: "wf_alt", branch: "selected", path: "selected/wf@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+}
+
+// TestParentForRunLocked_DistinctOpenSpansAllocateNothing pins that while no
+// two open activations share an agent name, branch and node path,
+// parentForRunLocked skips lookalike resolution without allocating.
+func TestParentForRunLocked_DistinctOpenSpansAllocateNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector allocates on its own")
+	}
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-distinct-allocs", time.Unix(1_700_000_000, 0))
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+	inv.agentStack = append(inv.agentStack, root)
+	for i := range 1_000 {
+		inv.agentStack = append(inv.agentStack, &spanRecord{
+			spanID:      fmt.Sprintf("item-%d", i),
+			kind:        spanKindAgent,
+			name:        "item",
+			path:        fmt.Sprintf("pw[%d]", i),
+			parent:      root,
+			goroutineID: uint64(i + 2),
+		})
+	}
+	id := identity{agentName: "leaf", path: "pw[999]"}
+	if allocs := testing.AllocsPerRun(100, func() {
+		inv.parentForRunLocked(id, nil, 99999, goroutineOrigin{parent: 1}, nil)
+	}); allocs != 0 {
+		t.Errorf("parentForRunLocked allocated %v times per call, want 0", allocs)
+	}
+}
+
+// TestTraceManager_LookalikeCountFollowsPushAndPop pins that the count of
+// agent name, branch and node path keys that two or more open activations
+// share follows pushAgentSpan and popAgentSpan.
+func TestTraceManager_LookalikeCountFollowsPushAndPop(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	id := func(agentName string) identity {
+		return identity{invocationID: "inv", agentName: agentName}
+	}
+	tm.invocationSpan(ctx, id("root"), nil)
+	dups := func() int {
+		inv := tm.invocations["inv"]
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		if inv.lookalikesLen != len(inv.agentStack) {
+			t.Fatalf("lookalikesLen = %d, want len(agentStack) = %d", inv.lookalikesLen, len(inv.agentStack))
+		}
+		return inv.lookalikeDups
+	}
+	tm.pushAgentSpan(ctx, id("root"))
+	tm.pushAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after one worker: lookalikeDups = %d, want 0", got)
+	}
+	tm.pushAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 1 {
+		t.Fatalf("after two workers: lookalikeDups = %d, want 1", got)
+	}
+	tm.popAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after one worker ends: lookalikeDups = %d, want 0", got)
+	}
+	tm.popAgentSpan(ctx, id("worker"))
+	tm.popAgentSpan(ctx, id("root"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after every agent ends: lookalikeDups = %d, want 0", got)
+	}
+}
+
+func TestRememberCompletedAtLocked_PrepareLateBeforeUnlinkAndClear(t *testing.T) {
+	t.Run("panic allocating late leaves active trace and open calls intact", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-prepare-late-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		origRootSpanID := inv.rootSpanID
+		// Force late destination creation to require newSpanID() so panickingRandReader
+		// panics while allocating the late trace.
+		inv.rootSpanID = ""
+		tm.mu.Unlock()
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		uuid.SetRand(nil)
+
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic while allocating late trace with empty rootSpanID")
+		}
+
+		tm.mu.Lock()
+		stillActive := tm.invocations[id.invocationID]
+		inv.rootSpanID = origRootSpanID
+		tm.mu.Unlock()
+		if stillActive != inv {
+			t.Fatalf("tm.invocations[%q] = %p after late-allocation panic, want original active trace %p", id.invocationID, stillActive, inv)
+		}
+		inv.mu.Lock()
+		finished := inv.finished
+		inv.mu.Unlock()
+		if finished {
+			t.Fatal("inv.finished = true after late-allocation panic, want false")
+		}
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", poppedLLM.spanID, startedLLM.spanID)
+		}
+		if poppedLLM.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency")
+		}
+
+		poppedTool, _, closedByError := tm.popToolSpan(ctx, id, "call-1", false)
+		if closedByError {
+			t.Error("popToolSpan closedByError = true, want false")
+		}
+		if poppedTool.spanID != startedTool.spanID {
+			t.Errorf("popToolSpan spanID = %q, want started spanID %q", poppedTool.spanID, startedTool.spanID)
+		}
+		if poppedTool.latency == nil {
+			t.Error("popToolSpan latency = nil, want non-nil latency")
+		}
+	})
+
+	t.Run("normal handover reuses saved rootSpanID without calling UUID generator", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-prepare-late-reuse-id", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		tm.endInvocation(ctx, id)
+		uuid.SetRand(nil)
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID || poppedLLM.latency == nil {
+			t.Errorf("popLLMSpan = (%q, %v), want (%q, non-nil)", poppedLLM.spanID, poppedLLM.latency, startedLLM.spanID)
+		}
+		poppedTool, _, _ := tm.popToolSpan(ctx, id, "call-1", false)
+		if poppedTool.spanID != startedTool.spanID || poppedTool.latency == nil {
+			t.Errorf("popToolSpan = (%q, %v), want (%q, non-nil)", poppedTool.spanID, poppedTool.latency, startedTool.spanID)
+		}
+	})
+}
+
+func TestForceEndInvocation_EvictedRunNeedsNoUUIDAndDeletesEvicted(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	tm.maxTracked = 2
+
+	evictedID := identity{invocationID: "inv-force-evicted", agentName: "evicted-root"}
+	origSpan := tm.invocationSpan(ctx, evictedID, nil)
+
+	keep1 := identity{invocationID: "inv-force-keep-1", agentName: "root-1"}
+	keep2 := identity{invocationID: "inv-force-keep-2", agentName: "root-2"}
+	tm.invocationSpan(ctx, keep1, nil)
+	tm.invocationSpan(ctx, keep2, nil)
+
+	tm.mu.Lock()
+	_, inEvictedBefore := tm.evicted[evictedID.invocationID]
+	tm.mu.Unlock()
+	if !inEvictedBefore {
+		t.Fatal("expected inv-force-evicted to be in tm.evicted before forceEndInvocation")
+	}
+
+	uuid.SetRand(panickingRandReader{})
+	defer uuid.SetRand(nil)
+	t.Cleanup(func() { uuid.SetRand(nil) })
+	tm.now = func() time.Time { panic("clock failing during forceEndInvocation") }
+
+	tm.forceEndInvocation(evictedID)
+
+	uuid.SetRand(nil)
+	tm.now = time.Now
+
+	tm.mu.Lock()
+	_, stillEvicted := tm.evicted[evictedID.invocationID]
+	completed := tm.completed[evictedID.invocationID]
+	_, keep1Active := tm.invocations[keep1.invocationID]
+	_, keep2Active := tm.invocations[keep2.invocationID]
+	tm.mu.Unlock()
+
+	if stillEvicted {
+		t.Fatal("inv-force-evicted remained in tm.evicted after forceEndInvocation")
+	}
+	if completed == nil {
+		t.Fatal("inv-force-evicted missing from tm.completed after forceEndInvocation")
+	}
+	if completed.identity.traceID != origSpan.traceID || completed.identity.spanID != origSpan.spanID {
+		t.Errorf("completed.identity = %+v, want traceID=%q spanID=%q", completed.identity, origSpan.traceID, origSpan.spanID)
+	}
+	if !keep1Active || !keep2Active {
+		t.Fatalf("active invocations displaced: keep1=%t keep2=%t, want true/true", keep1Active, keep2Active)
+	}
+
+	// A subsequent late callback must enter late state rather than recreating an
+	// active invocation that would displace keep1 or keep2 at capacity.
+	lateInv := tm.lookupInvocation(ctx, evictedID, false, false)
+	if !lateInv.isLate {
+		t.Fatal("lookupInvocation after forceEndInvocation returned non-late trace")
+	}
+	tm.mu.Lock()
+	_, keep1After := tm.invocations[keep1.invocationID]
+	_, keep2After := tm.invocations[keep2.invocationID]
+	tm.mu.Unlock()
+	if !keep1After || !keep2After {
+		t.Errorf("late callback displaced active runs at capacity: keep1=%t keep2=%t, want true/true", keep1After, keep2After)
+	}
+
+	if !raceEnabled {
+		// Re-seed tm.evicted while the completed slot exists to verify publishing
+		// the saved identity allocates zero throwaway traces or UUIDs.
+		allocs := testing.AllocsPerRun(50, func() {
+			tm.mu.Lock()
+			tm.evicted[evictedID.invocationID] = evictedTrace{
+				traceID:       origSpan.traceID,
+				spanID:        origSpan.spanID,
+				rootAgentName: evictedID.agentName,
+			}
+			tm.mu.Unlock()
+			tm.forceEndInvocation(evictedID)
+		})
+		if allocs != 0 {
+			t.Errorf("forceEndInvocation on evicted run allocated %v objects/op, want 0", allocs)
+		}
+	}
+}
+
+func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-2048-fast-skip"
+	lateReviewEnded(tm, invID)
+
+	for i := range 2048 {
+		aid := identity{
+			invocationID: invID,
+			agentName:    "worker",
+			path:         fmt.Sprintf("pw[%d]", i),
+		}
+		tm.pushAgentSpan(ctx, aid)
+	}
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	if got := len(late.agentStack) - 1; got != 2048 {
+		late.mu.Unlock()
+		t.Fatalf("live late activations = %d, want 2048", got)
+	}
+	// Mark partial states (runDone without contextEnded, and contextEnded without
+	// runDone) to verify neither triggers a full retirement scan on its own.
+	late.agentStack[1].runDone = true
+	late.agentStack[2].contextEnded = true
+	late.mu.Unlock()
+
+	if !raceEnabled {
+		late.mu.Lock()
+		allocs := testing.AllocsPerRun(50, func() {
+			late.retireLateSettledLocked()
+		})
+		late.mu.Unlock()
+		if allocs != 0 {
+			t.Errorf("retireLateSettledLocked with 2048 unsettled activations allocated %v objects/op, want 0", allocs)
+		}
+	}
+
+	// Unmatched late LLM and agent completions must leave all 2048 unsettled
+	// activations untouched.
+	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
+	tm.popAgentSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"})
+	if got := len(lateReviewStack(t, tm, invID)); got != 2048 {
+		t.Fatalf("late activations after unmatched pops = %d, want 2048", got)
+	}
+
+	// Once a leaf activation has both runDone and contextEnded (and responded so
+	// it is not held as unresponded), an unmatched popLLMSpan still retires it.
+	late.mu.Lock()
+	leaf := late.agentStack[len(late.agentStack)-1]
+	leaf.hasResponse = true
+	leaf.runDone = true
+	leaf.contextEnded = true
+	late.mu.Unlock()
+
+	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
+	if got := len(lateReviewStack(t, tm, invID)); got != 2047 {
+		t.Fatalf("late activations after settling one leaf = %d, want 2047", got)
 	}
 }

@@ -29,7 +29,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -239,8 +238,7 @@ func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part, metadat
 // 412 (*googleapi.Error) on the JSON API, or codes.FailedPrecondition on the
 // gRPC transport. Both status.FromError and errors.As unwrap wrapped errors.
 func isPreconditionFailed(err error) bool {
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return apiErr.Code == http.StatusPreconditionFailed
 	}
 	return status.Code(err) == codes.FailedPrecondition
@@ -275,9 +273,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	g, gctx := errgroup.WithContext(ctx)
 
 	// delete versions in parallel
-	for _, version := range response.Versions {
-		v := version // capture loop variable for goroutine
-
+	for _, v := range response.Versions {
 		g.Go(func() error {
 			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
 			obj := s.bucket.object(blobName)
@@ -397,8 +393,7 @@ func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*arti
 		return nil, fmt.Errorf("failed to fetch user filenames: %w", err)
 	}
 
-	filenames := slices.Collect(maps.Keys(filenamesSet))
-	sort.Strings(filenames)
+	filenames := slices.Sorted(maps.Keys(filenamesSet))
 	return &artifact.ListResponse{FileNames: filenames}, nil
 }
 

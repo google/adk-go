@@ -19,6 +19,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -36,23 +37,34 @@ import (
 func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 	type details struct {
 		DisplayName string
+		privateName string
 	}
 	type Details struct {
 		DisplayName string
 	}
+	type item struct {
+		Parent *item
+	}
+	type entry struct{ Done bool }
+	type result struct {
+		ItemCount uint `json:"itemCount"`
+	}
+	type entries []entry
+	cyclic := &item{}
+	cyclic.Parent = cyclic
 	// Decode the wire names independently of the session types' camelCase tags.
 	type inputRequest struct {
 		InterruptID string `json:"interrupt_id"`
 		Message     string `json:"message"`
 	}
 	type wireEvent struct {
-		ID           string         `json:"id"`
-		Author       string         `json:"author"`
-		Content      *genai.Content `json:"content"`
-		Output       map[string]any `json:"output"`
-		TurnComplete bool           `json:"turn_complete"`
-		ErrorCode    string         `json:"error_code"`
-		ErrorMessage string         `json:"error_message"`
+		ID           string          `json:"id"`
+		Author       string          `json:"author"`
+		Content      *genai.Content  `json:"content"`
+		Output       json.RawMessage `json:"output"`
+		TurnComplete bool            `json:"turn_complete"`
+		ErrorCode    string          `json:"error_code"`
+		ErrorMessage string          `json:"error_message"`
 		Actions      struct {
 			StateDelta map[string]any `json:"state_delta"`
 		} `json:"actions"`
@@ -63,7 +75,8 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 			for _, tc := range []struct {
 				name       string
 				event      session.Event
-				wantOutput map[string]any
+				wantOutput any
+				skipEvent  bool
 			}{
 				{name: "metadata_only"},
 				{
@@ -98,8 +111,83 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 				},
 				{
 					name:       "output_unexported_embed",
-					event:      session.Event{Output: struct{ details }{details{"synthetic output"}}},
+					event:      session.Event{Output: struct{ details }{details{DisplayName: "synthetic output", privateName: "hidden"}}},
 					wantOutput: map[string]any{"display_name": "synthetic output"},
+				},
+				{
+					name: "output_cycle",
+					event: session.Event{
+						Output:      cyclic,
+						LLMResponse: model.LLMResponse{TurnComplete: true},
+					},
+				},
+				{
+					name: "output_nan",
+					event: session.Event{
+						Output:      math.NaN(),
+						LLMResponse: model.LLMResponse{TurnComplete: true},
+					},
+				},
+				{
+					name: "output_unsupported",
+					event: session.Event{
+						Output:      make(chan int),
+						LLMResponse: model.LLMResponse{TurnComplete: true},
+					},
+				},
+				{
+					name: "output_hidden_slice",
+					event: session.Event{Output: struct {
+						entries
+						Ready bool
+					}{entries{{Done: true}}, true}},
+					wantOutput: map[string]any{"ready": true},
+				},
+				{
+					name: "output_unsigned",
+					event: session.Event{
+						Output:      uint(7),
+						LLMResponse: model.LLMResponse{TurnComplete: true},
+					},
+					wantOutput: float64(7),
+				},
+				{
+					name:  "output_integer_map_keys",
+					event: session.Event{Output: map[int]result{-1: {ItemCount: 3}, 2: {ItemCount: 4}}},
+					wantOutput: map[string]any{
+						"-1": map[string]any{"item_count": float64(3)},
+						"2":  map[string]any{"item_count": float64(4)},
+					},
+				},
+				{
+					name:  "output_unsigned_map_keys",
+					event: session.Event{Output: map[uint]result{1: {ItemCount: 3}, 2: {ItemCount: 4}}},
+					wantOutput: map[string]any{
+						"1": map[string]any{"item_count": float64(3)},
+						"2": map[string]any{"item_count": float64(4)},
+					},
+				},
+				{
+					name: "output_standard_json_fallback",
+					event: session.Event{
+						Output: struct {
+							Value int `json:"value,string"`
+						}{7},
+						LLMResponse: model.LLMResponse{TurnComplete: true},
+					},
+					wantOutput: map[string]any{"value": "7"},
+				},
+				{
+					name: "unencodable_state_delta",
+					event: session.Event{Actions: session.EventActions{
+						StateDelta: map[string]any{"counter": math.NaN()},
+					}},
+					skipEvent: true,
+				},
+				{
+					name:       "output_array",
+					event:      session.Event{Output: [2]uint8{1, 2}},
+					wantOutput: []any{float64(1), float64(2)},
 				},
 				{
 					name: "output_nil_embed",
@@ -175,6 +263,9 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 					}
 					decoder := json.NewDecoder(rw.Body)
 					for i := range 3 {
+						if i == 1 && tc.skipEvent {
+							continue
+						}
 						var got wireEvent
 						if envelope {
 							var response struct {
@@ -207,8 +298,15 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 						if got.ID != "contentless-event" || got.Author != "test_agent" {
 							t.Error("contentless event identity was not preserved")
 						}
-						if !cmp.Equal(got.Output, tc.wantOutput) {
-							t.Error("event output was not preserved")
+						if tc.wantOutput == nil {
+							if got.Output != nil {
+								t.Error("event output should be omitted")
+							}
+						} else {
+							var output any
+							if err := json.Unmarshal(got.Output, &output); err != nil || !cmp.Equal(output, tc.wantOutput) {
+								t.Error("event output was not preserved")
+							}
 						}
 						if got.TurnComplete != tc.event.TurnComplete {
 							t.Error("event completion flag was not preserved")
@@ -229,7 +327,7 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 					}
 					var extra json.RawMessage
 					if err := decoder.Decode(&extra); err != io.EOF {
-						t.Fatal("want end of stream after three events")
+						t.Fatal("want end of stream after expected events")
 					}
 				})
 			}

@@ -553,11 +553,10 @@ func TestFunctionTool_WrapsNonMapResult(t *testing.T) {
 
 func TestFunctionTool_OutputSchemaMismatch(t *testing.T) {
 	type Args struct{}
-	maxLen := 3
 	tl, err := functiontool.New(functiontool.Config{
 		Name:         "short_text_tool",
 		Description:  "a tool whose result must be at most three characters",
-		OutputSchema: &jsonschema.Schema{Type: "string", MaxLength: &maxLen},
+		OutputSchema: &jsonschema.Schema{Type: "string", MaxLength: new(3)},
 	}, func(ctx agent.Context, _ Args) (string, error) {
 		return "abcdefgh", nil
 	})
