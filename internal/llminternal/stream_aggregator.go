@@ -140,7 +140,19 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 	if part.FunctionCall == nil {
 		return
 	}
-	if part.FunctionCall.PartialArgs != nil || (part.FunctionCall.WillContinue != nil && *part.FunctionCall.WillContinue) {
+	fc := part.FunctionCall
+	// As in adk-python, a chunk is part of a streamed call when it carries
+	// partial arguments or any WillContinue value, or when it continues an open
+	// call without arguments of its own. The chunk closing a call sets
+	// WillContinue to false, or omits it, and must close the call right away:
+	// left open, the next streamed call would take it over.
+	streamOpen := s.currentFunctionName != ""
+	if fc.PartialArgs != nil || fc.WillContinue != nil || (streamOpen && fc.Name == "" && fc.Args == nil) {
+		// A new named call while another is open closes the open one first.
+		if fc.Name != "" && streamOpen && fc.Name != s.currentFunctionName {
+			s.flushTextBufferToSequence()
+			s.flushFunctionCallToSequence()
+		}
 		if len(part.ThoughtSignature) > 0 && s.currentFunctionThoughtSignature == nil {
 			s.currentFunctionThoughtSignature = part.ThoughtSignature
 		}
@@ -148,6 +160,7 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 	} else {
 		if part.FunctionCall.Name != "" {
 			s.flushTextBufferToSequence()
+			s.flushFunctionCallToSequence()
 			if part.ThoughtSignature == nil && s.currentThoughtSignature != nil {
 				part.ThoughtSignature = s.currentThoughtSignature
 			}
