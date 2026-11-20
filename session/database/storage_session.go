@@ -106,7 +106,7 @@ type storageEvent struct {
 
 	// Partial is NULL when the event left Partial unset (PartialSet false),
 	// which is how adk-python stores partial=None.
-	Partial *bool
+	Partial      *bool
 	TurnComplete *bool
 	ErrorCode    *string
 	ErrorMessage *string

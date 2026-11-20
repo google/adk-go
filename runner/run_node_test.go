@@ -1698,7 +1698,7 @@ func TestRunner_GetSessionConfig_NegativeNumRecentEventsLoadsAllEvents(t *testin
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(func(*session.Event, error) bool) {
 				events := ctx.Session().Events()
-				for i := 0; i < events.Len(); i++ {
+				for i := range events.Len() {
 					got = append(got, eventText(events.At(i)))
 				}
 			}
