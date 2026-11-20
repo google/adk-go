@@ -70,8 +70,12 @@ func APIOptions(ctx context.Context, caller ...option.ClientOption) (opts []opti
 	if err != nil || source == nil {
 		return nil, false, err
 	}
-	// As the client libraries read it: with always they pick the mTLS endpoint
-	// themselves, and any value but auto keeps the default one.
+	// Read as the api library reads it, on purpose: this answer has to agree
+	// with the endpoint the library picks. With always it picks the mTLS
+	// endpoint itself, any other value but auto keeps the default one, and
+	// the older variable is a fallback. auth/gcp.NewClient builds its own
+	// client and differs: it rejects an unknown value and does not read the
+	// older variable.
 	mode := os.Getenv(envMTLSEndpoint)
 	if mode == "" {
 		mode = os.Getenv(envMTLSEndpointOld)

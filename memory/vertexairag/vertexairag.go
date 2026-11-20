@@ -85,9 +85,12 @@ type Config struct {
 // With the certificate, the upload client is built by the newer Google auth
 // library, as the generated clients for listing and retrieval always are.
 // That library does not apply the deprecated [option.ImpersonateCredentials],
-// and on its own it turns the certificate on more widely than the rule: to an
-// endpoint that requests a certificate, the generated clients can present one
-// that the rule leaves off.
+// so the calls run as the base credentials, with no error: pass
+// [option.WithTokenSource] with a token source from
+// [google.golang.org/api/impersonate.CredentialsTokenSource] instead, which
+// all three clients apply. On its own the library also turns the certificate
+// on more widely than the rule: to an endpoint that requests a certificate,
+// the generated clients can present one that the rule leaves off.
 func NewService(ctx context.Context, cfg Config, opts ...option.ClientOption) (memory.Service, error) {
 	ctx = context.WithoutCancel(ctx)
 	resolved := resolveConfig(cfg, os.Getenv)

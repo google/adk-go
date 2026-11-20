@@ -21,6 +21,8 @@ import (
 	"os"
 	"testing"
 
+	"golang.org/x/oauth2"
+	"google.golang.org/api/impersonate"
 	"google.golang.org/api/option"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
@@ -115,6 +117,59 @@ func TestNewClientFollowsTheCertificateRule(t *testing.T) {
 			}
 			if !bytes.Equal(got[0], want) {
 				t.Errorf("server saw a certificate other than %s", whose)
+			}
+		})
+	}
+}
+
+// TestNewClientImpersonation runs what Config.ClientOptions says about
+// impersonation. The proxy refuses every request, so the host a call asks for
+// first shows whose token it wanted: the IAM credentials service for the
+// impersonated one, BigQuery itself for the base one.
+func TestNewClientImpersonation(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	hosts := clientcerttest.RecordingProxy(t)
+	workload, _ := clientcerttest.Workload(t)
+	const (
+		iam    = "iamcredentials.googleapis.com:443"
+		target = "target@example-project.iam.gserviceaccount.com"
+	)
+	base := option.WithTokenSource(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "base"}))
+	source, err := impersonate.CredentialsTokenSource(t.Context(), impersonate.CredentialsConfig{TargetPrincipal: target, Scopes: []string{bigqueryScope}}, base)
+	if err != nil {
+		t.Fatalf("impersonate.CredentialsTokenSource() error = %v", err)
+	}
+	deprecated := []option.ClientOption{base, option.ImpersonateCredentials(target)}
+	replacement := []option.ClientOption{option.WithTokenSource(source)}
+
+	for _, tc := range []struct {
+		name    string
+		useCert string // GOOGLE_API_USE_CLIENT_CERTIFICATE
+		opts    []option.ClientOption
+		want    string
+	}{
+		{name: "certificate off, option.ImpersonateCredentials", useCert: "false", opts: deprecated, want: iam},
+		{name: "certificate on, option.ImpersonateCredentials is not applied", useCert: clientcerttest.Unset, opts: deprecated, want: "bigquery.mtls.googleapis.com:443"},
+		{name: "certificate off, a token source from the impersonate package", useCert: "false", opts: replacement, want: iam},
+		{name: "certificate on, a token source from the impersonate package", useCert: clientcerttest.Unset, opts: replacement, want: iam},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", tc.useCert)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+
+			c, err := newClient(t.Context(), Config{ClientOptions: tc.opts})
+			if err != nil {
+				t.Fatalf("newClient() error = %v", err)
+			}
+			before := len(hosts())
+			if resp, err := c.httpClient.Get(c.endpoint + "projects/p/datasets"); err == nil {
+				_ = resp.Body.Close()
+				t.Fatal("Get() through the refusing proxy succeeded")
+			}
+			if got := hosts()[before:]; len(got) != 1 || got[0] != tc.want {
+				t.Errorf("the call asked for %q, want only %q", got, tc.want)
 			}
 		})
 	}
