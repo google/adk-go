@@ -16,17 +16,20 @@
 // from just a model-name string via [NewLLM], mirroring Python ADK's
 // LLMRegistry.new_llm(name).
 //
-// Registration is opt-in: provider packages do not register themselves on
-// import. A user who wants name-based Gemini resolution registers it
-// explicitly, using an anchored pattern:
+// Package [google.golang.org/adk/v2/model/gemini] registers its patterns when
+// it is imported, so importing it makes Gemini names such as
+// "gemini-2.5-flash" resolve. Other providers are registered by the program,
+// using an anchored pattern:
 //
-//	model.Register("^(?i)gemini-.*", func(ctx context.Context, name string) (model.LLM, error) {
-//		return gemini.NewModel(ctx, name, nil)
+//	model.Register("^my-model-.*$", func(ctx context.Context, name string) (model.LLM, error) {
+//		return newMyModel(ctx, name)
 //	})
 //
-// [NewLLM] then requires exactly one registered pattern to match a given name:
+// [NewLLM] requires exactly one registered pattern to match a given name:
 // zero matches or two-or-more matches are reported as errors, so resolution
-// never depends on registration or import order.
+// never depends on registration or import order. Registering another pattern
+// that matches the same names as a registered one, the Gemini patterns
+// included, makes those names ambiguous.
 package model
 
 import (

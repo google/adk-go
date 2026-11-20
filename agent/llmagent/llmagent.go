@@ -44,6 +44,7 @@
 package llmagent
 
 import (
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
@@ -65,10 +66,16 @@ import (
 )
 
 // New is a constructor for LLMAgent. It returns an error if both
-// Config.OutputSchema and Config.OutputJsonSchema are set.
+// Config.OutputSchema and Config.OutputJsonSchema are set. It returns an error
+// wrapping [agent.ErrInvalidAgentConfig] if cfg.GenerateContentConfig sets
+// Tools, SystemInstruction or HTTPOptions.BaseURL; when several are set, the
+// error names the first of them in that order.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.OutputSchema != nil && cfg.OutputJsonSchema != nil {
 		return nil, fmt.Errorf("LlmAgent %q: OutputSchema and OutputJsonSchema are mutually exclusive; set at most one", cfg.Name)
+	}
+	if err := validateGenerateContentConfig(cfg.GenerateContentConfig); err != nil {
+		return nil, err
 	}
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
@@ -132,7 +139,10 @@ func New(cfg Config) (agent.Agent, error) {
 		},
 	}
 
-	baseAgent, err := agent.New(agent.Config{
+	// The base agent is published as its sub-agents' parent only once a is
+	// complete (link, at the end), so a goroutine walking a sub-agent's parent
+	// link never sees a half-built a.
+	internalAgent, link, err := agentinternal.NewUnlinked(agent.Config{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
 		SubAgents:            cfg.SubAgents,
@@ -142,6 +152,10 @@ func New(cfg Config) (agent.Agent, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
+	}
+	baseAgent, ok := internalAgent.(agent.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to agent")
 	}
 
 	// TODO: remove this in favor of the state reveal below.
@@ -154,22 +168,44 @@ func New(cfg Config) (agent.Agent, error) {
 	// So in BeforeAgentCallback, we cannot access llmAgent.State fields.
 	// We should remote llminternal.State in favor of agentinternal.State.
 
-	internalAgent, ok := baseAgent.(agentinternal.Agent)
-	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
-	}
 	state := agentinternal.Reveal(internalAgent)
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
 	// A before-agent callback that returns content short-circuits the run, so its
 	// event never reaches llmAgent.run. Give it the same output_key handling.
-	state.OnBeforeAgentCallbackEvent = a.maybeSaveOutputToState
+	state.OnBeforeAgentCallbackEvent = a.saveOutputToState
+	// The model walk reaches a's parent link through Base, and an ancestor
+	// walk that reaches the base agent finds a, and its model, through the
+	// Owner that link sets.
+	a.Base = internalAgent
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err
 	}
 
+	link(a)
 	return a, nil
+}
+
+// validateGenerateContentConfig refuses the fields of cfg that other agent or
+// model settings own, in the order adk-python checks them
+// (agents/llm_agent.py, validate_generate_content_config). adk-python also
+// refuses ResponseSchema; ADK Go accepts it, because workflow agent nodes read
+// it as the agent's own response format.
+func validateGenerateContentConfig(cfg *genai.GenerateContentConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Tools) > 0 {
+		return fmt.Errorf("%w: all tools must be set via llmagent.Config.Tools, not via llmagent.Config.GenerateContentConfig.Tools", agent.ErrInvalidAgentConfig)
+	}
+	if cfg.SystemInstruction != nil {
+		return fmt.Errorf("%w: system instruction must be set via llmagent.Config.Instruction, not via llmagent.Config.GenerateContentConfig.SystemInstruction", agent.ErrInvalidAgentConfig)
+	}
+	if cfg.HTTPOptions != nil && cfg.HTTPOptions.BaseURL != "" {
+		return fmt.Errorf("%w: base URL is a transport setting and must be set on the model or its client, not via llmagent.Config.GenerateContentConfig.HTTPOptions.BaseURL", agent.ErrInvalidAgentConfig)
+	}
+	return nil
 }
 
 func installTaskTools(a *llmAgent) error {
@@ -219,7 +255,9 @@ func installTaskTools(a *llmAgent) error {
 // Config of the LLMAgent.
 type Config struct {
 	// Name must be a non-empty string, unique within the agent tree.
-	// Agent name cannot be "user", since it's reserved for end-user's input.
+	// Agent name cannot be "user", since it's reserved for end-user's input:
+	// New refuses it with an error wrapping agent.ErrInvalidAgentConfig. The
+	// check is case-sensitive, so "User" is accepted.
 	Name string
 	// Description of the agent's capability.
 	//
@@ -242,8 +280,25 @@ type Config struct {
 	// GenerateContentConfig is for the additional content generation
 	// configuration.
 	//
-	// NOTE: not all fields are usable, e.g. tools must be configured via
-	// `tools`.
+	// NOTE: not all fields are usable. [New] refuses a config that sets any of
+	// these, with an error wrapping [agent.ErrInvalidAgentConfig]:
+	//   - Tools: set tools in [Config.Tools]. For a *genai.Tool, use
+	//     geminitool.New(name, description, t) or a geminitool built-in such
+	//     as geminitool.GoogleSearch{}.
+	//   - SystemInstruction: set the instruction in [Config.Instruction].
+	//     Instruction is a template, so text with {placeholders} that must
+	//     stay literal belongs in [Config.InstructionProvider] instead.
+	//     A system instruction with non-text parts has no Config field; add
+	//     those parts to req.Config.SystemInstruction in a
+	//     [BeforeModelCallback], creating it when it is nil.
+	//   - HTTPOptions.BaseURL: set the base URL on the model or its client,
+	//     for example in the *genai.ClientConfig given to gemini.NewModel.
+	//     It is refused because a supplied config could send the credentialed
+	//     model call to an arbitrary host. The other HTTPOptions fields are
+	//     accepted.
+	//
+	// [New] checks the config once, when it is called. It keeps the pointer,
+	// so later edits to the config are not checked.
 	//
 	// For example: use this config to adjust model temperature, configure
 	// safety settings, etc.
@@ -258,6 +313,18 @@ type Config struct {
 	// `LLMResponse`, which would skip the actual model call.
 	BeforeModelCallbacks []BeforeModelCallback
 	// Model that is used by the agent.
+	//
+	// When Model is nil, the agent uses the model of its nearest ancestor that
+	// is an LLM agent with a model, skipping other agents in between; the
+	// ancestors are read when the model is needed, so the parent can be built
+	// after this agent. With no such ancestor, the agent uses the process-wide
+	// default model (DefaultModel until SetDefaultModel or
+	// SetDefaultModelByName changes it), and in a live run the default live
+	// model. CanonicalModel and CanonicalLiveModel return the model the agent
+	// resolves to. The built-in default names resolve only in a program that
+	// imports package model/gemini, which registers the Gemini patterns:
+	//
+	//	import _ "google.golang.org/adk/v2/model/gemini"
 	Model model.LLM
 	// AfterModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then
@@ -383,13 +450,25 @@ type Config struct {
 	// not offered, and a function call to its name gets the tool-not-found
 	// result. In live mode (RunLive) the second rule holds only for a tool
 	// that registers itself in the request, as toolutils.PackTool does.
+	// These tools come before the tools of Toolsets, in this order; see
+	// Toolsets for keeping a plain tool's place among toolsets.
 	Tools []tool.Tool
 	// Callbacks are executed in the order they are provided.
 	// If a callback returns result/error, then the execution of the callback
 	// list stops and this result/error is returned instead.
 	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
-	// underlying LLM.
+	// underlying LLM. The model is offered Tools first, then the tools of each
+	// toolset in this order; to put a plain tool between toolsets, leave it
+	// out of Tools and wrap it with tool.AsToolset here. Before every model
+	// call of a run the toolsets are listed again, concurrently, so a toolset
+	// may answer differently per step. A toolset's Tools method must be safe
+	// for concurrent use, including with itself: a toolset placed here twice
+	// has Tools called twice at the same time. A toolset whose listing fails is
+	// skipped for that step: it contributes no tools, and the run goes on
+	// without an error or a log line, unless the run's context is
+	// done, which ends the step with the listing error. CanonicalTools returns
+	// the same list outside a run.
 	Toolsets []tool.Toolset
 
 	OnToolErrorCallbacks []OnToolErrorCallback
@@ -399,6 +478,26 @@ type Config struct {
 	// Typical uses cases are:
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
+	//
+	// The stored value is the agent's final text: the non-thought text parts of
+	// its final response, joined. When the agent streams text and calls tools
+	// in one run, it is the text of every non-partial event of the agent in
+	// that run, joined, so text spoken before a tool call is kept. An agent
+	// with an output schema stores only its final text.
+	//
+	// With OutputJsonSchema set, the stored value is what the final text parses
+	// to as JSON, after a markdown code fence around it is removed. JSON numbers
+	// are float64. Text that is not JSON ends the run with an error naming the
+	// agent. On a live run (RunLive) the text is stored unparsed instead.
+	//
+	// With OutputSchema set, the stored value is the text, a JSON string, where
+	// ADK Python stores the parsed value. Parse it, or read
+	// Actions.SetModelResponse, if you need the value. An agent run as a
+	// single_turn node stores the parsed map instead.
+	//
+	// A task agent (Mode is ModeTask) stores the result of its finish_task call
+	// when it runs as a node. Its text turns are not stored, and nothing is
+	// stored when it runs through Run or RunLive.
 	OutputKey string
 
 	// Mode is the delegation mode for this agent.
@@ -553,8 +652,13 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		}
 
 		paused, endedByTransfer, failed := false, false, false
+		output := ""
 		for ev, err := range f.Run(ctx) {
-			a.maybeSaveOutputToState(ev)
+			if saveErr := a.saveOutputToState(ev); saveErr != nil {
+				yield(nil, saveErr)
+				return
+			}
+			output = a.maybeAccumulateOutput(ev, output)
 			if !yield(ev, err) {
 				return
 			}
@@ -662,6 +766,15 @@ func (a *llmAgent) transferTargetOf(ctx agent.InvocationContext, ev *session.Eve
 	return nil
 }
 
+// RunLive runs the agent over a live model connection. It saves output to
+// state with maybeSaveOutputToState, not saveOutputToState, so with
+// OutputJsonSchema the text form is kept and never parsed. The live connection
+// yields each text chunk of a model turn as its own non-partial event
+// (internal/llminternal/googlellm/live_connection.go), so the first chunk of a
+// JSON answer sent in more than one message is not valid JSON on its own.
+// adk-python parses the whole answer, because its live connection marks text
+// chunks partial and yields the joined text at turn_complete
+// (models/gemini_llm_connection.py:404, :551-556).
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:      ctx.Artifacts(),
@@ -693,9 +806,11 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		output := ""
 		for ev, err := range innerIter {
 			if err == nil {
 				a.maybeSaveOutputToState(ev)
+				output = a.maybeAccumulateOutput(ev, output)
 			}
 			if !yield(ev, err) {
 				return
@@ -706,15 +821,37 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return sess, wrappedIter, nil
 }
 
+// saveOutputToState runs maybeSaveOutputToState on event. With
+// OutputJsonSchema it then replaces the saved text by the value the text
+// parses to, after removing a markdown code fence around it, as adk-python's
+// validate_schema does for a schema that is not a model
+// (utils/_schema_utils.py). Text that is not JSON is an error, and event must
+// then not be yielded: adk-python raises before it yields the event
+// (agents/llm_agent.py, _run_async_impl). An OutputSchema result keeps its
+// text form.
+func (a *llmAgent) saveOutputToState(event *session.Event) error {
+	text, saved := a.maybeSaveOutputToState(event)
+	if !saved || a.OutputJsonSchema == nil {
+		return nil
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(utils.StripJSONCodeFence(text)), &parsed); err != nil {
+		return fmt.Errorf("LlmAgent %q output is not valid JSON: %w", a.Name(), err)
+	}
+	event.Actions.StateDelta[a.OutputKey] = parsed
+	return nil
+}
+
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event
-// was authored by some other agent (e.g. current agent transferred to another agent)
-func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
+// was authored by some other agent (e.g. current agent transferred to another agent).
+// It returns the text it saved and whether it saved any.
+func (a *llmAgent) maybeSaveOutputToState(event *session.Event) (string, bool) {
 	if event == nil {
-		return
+		return "", false
 	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
-		return
+		return "", false
 	}
 	// A task agent delivers its result through finish_task, which runTask writes
 	// to OutputKey. Its text turns (a clarification question, a greeting) are
@@ -724,7 +861,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
 	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
 	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
-		return
+		return "", false
 	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
@@ -736,17 +873,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 			}
 		}
 		if !hasTextPart {
-			return
+			return "", false
 		}
 		result := sb.String()
 
-		// TODO: add output schema validation and unmarshalling
 		if a.OutputSchema != nil || a.OutputJsonSchema != nil {
 			// If the result from the final chunk is just whitespace or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.
 			if strings.TrimSpace(result) == "" {
-				return
+				return "", false
 			}
 		}
 
@@ -755,7 +891,38 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		}
 
 		event.Actions.StateDelta[a.OutputKey] = result
+		return result, true
 	}
+	return "", false
+}
+
+// maybeAccumulateOutput appends the text of event to output, the text this
+// agent has given in the current run so far, writes the total to state under
+// OutputKey, and returns it. The total replaces what maybeSaveOutputToState
+// wrote for the same event. A model turn that streams text and then calls a
+// tool ends in an event with both, which is not a final response, so without
+// this its text would never reach state. Partial events, thought parts, the
+// events of other agents, a task agent and an agent with an output schema are
+// left out. It ports adk-python's __maybe_accumulate_streaming_output
+// (agents/llm_agent.py).
+func (a *llmAgent) maybeAccumulateOutput(event *session.Event, output string) string {
+	if event == nil || a.OutputKey == "" || llminternal.Reveal(a).Mode == llminternal.ModeTask ||
+		a.OutputSchema != nil || a.OutputJsonSchema != nil ||
+		event.Author != a.Name() || event.Partial || event.Content == nil {
+		return output
+	}
+	var sb strings.Builder
+	for _, part := range event.Content.Parts {
+		if !part.Thought {
+			sb.WriteString(part.Text)
+		}
+	}
+	if sb.Len() == 0 {
+		return output
+	}
+	output += sb.String()
+	event.Actions.StateDelta[a.OutputKey] = output
+	return output
 }
 
 // FindAgent finds a sub-agent by name.

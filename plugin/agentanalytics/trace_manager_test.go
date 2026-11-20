@@ -1708,8 +1708,8 @@ func TestTraceManager_AgentNamed(t *testing.T) {
 
 // agentContext is a mockInvocationContext whose Agent method returns a, as
 // the contexts of ADK's invocation callbacks do. With a nil, calling Agent
-// fails the test: the contexts that ADK gives agent callbacks log a
-// warning and return nil.
+// fails the test: ADK releases the plugin supports give agent callbacks a
+// context whose Agent returns nil.
 type agentContext struct {
 	*mockInvocationContext
 	t *testing.T

@@ -42,7 +42,8 @@ type EventActions struct {
 	EndOfAgent                 *bool                                        `json:"endOfAgent,omitempty"`
 	// AgentState is a pointer so that an empty state is written as {} and an
 	// absent one is left out, as session.EventActions encodes it.
-	AgentState *map[string]any `json:"agentState,omitempty"`
+	AgentState      *map[string]any    `json:"agentState,omitempty"`
+	RenderUIWidgets []session.UIWidget `json:"renderUiWidgets,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -149,6 +150,7 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
 			EndOfAgent:                 event.Actions.EndOfAgent,
 			AgentState:                 agentStateValue(event.Actions.AgentState),
+			RenderUIWidgets:            event.Actions.RenderUIWidgets,
 			// Actions.Compaction is deliberately not mapped inbound. A
 			// compaction record tells prompt assembly to drop a span of history
 			// and substitute content in its place, so honoring one from a
@@ -208,6 +210,7 @@ func FromSessionEvent(event session.Event) Event {
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
 			EndOfAgent:                 event.Actions.EndOfAgent,
 			AgentState:                 agentStateRef(event.Actions.AgentState),
+			RenderUIWidgets:            event.Actions.RenderUIWidgets,
 		},
 	}
 }

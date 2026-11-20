@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -260,6 +261,74 @@ func TestGenerateRequestConfirmationEventHasID(t *testing.T) {
 
 	if got.InvocationID != "inv_1" {
 		t.Errorf("expected InvocationID=\"inv_1\", got %q", got.InvocationID)
+	}
+}
+
+// The adk_request_confirmation call carries the JSON form adk-python gives it
+// (flows/llm_flows/tools/_functions.py): an empty args map of the original call
+// stays as {}, nil args leave the key out, and a nil payload leaves the payload
+// key out while hint and confirmed are always written.
+func TestGenerateRequestConfirmationEvent_OriginalCallArgsAndPayloadJSON(t *testing.T) {
+	tests := []struct {
+		name         string
+		call         *genai.FunctionCall
+		confirmation toolconfirmation.ToolConfirmation
+		want         map[string]any
+	}{
+		{
+			name:         "nil args and nil payload",
+			call:         &genai.FunctionCall{ID: "call_nil", Name: "tool_a"},
+			confirmation: toolconfirmation.ToolConfirmation{},
+			want: map[string]any{
+				"originalFunctionCall": map[string]any{"id": "call_nil", "name": "tool_a"},
+				"toolConfirmation":     map[string]any{"confirmed": false, "hint": ""},
+			},
+		},
+		{
+			name:         "empty args and nil payload",
+			call:         &genai.FunctionCall{ID: "call_empty", Name: "tool_b", Args: map[string]any{}},
+			confirmation: toolconfirmation.ToolConfirmation{Hint: "confirm?"},
+			want: map[string]any{
+				"originalFunctionCall": map[string]any{"args": map[string]any{}, "id": "call_empty", "name": "tool_b"},
+				"toolConfirmation":     map[string]any{"confirmed": false, "hint": "confirm?"},
+			},
+		},
+		{
+			name:         "non-empty args and payload",
+			call:         &genai.FunctionCall{ID: "call_nonempty", Name: "tool_c", Args: map[string]any{"x": "y"}},
+			confirmation: toolconfirmation.ToolConfirmation{Hint: "h", Payload: map[string]any{"p": "q"}},
+			want: map[string]any{
+				"originalFunctionCall": map[string]any{"args": map[string]any{"x": "y"}, "id": "call_nonempty", "name": "tool_c"},
+				"toolConfirmation":     map[string]any{"confirmed": false, "hint": "h", "payload": map[string]any{"p": "q"}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ic := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
+			callEvent := &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Parts: []*genai.Part{{FunctionCall: tt.call}},
+			}}}
+			responseEvent := &session.Event{Actions: session.EventActions{
+				RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{tt.call.ID: tt.confirmation},
+			}}
+
+			ev := generateRequestConfirmationEvent(ic, callEvent, responseEvent)
+			if ev == nil || ev.Content == nil || len(ev.Content.Parts) != 1 || ev.Content.Parts[0].FunctionCall == nil {
+				t.Fatalf("generateRequestConfirmationEvent() = %+v, want one function call part", ev)
+			}
+			data, err := json.Marshal(ev.Content.Parts[0].FunctionCall.Args)
+			if err != nil {
+				t.Fatalf("json.Marshal(args) error = %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("json.Unmarshal(args) error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("adk_request_confirmation args JSON mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

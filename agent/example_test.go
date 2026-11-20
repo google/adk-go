@@ -105,7 +105,7 @@ func ExampleRunConfig_labels() {
 // RunConfig.HTTPOptions is merged into the HTTP options of every model
 // request of the run. When the agent sets its own HTTPOptions, headers are
 // merged by canonical header name, with the run's value winning, and the
-// agent's APIVersion and BaseURL are kept.
+// agent's APIVersion is kept.
 func ExampleRunConfig_httpOptions() {
 	llm := &requestRecorder{}
 	a, err := llmagent.New(llmagent.Config{

@@ -34,6 +34,18 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// ErrInvalidAgentConfig is wrapped by these constructor errors only:
+//   - the error [New] returns for the reserved name "user", which the other
+//     agent constructors pass on because they build their agent through [New];
+//   - the errors [google.golang.org/adk/v2/agent/llmagent.New] returns when
+//     the config's GenerateContentConfig sets Tools, SystemInstruction or
+//     HTTPOptions.BaseURL, which belong on the agent's Tools, its Instruction,
+//     and the model or its client.
+//
+// No other constructor error wraps it; in particular, the errors [New] returns
+// for an empty name or a repeated sub-agent do not.
+var ErrInvalidAgentConfig = errors.New("invalid agent configuration")
+
 // Agent is the base interface which all agents must implement.
 //
 // Agents are created with ADK constructors to ensure correct
@@ -48,7 +60,16 @@ type Agent interface {
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+
+	// FindAgent searches the agent tree for an agent with the given name.
+	// It returns the agent itself on an exact name match; otherwise, it
+	// delegates to the inner FindSubAgent. A type that embeds Agent MUST override
+	// FindAgent to return itself on an exact name match and delegate to the inner
+	// FindSubAgent otherwise, preserving identity.
 	FindAgent(name string) Agent
+
+	// FindSubAgent searches the agent's descendants (depth-first, pre-order)
+	// for an agent with the given name. It excludes the agent itself.
 	FindSubAgent(name string) Agent
 
 	internal() *agent
@@ -56,15 +77,50 @@ type Agent interface {
 
 // New creates an Agent with a custom logic defined by Run function. It returns
 // an error if cfg.Name is empty or a sub-agent appears more than once in
-// cfg.SubAgents.
+// cfg.SubAgents. It refuses the name "user", which is reserved for the end
+// user's input, with an error wrapping [ErrInvalidAgentConfig]; the check is
+// case-sensitive, so "User" is accepted.
+//
+// When it succeeds, New records the new agent as the parent of each agent in
+// cfg.SubAgents; see [Config.SubAgents]. A sub-agent that already has a parent
+// is accepted and takes the new agent as its parent. A failed New records
+// nothing. New is safe for concurrent use, including concurrent calls that
+// list the same sub-agent.
 func New(cfg Config) (Agent, error) {
+	a, err := newUnlinked(cfg)
+	if err != nil {
+		return nil, err
+	}
+	a.linkSubAgents(nil)
+	return a, nil
+}
+
+func init() {
+	agentinternal.NewUnlinked = func(cfg any) (agentinternal.Agent, func(owner any), error) {
+		a, err := newUnlinked(cfg.(Config))
+		if err != nil {
+			return nil, nil, err
+		}
+		return a, a.linkSubAgents, nil
+	}
+	agentinternal.InnerState = func(a any) *agentinternal.State {
+		return &a.(Agent).internal().State
+	}
+}
+
+// newUnlinked validates cfg and builds the agent New returns, without
+// linking it to its sub-agents.
+func newUnlinked(cfg Config) (*agent, error) {
 	// Under agenttool or as a transfer target, an empty name puts an empty
 	// function name or enum value in the parent's model request, which Vertex
-	// AI rejects. adk-python also requires a valid identifier other than
-	// "user"; that is not enforced here because it would reject names that
-	// work today, such as "research-agent".
+	// AI rejects. adk-python also requires a valid identifier; that is not
+	// enforced here because it would reject names that work today, such as
+	// "research-agent".
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("error creating agent: name must not be empty")
+	}
+	if cfg.Name == "user" {
+		return nil, fmt.Errorf("%w: agent name cannot be `user`, it is reserved for the end user's input", ErrInvalidAgentConfig)
 	}
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
@@ -73,7 +129,7 @@ func New(cfg Config) (Agent, error) {
 		}
 		subAgentSet[subAgent] = true
 	}
-	return &agent{
+	a := &agent{
 		name:                 cfg.Name,
 		description:          cfg.Description,
 		subAgents:            cfg.SubAgents,
@@ -83,7 +139,23 @@ func New(cfg Config) (Agent, error) {
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
 		},
-	}, nil
+	}
+	return a, nil
+}
+
+// linkSubAgents publishes a as the parent of each of its sub-agents, with
+// owner as a's Owner. The caller has passed every validation, so a failed
+// constructor leaves the sub-agents as they were. internal() reaches the
+// inner agent of any value, including a type that embeds an Agent.
+func (a *agent) linkSubAgents(owner any) {
+	children := make([]*agentinternal.State, 0, len(a.subAgents))
+	for _, subAgent := range a.subAgents {
+		if subAgent == nil {
+			continue
+		}
+		children = append(children, &subAgent.internal().State)
+	}
+	agentinternal.Link(a, owner, children)
 }
 
 // Config is the configuration for creating a new Agent.
@@ -97,8 +169,11 @@ type Config struct {
 	// One-line description is enough and preferred.
 	Description string
 	// SubAgents are the child agents that this agent can delegate tasks to.
-	// ADK will automatically set a parent of each sub-agent to this agent to
-	// allow agent transferring across the tree.
+	// ADK records this agent as the parent of each sub-agent, which an LLM
+	// sub-agent without a model reads to inherit its ancestor's model. An agent
+	// listed in the SubAgents of two constructed agents keeps the one
+	// constructed last as its parent; listing it again is not an error. Build
+	// the agent tree before running it.
 	SubAgents []Agent
 
 	// BeforeAgentCallbacks are called sequentially before the agent starts its
@@ -181,6 +256,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 
 		var aa Agent = a
+		if owner, ok := agentinternal.OwnerOf(&a.State).(Agent); ok && owner != nil {
+			aa = owner
+		}
 		var newCtx context.Context = ctx.WithContext(spanCtx)
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
@@ -191,7 +269,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
-			a.OnBeforeAgentCallbackEvent(event)
+			if hookErr := a.OnBeforeAgentCallbackEvent(event); hookErr != nil {
+				event, err = nil, hookErr
+			}
 		}
 		if event != nil || err != nil {
 			if err != nil {

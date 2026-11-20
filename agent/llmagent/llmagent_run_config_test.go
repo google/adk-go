@@ -515,3 +515,61 @@ func TestOutputSchemaWithTools_OpenAIModelGetsSetModelResponse(t *testing.T) {
 		})
 	}
 }
+
+func TestRunConfig_InheritedClaudeModel_FiltersHTTPOptionsAndLabels(t *testing.T) {
+	b := &mixedModelBackends{}
+	var calls int
+	claudeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b.record(t, &b.claude, r)
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu_1","name":"transfer_to_agent","input":{"agent_name":"claude_child"}}],"usage":{"input_tokens":3,"output_tokens":2}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"inherited claude answer"}],"usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	t.Cleanup(claudeServer.Close)
+	claudeModel, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+		APIKey:  "test-key",
+		BaseURL: claudeServer.URL,
+	})
+	if err != nil {
+		t.Fatalf("anthropicmodel.NewModel() error = %v", err)
+	}
+
+	child, err := llmagent.New(llmagent.Config{Name: "claude_child", Description: "Inherits Claude."})
+	if err != nil {
+		t.Fatalf("llmagent.New(claude_child) error = %v", err)
+	}
+	root, err := llmagent.New(llmagent.Config{Name: "claude_parent", Model: claudeModel, SubAgents: []agent.Agent{child}})
+	if err != nil {
+		t.Fatalf("llmagent.New(claude_parent) error = %v", err)
+	}
+
+	r := testutil.NewTestAgentRunner(t, root)
+	labels := map[string]string{"cost_center": "billing"}
+	events, err := testutil.CollectEvents(r.RunContentWithConfig(t, "session", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{
+		Labels: &labels,
+		HTTPOptions: &genai.HTTPOptions{
+			Headers:   http.Header{"X-Run-Header": {"h1"}},
+			ExtraBody: map[string]any{"unsupported": true},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("run yielded no events")
+	}
+	if len(b.claude) != 2 {
+		t.Fatalf("claude backend received %d requests, want 2", len(b.claude))
+	}
+	if _, ok := b.claude[1].body["unsupported"]; ok {
+		t.Errorf("inherited claude request body carries unsupported ExtraBody: %v", b.claude[1].body)
+	}
+	last := events[len(events)-1]
+	if last.Author != "claude_child" || last.Content == nil || len(last.Content.Parts) == 0 || last.Content.Parts[0].Text != "inherited claude answer" {
+		t.Errorf("last event = %+v, want claude_child's answer", last)
+	}
+}

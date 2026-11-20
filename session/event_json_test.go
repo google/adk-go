@@ -605,3 +605,111 @@ func TestEventActionsJSON_EndOfAgentAndAgentState(t *testing.T) {
 		})
 	}
 }
+
+// Widgets are stored as this JSON by the database session service and as
+// raw_event by the Vertex AI one. adk-python writes "renderUiWidgets" only
+// when a widget was rendered, and always writes a widget's payload, as {}
+// when it has none.
+func TestEventJSON_RenderUIWidgets(t *testing.T) {
+	ev := &session.Event{
+		ID:        "e1",
+		Timestamp: time.Date(2026, 11, 13, 6, 0, 0, 0, time.UTC),
+		Actions: session.EventActions{
+			RenderUIWidgets: []session.UIWidget{
+				{ID: "w1", Provider: "mcp", Payload: map[string]any{"k": "v"}},
+				{ID: "w2", Provider: "mcp"},
+			},
+		},
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal() failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("Unmarshal() to map failed: %v", err)
+	}
+	actions, ok := wire["actions"].(map[string]any)
+	if !ok {
+		t.Fatalf("actions = %T, want a JSON object", wire["actions"])
+	}
+	wantWire := []any{
+		map[string]any{"id": "w1", "provider": "mcp", "payload": map[string]any{"k": "v"}},
+		map[string]any{"id": "w2", "provider": "mcp", "payload": map[string]any{}},
+	}
+	if diff := cmp.Diff(wantWire, actions["renderUiWidgets"]); diff != "" {
+		t.Errorf("actions.renderUiWidgets mismatch (-want +got):\n%s", diff)
+	}
+
+	var got session.Event
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	wantBack := []session.UIWidget{
+		{ID: "w1", Provider: "mcp", Payload: map[string]any{"k": "v"}},
+		{ID: "w2", Provider: "mcp", Payload: map[string]any{}},
+	}
+	if diff := cmp.Diff(wantBack, got.Actions.RenderUIWidgets); diff != "" {
+		t.Errorf("RenderUIWidgets after round trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEventJSON_RenderUIWidgetsOmittedWhenNone(t *testing.T) {
+	tests := []struct {
+		name    string
+		widgets []session.UIWidget
+	}{
+		{name: "nil", widgets: nil},
+		{name: "empty", widgets: []session.UIWidget{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(session.EventActions{RenderUIWidgets: tt.widgets})
+			if err != nil {
+				t.Fatalf("Marshal() failed: %v", err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatalf("Unmarshal() to map failed: %v", err)
+			}
+			if raw, ok := wire["renderUiWidgets"]; ok {
+				t.Errorf("renderUiWidgets = %s, want the key to be absent", raw)
+			}
+		})
+	}
+}
+
+func TestUIWidgetUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want session.UIWidget
+	}{
+		{
+			name: "unknown key is ignored",
+			data: `{"id":"w","provider":"p","payload":{"k":"v"},"extra":1}`,
+			want: session.UIWidget{ID: "w", Provider: "p", Payload: map[string]any{"k": "v"}},
+		},
+		{
+			name: "missing payload becomes empty",
+			data: `{"id":"w","provider":"p"}`,
+			want: session.UIWidget{ID: "w", Provider: "p", Payload: map[string]any{}},
+		},
+		{
+			name: "null payload becomes empty",
+			data: `{"id":"w","provider":"p","payload":null}`,
+			want: session.UIWidget{ID: "w", Provider: "p", Payload: map[string]any{}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got session.UIWidget
+			if err := json.Unmarshal([]byte(tt.data), &got); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Unmarshal() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

@@ -354,6 +354,57 @@ func TestFindAgent(t *testing.T) {
 	}
 }
 
+// The search is depth-first and pre-order, as in adk-python's find_sub_agent:
+// a match under an earlier sub-agent wins over a later sub-agent of the same
+// name.
+func TestFindAgent_PreOrderDepthFirstPrecedence(t *testing.T) {
+	newAgent := func(name string, subAgents ...Agent) Agent {
+		t.Helper()
+		a, err := New(Config{Name: name, SubAgents: subAgents})
+		if err != nil {
+			t.Fatalf("New(%q) error = %v", name, err)
+		}
+		return a
+	}
+	// root -> [branch1 -> [deepMatch ("target")], laterMatch ("target")]
+	deepMatch := newAgent("target")
+	branch1 := newAgent("branch1", deepMatch)
+	laterMatch := newAgent("target")
+	root := newAgent("root", branch1, laterMatch)
+
+	tests := []struct {
+		name string
+		got  Agent
+		want Agent
+	}{
+		{name: "FindAgent returns the match under the earlier sub-agent", got: root.FindAgent("target"), want: deepMatch},
+		{name: "FindSubAgent returns the match under the earlier sub-agent", got: root.FindSubAgent("target"), want: deepMatch},
+		{name: "FindSubAgent excludes self", got: branch1.FindSubAgent("branch1"), want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %p, want %p", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFindAgent_PrefersSelfOverSameNamedDescendant(t *testing.T) {
+	child, err := New(Config{Name: "shared"})
+	if err != nil {
+		t.Fatalf("New(child) error = %v", err)
+	}
+	root, err := New(Config{Name: "shared", SubAgents: []Agent{child}})
+	if err != nil {
+		t.Fatalf("New(root) error = %v", err)
+	}
+
+	if got := root.FindAgent("shared"); got != root {
+		t.Errorf("root.FindAgent(%q) = %p, want root %p (child is %p)", "shared", got, root, child)
+	}
+}
+
 func TestRunWithoutRunFunc(t *testing.T) {
 	tests := []struct {
 		name string

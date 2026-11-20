@@ -1078,6 +1078,35 @@ func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
 	}
 }
 
+// Lookups return the agents the caller built, not the base agent that
+// sequentialagent.New wraps, as adk-python's find_agent returns the tree's own
+// objects.
+func TestSequentialAgent_FindAgentPreservesWrapperIdentity(t *testing.T) {
+	// root ("shared") -> child ("shared") -> grandchild ("grandchild_seq")
+	grandchild := newSequentialAgent(t, nil, "grandchild_seq")
+	child := newSequentialAgent(t, []agent.Agent{grandchild}, "shared")
+	root := newSequentialAgent(t, []agent.Agent{child}, "shared")
+
+	tests := []struct {
+		name string
+		got  agent.Agent
+		want agent.Agent
+	}{
+		{name: "FindAgent prefers self over a same-named descendant", got: root.FindAgent("shared"), want: root},
+		{name: "FindSubAgent returns the same-named descendant", got: root.FindSubAgent("shared"), want: child},
+		{name: "FindSubAgent excludes self", got: child.FindSubAgent("shared"), want: nil},
+		{name: "FindAgent returns a nested sequential agent", got: root.FindAgent("grandchild_seq"), want: grandchild},
+		{name: "FindSubAgent returns nil for an unknown name", got: root.FindSubAgent("unknown"), want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %p (%T), want %p (%T)", tc.got, tc.got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
 func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
 	child := newCustomAgent(t, 0)
 	seq := newSequentialAgent(t, []agent.Agent{child}, "seq")

@@ -40,7 +40,10 @@ var toolsetCloseTimeout = 10 * time.Second
 // reachable from the runner's root: the root agent or node, the toolsets of
 // each LLM agent, their sub-agents, the agents a workflow graph runs
 // (including nested workflows and parallel workers) and the child agent of an
-// agent tool, whether an LLM agent or a workflow ToolNode holds the tool.
+// agent tool, whether an LLM agent or a workflow ToolNode holds the tool. An
+// LLM agent holds an agent tool in its Tools, or in its Toolsets through
+// [tool.AsToolset], also behind a wrapper such as [tool.FilterToolset]; the
+// walk never calls a toolset's Tools.
 // Each distinct toolset is closed once, one after another, and has ten
 // seconds to return. An agent's own toolsets are closed before those
 // of the agents it leads to; beyond that the order is unspecified. After the
@@ -104,10 +107,17 @@ type toolsetWalk struct {
 	found  []tool.Toolset
 }
 
-// agent walks a's own toolsets, the agents behind its agent tools, then the
-// agents it leads to, then the agents behind the agent tools its workflow
-// graph's ToolNodes run. An agent is walked once even when several paths lead
-// to it.
+// toolWrapper is implemented by the toolset tool.AsToolset returns. It lets
+// the walk reach the tool such a toolset holds without calling Tools.
+type toolWrapper interface {
+	WrappedTool() tool.Tool
+}
+
+// agent walks a's own toolsets, the agents behind its agent tools (those in
+// Tools, then those a toolset made by tool.AsToolset holds, directly or
+// behind wrappers), then the agents it leads to, then the agents behind the
+// agent tools its workflow graph's ToolNodes run. An agent is walked once even
+// when several paths lead to it.
 func (w *toolsetWalk) agent(a agent.Agent) {
 	if _, ok := w.agents[a]; ok {
 		return
@@ -119,8 +129,11 @@ func (w *toolsetWalk) agent(a agent.Agent) {
 			w.toolset(ts)
 		}
 		for _, t := range state.Tools {
-			if wrapper, ok := t.(toolinternal.AgentWrapper); ok {
-				w.agent(wrapper.WrappedAgent())
+			w.agentTool(t)
+		}
+		for _, ts := range state.Toolsets {
+			if tw, ok := innermostToolset(ts).(toolWrapper); ok {
+				w.agentTool(tw.WrappedTool())
 			}
 		}
 	}
@@ -129,6 +142,24 @@ func (w *toolsetWalk) agent(a agent.Agent) {
 	}
 	for _, child := range agenttree.ToolAgents(a) {
 		w.agent(child)
+	}
+}
+
+// agentTool walks the agent t runs when t is an agent tool.
+func (w *toolsetWalk) agentTool(t tool.Tool) {
+	if wrapper, ok := t.(toolinternal.AgentWrapper); ok {
+		w.agent(wrapper.WrappedAgent())
+	}
+}
+
+// innermostToolset follows Unwrap from ts to the toolset that wraps no other.
+func innermostToolset(ts tool.Toolset) tool.Toolset {
+	for {
+		u, ok := ts.(toolinternal.ToolsetUnwrapper)
+		if !ok {
+			return ts
+		}
+		ts = u.Unwrap()
 	}
 }
 
@@ -143,15 +174,7 @@ func (w *toolsetWalk) toolset(ts tool.Toolset) {
 	if _, ok := ts.(io.Closer); !ok {
 		return
 	}
-	inner := ts
-	for {
-		u, ok := inner.(toolinternal.ToolsetUnwrapper)
-		if !ok {
-			break
-		}
-		inner = u.Unwrap()
-	}
-	if key, ok := identityKey(inner); ok {
+	if key, ok := identityKey(innermostToolset(ts)); ok {
 		if _, seen := w.keys[key]; seen {
 			return
 		}

@@ -67,10 +67,13 @@ func (c *toolContextWrapper) SubScheduler() DynamicSubScheduler {
 	return c.context.SubScheduler()
 }
 
-// Agent implements [Context].
+// Agent implements [Context]. It returns the agent whose turn runs the tool,
+// which is the agent [ReadonlyContext.AgentName] names: the LLM agent whose
+// model called the tool, the agent whose request a tool's or toolset's
+// request hook prepares, or, for a tool run as a workflow node, the agent that
+// runs the workflow.
 func (c *toolContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Agent()
 }
 
 // EndInvocation implements [Context].
@@ -92,8 +95,7 @@ func (c *toolContextWrapper) IsolationScope() string {
 
 // Memory implements [Context].
 func (c *toolContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Memory()
 }
 
 // Path implements [Context].
@@ -109,8 +111,7 @@ func (c *toolContextWrapper) ResumedInput(interruptID string) (any, bool) {
 
 // RunConfig implements [Context].
 func (c *toolContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.RunConfig()
 }
 
 // RunID implements [Context].
@@ -158,6 +159,11 @@ func (c *toolContextWrapper) FunctionCallID() string {
 // RequestConfirmation implements [Context].
 func (c *toolContextWrapper) RequestConfirmation(hint string, payload any) error {
 	return c.context.RequestConfirmation(hint, payload)
+}
+
+// RenderUIWidget implements [UIWidgetRenderer].
+func (c *toolContextWrapper) RenderUIWidget(widget session.UIWidget) error {
+	return RenderUIWidget(c.context, widget)
 }
 
 // SearchMemory implements [Context].

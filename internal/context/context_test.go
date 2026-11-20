@@ -36,6 +36,22 @@ func TestReadonlyContext(t *testing.T) {
 	}
 }
 
+// agent.CustomMetadata reaches the run config of an instruction provider's or
+// toolset's context through this method when no runner stored a snapshot.
+func TestReadonlyContextRunConfig(t *testing.T) {
+	rc := &agent.RunConfig{CustomMetadata: &map[string]any{"k": "v"}}
+	inv := NewInvocationContext(t.Context(), InvocationContextParams{RunConfig: rc})
+	readonly := NewReadonlyContext(inv)
+
+	r, ok := readonly.(interface{ RunConfig() *agent.RunConfig })
+	if !ok {
+		t.Fatalf("ReadonlyContext(%T) has no RunConfig method", readonly)
+	}
+	if got := r.RunConfig(); got != rc {
+		t.Errorf("RunConfig() = %p, want the invocation's run config %p", got, rc)
+	}
+}
+
 func TestCallbackContext(t *testing.T) {
 	inv := NewInvocationContext(t.Context(), InvocationContextParams{})
 	callback := NewCallbackContext(inv)

@@ -14,6 +14,28 @@
 
 // Package gemini implements the [model.LLM] interface for Gemini models.
 //
+// [NewModel] builds a model with a client configured by the caller. Importing
+// this package also registers its connector with [model.Register] for the
+// names adk-python's Gemini connector serves, matched case-sensitively against
+// the whole name:
+//
+//	^gemini-.*$
+//	^gemma-4.*$
+//	^model-optimizer-.*$
+//	^projects/.+/locations/.+/endpoints/.+$
+//	^projects/.+/locations/.+/publishers/google/models/gemini.+$
+//
+// so [model.NewLLM] resolves, for example, "gemini-2.5-flash" to this
+// connector. Resolving a name needs no credentials: the model creates its
+// genai client from the environment (GOOGLE_API_KEY, GOOGLE_GENAI_USE_VERTEXAI
+// and the other variables genai reads) on first use. A client that cannot be
+// created is reported by that GenerateContent call and not kept: the next call
+// tries again and reads the environment again.
+//
+// A program that registers its own pattern must not overlap these: a name two
+// registered patterns match is refused by [model.NewLLM] as ambiguous, and
+// [model.Register] panics for a pattern string identical to one of them.
+//
 // # Context caching
 //
 // A request whose CacheConfig is set, which the runner arranges when
@@ -46,6 +68,7 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -58,9 +81,15 @@ import (
 
 // TODO: test coverage
 type geminiModel struct {
-	client             *genai.Client
 	name               string
 	versionHeaderValue string
+
+	// newClient, when set, creates the client on first use. A model built by
+	// NewModel has its client from the start and no newClient.
+	newClient func() (*genai.Client, error)
+
+	clientMu sync.Mutex    // guards client, and serializes calls to newClient
+	client   *genai.Client // nil until newClient succeeds
 }
 
 // NewModel returns [model.LLM], backed by the Gemini API.
@@ -71,6 +100,20 @@ type geminiModel struct {
 //
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
+	client, err := newGenAIClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &geminiModel{
+		name:               modelName,
+		client:             client,
+		versionHeaderValue: version.TrackingHeader(),
+	}, nil
+}
+
+// newGenAIClient creates the genai client for cfg (nil reads the
+// environment) with the model's header merging installed on its transport.
+func newGenAIClient(ctx context.Context, cfg *genai.ClientConfig) (*genai.Client, error) {
 	// Create a copy of the config to avoid mutating the caller's config
 	// or the underlying http.Client.
 	var cfgCopy genai.ClientConfig
@@ -95,12 +138,25 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 			base: client.ClientConfig().HTTPClient.Transport,
 		}
 	}
+	return client, nil
+}
 
-	return &geminiModel{
-		name:               modelName,
-		client:             client,
-		versionHeaderValue: version.TrackingHeader(),
-	}, nil
+// genaiClient returns the model's client, creating it when the model was
+// built without one. Only a created client is kept; a failed creation is
+// returned, and the next call tries again. Creation runs under clientMu, so
+// concurrent first callers share one client.
+func (m *geminiModel) genaiClient() (*genai.Client, error) {
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
+	if m.client != nil {
+		return m.client, nil
+	}
+	client, err := m.newClient()
+	if err != nil {
+		return nil, err
+	}
+	m.client = client
+	return client, nil
 }
 
 func (m *geminiModel) Name() string {
@@ -153,7 +209,12 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // the recorded expiry.
 func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
+		client, err := m.genaiClient()
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to create the Gemini client: %w", err))
+			return
+		}
+		cache := &contextCache{client: client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
 		plan := cache.prepare(ctx, req)
 
 		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
@@ -234,8 +295,12 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // candidate. The genai SDK resumes a generation the model paused with
 // CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	config := m.requestConfig(req)
-	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
+	client, err := m.genaiClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the Gemini client: %w", err)
+	}
+	config := requestConfig(client, req)
+	resp, err := client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
@@ -252,8 +317,13 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		config := m.requestConfig(req)
-		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
+		client, err := m.genaiClient()
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to create the Gemini client: %w", err))
+			return
+		}
+		config := requestConfig(client, req)
+		for resp, err := range client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
 			if err != nil {
 				yield(nil, err)
 				return
@@ -273,8 +343,8 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 // requestConfig returns the copy of req.Config sent to the backend. The Gemini
 // Developer API does not support labels, so the copy sent there has none, while
 // req.Config keeps them for callbacks and plugins that read the request.
-func (m *geminiModel) requestConfig(req *model.LLMRequest) *genai.GenerateContentConfig {
-	clientConfig := m.client.ClientConfig()
+func requestConfig(client *genai.Client, req *model.LLMRequest) *genai.GenerateContentConfig {
+	clientConfig := client.ClientConfig()
 	config := configPreservingEmptyTextThoughtSignatures(req.Config, clientConfig.HTTPOptions.ExtrasRequestProvider)
 	if clientConfig.Backend == genai.BackendGeminiAPI {
 		config.Labels = nil
@@ -396,15 +466,26 @@ func (h *mergeHeadersInterceptor) RoundTrip(req *http.Request) (*http.Response, 
 	return h.base.RoundTrip(req)
 }
 
+// GetGoogleLLMVariant returns the backend of the model's client, or
+// genai.BackendUnspecified when the client cannot be created now.
 func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
-	if m == nil || m.client == nil {
+	if m == nil {
 		return genai.BackendUnspecified
 	}
-	return m.client.ClientConfig().Backend
+	client, err := m.genaiClient()
+	if err != nil || client == nil {
+		return genai.BackendUnspecified
+	}
+	return client.ClientConfig().Backend
 }
 
+// Client returns the model's genai client, or nil when it cannot be created
+// now. A later call tries again.
 func (m *geminiModel) Client() *genai.Client {
-	return m.client
+	// Client has no error result: a failed creation shows as a nil client
+	// here, and GenerateContent returns the error itself.
+	client, _ := m.genaiClient()
+	return client
 }
 
 // Capabilities returns the resolved capabilities of the Gemini model.

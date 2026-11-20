@@ -219,3 +219,53 @@ func (f *fakeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter
 func (f *fakeLLM) GetGoogleLLMVariant() genai.Backend { return f.backend }
 
 var _ model.LLM = (*fakeLLM)(nil)
+
+func TestTaskAgentTool_DeclarationUsesResolvedModel(t *testing.T) {
+	newTaskSub := func(name string) agent.Agent {
+		t.Helper()
+		a, err := llmagent.New(llmagent.Config{Name: name, Description: taskAgentDesc, Mode: llmagent.ModeTask})
+		if err != nil {
+			t.Fatalf("llmagent.New(%q): %v", name, err)
+		}
+		return a
+	}
+	newParent := func(name string, llm model.LLM, sub agent.Agent) agent.Agent {
+		t.Helper()
+		return newLLMAgentWithParentModel(t, name, llm, sub)
+	}
+
+	// The tool is built before any parent exists, so its declaration must
+	// follow the model the sub-agent inherits later.
+	vertexSub := newTaskSub("vertex_sub")
+	vertexTool := newTaskAgentTool(t, vertexSub)
+	newParent("vertex_parent", &fakeLLM{backend: genai.BackendVertexAI}, vertexSub)
+
+	geminiSub := newTaskSub("gemini_sub")
+	geminiTool := newTaskAgentTool(t, geminiSub)
+	newParent("gemini_parent", &fakeLLM{backend: genai.BackendGeminiAPI}, geminiSub)
+
+	// The model comes from a grandparent built after the parent.
+	deepSub := newTaskSub("deep_sub")
+	deepTool := newTaskAgentTool(t, deepSub)
+	mid := newParent("mid", nil, deepSub)
+	newParent("grandparent", &fakeLLM{backend: genai.BackendGeminiAPI}, mid)
+
+	if diff := cmp.Diff(&genai.Schema{Type: "STRING"}, vertexTool.Declaration().ResponseJsonSchema); diff != "" {
+		t.Errorf("ResponseJsonSchema under a Vertex AI parent diff (-want +got):\n%s", diff)
+	}
+	if got := geminiTool.Declaration().ResponseJsonSchema; got != nil {
+		t.Errorf("ResponseJsonSchema under a Gemini API parent = %+v, want nil", got)
+	}
+	if got := deepTool.Declaration().ResponseJsonSchema; got != nil {
+		t.Errorf("ResponseJsonSchema under a Gemini API grandparent = %+v, want nil", got)
+	}
+}
+
+func newLLMAgentWithParentModel(t *testing.T, name string, llm model.LLM, sub agent.Agent) agent.Agent {
+	t.Helper()
+	a, err := llmagent.New(llmagent.Config{Name: name, Model: llm, SubAgents: []agent.Agent{sub}})
+	if err != nil {
+		t.Fatalf("llmagent.New(%q): %v", name, err)
+	}
+	return a
+}

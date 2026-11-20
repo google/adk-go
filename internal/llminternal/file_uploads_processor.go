@@ -36,7 +36,7 @@ func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMReques
 			return
 		}
 
-		if !googlellm.IsGeminiAPIVariant(llmAgent.internal().Model) {
+		if !googlellm.IsGeminiAPIVariant(processorModel(ctx, f)) {
 			return
 		}
 

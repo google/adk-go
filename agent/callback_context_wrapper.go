@@ -68,10 +68,16 @@ func (c *callbackContextWrapper) SubScheduler() DynamicSubScheduler {
 	return nil
 }
 
-// Agent implements [Context].
+// Agent implements [Context]. It returns the agent the callback belongs to,
+// which is the agent [ReadonlyContext.AgentName] names: the agent whose agent
+// callbacks or on-agent-error callbacks run, the LLM agent whose model call the
+// model callbacks surround, or the remote agent whose request callbacks run.
+// Plugin callbacks get the same agent as the agent's own callbacks. A callback
+// context made from a node context of a runner whose root is a node returns the
+// runner's stand-in agent for that node. Agent returns nil when the
+// invocation the context was made from has no agent.
 func (c *callbackContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Agent()
 }
 
 // EndInvocation implements [Context].
@@ -93,8 +99,7 @@ func (c *callbackContextWrapper) IsolationScope() string {
 
 // Memory implements [Context].
 func (c *callbackContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Memory()
 }
 
 // Path implements [Context].
@@ -111,8 +116,7 @@ func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
 
 // RunConfig implements [Context].
 func (c *callbackContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.RunConfig()
 }
 
 // RunID implements [Context].
@@ -123,8 +127,7 @@ func (c *callbackContextWrapper) RunID() string {
 
 // Session implements [Context].
 func (c *callbackContextWrapper) Session() session.Session {
-	log.Print("Session() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Session()
 }
 
 // WithBranch implements [Context].
@@ -165,12 +168,20 @@ func (c *callbackContextWrapper) FunctionCallID() string {
 func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) error {
 	//  RequestConfirmation() does not make any sense for a callback context
 	log.Print("RequestConfirmation() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
+	return errNoFunctionCallID
 }
 
-// SearchMemory implements [Context].
+// RenderUIWidget implements [UIWidgetRenderer].
+func (c *callbackContextWrapper) RenderUIWidget(widget session.UIWidget) error {
+	return RenderUIWidget(c.context, widget)
+}
+
+// SearchMemory implements [Context]. Without a memory service it reports the
+// missing service, as every context does; with one it refuses.
 func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	//  SearchMemory() does not make any sense for a callback context
+	if _, ok := memoryService(c.context); !ok {
+		return nil, errNoMemoryForSearch
+	}
 	log.Print("SearchMemory() is not supported for callback context") //nolint:forbidigo // pre-slog call site
 	return nil, fmt.Errorf("SearchMemory() is not supported for callback context")
 }

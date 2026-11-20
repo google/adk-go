@@ -217,3 +217,24 @@ func TestTrackedArtifacts_SaveDelta(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestConfirmation_NoFunctionCallIDError(t *testing.T) {
+	const want = "RequestConfirmation requires a function call ID; it can only be used in a tool context"
+	tests := []struct {
+		name string
+		ctx  func(ic InvocationContext) Context
+	}{
+		{name: "NewContext", ctx: NewContext},
+		{name: "NewCallbackContext", ctx: func(ic InvocationContext) Context { return NewCallbackContext(ic, nil) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tt.ctx(&invocationContext{Context: t.Context()})
+			var err error
+			captureLog(t, func() { err = ctx.RequestConfirmation("h", nil) })
+			if err == nil || err.Error() != want {
+				t.Errorf("RequestConfirmation() error = %v, want %q", err, want)
+			}
+		})
+	}
+}

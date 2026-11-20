@@ -153,3 +153,65 @@ func AddEventsToMemory(ctx context.Context, svc Service, req *AddEventsRequest) 
 	}
 	return adder.AddEventsToMemory(ctx, req)
 }
+
+// ErrAddMemoryUnsupported is returned by [AddMemory] when a [Service] does not
+// implement [MemoryAdder]. It wraps [errors.ErrUnsupported]. A caller that
+// receives it can ingest events with [AddEventsToMemory] or the full session
+// with [Service.AddSessionToMemory] instead, as its message says.
+var ErrAddMemoryUnsupported error = &unsupportedError{
+	msg: "memory: service does not support direct memory writes; call memory.AddEventsToMemory or Service.AddSessionToMemory instead",
+}
+
+// MemoryAdder is an optional interface implemented by a [Service] that accepts
+// memory entries written directly, in addition to the memories it generates
+// from sessions and events.
+//
+// The in-memory service returned by [InMemoryService] does not implement
+// MemoryAdder. Callers holding an arbitrary [Service] can either call the
+// package-level [AddMemory] helper or test for support with a type assertion.
+//
+// As with [EventAdder], a type that wraps a Service by embedding the Service
+// interface does not implement MemoryAdder, even when the wrapped value does.
+// Such a wrapper declares AddMemory itself to forward the call.
+type MemoryAdder interface {
+	// AddMemory stores req.Memories for the scope named by req.
+	//
+	// req must not be nil. Implementations document how they treat entries
+	// that repeat an ID already stored, and which CustomMetadata keys they
+	// read.
+	AddMemory(ctx context.Context, req *AddMemoryRequest) error
+}
+
+// AddMemoryRequest is the parameter for [MemoryAdder.AddMemory] and
+// [AddMemory].
+type AddMemoryRequest struct {
+	// AppName is the application name for memory scope.
+	AppName string
+	// UserID is the user ID for memory scope.
+	UserID string
+	// Memories are the entries to store, in order.
+	Memories []*Entry
+	// CustomMetadata holds optional, implementation-defined metadata for the
+	// write.
+	CustomMetadata map[string]any
+}
+
+// AddMemory adds req.Memories to svc if svc implements [MemoryAdder], or
+// returns [ErrAddMemoryUnsupported] if svc does not implement [MemoryAdder].
+//
+// svc and req must not be nil; AddMemory returns an error for either without
+// calling svc. Otherwise it passes req to [MemoryAdder.AddMemory] unchanged
+// and returns its error.
+func AddMemory(ctx context.Context, svc Service, req *AddMemoryRequest) error {
+	if svc == nil {
+		return errors.New("memory: service must not be nil")
+	}
+	if req == nil {
+		return errors.New("memory: AddMemoryRequest must not be nil")
+	}
+	adder, ok := svc.(MemoryAdder)
+	if !ok {
+		return ErrAddMemoryUnsupported
+	}
+	return adder.AddMemory(ctx, req)
+}

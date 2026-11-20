@@ -315,9 +315,9 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	if !ok {
 		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
 	}
-	m := llminternal.Reveal(llmAgent).Model
-	if m == nil {
-		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q has no model", rootAgent.Name())
+	m, err := llminternal.ResolveModel(context.Background(), rootAgent)
+	if err != nil {
+		return nil, fmt.Errorf("the Compaction config needs a Summarizer: no default model is available for root agent %q: %w", rootAgent.Name(), err)
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,
@@ -762,6 +762,9 @@ func mergeEventActions(dst, src *session.EventActions, record *session.EventComp
 	}
 	if len(src.RequestedAuthConfigs) > 0 {
 		dst.RequestedAuthConfigs = maps.Clone(src.RequestedAuthConfigs)
+	}
+	if len(src.RenderUIWidgets) > 0 {
+		dst.RenderUIWidgets = slices.Clone(src.RenderUIWidgets)
 	}
 	if src.SkipSummarization {
 		dst.SkipSummarization = true
@@ -1728,8 +1731,8 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		return ctx, nil, replaced, errUserFunctionCall
 	}
 
-	artifactsService := ctx.Artifacts()
-	if artifactsService != nil && saveInputBlobsAsArtifacts {
+	if r.artifactService != nil && saveInputBlobsAsArtifacts {
+		artifactsService := ctx.Artifacts()
 		for i, part := range msg.Parts {
 			// A nil part carries no content, so it is skipped; adk-python rejects
 			// the request instead.
