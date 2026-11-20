@@ -260,8 +260,13 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
+		// An agent's run is not a node attempt, whichever node runs the agent, so
+		// every context inside it reads AttemptCount 1. adk-python builds an
+		// agent's context from the invocation, not from the node's context.
+		one := 1
 		nodeCtx := PromoteWithDelta(ctx, &CommonContextDelta{
 			InvocationContextDelta: icDelta,
+			AttemptCount:           &one,
 		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)

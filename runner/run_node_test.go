@@ -2588,8 +2588,8 @@ func TestRunner_NodePath_ResultWrappedAnswerMatchesRequestSchema(t *testing.T) {
 			wantAnswers: map[string][]any{"asker": {"approved"}},
 		},
 		{
-			// The answer goes to the LlmAgent, which calls the model again
-			// without re-running the tool.
+			// The tool's node asks for input, so the tool pauses on turn 1;
+			// on turn 2 the tool runs again and its node receives the answer.
 			name: "llm_agent_root_tool_runs_node",
 			newRunner: func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner {
 				type noArgs struct{}
@@ -2615,7 +2615,8 @@ func TestRunner_NodePath_ResultWrappedAnswerMatchesRequestSchema(t *testing.T) {
 				}
 				return newNodeTestRunner(t, a, svc)
 			},
-			wantTexts: []string{"finished"},
+			wantAnswers: map[string][]any{"asker": {"approved"}},
+			wantTexts:   []string{"finished"},
 		},
 	}
 	for _, tc := range tests {

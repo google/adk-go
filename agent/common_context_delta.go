@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/adkcontext"
+	"google.golang.org/adk/v2/session"
 )
 
 // CommonContextDelta holds all the changes which should be applied to a new child context based on agent.Context.
@@ -36,6 +37,31 @@ type CommonContextDelta struct {
 	RunID                  *string
 	SubScheduler           *DynamicSubScheduler
 	OutputForAncestors     *[]string
+
+	// StateValidator, when non-nil, replaces the validator the new context checks
+	// State().Set writes with; a pointer to a nil StateValidator removes it. Contexts
+	// derived from the new context inherit it.
+	StateValidator *StateValidator
+	// EventActions, when non-nil, replaces the pending event actions of the new
+	// context. The caller gives each activation its own value and owns what is
+	// moved out of it.
+	//
+	// WithDelta installs this pointer, not a copy, after creating its nil
+	// StateDelta and ArtifactDelta maps in place, so the new context, every
+	// context derived from it and the caller share one value. Two activations
+	// must not share one: the maps are not safe for concurrent writes.
+	EventActions *session.EventActions
+	// AttemptCount, when non-nil, points to the attempt number the new context
+	// and every context derived from it report through [AttemptCount]; nil
+	// keeps the number of the context WithDelta is called on. The value is
+	// copied, so a later change to *AttemptCount does not reach the new
+	// context. A value below 1 is not rejected: AttemptCount reports
+	// max(*AttemptCount, 1).
+	//
+	// [ContextMock.WithDelta] ignores the delta, so a mock always reports 1. A
+	// test builds the context of a node attempt with
+	// NewContext(ic).WithDelta(&CommonContextDelta{AttemptCount: &n}) instead.
+	AttemptCount *int
 }
 
 // InvocationContextDelta holds all the changes which should be applied to a new child context based on agent.InvocationContext
@@ -75,6 +101,15 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	}
 	if d.OutputForAncestors != nil {
 		res.outputForAncestors = *d.OutputForAncestors
+	}
+	if d.StateValidator != nil {
+		res.stateValidator = *d.StateValidator
+	}
+	if d.EventActions != nil {
+		res.actions = prepareEventActions(d.EventActions)
+	}
+	if d.AttemptCount != nil {
+		res.attempt = *d.AttemptCount
 	}
 
 	return &res

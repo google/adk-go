@@ -20,7 +20,6 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
-	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
@@ -36,9 +35,18 @@ type ParallelWorker struct {
 
 // NewParallelWorker creates a new ParallelWorker node.
 // maxConcurrency <= 0 means no limit on concurrency.
+// The wrapped node's NodeConfig.Timeout bounds each attempt of each item:
+// an attempt that exceeds it fails with a *NodeTimeoutError naming the
+// wrapped node, which cfg.RetryConfig may retry with a fresh Timeout.
+// cfg.Timeout bounds the whole worker.
 func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeConfig) (*ParallelWorker, error) {
 	if wrapped.Config().RetryConfig != nil {
 		return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s cannot have RetryConfig", name, wrapped.Name())
+	}
+	if s := wrapped.Config().StateSchema; s != nil {
+		if _, err := newStateValidator(s); err != nil {
+			return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s: %w", name, wrapped.Name(), err)
+		}
 	}
 	retryCfg := cfg.RetryConfig
 	cfg.RetryConfig = nil // Hide from scheduler, so it does not try to retry the node itself.
@@ -78,7 +86,14 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
 //
-// Intermediate non-output events emitted by the wrapped node are suppressed.
+// Intermediate non-output events emitted by the wrapped node are suppressed,
+// but their state and artifact deltas are carried. Each item attempt checks its
+// state writes and the state deltas of its events against the workflow's state
+// schema, as a node does; a refused write fails the item like any other error.
+// The deltas of every item are merged in item order, so a later item wins a key
+// that two items wrote. On success they ride on the aggregated output event. On
+// failure they go out on one event that carries only them, before the error,
+// unless ctx is done.
 func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		cancelCtx, cancelFunc := ctx.WithAgentCancel()
@@ -168,7 +183,9 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			close(resCh)
 		}()
 
+		deltas := make([]*session.EventActions, nItems)
 		for res := range resCh {
+			deltas[res.index] = res.delta
 			if res.ev != nil {
 				if out, ok := extractOutput(res.ev); ok {
 					outputs[res.index] = out
@@ -183,9 +200,28 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		if firstErr == nil && ctx.Err() != nil {
 			firstErr = ctx.Err()
 		}
+		itemWrites := &session.EventActions{}
+		for _, d := range deltas {
+			mergeDelta(itemWrites, d)
+		}
 		if firstErr != nil {
+			// The item writes outlive the worker's failure, whatever its
+			// cause. They stay out of the worker's own pending writes, which
+			// a failure caused by a dynamic child discards, and the event
+			// that carries them is registered as checked.
+			if ctx.Err() == nil && (len(itemWrites.StateDelta) > 0 || len(itemWrites.ArtifactDelta) > 0) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				mergeDelta(&ev.Actions, itemWrites)
+				forwardedFrom(ctx).mark(ev)
+				if !yield(ev, nil) {
+					return
+				}
+			}
 			yield(nil, firstErr)
 			return
+		}
+		if actions := ctx.Actions(); actions != nil {
+			mergeDelta(actions, itemWrites)
 		}
 
 		// Yield the aggregated output
@@ -199,6 +235,9 @@ type workerResult struct {
 	index int
 	ev    *session.Event
 	err   error
+	// delta holds the state and artifact deltas of every attempt of the
+	// item, a later attempt winning a key two attempts wrote.
+	delta *session.EventActions
 }
 
 func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem chan struct{}, resCh chan<- workerResult, wg *sync.WaitGroup, reportFailure func(error)) {
@@ -211,13 +250,19 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 
 	retryCfg := n.retryCfg
 	failedAttempts := 0
+	itemDelta := &session.EventActions{}
 
 	for {
-		workerOutputs, runErr := n.runWrappedOnce(ctx, item)
+		// The retry delay and the cancellation checks below stay on the
+		// item's context; only the attempt's run sees its number.
+		attempt := failedAttempts + 1
+		attemptCtx := ctx.WithDelta(&agent.CommonContextDelta{AttemptCount: &attempt})
+		workerOutputs, attemptDelta, runErr := n.runWrappedOnce(attemptCtx, item)
+		mergeDelta(itemDelta, attemptDelta)
 
 		if runErr == nil {
 			// On success populate the output event.
-			resCh <- workerResult{index: idx, ev: makeWorkerOutputEvent(workerOutputs)}
+			resCh <- workerResult{index: idx, ev: makeWorkerOutputEvent(workerOutputs), delta: itemDelta}
 			return
 		}
 
@@ -225,15 +270,8 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 		// If so, follow the retry logic and repeat the execution of the wrapped node on failed input.
 		failedAttempts++
 		if ShouldRetry(retryCfg, runErr, failedAttempts) {
-			delay := CalculateDelay(retryCfg, failedAttempts)
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-			}
-			// A two-case select picks at random when the delay has elapsed and ctx
-			// is done, so decide on ctx itself: a canceled item must not start the
-			// wrapped node again.
-			if err := ctx.Err(); err != nil {
+			// A canceled item must not start the wrapped node again.
+			if err := waitRetryDelay(ctx, CalculateDelay(retryCfg, failedAttempts)); err != nil {
 				// Cancellation while parked in the retry delay is a real
 				// failure too: report it before releasing sem, exactly
 				// like the exhausted-attempts path below. Without this,
@@ -242,7 +280,7 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 				// silently dropped and the whole run yields success with
 				// a nil output for this item.
 				reportFailure(err)
-				resCh <- workerResult{index: idx, err: err}
+				resCh <- workerResult{index: idx, err: err, delta: itemDelta}
 				return
 			}
 			continue
@@ -250,7 +288,7 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 
 		// Cannot retry or exhausted attempts: report before releasing sem.
 		reportFailure(runErr)
-		resCh <- workerResult{index: idx, err: runErr}
+		resCh <- workerResult{index: idx, err: runErr, delta: itemDelta}
 		return
 	}
 }
@@ -259,17 +297,37 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 // invoke_node span, so each item and each retry attempt is a distinct
 // span. Kept a separate function so the deferred span.end() fires per
 // attempt instead of piling up across runWorker's retry loop.
-func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []any, err error) {
+//
+// Each attempt is an activation of its own, with its own pending writes.
+// delta collects the state and artifact deltas of the attempt's events and
+// the writes the attempt has not put on an event; a canceled attempt keeps
+// only the deltas of its events.
+func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []any, delta *session.EventActions, err error) {
+	ctx, cancel, timeout := withNodeTimeout(ctx, n.wrapped)
+	defer cancel()
+	own, ownErr := nodeStateValidator(ctx, n.wrapped)
+	if ownErr != nil {
+		return nil, nil, ownErr
+	}
+	ctx, writes := beginActivation(ctx, n.wrapped, own)
 	span, ctx := startNodeSpan(ctx, n.wrapped)
 	defer func() {
+		err = timeout.attribute(ctx, err)
 		span.recordError(err, nil)
 		span.end()
 	}()
 
+	delta = &session.EventActions{}
 	for ev, runErr := range n.wrapped.Run(ctx, item) {
 		if runErr != nil {
 			err = runErr
 			break
+		}
+		if err = writes.admit(ev); err != nil {
+			break
+		}
+		if ev != nil {
+			mergeDelta(delta, &ev.Actions)
 		}
 		if out, ok := extractOutput(ev); ok {
 			outputs = append(outputs, out)
@@ -281,7 +339,14 @@ func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []
 			break
 		}
 	}
-	return outputs, err
+	cause := err
+	if cause == nil {
+		cause = ctx.Err()
+	}
+	if flushesPending(cause) {
+		writes.drainInto(delta)
+	}
+	return outputs, delta, err
 }
 
 func makeWorkerOutputEvent(outputs []any) *session.Event {

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -35,12 +36,36 @@ import (
 
 // Config is the configuration for creating a new Workflow agent.
 type Config struct {
-	Name                 string
-	Description          string
-	SubAgents            []agent.Agent
+	// Name is the agent's name, unique within the agent tree, and the name
+	// of its workflow: the first segment of its nodes' paths.
+	Name string
+	// Description is the agent's description, as in agent.Config.
+	Description string
+	// SubAgents are the agent's sub-agents in the agent tree, as in
+	// agent.Config. Listing an agent here does not put it in the graph:
+	// only Edges does. On a resumed turn the runner may run a listed agent
+	// on its own; see New.
+	SubAgents []agent.Agent
+	// BeforeAgentCallbacks are called before the workflow starts, as in
+	// agent.Config; see agent.BeforeAgentCallback for how their return
+	// values affect the run.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	AfterAgentCallbacks  []agent.AfterAgentCallback
-	Edges                []workflow.Edge
+	// AfterAgentCallbacks are called after the workflow ends, as in
+	// agent.Config; see agent.AfterAgentCallback.
+	AfterAgentCallbacks []agent.AfterAgentCallback
+	// Edges is the workflow's graph, validated by workflow.New.
+	Edges []workflow.Edge
+
+	// InputSchema, when non-nil, validates the workflow's input. See workflow.WithInputSchema.
+	InputSchema *jsonschema.Resolved
+	// OutputSchema, when non-nil, validates the workflow's terminal output. See workflow.WithOutputSchema.
+	OutputSchema *jsonschema.Resolved
+	// StateSchema, when non-nil, checks the state writes of the workflow's nodes, on every turn
+	// including a resumed one. See workflow.WithStateSchema.
+	StateSchema *jsonschema.Resolved
+	// MaxConcurrency, when positive, caps the graph-scheduled nodes of the workflow that run at once;
+	// zero or negative means no cap. See workflow.WithMaxConcurrency.
+	MaxConcurrency int
 }
 
 // New creates a new Workflow agent. A single returned agent
@@ -50,6 +75,31 @@ type Config struct {
 // workflow resumes on a follow-up turn when the user submits a
 // FunctionResponse targeting the InterruptID emitted by the
 // paused node.
+//
+// cfg.InputSchema and cfg.OutputSchema are passed to the workflow as
+// [workflow.WithInputSchema] and [workflow.WithOutputSchema]: a run whose
+// input fails the input schema yields an error wrapping
+// [workflow.ErrInputValidation] before any node runs, and a run whose
+// terminal output fails the output schema ends with an error wrapping
+// [workflow.ErrNodeFailed].
+//
+// cfg.StateSchema and cfg.MaxConcurrency are passed to the workflow as
+// [workflow.WithStateSchema] and [workflow.WithMaxConcurrency], and hold on
+// every turn of a resumed run. A write the state schema refuses fails its node
+// with a [*workflow.StateSchemaError] and is not stored. The cap counts the
+// workflow's own graph-scheduled nodes; when the agent runs as a
+// [workflow.AgentNode], the enclosing workflow counts it as one node, and its
+// own state schema replaces the enclosing workflow's for its nodes (without
+// one they are checked against the enclosing workflow's). New returns
+// [workflow.New]'s errors for them unwrapped: a [*workflow.StateSchemaError]
+// for a state-bound FunctionNode parameter the schema does not declare, and an
+// error matching [workflow.ErrStateSchemaUnusable] for a schema that cannot be
+// checked at run time.
+//
+// cfg.Edges is passed to [workflow.New], which validates it: edges that do
+// not describe a valid graph return an error that matches
+// [workflow.ErrGraphValidation]. Empty cfg.Edges give an agent whose
+// workflow runs no node and yields no event of its own.
 //
 // In a resumable run (runner.Config.Resumable) the agent yields one
 // end-of-agent event, authored by itself, after the workflow has finished with
@@ -71,7 +121,11 @@ type Config struct {
 // does not apply, and a resumed turn may, for example, fail, run nodes or
 // sub-agents again, or end before every branch has finished.
 func New(cfg Config) (agent.Agent, error) {
-	w, err := workflow.New(cfg.Name, cfg.Edges)
+	w, err := workflow.New(cfg.Name, cfg.Edges,
+		workflow.WithInputSchema(cfg.InputSchema),
+		workflow.WithOutputSchema(cfg.OutputSchema),
+		workflow.WithStateSchema(cfg.StateSchema),
+		workflow.WithMaxConcurrency(cfg.MaxConcurrency))
 	if err != nil {
 		return nil, err
 	}

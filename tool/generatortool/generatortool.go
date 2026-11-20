@@ -27,13 +27,16 @@
 // [workflow.ErrMultipleOutputs].
 //
 // A generator tool works in non-live runs only. Each call runs as a child
-// workflow node of the calling agent's node when the agent runs on the
-// runner's node path, or in its default or chat mode on a dynamic node's
-// context. Elsewhere (in a workflow's agent node, in an agent run as
-// single_turn, or under a root agent that is not an LLM agent) the call has no
-// node: the handler runs and its result is the function response, and its
-// state and artifact changes go out with the function response, but the
-// events it emits are not shown to the user and it cannot pause for input.
+// workflow node of the calling agent. Its events are shown and it can pause
+// for input when the agent runs on the runner's node path, in a workflow's
+// agent node, in that node run as a dynamic child, or under
+// llmagent.RunLLMAgentAsNode in a workflow node. In a workflow's agent node,
+// in that node run as a dynamic child, and for a single_turn agent under
+// llmagent.RunLLMAgentAsNode, the user's answer does not run the call again.
+// Under a root agent that is neither an LLM agent nor a workflow, the handler
+// runs and its result is the function response, and its state and artifact
+// changes go out with the function response, but the events it emits are not
+// shown to the user and it cannot pause for input.
 //
 // A handler pauses for input by calling [workflow.ResumeOrRequestInput] with
 // its context and emit function and returning that function's error. The run
@@ -110,12 +113,12 @@ type Func[TArgs, TResult any] func(ctx agent.Context, args TArgs, emit func(*ses
 // returns for a bad schema. The result is non-nil exactly when the error is
 // nil.
 //
-// The tool is safe for concurrent use if handler is. A call with no workflow
-// node (see the package doc) runs handler on every call with no resumed
-// input. Its emit keeps of each non-partial event the Output, as the call's
-// output, and the state and artifact deltas, which move onto the function
-// response event; it drops the rest. A request for input it does not send:
-// emit returns an error wrapping workflow.ErrInvalidRunNodeContext.
+// The tool is safe for concurrent use if handler is. Where the call's events
+// are not shown (see the package doc), handler runs on every call with no
+// resumed input. Its emit keeps of each non-partial event the Output, as the
+// call's output, and the state and artifact deltas, which move onto the
+// function response event; it drops the rest. A request for input it does
+// not send: emit returns an error wrapping workflow.ErrInvalidRunNodeContext.
 func New[TArgs, TResult any](cfg functiontool.Config, handler Func[TArgs, TResult]) (tool.Tool, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("generatortool: Config.Name is empty: %w", functiontool.ErrInvalidArgument)

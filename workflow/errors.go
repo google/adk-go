@@ -15,8 +15,10 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -32,9 +34,11 @@ var (
 	// errors.Is(ErrNodeInterrupted) checks still treat it as a pause.
 	ErrNodeWaitingForOutput = fmt.Errorf("%w: waiting for output", ErrNodeInterrupted)
 
-	// ErrInvalidRunNodeContext is returned by RunNode when ctx is not
-	// the context of a currently-executing dynamic node (i.e. it
-	// carries no sub-scheduler).
+	// ErrInvalidRunNodeContext is returned by RunNode when ctx is the
+	// context a workflow node that is not a dynamic node runs under, or
+	// carries neither a session nor a function call, and by the scheduler
+	// RunNode builds for a context without a sub-scheduler when the child
+	// asks for input.
 	ErrInvalidRunNodeContext = errors.New("workflow: RunNode called outside a dynamic node")
 
 	// ErrInvalidRunID rejects a custom run id that would collide
@@ -51,6 +55,12 @@ var (
 	// ErrOutputAlreadyDelegated rejects a second WithUseAsOutput
 	// child in the same parent activation.
 	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output delegate")
+
+	// ErrStateSchemaUnusable is returned, wrapped, for a state schema that ADK cannot check writes against at
+	// run time: one whose references leave its own document (a remote $ref that its author resolved with a
+	// loader). Match it with errors.Is; the wrapped cause is the schema library's text, which names the
+	// reference, and the wrapping adds the node.
+	ErrStateSchemaUnusable = errors.New("workflow: state schema cannot be validated at run time")
 )
 
 // NodeRunError wraps a sentinel with the failing child's identity.
@@ -58,11 +68,25 @@ var (
 type NodeRunError struct {
 	// ChildName is the child's Node.Name(), e.g. "fixer_agent".
 	ChildName string
-	// ChildPath is the composite path, e.g. "code_workflow/fixer_agent@2".
+	// ChildPath is the child's node path: the path of the node that called
+	// RunNode, "/", the child's name, "@" and its run ID, for example
+	// "code_workflow@1/coder@1/fixer_agent@2". Every segment, the
+	// workflow's included, ends in "@" and a run ID. It is empty for a call
+	// refused because the child's input schema refuses the input, the run
+	// ID is invalid (ErrInvalidRunID), or the child's state schema cannot
+	// be checked (ErrStateSchemaUnusable). A second WithUseAsOutput call,
+	// refused with ErrOutputAlreadyDelegated, sets it.
 	ChildPath string
-	// RunID is the per-invocation identifier, auto-counter or
-	// user-supplied via WithRunID.
+	// RunID is the child's run ID, counted per child name or given with
+	// WithRunID. It is empty for every call refused before the child
+	// started, including a second WithUseAsOutput call.
 	RunID string
+	// Cause is why the child did not return an output. For a child that
+	// failed it wraps ErrNodeFailed and the child's own error; for a call
+	// refused before the child started it is an error such as one that
+	// wraps ErrInputValidation, ErrInvalidRunID or ErrOutputAlreadyDelegated;
+	// for a child that paused it is a pause sentinel such as
+	// ErrNodeInterrupted. The workflow always sets it.
 	Cause error
 }
 
@@ -81,9 +105,79 @@ func (e *NodeRunError) Error() string {
 	return fmt.Sprintf("workflow: dynamic child %s: %v", path, e.Cause)
 }
 
+// Unwrap returns Cause, so errors.Is and errors.As look through a
+// NodeRunError to the sentinel and the child's own error. It returns nil for
+// a nil e.
 func (e *NodeRunError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
 	return e.Cause
+}
+
+// NodeTimeoutError reports that a node with NodeConfig.Timeout set ran past
+// that timeout. The workflow ends the node's attempt and reports this error as
+// the attempt's failure: RetryConfig sees it, and once the retries are spent it
+// is the run's error. Find it with errors.As, also through wrapping errors.
+//
+// The error names the node whose own timeout elapsed. When a node with a
+// timeout sits inside another node with a timeout (a nested workflow, or an
+// AgentNode over a workflow agent), the error names the inner node when its
+// timeout elapses and it returns before the enclosing node's deadline passes;
+// when the enclosing deadline has passed by the time the inner node returns,
+// for example because the inner node takes long to stop, the error names the
+// enclosing node. A deadline set by an enclosing node or by the caller of the
+// workflow is not the inner node's timeout, and fails it with
+// context.DeadlineExceeded. A node that runs its own code (not a
+// nested workflow, a ParallelWorker or an AgentNode over a workflow agent)
+// and returns an error matching context.DeadlineExceeded before its own
+// timeout elapses also fails with a NodeTimeoutError, because the timeout it
+// reports is taken to be its own.
+//
+// A node that ignores its context runs on past its timeout. Every event it
+// yields after the timeout elapsed, its output included, is dropped: it never
+// reaches the caller or the node's successors, the node's yield returns
+// false, and the attempt fails with this error when the node returns. State
+// writes the attempt made are still sent. A node whose output must count has
+// to return before its timeout.
+//
+// errors.Is(err, context.DeadlineExceeded) is true for every NodeTimeoutError,
+// so code that checks for a deadline keeps working. Unwrap returns the error
+// that signaled the timeout.
+//
+// The Error text is
+//
+//	node "slow" timed out after 0.05 seconds
+//
+// with the node's name quoted as by %q and the timeout in seconds as by %g.
+// A NodeTimeoutError is immutable once built and safe for concurrent use.
+type NodeTimeoutError struct {
+	// NodeName is the Name of the node whose timeout elapsed.
+	NodeName string
+	// Timeout is that node's NodeConfig.Timeout.
+	Timeout time.Duration
+
+	cause error // the body's timeout error; nil when the node's own deadline passed
+}
+
+// Error formats as: node "SlowNode" timed out after 0.1 seconds. A nil
+// receiver formats as "<nil>".
+func (e *NodeTimeoutError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("node %q timed out after %g seconds", e.NodeName, e.Timeout.Seconds())
+}
+
+// Unwrap returns the error that signaled the timeout: context.DeadlineExceeded
+// when the node's own deadline passed, or the error the node's body returned
+// when it reported a timeout of its own. It returns nil for a nil receiver.
+func (e *NodeTimeoutError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	if e.cause == nil {
+		return context.DeadlineExceeded
+	}
+	return e.cause
 }

@@ -194,6 +194,13 @@ type Context interface {
 	// The returned State, like the call's context, belongs to one call at a
 	// time: Set writes the call's state delta, a plain map, so a call must not
 	// use it from several goroutines at once.
+	//
+	// On the context of a workflow node, Set checks each write against the
+	// workflow's state schema (workflow.WithStateSchema) before it writes
+	// anything, and returns the schema's error when the write is refused. The
+	// refused write is not made, so the node must not ignore the error. The
+	// same rule applies there: one node context's Set is not safe for use from
+	// several goroutines at once.
 	State() session.State
 
 	// Tool context section
@@ -205,6 +212,12 @@ type Context interface {
 	// Actions returns the EventActions for the current event. This can be
 	// used by the tool to modify the agent's state, transfer to another
 	// agent, or perform other actions.
+	//
+	// On the context of a workflow node, Actions returns the pending actions
+	// of the node's activation. ADK puts only their StateDelta and
+	// ArtifactDelta on the node's next event; SkipSummarization, Escalate,
+	// TransferToAgent, RequestedAuthConfigs, RenderUIWidgets and Compaction
+	// are not used in a node.
 	Actions() *session.EventActions
 
 	// SearchMemory performs a semantic search on the agent's memory.
@@ -254,12 +267,14 @@ type Context interface {
 
 	// Path returns the composite path of the currently-executing node.
 	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"
-	// for dynamic children.
+	// for dynamic children. [AttemptCount] reports which attempt of the node
+	// this is.
 	Path() string
 
 	// RunID returns the per-invocation identifier. Empty for top-level
 	// static nodes; auto-counter or user-supplied via WithRunID for
-	// dynamic children.
+	// dynamic children. [AttemptCount] reports which attempt of the run
+	// this is.
 	RunID() string
 
 	// SubScheduler is non-nil only when this context belongs to a
@@ -300,6 +315,49 @@ func AddSessionToMemory(ctx Context) error {
 		return errNoMemoryForSession
 	}
 	return m.AddSessionToMemory(ctx, invocationSession(ctx))
+}
+
+// AttemptCount returns the 1-based number of the attempt that ctx belongs to.
+// A workflow node reads it to tell its first run from a retry that its
+// RetryConfig granted.
+//
+// The result is at least 1. A node's first run of an activation reads 1, and
+// each retry adds one, so a node that succeeds on its third run reads 1, 2 and
+// 3. A new activation of the same node, such as a loop back to it or a second
+// trigger, starts again at 1. The count is not persisted, as in adk-python: a
+// node re-entered by Workflow.Resume starts at 1 when the RunState comes from
+// Workflow.ReconstructRunState as returned, and when it is built by hand or
+// unmarshaled from JSON. It reads NodeState.Attempt + 1 only when a caller sets
+// Attempt > 0 on a state that ReconstructRunState returned over history
+// carrying run ids.
+//
+// A parallel worker's item reads that item's own attempt. A dynamic child run
+// with RunNode reads the number of its attempt within that call: 1 on the
+// first, and 1 again when a retry of its parent, a resume or a new call runs
+// it. A tool
+// run by a ToolNode reads the number of the node attempt that runs it, and so
+// does every context derived from that tool context (WithDelta, WithICDelta,
+// WithAgentCancel, WithAgentTimeout). Every context inside an agent's run
+// reads 1, whatever node runs the agent: the agent's own context, its callback
+// contexts and the tool contexts of the tools its model calls.
+//
+// Every other context reads 1: a nil ctx, a callback context, a context from
+// [NewContext], [ContextMock], [StrictContextMock], and a Context implemented
+// outside this module, including one that embeds a node's Context.
+//
+// AttemptCount never panics and is safe for concurrent use: a context's number
+// is fixed when the context is built.
+func AttemptCount(ctx Context) int {
+	if c, ok := ctx.(attemptCounter); ok {
+		return max(c.attemptCount(), 1)
+	}
+	return 1
+}
+
+// attemptCounter is implemented by the contexts of this package that carry a
+// node attempt's number.
+type attemptCounter interface {
+	attemptCount() int
 }
 
 // invocationSession returns the session of ctx's invocation. A tool context
