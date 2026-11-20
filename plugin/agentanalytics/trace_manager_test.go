@@ -22092,7 +22092,8 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAge
 						// fails; the retry waits for that call (see x).
 						go func() {
 							defer close(firstDone)
-							for range helper.Run(ctx) {
+							for _, err := range helper.Run(ctx) {
+								_ = err
 							}
 						}()
 						if !yield(answer(), nil) {
