@@ -430,72 +430,50 @@ func TestAgentTool_Run_FiltersThoughtParts(t *testing.T) {
 	}
 }
 
-func TestAgentTool_Run_AllThoughtPartsReturnsEmpty(t *testing.T) {
-	testLLM := &testutil.MockModel{
-		Responses: []*genai.Content{
-			{
-				Parts: []*genai.Part{
-					{Text: "Just thinking...", Thought: true},
-				},
-				Role: genai.RoleModel,
-			},
-		},
-		StreamResponsesCount: 1,
-	}
-
-	agent := createAgentWithModel(t, nil, nil, testLLM)
-	agentTool := agenttool.New(agent, nil)
-	toolCtx := createToolContext(t, agent)
-	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("agentTool does not implement FunctionTool")
-	}
-
-	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "think only"})
-	if err != nil {
-		t.Fatalf("Run() failed unexpectedly: %v", err)
-	}
-	want := map[string]any{"result": ""}
-	if diff := cmp.Diff(want, result); diff != "" {
-		t.Errorf("Run() result diff (-want +got):\n%s", diff)
-	}
-}
-
-// A reply without text is an empty result even when the agent has an output
-// schema, where adk-python validates the empty text and raises.
-func TestAgentTool_Run_AllThoughtPartsReturnsEmpty_WithOutputSchema(t *testing.T) {
+// A sub-agent turn that finishes with STOP holding only thought parts is an
+// error event with code MODEL_RETURNED_NO_CONTENT, and AgentTool reports a
+// sub-agent's error event as an error, with or without an output schema.
+// adk-python's AgentTool returns the event's error message as the tool result
+// instead (tools/agent_tool.py).
+func TestAgentTool_Run_AllThoughtPartsStopTurnIsAnError(t *testing.T) {
 	outputSchema := &genai.Schema{
 		Type:       "OBJECT",
 		Properties: map[string]*genai.Schema{"is_valid": {Type: "BOOLEAN"}},
 		Required:   []string{"is_valid"},
 	}
-	testLLM := &testutil.MockModel{
-		Responses: []*genai.Content{
-			{
-				Parts: []*genai.Part{
-					{Text: "Just thinking...", Thought: true},
+	for _, tc := range []struct {
+		name         string
+		outputSchema *genai.Schema
+	}{
+		{name: "no_output_schema"},
+		{name: "output_schema", outputSchema: outputSchema},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testLLM := &testutil.MockModel{
+				Responses: []*genai.Content{
+					{
+						Parts: []*genai.Part{
+							{Text: "Just thinking...", Thought: true},
+						},
+						Role: genai.RoleModel,
+					},
 				},
-				Role: genai.RoleModel,
-			},
-		},
-		StreamResponsesCount: 1,
-	}
+				StreamResponsesCount: 1,
+			}
 
-	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
-	agentTool := agenttool.New(agent, nil)
-	toolCtx := createToolContext(t, agent)
-	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("agentTool does not implement FunctionTool")
-	}
+			agent := createAgentWithModel(t, nil, tc.outputSchema, testLLM)
+			agentTool := agenttool.New(agent, nil)
+			toolCtx := createToolContext(t, agent)
+			toolImpl, ok := agentTool.(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
 
-	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "think only"})
-	if err != nil {
-		t.Fatalf("Run() failed unexpectedly: %v", err)
-	}
-	want := map[string]any{"result": ""}
-	if diff := cmp.Diff(want, result); diff != "" {
-		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			result, err := toolImpl.Run(toolCtx, map[string]any{"request": "think only"})
+			if err == nil || !strings.Contains(err.Error(), `code: "MODEL_RETURNED_NO_CONTENT"`) {
+				t.Fatalf("Run() = %v, %v; want an error with code MODEL_RETURNED_NO_CONTENT", result, err)
+			}
+		})
 	}
 }
 

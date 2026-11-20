@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -148,9 +149,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 			if lastEvent.IsFinalResponse() {
 				// A thought-only ("thinking") turn reports as final but has no
-				// answer; don't stop on it — call the model again. Give up once
-				// the model has produced only thoughts too many times in a row,
-				// leaving the last thinking event as the result.
+				// answer; don't stop on it — call the model again. A
+				// thought-only turn that finished with STOP is not one of these:
+				// applyEmptyResponsePolicy gave it an error code, and it ends
+				// the run. Give up once the model has produced only thoughts too
+				// many times in a row, leaving the last thinking event as the
+				// result.
 				if !isThoughtOnlyTurn(lastEvent) {
 					return
 				}
@@ -180,9 +184,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 // isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
 // whose parts are all model "thinking" (Thought) parts — no surfaced answer.
 // Thought signatures ride on substantive parts (text, function calls), which
-// are not Thought, so any such part makes the turn non-thought-only.
+// are not Thought, so any such part makes the turn non-thought-only. A turn
+// with an error code is never thought-only: it is a final response, as in
+// adk-python (Event.is_final_response), whatever its parts are. This is what
+// ends the run on a thought-only STOP turn that applyEmptyResponsePolicy marked.
 func isThoughtOnlyTurn(ev *session.Event) bool {
-	if ev == nil || ev.LLMResponse.Partial {
+	if ev == nil || ev.LLMResponse.Partial || ev.LLMResponse.ErrorCode != "" {
 		return false
 	}
 	content := ev.LLMResponse.Content
@@ -195,6 +202,93 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 		}
 	}
 	return true
+}
+
+// isPythonWhitespace reports whether r is whitespace for Python's str.strip,
+// which also strips the file, group, record and unit separators U+001C to
+// U+001F that unicode.IsSpace does not report.
+func isPythonWhitespace(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// hasMeaningfulContent reports whether resp holds a part a caller can act on:
+// a function call or response, executable code or its result, inline or file
+// data, or text that is not a thought and not only whitespace. It follows
+// adk-python's has_meaningful_content (flows/llm_flows/core/_finalizer.py).
+func hasMeaningfulContent(resp *model.LLMResponse) bool {
+	if !hasParts(resp) {
+		return false
+	}
+	for _, p := range resp.Content.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionCall != nil || p.FunctionResponse != nil || p.ExecutableCode != nil ||
+			p.CodeExecutionResult != nil || p.InlineData != nil || p.FileData != nil {
+			return true
+		}
+		if !p.Thought && strings.TrimFunc(p.Text, isPythonWhitespace) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParts reports whether resp has content with at least one part.
+func hasParts(resp *model.LLMResponse) bool {
+	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
+}
+
+// streamingMode returns the streaming mode of the invocation.
+func streamingMode(ctx agent.InvocationContext) agent.StreamingMode {
+	if rc := ctx.RunConfig(); rc != nil {
+		return rc.StreamingMode
+	}
+	return agent.StreamingModeNone
+}
+
+// Error code and messages applyEmptyResponsePolicy sets, as in adk-python
+// (flows/llm_flows/core/_model_call.py).
+const (
+	noContentErrorCode              = "MODEL_RETURNED_NO_CONTENT"
+	noContentErrorMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	noMeaningfulContentErrorMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// applyEmptyResponsePolicy marks a completed response that finished with STOP
+// but holds no meaningful content (no parts, only thought parts, or only
+// whitespace text) as an error, so that the turn ends with an error event the
+// caller can act on instead of a silent empty answer. It sets resp.ErrorCode
+// to MODEL_RETURNED_NO_CONTENT and, unless resp already has an error message,
+// a message that says whether the response had no parts or only thought or
+// whitespace parts. It follows adk-python's apply_empty_response_policy
+// (flows/llm_flows/core/_model_call.py).
+//
+// It leaves resp unchanged when resp is partial, already has an error code, or
+// finished for another reason. Under SSE streaming it also leaves a response
+// without parts unchanged: the streaming aggregator ends a turn with a
+// finish-only chunk, which adk-python does not mark either.
+//
+// It must run after the after-model callbacks and before the response
+// processors: emptiness is a property of what the model returned, and a
+// processor may clear the content on purpose, as the code execution processor
+// does.
+func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMResponse) {
+	if resp == nil || resp.Partial || resp.ErrorCode != "" || resp.FinishReason != genai.FinishReasonStop || hasMeaningfulContent(resp) {
+		return
+	}
+	withParts := hasParts(resp)
+	if !withParts && streamingMode(ctx) == agent.StreamingModeSSE {
+		return
+	}
+	resp.ErrorCode = noContentErrorCode
+	if resp.ErrorMessage != "" {
+		return
+	}
+	resp.ErrorMessage = noContentErrorMessage
+	if withParts {
+		resp.ErrorMessage = noMeaningfulContentErrorMessage
+	}
 }
 
 type activeTask struct {
@@ -934,6 +1028,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
 			if err := f.postprocess(ctx, req, resp); err != nil {
 				yield(nil, err)
 				return

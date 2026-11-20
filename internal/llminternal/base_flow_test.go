@@ -1169,6 +1169,10 @@ func TestIsThoughtOnlyTurn(t *testing.T) {
 		{"thought_then_signed_call", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}, ThoughtSignature: []byte("sig")}), false},
 		{"thought_plus_signature_only_part", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{ThoughtSignature: []byte("sig")}), false},
 		{"partial_thought", event(true, &genai.Part{Thought: true, Text: "t"}), false},
+		{"thought_with_error_code", &session.Event{LLMResponse: model.LLMResponse{
+			Content:   &genai.Content{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "t"}}},
+			ErrorCode: "MODEL_RETURNED_NO_CONTENT",
+		}}, false},
 		{"empty_content", event(false), false},
 		{"nil_event", nil, false},
 	}
@@ -1835,5 +1839,284 @@ func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
 				t.Errorf("drew %d ids from the provider, want %d", draws, tc.wantDraws)
 			}
 		})
+	}
+}
+
+const (
+	wantNoContentMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	wantNoActionableContentMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// runScriptedFlow runs f.Run with a model that answers its i-th call with
+// turns[i], and fails the test if the model is called more often than turns
+// allows. It returns the yielded events and the number of model calls.
+func runScriptedFlow(t *testing.T, f *Flow, runConfig *agent.RunConfig, turns ...*model.LLMResponse) ([]*session.Event, int) {
+	t.Helper()
+	calls := 0
+	f.Model = &mockModelForTest{
+		name: "scripted",
+		generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				calls++
+				if calls > len(turns) {
+					t.Fatalf("model called %d times, want at most %d", calls, len(turns))
+				}
+				yield(turns[calls-1], nil)
+			}
+		},
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+			RunConfig:    runConfig,
+		},
+	)
+	var events []*session.Event
+	for ev, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events = append(events, ev)
+	}
+	return events, calls
+}
+
+func stopTurn(parts ...*genai.Part) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:      &genai.Content{Role: genai.RoleModel, Parts: parts},
+		FinishReason: genai.FinishReasonStop,
+	}
+}
+
+type eventError struct{ Code, Message string }
+
+func errorsOf(events []*session.Event) []eventError {
+	var got []eventError
+	for _, ev := range events {
+		got = append(got, eventError{ev.ErrorCode, ev.ErrorMessage})
+	}
+	return got
+}
+
+// TestHasMeaningfulContent follows adk-python's has_meaningful_content tests
+// (flows/llm_flows/core/test_finalizer.py), among them
+// test_has_meaningful_content_thought_only and
+// test_has_meaningful_content_multiple_thoughts_only.
+func TestHasMeaningfulContent(t *testing.T) {
+	content := func(parts ...*genai.Part) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
+	}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want bool
+	}{
+		{"nil_response", nil, false},
+		{"nil_content", &model.LLMResponse{}, false},
+		{"empty_parts", content(), false},
+		{"thought_only", content(&genai.Part{Text: "thinking", Thought: true}), false},
+		{"multiple_thoughts_only", content(&genai.Part{Text: "step 1", Thought: true}, &genai.Part{Text: "step 2", Thought: true}), false},
+		{"whitespace_only", content(&genai.Part{Text: " \n\t "}), false},
+		{"thought_and_whitespace", content(&genai.Part{Text: "thinking", Thought: true}, &genai.Part{Text: "  "}), false},
+		{"text", content(&genai.Part{Text: "answer"}), true},
+		{"thought_and_text", content(&genai.Part{Text: "thinking", Thought: true}, &genai.Part{Text: "answer"}), true},
+		{"function_call", content(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}), true},
+		{"function_response", content(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}), true},
+		{"executable_code", content(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "x"}}), true},
+		{"code_execution_result", content(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}}), true},
+		{"inline_data", content(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}}), true},
+		{"file_data", content(&genai.Part{FileData: &genai.FileData{FileURI: "gs://b/o"}}), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasMeaningfulContent(tc.resp); got != tc.want {
+				t.Errorf("hasMeaningfulContent() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEmptyResponsePolicy_MeaningfulContentParts(t *testing.T) {
+	t.Run("function_response_is_meaningful", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, nil,
+			stopTurn(&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "tool", Response: map[string]any{"ok": true}}}),
+			stopTurn(&genai.Part{Text: "done"}),
+		)
+		want := []eventError{{}, {}}
+		if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("nil_part_element_not_meaningful", func(t *testing.T) {
+		events, calls := runScriptedFlow(t, &Flow{}, nil, stopTurn(nil))
+		if calls != 1 {
+			t.Errorf("model called %d times, want 1", calls)
+		}
+		want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+		if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun follows adk-python's
+// test_apply_empty_response_policy_marks_thought_only_stop[StreamingMode.NONE]
+// (flows/llm_flows/core/test_model_call.py): a completed STOP turn that holds
+// only thoughts becomes an error event, and the model is not called again.
+func TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun(t *testing.T) {
+	events, calls := runScriptedFlow(t, &Flow{}, nil,
+		stopTurn(&genai.Part{Text: "thinking...", Thought: true}),
+		stopTurn(&genai.Part{Text: "answer"}),
+	)
+	if calls != 1 {
+		t.Errorf("model called %d times, want 1", calls)
+	}
+	want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+	if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE follows adk-python's
+// test_thought_only_stop_in_sse_streaming_surfaces_error_event
+// (flows/llm_flows/test_base_llm_flow.py): under SSE, the partial thought
+// chunk carries no error, and the aggregated thought-only STOP response
+// becomes the one error event.
+func TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE(t *testing.T) {
+	thought := func() *genai.Content {
+		return &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Thinking step 1...", Thought: true}}}
+	}
+	calls := 0
+	f := &Flow{Model: &mockModelForTest{
+		name: "thought-stream",
+		generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				calls++
+				if !yield(&model.LLMResponse{Content: thought(), Partial: true}, nil) {
+					return
+				}
+				yield(&model.LLMResponse{Content: thought(), FinishReason: genai.FinishReasonStop}, nil)
+			}
+		},
+	}}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{StreamingMode: runconfig.StreamingModeSSE}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+			RunConfig:    &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		},
+	)
+	type eventSummary struct {
+		Partial bool
+		Err     eventError
+	}
+	var got []eventSummary
+	for ev, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		got = append(got, eventSummary{Partial: ev.Partial, Err: eventError{ev.ErrorCode, ev.ErrorMessage}})
+		if len(got) > 4 {
+			break
+		}
+	}
+	want := []eventSummary{
+		{Partial: true},
+		{Partial: false, Err: eventError{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if calls != 1 {
+		t.Errorf("model called %d times, want 1", calls)
+	}
+}
+
+// TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators pins Python's
+// str.strip whitespace, which also strips U+001C to U+001F; unicode.IsSpace
+// does not.
+func TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators(t *testing.T) {
+	events, _ := runScriptedFlow(t, &Flow{}, nil, stopTurn(&genai.Part{Text: "\x1c\x1d\x1e\x1f"}))
+	want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+	if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEmptyResponsePolicy_PreservesPreExistingErrorAndSkipsNonStopOrPartial(t *testing.T) {
+	emptyText := func() *genai.Content { return genai.NewContentFromText("", genai.RoleModel) }
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want eventError
+	}{
+		{
+			name: "preexisting_message_kept",
+			resp: &model.LLMResponse{Content: emptyText(), ErrorMessage: "upstream detail", FinishReason: genai.FinishReasonStop},
+			want: eventError{"MODEL_RETURNED_NO_CONTENT", "upstream detail"},
+		},
+		{
+			name: "existing_error_code_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), ErrorCode: "SAFETY", ErrorMessage: "blocked", FinishReason: genai.FinishReasonStop},
+			want: eventError{"SAFETY", "blocked"},
+		},
+		{
+			name: "non_stop_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), FinishReason: genai.FinishReasonMaxTokens},
+			want: eventError{},
+		},
+		{
+			name: "partial_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), Partial: true, FinishReason: genai.FinishReasonStop},
+			want: eventError{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []*session.Event
+			captureLog(t, func() { events, _ = runScriptedFlow(t, &Flow{}, nil, tc.resp) })
+			if diff := cmp.Diff([]eventError{tc.want}, errorsOf(events)); diff != "" {
+				t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestEmptyResponsePolicy_SSEEmptyContentAndNilContentNotStamped(t *testing.T) {
+	sse := &agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+	t.Run("nil_content", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, sse, &model.LLMResponse{FinishReason: genai.FinishReasonStop})
+		if len(events) != 0 {
+			t.Errorf("Run() yielded %d events, want 0: %+v", len(events), errorsOf(events))
+		}
+	})
+	t.Run("empty_parts", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, sse, stopTurn())
+		if diff := cmp.Diff([]eventError{{}}, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestRunOneStep_AppliesPolicyBeforeProcessors pins that the policy judges what
+// the model returned: a response processor that adds content afterwards does
+// not hide an empty model turn.
+func TestRunOneStep_AppliesPolicyBeforeProcessors(t *testing.T) {
+	addPart := func(_ agent.InvocationContext, _ *model.LLMRequest, resp *model.LLMResponse) error {
+		resp.Content.Parts = append(resp.Content.Parts, &genai.Part{Text: "added by processor"})
+		return nil
+	}
+	f := &Flow{ResponseProcessors: []func(agent.InvocationContext, *model.LLMRequest, *model.LLMResponse) error{addPart}}
+
+	events, _ := runScriptedFlow(t, f, nil, stopTurn())
+
+	if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoContentMessage}}, errorsOf(events)); diff != "" {
+		t.Fatalf("event errors mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]*genai.Part{{Text: "added by processor"}}, events[0].Content.Parts); diff != "" {
+		t.Errorf("event parts mismatch (-want +got):\n%s", diff)
 	}
 }

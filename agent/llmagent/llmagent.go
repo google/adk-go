@@ -16,6 +16,23 @@
 // LLM agents use large language models to perform tasks based on instructions, user input,
 // deciding on actions to take, and executing actions using available tools or
 // delegating to sub agents.
+//
+// # Model responses
+//
+// A completed model response that finished with [genai.FinishReasonStop] but
+// holds no part a caller can act on (no parts at all, only thought parts, or
+// only text that is whitespace) becomes an error event, which ends the agent's
+// turn. Its ErrorCode is "MODEL_RETURNED_NO_CONTENT", and its ErrorMessage, if
+// the response had none, says whether the response had no parts or only
+// thought or whitespace parts. The check runs after the AfterModelCallbacks,
+// on the response a callback put in place of the model's, and leaves a
+// response that already has an ErrorCode as it is. Under
+// [agent.StreamingModeSSE], a response without parts is exempt, because one
+// ends every stream.
+//
+// A thought-only response that did not finish with STOP is not an error: the
+// agent calls the model again after it, up to ten thought-only responses in a
+// row, and then ends its turn on the last one.
 package llmagent
 
 import (
