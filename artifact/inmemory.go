@@ -16,7 +16,6 @@ package artifact
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"iter"
@@ -49,7 +48,21 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *artifactEntry]
 }
 
-// InMemoryService returns a new in-memory artifact service.
+// InMemoryService returns a new in-memory artifact service. Its Versions
+// returns version numbers in ascending order. Load reports a version that
+// holds the rewind marker (see [IsRewindTombstone]) as not found.
+//
+// The artifacts live only as long as the service, so it suits tests,
+// demonstrations and programs that need no persistence. The service is safe
+// for concurrent use.
+//
+// It stores text, inline data and file data. File data whose URI uses the
+// artifact:// scheme is a reference: Save refuses one that leaves the
+// caller's app, user or session, and Load follows it, checking each hop with
+// [ParseAndValidateReferenceURI]. Other file data is stored and loaded as it
+// is. Load and GetArtifactVersion report a negative version as not found. An
+// artifact or version that does not exist is an error wrapping
+// [fs.ErrNotExist].
 func InMemoryService() Service {
 	return &inMemoryService{}
 }
@@ -150,24 +163,18 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 
 // Save implements [artifact.Service]
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
-	// Allow artifact reference parts, which carry neither text nor inline data
-	// and are only understood by this service; the scope check below re-validates
+	// Allow file data parts, which carry neither text nor inline data:
+	// external file data is kept as is, and the scope check below re-validates
 	// that a reference stays within the caller's app/user/session.
 	if err := req.validate(true); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if isArtifactRef(req.Part) {
-		parsed, ok := parseArtifactURI(req.Part.FileData.FileURI)
-		if !ok {
-			// Do not echo the URI: it carries app, user, session, and file
-			// identifiers, which are caller data.
-			return nil, errors.New("invalid artifact reference URI")
-		}
 		// Check the caller's session before the user-scope rewrite, so the scope
 		// is validated against the caller, matching Load's per-hop rule.
-		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
-			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+		if _, err := ParseAndValidateReferenceURI(req.Part.FileData.FileURI, appName, userID, sessionID, MaxArtifactReferenceDepth); err != nil {
+			return nil, fmt.Errorf("request validation failed: %w", err)
 		}
 	}
 	// If file is user scoped, store it under user scope path
@@ -254,12 +261,9 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 	// An artifact part may be a reference (its FileData.FileURI uses the
 	// "artifact://" scheme), pointing at another artifact rather than storing
 	// data. Resolve it here, re-validating scope at each hop so a reference can
-	// never escape the app/user/session it was saved under. maxArtifactRefDepth
-	// bounds resolution against cycles and counts reference hops only, so the
-	// requested artifact does not consume one. This mirrors adk-python's cap of 5
-	// (artifact_util._MAX_ARTIFACT_REFERENCE_DEPTH).
-	const maxArtifactRefDepth = 5
-	remainingDepth := maxArtifactRefDepth
+	// never escape the app/user/session it was saved under.
+	// MaxArtifactReferenceDepth bounds resolution against cycles.
+	remainingDepth := MaxArtifactReferenceDepth
 	for {
 		// User-scoped artifacts are stored under the shared user key, but the
 		// scope check below must use the caller's scope (threaded through as
@@ -273,9 +277,10 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 			entry *artifactEntry
 			ok    bool
 		)
-		if version > 0 {
+		switch {
+		case version > 0:
 			entry, ok = s.get(appName, userID, lookupSession, fileName, version)
-		} else {
+		case version == 0:
 			// pick the latest version
 			_, entry, ok = s.find(appName, userID, lookupSession, fileName)
 		}
@@ -284,27 +289,29 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 		}
 
 		if !isArtifactRef(entry.part) {
+			// A version holding the rewind marker loads as absent, as in
+			// adk-python's in-memory service; earlier versions still load.
+			if IsRewindTombstone(entry.part) {
+				return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+			}
 			return entry, nil
 		}
 
-		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
-		if !ok {
-			// Do not echo the URI: it carries app, user, session, and file
-			// identifiers, which are caller data.
-			return nil, errors.New("invalid artifact reference URI")
+		parsed, err := ParseAndValidateReferenceURI(entry.part.FileData.FileURI, appName, userID, sessionID, remainingDepth)
+		if err != nil {
+			return nil, err
 		}
-		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
-			return nil, fmt.Errorf("invalid artifact reference: %w", err)
-		}
-
 		remainingDepth--
-		if remainingDepth < 0 {
-			return nil, fmt.Errorf("artifact reference resolution exceeded maximum depth of %d", maxArtifactRefDepth)
-		}
 
 		// Follow the reference: the next hop is validated against the session it
 		// just followed, as adk-python resolves each hop against the URI it reached.
 		appName, userID, sessionID, fileName, version = parsed.AppName, parsed.UserID, parsed.SessionID, parsed.FileName, parsed.Version
+		// The target must be loadable on its own, as in the Cloud Storage
+		// service: a user-scoped reference to a file without the "user:"
+		// prefix has no session to look it up in.
+		if err := (&LoadRequest{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}).Validate(); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference target: %w", err)
+		}
 	}
 }
 
@@ -350,7 +357,8 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	return &ListResponse{FileNames: filenames}, nil
 }
 
-// Versions implements [artifact.Service] and returns an error if no versions are found.
+// Versions implements [artifact.Service]. It returns the versions in ascending
+// order, and an error if no versions are found.
 func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -374,6 +382,8 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 	if len(versions) == 0 {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
+	// Keys sort newest first, so the scan yields descending versions.
+	slices.Reverse(versions)
 	return &VersionsResponse{Versions: versions}, nil
 }
 
@@ -394,9 +404,10 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 
 	var entry *artifactEntry
 	var ok bool
-	if version > 0 {
+	switch {
+	case version > 0:
 		entry, ok = s.get(appName, userID, sessionID, fileName, version)
-	} else {
+	case version == 0:
 		version, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
 
@@ -412,13 +423,16 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
 	}
 	// Report the media type the same way adk-python's in-memory service does:
-	// inline data carries its own, text is text/plain, and a reference has no
-	// media type until it is loaded.
+	// inline data and external file data carry their own, text (empty text
+	// included) is text/plain, and a reference has no media type until it is
+	// loaded.
 	var mimeType string
 	switch {
 	case entry.part.InlineData != nil:
 		mimeType = entry.part.InlineData.MIMEType
-	case entry.part.Text != "":
+	case entry.part.FileData != nil && !isArtifactRef(entry.part):
+		mimeType = entry.part.FileData.MIMEType
+	case !isArtifactRef(entry.part):
 		mimeType = "text/plain"
 	}
 

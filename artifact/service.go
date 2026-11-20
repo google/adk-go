@@ -17,11 +17,42 @@
 // An artifact is a file identified by an application name, a user ID, a session ID,
 // and a filename. The service provides basic storage operations for artifacts,
 // such as Save, Load, Delete, and List. It also supports versioning of artifacts.
+//
+// The content of an artifact is a [genai.Part]: text, inline data, or, in the
+// services that store it, file data. A file name with the "user:" prefix
+// names an artifact of the user, shared by all the user's sessions; requests
+// for it need no session ID, and List reports it in every session of the
+// user. Any other file name names an artifact of one session.
+//
+// Every Save creates a new version, and the services in this module number
+// an artifact's versions from 1. Version 0 in a load, lookup or delete request
+// selects the latest version (every version, for Delete).
+//
+// An artifact can hold a reference to another artifact of the same app and
+// user: a file-data part whose URI is the artifact:// URI that
+// [BuildArtifactURI] builds. Services that store references follow them on
+// Load, at most [MaxArtifactReferenceDepth] hops, and check at each hop that
+// the target stays in the caller's scope (see [ParseAndValidateReferenceURI]).
+//
+// The Validate methods of the request types check the IDs with
+// [ValidatePathSegment] and the file name with [ValidateFileName]. Their
+// errors, and the errors for an invalid reference, wrap [ErrInputValidation].
+// The services in this module return an error wrapping [io/fs.ErrNotExist]
+// for an artifact or version that does not exist.
+//
+// [InMemoryService] keeps artifacts in memory. Package
+// [google.golang.org/adk/v2/artifact/gcsartifact] stores them in Google Cloud
+// Storage and package [google.golang.org/adk/v2/artifact/fileartifact] in a
+// directory tree. A runner takes a Service in its ArtifactService
+// configuration field, and agents, callbacks and tools reach it through
+// agent.Context.Artifacts.
 package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -44,12 +75,40 @@ type Service interface {
 	// and deleting an artifact that does not exist is not an error. If req.Version
 	// is set and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
-	// List lists all the artifact filenames within a session.
+	// List lists the artifact filenames visible to a session: the session's own
+	// files and the user-scoped ("user:" prefixed) files of the user. When
+	// req.SessionID is empty, List returns only the user-scoped filenames.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
-	// Versions lists all versions of an artifact.
+	// Versions lists all versions of an artifact. The services in this module
+	// return them in ascending order.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
 	// GetArtifactVersion gets the metadata for a specific version of an artifact.
 	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
+}
+
+// ErrInputValidation classifies an artifact request or an artifact reference
+// that carries invalid input: a missing or malformed app name, user ID,
+// session ID or file name, an unsupported part, or an artifact:// reference
+// that is malformed, leaves the caller's scope or is followed too deep. The
+// Validate methods of the request types, [ValidatePathSegment] and the
+// in-memory service wrap it, so callers test for it with [errors.Is]. The
+// messages never echo the caller's values.
+var ErrInputValidation = errors.New("invalid input")
+
+// validationError carries a message and wraps ErrInputValidation without
+// changing the message: Error returns msg byte for byte.
+type validationError struct {
+	msg string
+	err error
+}
+
+func (e *validationError) Error() string { return e.msg }
+func (e *validationError) Unwrap() error { return e.err }
+
+// invalidInput returns an error with the text msg that wraps
+// ErrInputValidation.
+func invalidInput(msg string) error {
+	return &validationError{msg: msg, err: ErrInputValidation}
 }
 
 // requiredField is an internal type to use on validate operations
@@ -88,27 +147,94 @@ func validateRequiredStrings(fields []requiredField) []string {
 	return missingFields
 }
 
-// Validate checks if the struct is valid or if it is missing fields.
+// artifactName holds the fields of a request that name one artifact.
+type artifactName struct {
+	appName, userID, sessionID, fileName string
+}
+
+// missingFields returns the names of the empty required fields, in the order
+// the missing-field error lists them. A "user:" file name names a user-scoped
+// artifact, so the session ID is not required for it.
+func (n artifactName) missingFields() []string {
+	fields := []requiredField{
+		{Name: "AppName", Value: n.appName},
+		{Name: "UserID", Value: n.userID},
+	}
+	if !fileHasUserNamespace(n.fileName) {
+		fields = append(fields, requiredField{Name: "SessionID", Value: n.sessionID})
+	}
+	fields = append(fields, requiredField{Name: "FileName", Value: n.fileName})
+	return validateRequiredStrings(fields)
+}
+
+// validatePaths path-checks the app name, the user ID and, unless the file
+// name is "user:" prefixed, the session ID, in that order.
+func (n artifactName) validatePaths() error {
+	if err := validateAppAndUser(n.appName, n.userID); err != nil {
+		return err
+	}
+	if fileHasUserNamespace(n.fileName) {
+		return nil
+	}
+	return ValidatePathSegment(n.sessionID, "session_id")
+}
+
+// validateAppAndUser path-checks the app name, then the user ID.
+func validateAppAndUser(appName, userID string) error {
+	if err := ValidatePathSegment(appName, "app_name"); err != nil {
+		return err
+	}
+	return ValidatePathSegment(userID, "user_id")
+}
+
+// Validate checks the request: AppName, UserID, FileName and Part are required,
+// and SessionID is required unless FileName has the "user:" prefix. AppName and
+// UserID, and SessionID when it is required, are checked with
+// [ValidatePathSegment] in that order. A "user:" file name makes the session
+// irrelevant: an empty SessionID is accepted and a non-empty one is not
+// checked. The part must carry text or inline data, or have no field set:
+// genai.Part cannot tell empty text from unset text, so the services in this
+// module store a part with no field set as empty text. A part with any other
+// field set and neither text nor inline data, such as file data alone, is
+// refused. Every error wraps [ErrInputValidation].
 func (req *SaveRequest) Validate() error {
 	return req.validate(false)
 }
 
-// validate is the shared request validation, with allowRef tolerating an
-// artifact reference part. Every Service calls Validate() (allowRef false),
-// which rejects a part that is neither text nor inline data; this is a shared
-// contract that backends such as GCS rely on. Only the in-memory service
-// understands references, so it is the sole caller that sets allowRef.
-func (req *SaveRequest) validate(allowRef bool) error {
-	// Define the fields to check in the desired order
-	fieldsToCheck := []requiredField{
-		{Name: "AppName", Value: req.AppName},
-		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
-		{Name: "FileName", Value: req.FileName},
+// ValidateAllowingFileData checks the request with the rules of
+// [SaveRequest.Validate], except that the part may also be file data: an
+// external file URI or an artifact:// reference. It is for a [Service] that
+// stores file data itself, such as the Cloud Storage service; Validate stays
+// the check for services that do not.
+//
+// File data whose FileURI is empty is refused, as adk-python's Cloud Storage
+// service does, unless the part also carries inline data or non-empty text,
+// which the service stores instead of the file data. The method checks
+// the form of the part only: the service still checks an artifact:// URI with
+// [ParseAndValidateReferenceURI]. Every error wraps [ErrInputValidation] and
+// leaves the caller's values out of its message. It is safe for concurrent use
+// as long as the request is not modified meanwhile.
+func (req *SaveRequest) ValidateAllowingFileData() error {
+	if err := req.validate(true); err != nil {
+		return err
 	}
+	part := req.Part
+	if part.InlineData == nil && part.Text == "" && part.FileData != nil && part.FileData.FileURI == "" {
+		return invalidInput("invalid save request: Part.FileData.FileURI has to be set (Artifact file_data must have a file_uri.)")
+	}
+	return nil
+}
 
-	// Use the helper function for all required string fields
-	missingFields := validateRequiredStrings(fieldsToCheck)
+// validate is the shared request validation, with allowRef tolerating a file
+// data part, an artifact reference or external data. Validate() (allowRef
+// false) accepts a part with text, a part with inline data, or a part with no
+// field set, which the services store as empty text, and rejects every other
+// part: the shared contract of services that do not store file data. The
+// services that store it set allowRef: the in-memory service directly, and
+// others through ValidateAllowingFileData.
+func (req *SaveRequest) validate(allowRef bool) error {
+	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
+	missingFields := name.missingFields()
 
 	// Perform checks that don't fit the helper
 	if req.Part == nil {
@@ -117,26 +243,36 @@ func (req *SaveRequest) validate(allowRef bool) error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return invalidInput(fmt.Sprintf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
 
-	// A reference part carries neither Part.Text nor Part.InlineData; only the
-	// in-memory service accepts one, so the content rule tolerates it there and
-	// stays strict for every other caller.
-	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && isArtifactRef(req.Part)) {
-		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
+	if err := name.validatePaths(); err != nil {
+		return err
+	}
+
+	// File data, an artifact reference or external data, carries neither
+	// Part.Text nor Part.InlineData; the content rule tolerates it only for
+	// the services that store file data and stays strict for every other
+	// caller. A part whose every field is zero is empty text: genai.Part cannot
+	// tell Text "" from an unset Text, and adk-python accepts Part(text="").
+	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && req.Part.FileData != nil) && !reflect.ValueOf(*req.Part).IsZero() {
+		return invalidInput("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateFileName(name string) error {
+// ValidateFileName reports whether name is usable as an artifact file name:
+// it returns an error wrapping [ErrInputValidation] when name contains a
+// path separator ("/" or "\") and nil otherwise. The error text does not
+// contain name.
+func ValidateFileName(name string) error {
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		return fmt.Errorf("invalid name: filename cannot contain path separators")
+		return invalidInput("invalid name: filename cannot contain path separators")
 	}
 	return nil
 }
@@ -151,29 +287,25 @@ type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to load. 0 selects the latest version.
 	Version int64
 }
 
-// Validate checks if the struct is valid or if it is missing fields.
+// Validate has the same field rules as [SaveRequest.Validate], without the part.
 func (req *LoadRequest) Validate() error {
-	// Define the fields to check in the desired order
-	fieldsToCheck := []requiredField{
-		{Name: "AppName", Value: req.AppName},
-		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
-		{Name: "FileName", Value: req.FileName},
+	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
+	// If the slice has any items, it means fields were missing.
+	if missingFields := name.missingFields(); len(missingFields) > 0 {
+		return invalidInput(fmt.Sprintf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
 
-	// Use the helper function for all required string fields
-	missingFields := validateRequiredStrings(fieldsToCheck)
-
-	// If the slice has any items, it means fields were missing.
-	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
+	if err := name.validatePaths(); err != nil {
+		return err
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
@@ -191,47 +323,48 @@ type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to delete. 0 deletes every version.
 	Version int64
 }
 
-// Validate checks if the struct is valid or if it is missing fields.
+// Validate has the same field rules as [SaveRequest.Validate], without the part.
 func (req *DeleteRequest) Validate() error {
-	// Define the fields to check in the desired order
-	fieldsToCheck := []requiredField{
-		{Name: "AppName", Value: req.AppName},
-		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
-		{Name: "FileName", Value: req.FileName},
+	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
+	// If the slice has any items, it means fields were missing.
+	if missingFields := name.missingFields(); len(missingFields) > 0 {
+		return invalidInput(fmt.Sprintf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
 
-	// Use the helper function for all required string fields
-	missingFields := validateRequiredStrings(fieldsToCheck)
-
-	// If the slice has any items, it means fields were missing.
-	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
+	if err := name.validatePaths(); err != nil {
+		return err
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// ListRequest is the parameter for [Service.List].
+// ListRequest is the parameter for [Service.List]. AppName and UserID are
+// required and checked with [ValidatePathSegment]. SessionID is optional; an
+// empty SessionID asks for the user-scoped file names only.
 type ListRequest struct {
 	AppName, UserID, SessionID string
 }
 
-// Validate checks if the struct is valid or if it is missing a field.
+// Validate checks the request. AppName and UserID are required and path-checked
+// in that order. SessionID is path-checked only when it is not empty; an empty
+// SessionID is valid when AppName and UserID are set, and the error lists
+// SessionID among the missing fields only when AppName or UserID is missing
+// too. Every error wraps [ErrInputValidation].
 func (req *ListRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
 		{Name: "AppName", Value: req.AppName},
 		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
 	}
 
 	// Use the helper function for all required string fields
@@ -239,9 +372,18 @@ func (req *ListRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid list request: missing required fields: %s", strings.Join(missingFields, ", "))
+		if req.SessionID == "" {
+			missingFields = append(missingFields, "SessionID")
+		}
+		return invalidInput(fmt.Sprintf("invalid list request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
-	return nil
+	if err := validateAppAndUser(req.AppName, req.UserID); err != nil {
+		return err
+	}
+	if req.SessionID == "" {
+		return nil
+	}
+	return ValidatePathSegment(req.SessionID, "session_id")
 }
 
 // ListResponse is the return type of [Service.List].
@@ -254,26 +396,20 @@ type VersionsRequest struct {
 	AppName, UserID, SessionID, FileName string
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate has the same field rules as [SaveRequest.Validate], without the part.
 func (req *VersionsRequest) Validate() error {
-	// Define the fields to check in the desired order
-	fieldsToCheck := []requiredField{
-		{Name: "AppName", Value: req.AppName},
-		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
-		{Name: "FileName", Value: req.FileName},
+	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
+	// If the slice has any items, it means fields were missing.
+	if missingFields := name.missingFields(); len(missingFields) > 0 {
+		return invalidInput(fmt.Sprintf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
 
-	// Use the helper function for all required string fields
-	missingFields := validateRequiredStrings(fieldsToCheck)
-
-	// If the slice has any items, it means fields were missing.
-	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
+	if err := name.validatePaths(); err != nil {
+		return err
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
@@ -315,29 +451,25 @@ type GetArtifactVersionRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to describe. 0 selects the latest version.
 	Version int64
 }
 
-// Validate checks if the struct is valid or if it is missing a field.
+// Validate has the same field rules as [SaveRequest.Validate], without the part.
 func (req *GetArtifactVersionRequest) Validate() error {
-	// Define the fields to check in the desired order
-	fieldsToCheck := []requiredField{
-		{Name: "AppName", Value: req.AppName},
-		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
-		{Name: "FileName", Value: req.FileName},
+	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
+	// If the slice has any items, it means fields were missing.
+	if missingFields := name.missingFields(); len(missingFields) > 0 {
+		return invalidInput(fmt.Sprintf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", ")))
 	}
 
-	// Use the helper function for all required string fields
-	missingFields := validateRequiredStrings(fieldsToCheck)
-
-	// If the slice has any items, it means fields were missing.
-	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", "))
+	if err := name.validatePaths(); err != nil {
+		return err
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
