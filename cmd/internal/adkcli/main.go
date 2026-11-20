@@ -34,6 +34,11 @@ import (
 )
 
 func main() {
+	ctx, launcherArgs, err := loadMCPPolicy(context.Background(), os.Args[1:])
+	if err != nil {
+		log.Fatalf("Invalid MCP policy: %v", err)
+	}
+
 	// 1. Get the Current Working Directory (where the user typed 'adk')
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -89,7 +94,7 @@ func main() {
 		fmt.Printf("➡️  Loading agent from: %s\n", configPath)
 
 		// This reads the YAML, finds the 'agent_class', and calls the registered factory.
-		myAgent, err := configurable.FromConfig(context.Background(), configPath)
+		myAgent, err := configurable.FromConfig(ctx, configPath)
 		if err != nil {
 			log.Printf("⚠️  Error loading agent at %s: %v", configPath, err)
 			continue // Skip this one and try the next
@@ -105,8 +110,6 @@ func main() {
 		}
 		agentsMap[folderName] = myAgent
 	}
-
-	ctx := context.Background()
 
 	loader, err := conformance.NewConformanceAgentLoader(agentsMap)
 	if err != nil {
@@ -124,7 +127,7 @@ func main() {
 	}
 
 	l := full.NewLauncher()
-	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
+	if err = l.Execute(ctx, config, launcherArgs); err != nil {
 		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
 }
