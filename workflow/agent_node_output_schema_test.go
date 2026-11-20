@@ -16,7 +16,9 @@ package workflow_test
 
 import (
 	"context"
+	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 
@@ -760,5 +762,65 @@ func TestAgentNode_SetModelResponseWithoutArgs(t *testing.T) {
 	}
 	if diff := cmp.Diff(map[string]any{}, out); diff != "" {
 		t.Errorf("node output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A model wrapper can request the function-call fallback independently of its
+// name, including when the agent has no other tools.
+type schemaToolOptInModel struct{ model.LLM }
+
+func (*schemaToolOptInModel) UseOutputSchemaTool() bool { return true }
+
+func TestAgentNode_OutputSchemaToolOptIn(t *testing.T) {
+	for _, withTools := range []bool{false, true} {
+		for _, declared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("tools=%v/declared=%v", withTools, declared), func(t *testing.T) {
+				llm := &requestRecorder{name: "deepseek-chat", setReply: map[string]any{"city": "Paris", "temp": float64(31)}}
+				cfg := llmagent.Config{Name: "weather", Model: &schemaToolOptInModel{LLM: llm}}
+				if withTools {
+					cfg.Tools = []tool.Tool{lookupTool(t)}
+				}
+				if declared {
+					cfg.OutputSchema = weatherSchema
+				}
+				a, err := llmagent.New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				node, err := workflow.NewAgentNodeTyped[string, weatherOut](a, workflow.NodeConfig{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := runNode(t, node, a)
+				req := firstRequest(t, llm)
+				if req.Config.ResponseSchema != nil || req.Config.ResponseMIMEType != "" {
+					t.Error("native response schema sent to a model requesting tool-based structured output")
+				}
+				if !offersTool(req, "set_model_response") {
+					t.Error("set_model_response was not offered to the model")
+				}
+				if req.Config == nil || req.Config.SystemInstruction == nil {
+					t.Error("set_model_response instruction missing")
+				} else {
+					var instruction strings.Builder
+					for _, part := range req.Config.SystemInstruction.Parts {
+						instruction.WriteString(part.Text)
+					}
+					if !withTools && strings.Contains(instruction.String(), "other tools") {
+						t.Error("no-tools opt-in must not claim other tools are available")
+					}
+				}
+				if len(llm.reqs) != 1 {
+					t.Errorf("model calls = %d, want 1", len(llm.reqs))
+				}
+				got, err := node.ValidateOutput(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(map[string]any{"city": "Paris", "temp": float64(31)}, got); diff != "" {
+					t.Error("output did not come from set_model_response")
+				}
+			})
+		}
 	}
 }
