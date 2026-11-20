@@ -124,8 +124,10 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 }
 
 // Value implements context.Context. It returns this invocation's [agent.Identity]
-// for the ADK identity key (so agent.IdentityFromContext can recover it). Every
-// other key delegates to the embedded context, preserving existing behavior.
+// for the ADK identity key (so agent.IdentityFromContext can recover it), and
+// participates in ADK's private lineage and workflow-path lookups. Every other
+// key (including the parent-map key) delegates to the embedded context,
+// preserving existing behavior.
 //
 // This type owns its session, so the identity key is answered here even when the
 // session cannot be read — with no identity rather than the enclosing

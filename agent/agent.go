@@ -485,9 +485,11 @@ func (c *invocationContext) Session() session.Session {
 }
 
 // Value implements context.Context, answering the ADK identity key like every
-// other invocation context so a promoted copy and this one cannot disagree. It
-// owns its session, so no session means no identity — never the enclosing
-// invocation's, whose user made no such call.
+// other invocation context so a promoted copy and this one cannot disagree, and
+// participating in ADK's private lineage and workflow-path lookups before
+// delegating remaining keys (including the parent-map key) to the embedded
+// context. It owns its session, so no session means no identity — never the
+// enclosing invocation's, whose user made no such call.
 func (c *invocationContext) Value(key any) any {
 	if c == nil {
 		return nil

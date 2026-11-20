@@ -3927,6 +3927,9 @@ func prepareRootAgentInput(ctx context.Context, inv *invocationTrace, id identit
 		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); parents != nil {
 			in.hasContextParents = true
 			for child, parent := range parents {
+				if parent == nil {
+					continue
+				}
 				if pName := orZero(parent.Name); child != "" && pName != "" {
 					in.contextEdges = append(in.contextEdges, agentEdge{
 						child:  child,
@@ -4228,10 +4231,32 @@ func isBuiltInWorkflowAgent(a agent.Agent) bool {
 }
 
 func agentTypeOf(a agent.Agent) string {
+	var seenPtrs map[visitedContextStruct]bool
 	for range 8 {
+		if a == nil {
+			return ""
+		}
+		rv := reflect.ValueOf(a)
+		if rv.Kind() == reflect.Pointer {
+			if rv.IsNil() {
+				return ""
+			}
+			key := visitedContextStruct{ptr: rv.Pointer(), typ: rv.Type()}
+			if seenPtrs == nil {
+				seenPtrs = make(map[visitedContextStruct]bool, 4)
+			}
+			if seenPtrs[key] {
+				return ""
+			}
+			seenPtrs[key] = true
+		}
+		if u, ok := a.(agentUnwrapper); ok {
+			a = orZero(u.Unwrap)
+			continue
+		}
 		var seen map[visitedContextStruct]bool
-		v, ok := derefContextStructValueLazy(reflect.ValueOf(a), &seen, true)
-		if !ok {
+		v, ok := derefContextStructValueLazy(rv, &seen, true)
+		if !ok || !isADKStructPkg(v.Type().PkgPath()) {
 			return ""
 		}
 		if f, owner := promotedStructFieldOwned(v, "AgentType", isADKStructPkgType); f.IsValid() && isADKStructPkg(owner.PkgPath()) && f.Kind() == reflect.String {
@@ -4239,8 +4264,8 @@ func agentTypeOf(a agent.Agent) string {
 				return s
 			}
 		}
-		inner, _ := promotedStructField(v, "Agent")
-		if !inner.IsValid() || !inner.CanInterface() {
+		inner, owner := promotedStructFieldOwned(v, "Agent", isADKStructPkgType)
+		if !inner.IsValid() || !isADKStructPkg(owner.PkgPath()) || !inner.CanInterface() {
 			return ""
 		}
 		next, ok := reflect.TypeAssert[agent.Agent](inner)
@@ -4538,6 +4563,16 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 // observeLaunchLineage follow so a cyclic custom context terminates.
 const maxLaunchLineage = 4096
 
+// maxLegacyContextLineage bounds the fallback context chain walked before
+// acquiring inv.mu when running against an ADK core without ADKWalkLineage.
+const maxLegacyContextLineage = 256
+
+var syncLockerType = reflect.TypeFor[sync.Locker]()
+
+type contextUnwrapper interface {
+	Unwrap() context.Context
+}
+
 var lineageWalkerOnce = sync.OnceValue(func() func(context.Context) []any {
 	if w, ok := any(agent.Promote(nil)).(interface {
 		ADKWalkLineage(context.Context) []any
@@ -4549,6 +4584,16 @@ var lineageWalkerOnce = sync.OnceValue(func() func(context.Context) []any {
 
 func isComparableToken(tok any) bool {
 	return tok != nil && reflect.ValueOf(tok).Comparable()
+}
+
+func sameComparableValue(a, b any) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !isComparableToken(a) || !isComparableToken(b) {
+		return false
+	}
+	return a == b
 }
 
 // adkContextToken returns the opaque identity token reported by an ADK context
@@ -4614,18 +4659,22 @@ type launchLineage struct {
 	selfActivation any
 	selfTokens     [3]any
 	tokens         []any
+	unwrapChain    []any
 	observed       bool
 }
 
 // observeLaunchLineage collects the ADK context lineage of ctx through ADK's
 // private lineage key before inv.mu is acquired so wrapper synchronization is
 // respected, concurrent multi-parent Value lookups share no mutable observer,
-// and no user code runs under inv.mu.
+// and no user code runs under inv.mu. On older ADK cores without ADKWalkLineage,
+// it pre-collects comparable contexts via optional Unwrap() context.Context
+// methods and lock-free single-parent stepping outside inv.mu.
 func observeLaunchLineage(ctx context.Context, act any, selfTokens [3]any) *launchLineage {
 	if ctx == nil && act == nil {
 		return nil
 	}
 	var tokens []any
+	var unwrapChain []any
 	var observed bool
 	if ctx != nil {
 		if walk := lineageWalkerOnce(); walk != nil {
@@ -4643,12 +4692,44 @@ func observeLaunchLineage(ctx context.Context, act any, selfTokens [3]any) *laun
 					}
 				}
 			}
+		} else {
+			var seenPtrs map[visitedContextStruct]bool
+			cur := any(ctx)
+			for step := 0; cur != nil && step < maxLegacyContextLineage; step++ {
+				if rv := reflect.ValueOf(cur); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+					key := visitedContextStruct{ptr: rv.Pointer(), typ: rv.Type()}
+					if seenPtrs == nil {
+						seenPtrs = make(map[visitedContextStruct]bool, 8)
+					}
+					if seenPtrs[key] {
+						break
+					}
+					seenPtrs[key] = true
+				}
+				if step > 0 && isComparableToken(cur) {
+					unwrapChain = append(unwrapChain, cur)
+				}
+				if u, ok := cur.(contextUnwrapper); ok {
+					next := orZero(u.Unwrap)
+					if next == nil || sameComparableValue(next, cur) {
+						break
+					}
+					cur = next
+					continue
+				}
+				next, ok := stepContext(cur, true)
+				if !ok || sameComparableValue(next, cur) {
+					break
+				}
+				cur = next
+			}
 		}
 	}
 	return &launchLineage{
 		selfActivation: act,
 		selfTokens:     selfTokens,
 		tokens:         tokens,
+		unwrapChain:    unwrapChain,
 		observed:       observed,
 	}
 }
@@ -4666,11 +4747,69 @@ func isImmutableContextOrAgentPkg(pkg string) bool {
 	return pkg == "context" || isADKStructPkg(pkg)
 }
 
-func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, bool) {
+// hasVisibleSyncPrimitive reports whether t (or any embedded, nested, or
+// container-referenced type reachable within t) exposes a mutex, atomic,
+// channel, or sync.Locker, indicating mutable state guarded by struct-local or
+// channel-based synchronization.
+func hasVisibleSyncPrimitive(t reflect.Type, depth int, seen map[reflect.Type]bool) bool {
+	if depth >= 8 || t == nil {
+		return true
+	}
+	pkg := t.PkgPath()
+	if isImmutableContextOrAgentPkg(pkg) {
+		return false
+	}
+	if pkg == "sync" || pkg == "sync/atomic" {
+		return true
+	}
+	if t.Implements(syncLockerType) {
+		return true
+	}
+	if t.Kind() != reflect.Pointer && reflect.PointerTo(t).Implements(syncLockerType) {
+		return true
+	}
+	if seen[t] {
+		return false
+	}
+	if seen == nil {
+		seen = make(map[reflect.Type]bool, 8)
+	}
+	seen[t] = true
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return hasVisibleSyncPrimitive(t.Elem(), depth+1, seen)
+	case reflect.Chan:
+		return true
+	case reflect.Map:
+		return hasVisibleSyncPrimitive(t.Key(), depth+1, seen) || hasVisibleSyncPrimitive(t.Elem(), depth+1, seen)
+	case reflect.Struct:
+		for f := range t.Fields() {
+			if hasVisibleSyncPrimitive(f.Type, depth+1, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func canStepStructType(t reflect.Type, allowLockFreeExternal bool) bool {
+	if isImmutableContextOrAgentPkg(t.PkgPath()) {
+		return true
+	}
+	if !allowLockFreeExternal {
+		return false
+	}
+	return !hasVisibleSyncPrimitive(t, 0, nil)
+}
+
+func stepEmbeddedContextStrict(v reflect.Value, depth int, allowLockFreeExternal bool) (context.Context, bool) {
 	if depth >= 8 || !v.IsValid() || v.Kind() != reflect.Struct {
 		return nil, false
 	}
 	t := v.Type()
+	if !canStepStructType(t, allowLockFreeExternal) {
+		return nil, false
+	}
 	n := t.NumField()
 	liveCount := 0
 	var candidate context.Context
@@ -4682,19 +4821,29 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, boo
 		candidate = c
 		return false
 	}
+	extractCtx := func(fv reflect.Value) (context.Context, bool) {
+		if fv.CanInterface() {
+			c, ok := reflect.TypeAssert[context.Context](fv)
+			return c, ok && c != nil
+		}
+		// Only Go stdlib "context" and ADK-owned immutable structs
+		// (e.g. withoutCancelCtx.c, callbackContextWrapper.context) may read
+		// unexported context fields; never use unsafe on external user structs.
+		if !fv.CanAddr() || !isImmutableContextOrAgentPkg(t.PkgPath()) {
+			return nil, false
+		}
+		//nolint:gosec // Reads allowlisted stdlib/ADK internal context field when CanInterface is false.
+		c, ok := reflect.TypeAssert[context.Context](reflect.NewAt(fv.Type(), unsafe.Pointer(fv.UnsafeAddr())).Elem())
+		return c, ok && c != nil
+	}
 	for i := range n {
 		sf := t.Field(i)
 		fv := v.Field(i)
 		if sf.Anonymous {
 			if sf.Type.Implements(contextInterfaceType) {
 				if !isNilContextField(fv) {
-					var c context.Context
-					if fv.CanInterface() {
-						if tc, ok := reflect.TypeAssert[context.Context](fv); ok {
-							c = tc
-						}
-					}
-					if recordLive(c) {
+					c, ok := extractCtx(fv)
+					if !ok || recordLive(c) {
 						return nil, true
 					}
 				}
@@ -4702,6 +4851,9 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, boo
 			}
 			switch sf.Type.Kind() {
 			case reflect.Struct:
+				if !canStepStructType(sf.Type, allowLockFreeExternal) {
+					continue
+				}
 				if reflect.PointerTo(sf.Type).Implements(contextInterfaceType) && fv.CanAddr() && fv.Addr().CanInterface() {
 					if c, ok := reflect.TypeAssert[context.Context](fv.Addr()); ok && c != nil {
 						if recordLive(c) {
@@ -4710,30 +4862,27 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, boo
 						continue
 					}
 				}
-				c, ambig := stepEmbeddedContextStrict(fv, depth+1)
+				c, ambig := stepEmbeddedContextStrict(fv, depth+1, allowLockFreeExternal)
 				if ambig || (c != nil && recordLive(c)) {
 					return nil, true
 				}
 			case reflect.Pointer:
-				if sf.Type.Elem().Kind() != reflect.Struct || !isImmutableContextOrAgentPkg(sf.Type.Elem().PkgPath()) || fv.IsNil() {
+				if sf.Type.Elem().Kind() != reflect.Struct || !canStepStructType(sf.Type.Elem(), allowLockFreeExternal) || fv.IsNil() {
 					continue
 				}
-				c, ambig := stepEmbeddedContextStrict(fv.Elem(), depth+1)
+				c, ambig := stepEmbeddedContextStrict(fv.Elem(), depth+1, allowLockFreeExternal)
 				if ambig || (c != nil && recordLive(c)) {
 					return nil, true
 				}
 			}
 			continue
 		}
-		if ((t.PkgPath() == "context" && sf.Name == "c") || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
+		isNamedImmutableCtx := (t.PkgPath() == "context" && sf.Name == "c") ||
+			(t.PkgPath() == agentPkgPath && (t.Name() == "callbackContextWrapper" || t.Name() == "toolContextWrapper") && sf.Name == "context")
+		if (isNamedImmutableCtx || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
 			if !isNilContextField(fv) {
-				var c context.Context
-				if fv.CanInterface() {
-					if tc, ok := reflect.TypeAssert[context.Context](fv); ok {
-						c = tc
-					}
-				}
-				if recordLive(c) {
+				c, ok := extractCtx(fv)
+				if !ok || recordLive(c) {
 					return nil, true
 				}
 			}
@@ -4742,12 +4891,43 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, boo
 	return candidate, false
 }
 
+// stepEmbeddedContextValue is a test-only helper (no production callers;
+// production context stepping uses stepContext).
 func stepEmbeddedContextValue(v reflect.Value, depth int) context.Context {
-	c, ambig := stepEmbeddedContextStrict(v, depth)
+	c, ambig := stepEmbeddedContextStrict(v, depth, true)
 	if ambig {
 		return nil
 	}
 	return c
+}
+
+func stepContext(cur any, allowLockFreeExternal bool) (context.Context, bool) {
+	if cur == nil {
+		return nil, false
+	}
+	next := orZero(func() context.Context {
+		v := reflect.ValueOf(cur)
+		for derefs := 0; derefs < 16 && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
+			if v.IsNil() {
+				return nil
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct || !canStepStructType(v.Type(), allowLockFreeExternal) {
+			return nil
+		}
+		if !v.CanAddr() {
+			cp := reflect.New(v.Type()).Elem()
+			cp.Set(v)
+			v = cp
+		}
+		c, ambig := stepEmbeddedContextStrict(v, 0, allowLockFreeExternal)
+		if ambig {
+			return nil
+		}
+		return c
+	})
+	return next, next != nil
 }
 
 // stepEmbeddedContext returns the parent context.Context carried by cur when
@@ -4755,36 +4935,18 @@ func stepEmbeddedContextValue(v reflect.Value, depth int) context.Context {
 // (never arbitrary external user structs), and returns (nil, false) when absent
 // or ambiguous across multiple live context.Context fields.
 func stepEmbeddedContext(cur any) (context.Context, bool) {
-	if cur == nil {
-		return nil, false
-	}
-	next := orZero(func() context.Context {
-		v := reflect.ValueOf(cur)
-		if v.Kind() == reflect.Pointer {
-			if v.IsNil() {
-				return nil
-			}
-			v = v.Elem()
-		}
-		if v.Kind() != reflect.Struct || !isImmutableContextOrAgentPkg(v.Type().PkgPath()) {
-			return nil
-		}
-		return stepEmbeddedContextValue(v, 0)
-	})
-	return next, next != nil
+	return stepContext(cur, false)
 }
 
 // launcherLocked returns the index in agentStack of the open agent activation,
 // not excluded, whose context the starting agent run was started with, or 0 if
 // no such activation is known. In pushAgentSpan, observeLaunchLineage walks
-// ADK's private lineage key via Value before inv.mu is acquired and passes a
-// *launchLineage pointer, so custom wrappers (value structs,
-// context.WithoutCancel, mutex-guarded wrappers, optional embedded pointers,
-// and deep WithValue chains) are followed through their Value methods without
-// calling Value under inv.mu. When no token matches (for example after a
-// Value-filtering wrapper, in synthetic unit tests, or against an older ADK
-// build without the lineage key), lookup falls through to walking embedded and
-// named Context fields on lock-free structs.
+// ADK's private lineage key via Value (or, on ADK cores without ADKWalkLineage,
+// optional Unwrap() context.Context methods and lock-free single-parent context
+// hops) before inv.mu is acquired and passes a *launchLineage pointer without
+// running user code under inv.mu. When no pre-collected token or unwrap hop
+// matches, lookup falls through to walking embedded and named Context fields on
+// immutable stdlib/ADK structs.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if act == nil {
 		return 0
@@ -4818,7 +4980,7 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 		}
 		if len(byToken) > 0 {
 			for _, tok := range lin.tokens {
-				if !isComparableToken(tok) || tok == lin.selfTokens[0] || tok == lin.selfTokens[1] || tok == lin.selfTokens[2] {
+				if !isComparableToken(tok) || sameComparableValue(tok, lin.selfTokens[0]) || sameComparableValue(tok, lin.selfTokens[1]) || sameComparableValue(tok, lin.selfTokens[2]) {
 					continue
 				}
 				if i, ok := byToken[tok]; ok {
@@ -4828,10 +4990,6 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 		}
 	}
 
-	cur := lin.selfActivation
-	if cur == nil {
-		return 0
-	}
 	byActivation := make(map[any]int)
 	for i, rec := range inv.agentStack {
 		if i == 0 || excluded[i] || rec.kind != spanKindAgent || rec.activation == nil {
@@ -4844,6 +5002,20 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if len(byActivation) == 0 {
 		return 0
 	}
+
+	for _, cand := range lin.unwrapChain {
+		if sameComparableValue(cand, lin.selfActivation) {
+			continue
+		}
+		if i, ok := byActivation[cand]; ok {
+			return i
+		}
+	}
+
+	cur := lin.selfActivation
+	if cur == nil {
+		return 0
+	}
 	for step := range maxLaunchLineage {
 		if step > 0 && isComparableToken(cur) {
 			if i, ok := byActivation[cur]; ok {
@@ -4851,7 +5023,7 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 			}
 		}
 		next, ok := stepEmbeddedContext(cur)
-		if !ok {
+		if !ok || sameComparableValue(next, cur) {
 			return 0
 		}
 		cur = next
@@ -10578,7 +10750,7 @@ func activationKey(ctx context.Context) any {
 				break
 			}
 			inner := next.InvocationContext()
-			if inner == nil || any(inner) == cur {
+			if inner == nil || sameComparableValue(inner, cur) {
 				break
 			}
 			cur = inner
@@ -11910,19 +12082,30 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 		if m == nil {
 			return nil, false
 		}
-		return m, true
+		out := make(map[string]agent.Agent, len(m))
+		for k, a := range m {
+			if a != nil {
+				out[k] = a
+			}
+		}
+		return out, true
 	}
 	rv := reflect.ValueOf(raw)
 	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.IsNil() ||
 		rv.Type().Key().Kind() != reflect.String ||
-		rv.Type().Elem() != agentInterfaceType {
+		rv.Type().Elem() != agentInterfaceType || !rv.CanInterface() {
 		return nil, false
 	}
-	if rv.Type().ConvertibleTo(reflect.TypeFor[map[string]agent.Agent]()) {
-		return rv.Convert(reflect.TypeFor[map[string]agent.Agent]()).Interface().(map[string]agent.Agent), true
-	}
-	if !rv.CanInterface() {
-		return nil, false
+	mapType := reflect.TypeFor[map[string]agent.Agent]()
+	if rv.Type().ConvertibleTo(mapType) {
+		src := rv.Convert(mapType).Interface().(map[string]agent.Agent)
+		out := make(map[string]agent.Agent, len(src))
+		for k, a := range src {
+			if a != nil {
+				out[k] = a
+			}
+		}
+		return out, true
 	}
 	out := make(map[string]agent.Agent, rv.Len())
 	iter := rv.MapRange()
@@ -11934,11 +12117,129 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 	return out, true
 }
 
-// contextParentMap returns the child-to-parent agent map that ADK's runner
-// attaches to ctx via internal/agent/parentmap, or nil if ctx does not carry
-// one. Only Go stdlib and ADK context wrappers are unwrapped; fields of
-// third-party or user context types are never read.
-func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
+var (
+	parentMapKeyOnce sync.Once
+	parentMapCtxKey  any
+)
+
+// discoverParentMapCtxKey returns the context key under which ADK's runner
+// attaches its child-to-parent agent map, or nil if it cannot be discovered.
+// It probes runner.RunLive once with a root carrying one sub-agent so only ADK's
+// own runner parent-map key matches; in production contextParentMap calls it
+// only when parentMapReaderOnce() == nil (ADK cores <= v2.8.0), and every
+// production call flows through prepareRootAgentInput outside tm.mu and inv.mu.
+func discoverParentMapCtxKey() any {
+	parentMapKeyOnce.Do(func() {
+		parentMapCtxKey = probeParentMapCtxKey()
+	})
+	return parentMapCtxKey
+}
+
+// probeParentMapCtxKey discovers ADK's unexported parentmap context key via
+// runner.RunLive (which invokes the root agent's RunLive synchronously before
+// returning) without starting OTel spans or reading crypto/rand.
+func probeParentMapCtxKey() (key any) {
+	defer func() {
+		if r := recover(); r != nil {
+			key = nil
+		}
+	}()
+	const childName = "parent-map-key-probe-child"
+	childAgent, err := agent.New(agent.Config{
+		Name: childName,
+	})
+	if err != nil {
+		return nil
+	}
+	baseAgent, err := agent.New(agent.Config{
+		Name:      "parent-map-key-probe",
+		SubAgents: []agent.Agent{childAgent},
+	})
+	if err != nil {
+		return nil
+	}
+	var probeMu sync.Mutex
+	var probeCtx context.Context
+	probeAgent := &probeLiveAgent{
+		Agent: baseAgent,
+		onRunLive: func(ctx agent.InvocationContext) {
+			probeMu.Lock()
+			probeCtx = ctx
+			probeMu.Unlock()
+		},
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "parent-map-key-probe",
+		Agent:             probeAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		return nil
+	}
+	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "probe" })
+	_, _, _ = r.RunLive(ctx, "probe-user", "probe-session", agent.LiveRunConfig{})
+	probeMu.Lock()
+	capturedCtx := probeCtx
+	probeMu.Unlock()
+	if capturedCtx == nil {
+		return nil
+	}
+	var q contextStructQueue
+	q.push(reflect.ValueOf(capturedCtx))
+	var seen map[visitedContextStruct]bool
+	for steps := range 512 {
+		item, ok := q.pop()
+		if !ok {
+			break
+		}
+		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
+		if !ok {
+			continue
+		}
+		if v.Type().PkgPath() == "context" {
+			if k, val := directStructField(v, "key"), directStructField(v, "val"); k.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Kind() == reflect.Map &&
+					val.Type().Key().Kind() == reflect.String &&
+					val.Type().Elem() == agentInterfaceType {
+					if keyVal, ok := exportContextKey(k); ok && keyVal != nil {
+						if kt := reflect.TypeOf(keyVal); kt != nil && kt.Comparable() &&
+							strings.HasPrefix(kt.PkgPath(), adkPkgPrefix) {
+							if raw := orZero(func() any { return capturedCtx.Value(keyVal) }); raw != nil {
+								if out, ok := convertAgentParentMap(raw); ok && out[childName] == probeAgent {
+									return keyVal
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		c1, c2 := adkContextChildren(v)
+		q.push(c1)
+		q.push(c2)
+	}
+	return nil
+}
+
+// contextParentMap returns a nil-free snapshot of the child-to-parent agent map
+// that ADK's runner attaches to ctx, or nil if ctx does not carry one. In
+// production it is invoked only via prepareRootAgentInput outside tm.mu and
+// inv.mu. When ADK core exposes ADKParentMap (parentMapReaderOnce() != nil), it
+// relies exclusively on that reader and returns nil immediately without running
+// the runner.RunLive probe or walking structs when read(ctx) has no map. On
+// earlier cores (parentMapReaderOnce() == nil), it lazily runs
+// discoverParentMapCtxKey once and matches only that runner key via ctx.Value
+// and allowlisted Go stdlib / ADK context wrappers so application maps of the
+// same type are never mistaken for runner lineage.
+func contextParentMap(ctx context.Context) map[string]agent.Agent {
+	return contextParentMapWith(ctx, parentMapReaderOnce(), discoverParentMapCtxKey)
+}
+
+func contextParentMapWith(ctx context.Context, read func(context.Context) any, discover func() any) (res map[string]agent.Agent) {
 	defer func() {
 		if r := recover(); r != nil {
 			res = nil
@@ -11947,8 +12248,18 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	if ctx == nil {
 		return nil
 	}
-	if read := parentMapReaderOnce(); read != nil {
+	if read != nil {
 		if out, ok := convertAgentParentMap(read(ctx)); ok {
+			return out
+		}
+		return nil
+	}
+	runnerKey := discover()
+	if runnerKey == nil {
+		return nil
+	}
+	if raw := orZero(func() any { return ctx.Value(runnerKey) }); raw != nil {
+		if out, ok := convertAgentParentMap(raw); ok {
 			return out
 		}
 	}
@@ -11972,7 +12283,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 				if val.IsValid() && val.Kind() == reflect.Map &&
 					val.Type().Key().Kind() == reflect.String &&
 					val.Type().Elem() == agentInterfaceType {
-					if keyVal, ok := exportContextKey(key); ok {
+					if keyVal, ok := exportContextKey(key); ok && sameComparableValue(keyVal, runnerKey) {
 						lookupCtx := ctx
 						if v.CanAddr() && v.Addr().CanInterface() {
 							if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {

@@ -571,8 +571,11 @@ func (c *commonContext) UserID() string {
 
 // Value implements context.Context. For the ADK identity key it returns the
 // [Identity] of the invocation this context speaks for (so [IdentityFromContext]
-// can recover it from a derived context). Every other key delegates to the
-// embedded context, preserving existing behavior.
+// can recover it from a derived context). It also handles ADK's private lineage
+// and workflow-path keys (returning c.path when non-empty, else delegating),
+// and forwards the private parent-map key to invocationContext when the embedded
+// context is nil. Every other key delegates to the embedded context, preserving
+// existing behavior.
 //
 // Only the identity key touches the invocation, so no other key is affected by
 // its state, and a session that panics costs the identity, not the process.

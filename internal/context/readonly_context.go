@@ -37,8 +37,10 @@ type ReadonlyContext struct {
 }
 
 // Value implements context.Context. It answers the ADK identity key for the
-// invocation this context speaks for. Every other key delegates to the embedded
-// context, preserving existing behavior.
+// invocation this context speaks for, and forwards ADK's private lineage,
+// workflow-path, and parent-map keys to InvocationContext when no outer Context
+// is embedded. Every other key delegates to the embedded context, preserving
+// existing behavior.
 //
 // This type answers the key without carrying [adkcontext.Marker], unlike every
 // other type that does. That is safe only because it is not an

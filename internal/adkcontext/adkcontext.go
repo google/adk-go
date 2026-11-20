@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package adkcontext holds the private context key under which an ADK context
-// registers its invocation identity, so it can be recovered from a derived
-// context.Context via agent.IdentityFromContext. It is a tiny leaf package shared
-// by the agent and internal/context packages to avoid an import cycle.
+// Package adkcontext holds the private context keys and helpers under which ADK
+// contexts expose invocation identity, context lineage, workflow node paths,
+// and the runner's child-to-parent agent map across derived context.Context
+// chains. It is a tiny leaf package shared by the agent, internal/context, and
+// internal/agent/parentmap packages to avoid import cycles.
 package adkcontext
 
 import (
 	"context"
+	"reflect"
 	"weak"
 )
 
@@ -305,15 +307,40 @@ func ReadPath(ctx context.Context) string {
 	return s
 }
 
-// ReadParentMap returns the child-to-parent map recovered from ctx via
-// Value(ParentMapKey), or nil if ctx is nil, panics, or carries none.
+// ReadParentMap returns a shallow snapshot copy of the child-to-parent map
+// recovered from ctx via Value(ParentMapKey), or nil if ctx is nil, panics, or
+// carries no non-nil map. Nil pointer, interface, map, slice, channel, and
+// function entries are omitted so callers (including via
+// agent.Promote(nil).ADKParentMap) cannot mutate the runner's reused map.
 func ReadParentMap(ctx context.Context) any {
 	if ctx == nil {
 		return nil
 	}
 	v, ok := Recovered(func() any { return ctx.Value(ParentMapKey) })
+	if !ok || v == nil {
+		return nil
+	}
+	out, ok := Recovered(func() any {
+		rv := reflect.ValueOf(v)
+		if !rv.IsValid() || rv.Kind() != reflect.Map || rv.IsNil() {
+			return nil
+		}
+		cp := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			val := iter.Value()
+			switch val.Kind() {
+			case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+				if val.IsNil() {
+					continue
+				}
+			}
+			cp.SetMapIndex(iter.Key(), val)
+		}
+		return cp.Interface()
+	})
 	if !ok {
 		return nil
 	}
-	return v
+	return out
 }

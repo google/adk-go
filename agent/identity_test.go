@@ -550,3 +550,50 @@ func TestLineageWalksWithoutExposingContextOrInterceptingAppKeys(t *testing.T) {
 		t.Fatalf("ADKParentMap(cbCtx) = %#v, want leaf->worker", got)
 	}
 }
+
+func TestPromoteADKParentMap_ReturnsSnapshotCopy(t *testing.T) {
+	sub, err := New(Config{Name: "sub_agent"})
+	if err != nil {
+		t.Fatalf("New(sub): %v", err)
+	}
+	root, err := New(Config{Name: "root_agent", SubAgents: []Agent{sub}})
+	if err != nil {
+		t.Fatalf("New(root): %v", err)
+	}
+	other, err := New(Config{Name: "other_agent"})
+	if err != nil {
+		t.Fatalf("New(other): %v", err)
+	}
+
+	type runnerParentMap map[string]Agent
+	src := runnerParentMap{"sub_agent": root, "nil_entry": nil}
+	ctx := context.WithValue(context.Background(), adkcontext.ParentMapKey, src)
+
+	carrier, ok := Promote(nil).(interface{ ADKParentMap(context.Context) any })
+	if !ok {
+		t.Fatal("Promote(nil) does not expose ADKParentMap")
+	}
+	got, ok := carrier.ADKParentMap(ctx).(runnerParentMap)
+	if !ok {
+		t.Fatalf("ADKParentMap() type = %T, want runnerParentMap", carrier.ADKParentMap(ctx))
+	}
+	if _, hasNil := got["nil_entry"]; hasNil {
+		t.Fatalf("ADKParentMap() kept nil entry: %v", got)
+	}
+	if got["sub_agent"] != root {
+		t.Fatalf("ADKParentMap()[sub_agent] = %v, want %v", got["sub_agent"], root)
+	}
+	got["sub_agent"] = other
+	got["injected"] = other
+	if src["sub_agent"] != root {
+		t.Fatalf("mutating ADKParentMap() overwrote source map: %v", src["sub_agent"])
+	}
+	if _, leaked := src["injected"]; leaked {
+		t.Fatalf("mutating ADKParentMap() injected key into source map: %v", src)
+	}
+
+	nilMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, runnerParentMap(nil))
+	if gotNil := carrier.ADKParentMap(nilMapCtx); gotNil != nil {
+		t.Fatalf("ADKParentMap(typed-nil map) = %#v, want nil", gotNil)
+	}
+}

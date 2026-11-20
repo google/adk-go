@@ -10204,3 +10204,401 @@ func TestPlugin_RecoveredToolError_FinishTaskAfterToolErrorOrConfirmationGuards(
 		})
 	}
 }
+
+type overridingPathCtx struct {
+	context.Context
+	override string
+}
+
+func (c *overridingPathCtx) Path() string { return c.override }
+
+type plainDelegatingCtx struct {
+	context.Context
+}
+
+type plainCallbackWrapper struct {
+	agent.Context
+}
+
+type plainContextWrapper struct {
+	agent.Context
+}
+
+type plainToolCtxWrapper struct {
+	agent.Context
+}
+
+type plainReadonlyWrapper struct {
+	agent.ReadonlyContext
+}
+
+type plainInvocationWrapper struct {
+	agent.InvocationContext
+}
+
+type overridingCallbackWrapper struct {
+	agent.Context
+	override string
+}
+
+func (c *overridingCallbackWrapper) Path() string { return c.override }
+
+type valOverridePathCtx struct {
+	agent.Context
+	override string
+}
+
+func (c valOverridePathCtx) Path() string { return c.override }
+
+type outerOverridingPtr struct {
+	*overridingCallbackWrapper
+}
+
+type outerOverridingValEmbed struct {
+	overridingCallbackWrapper
+}
+
+type outerValOverride struct {
+	valOverridePathCtx
+}
+
+type middlePlainWrapper struct {
+	*plainCallbackWrapper
+}
+
+type explicitPathField struct {
+	override string
+}
+
+func (e *explicitPathField) Path() string { return e.override }
+
+type outerShadowingPlain struct {
+	*plainCallbackWrapper
+	*explicitPathField
+}
+
+func TestContextPath_ExplicitPathPrecedence(t *testing.T) {
+	ancestorPath := "ancestor/workflow/node"
+	ancestor := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "wf",
+		sessionID:    "s1",
+		invocationID: "inv-path-precedence",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &ancestorPath})
+
+	t.Run("non_empty_explicit_path_wins", func(t *testing.T) {
+		overridden := &overridingPathCtx{Context: ancestor, override: "child/explicit/node"}
+		if got := contextPath(overridden); got != "child/explicit/node" {
+			t.Fatalf("contextPath(non-empty override) = %q, want %q", got, "child/explicit/node")
+		}
+	})
+
+	t.Run("empty_explicit_path_wins", func(t *testing.T) {
+		emptyTopLevel := &overridingPathCtx{Context: ancestor, override: ""}
+		if got := contextPath(emptyTopLevel); got != "" {
+			t.Fatalf("contextPath(empty override) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("overriding_callback_wrapper_declared_path_wins", func(t *testing.T) {
+		cbBase := agent.NewCallbackContext(ancestor, nil)
+		nonEmpty := &overridingCallbackWrapper{Context: cbBase, override: "child/override"}
+		if got := contextPath(nonEmpty); got != "child/override" {
+			t.Fatalf("contextPath(overridingCallbackWrapper non-empty) = %q, want %q", got, "child/override")
+		}
+		empty := &overridingCallbackWrapper{Context: cbBase, override: ""}
+		if got := contextPath(empty); got != "" {
+			t.Fatalf("contextPath(overridingCallbackWrapper empty) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("value_receiver_declared_path_as_value_and_pointer", func(t *testing.T) {
+		cbBase := agent.NewCallbackContext(ancestor, nil)
+		valOverride := valOverridePathCtx{Context: cbBase, override: "val/override"}
+		if got := contextPath(valOverride); got != "val/override" {
+			t.Fatalf("contextPath(valOverridePathCtx value) = %q, want %q", got, "val/override")
+		}
+		if got := contextPath(&valOverride); got != "val/override" {
+			t.Fatalf("contextPath(*valOverridePathCtx pointer) = %q, want %q", got, "val/override")
+		}
+		valEmpty := valOverridePathCtx{Context: cbBase, override: ""}
+		if got := contextPath(valEmpty); got != "" {
+			t.Fatalf("contextPath(valOverridePathCtx empty value) = %q, want empty string", got)
+		}
+		if got := contextPath(&valEmpty); got != "" {
+			t.Fatalf("contextPath(*valOverridePathCtx empty pointer) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("nested_overriding_wrappers_honor_declared_path", func(t *testing.T) {
+		cbBase := agent.NewCallbackContext(ancestor, nil)
+
+		nestedPtr := &outerOverridingPtr{
+			overridingCallbackWrapper: &overridingCallbackWrapper{Context: cbBase, override: "nested/override"},
+		}
+		if got := contextPath(nestedPtr); got != "nested/override" {
+			t.Fatalf("contextPath(outerOverridingPtr non-empty) = %q, want %q", got, "nested/override")
+		}
+		nestedPtrEmpty := &outerOverridingPtr{
+			overridingCallbackWrapper: &overridingCallbackWrapper{Context: cbBase, override: ""},
+		}
+		if got := contextPath(nestedPtrEmpty); got != "" {
+			t.Fatalf("contextPath(outerOverridingPtr empty) = %q, want empty string", got)
+		}
+
+		// Addressable pointer receives (*overridingCallbackWrapper).Path() on all cores.
+		valEmbed := outerOverridingValEmbed{
+			overridingCallbackWrapper: overridingCallbackWrapper{Context: ancestor, override: "val-embed/override"},
+		}
+		if got := contextPath(&valEmbed); got != "val-embed/override" {
+			t.Fatalf("contextPath(*outerOverridingValEmbed non-empty) = %q, want %q", got, "val-embed/override")
+		}
+		valEmbedEmpty := outerOverridingValEmbed{
+			overridingCallbackWrapper: overridingCallbackWrapper{Context: ancestor, override: ""},
+		}
+		if got := contextPath(&valEmbedEmpty); got != "" {
+			t.Fatalf("contextPath(*outerOverridingValEmbed empty) = %q, want empty string", got)
+		}
+
+		nestedValRecv := outerValOverride{
+			valOverridePathCtx: valOverridePathCtx{Context: cbBase, override: "nested/val/override"},
+		}
+		if got := contextPath(nestedValRecv); got != "nested/val/override" {
+			t.Fatalf("contextPath(outerValOverride value) = %q, want %q", got, "nested/val/override")
+		}
+		if got := contextPath(&nestedValRecv); got != "nested/val/override" {
+			t.Fatalf("contextPath(*outerValOverride pointer) = %q, want %q", got, "nested/val/override")
+		}
+		nestedValRecvEmpty := outerValOverride{
+			valOverridePathCtx: valOverridePathCtx{Context: cbBase, override: ""},
+		}
+		if got := contextPath(nestedValRecvEmpty); got != "" {
+			t.Fatalf("contextPath(outerValOverride empty value) = %q, want empty string", got)
+		}
+		if got := contextPath(&nestedValRecvEmpty); got != "" {
+			t.Fatalf("contextPath(*outerValOverride empty pointer) = %q, want empty string", got)
+		}
+
+		shadowing := &outerShadowingPlain{
+			plainCallbackWrapper: &plainCallbackWrapper{Context: ancestor},
+			explicitPathField:    &explicitPathField{override: "shallow/override"},
+		}
+		if got := contextPath(shadowing); got != "shallow/override" {
+			t.Fatalf("contextPath(outerShadowingPlain non-empty) = %q, want %q", got, "shallow/override")
+		}
+		shadowingEmpty := &outerShadowingPlain{
+			plainCallbackWrapper: &plainCallbackWrapper{Context: ancestor},
+			explicitPathField:    &explicitPathField{override: ""},
+		}
+		if got := contextPath(shadowingEmpty); got != "" {
+			t.Fatalf("contextPath(outerShadowingPlain empty) = %q, want empty string", got)
+		}
+
+		nestedPlain := &middlePlainWrapper{
+			plainCallbackWrapper: &plainCallbackWrapper{Context: ancestor},
+		}
+		if got := contextPath(nestedPlain); got != ancestorPath {
+			t.Fatalf("contextPath(middlePlainWrapper) = %q, want %q", got, ancestorPath)
+		}
+	})
+
+	t.Run("plain_wrapper_inherits_ancestor_path", func(t *testing.T) {
+		if contextPathReaderOnce() == nil {
+			t.Skip("Value-based path inheritance through non-Path()-carrying wrappers requires ADK core > v2.8.0")
+		}
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{"plainDelegatingCtx", &plainDelegatingCtx{Context: ancestor}},
+			{"plainReadonlyWrapper", &plainReadonlyWrapper{ReadonlyContext: ancestor}},
+			{"plainInvocationWrapper", &plainInvocationWrapper{InvocationContext: ancestor}},
+			// Unaddressable value does not implement Path() because (*overridingCallbackWrapper).Path
+			// shadows agent.Context.Path without entering the value's method set.
+			{"outerOverridingValEmbed value", outerOverridingValEmbed{
+				overridingCallbackWrapper: overridingCallbackWrapper{Context: ancestor, override: "ignored"},
+			}},
+		} {
+			if got := contextPath(tc.ctx); got != ancestorPath {
+				t.Fatalf("%s: contextPath() = %q, want %q", tc.name, got, ancestorPath)
+			}
+		}
+	})
+
+	t.Run("plain_adk_interface_wrappers_resolve_path", func(t *testing.T) {
+		toolBase := agent.NewToolContext(ancestor, "fc-1", nil, nil)
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{"plainCallbackWrapper", &plainCallbackWrapper{Context: ancestor}},
+			{"plainContextWrapper", &plainContextWrapper{Context: ancestor}},
+			{"plainToolCtxWrapper", &plainToolCtxWrapper{Context: toolBase}},
+			{"middlePlainWrapper", &middlePlainWrapper{plainCallbackWrapper: &plainCallbackWrapper{Context: ancestor}}},
+		} {
+			if got := contextPath(tc.ctx); got != ancestorPath {
+				t.Fatalf("%s: contextPath() = %q, want %q", tc.name, got, ancestorPath)
+			}
+		}
+	})
+
+	t.Run("plain_adk_interface_wrappers_over_empty_child_inherit_ancestor_path", func(t *testing.T) {
+		if contextPathReaderOnce() == nil {
+			t.Skip("Value-based path inheritance through custom ADK interface wrappers over empty child requires ADK core > v2.8.0")
+		}
+		cbBase := agent.NewCallbackContext(ancestor, nil)
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{"plainCallbackWrapper", &plainCallbackWrapper{Context: cbBase}},
+			{"plainContextWrapper", &plainContextWrapper{Context: cbBase}},
+			{"plainReadonlyWrapper", &plainReadonlyWrapper{ReadonlyContext: cbBase}},
+			{"plainInvocationWrapper", &plainInvocationWrapper{InvocationContext: cbBase}},
+			{"middlePlainWrapper", &middlePlainWrapper{plainCallbackWrapper: &plainCallbackWrapper{Context: cbBase}}},
+		} {
+			if got := contextPath(tc.ctx); got != ancestorPath {
+				t.Fatalf("%s: contextPath() = %q, want %q", tc.name, got, ancestorPath)
+			}
+		}
+	})
+
+	t.Run("strict_context_mock_panic_recovers_to_inherited_path", func(t *testing.T) {
+		if contextPathReaderOnce() == nil {
+			t.Skip("Value-based path inheritance through StrictContextMock requires ADK core > v2.8.0")
+		}
+		strictMock := &agent.StrictContextMock{Ctx: ancestor}
+		if got := contextPath(strictMock); got != ancestorPath {
+			t.Fatalf("contextPath(StrictContextMock) = %q, want %q", got, ancestorPath)
+		}
+	})
+
+	t.Run("adk_wrappers_delegate", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{"commonContext", ancestor},
+			{"callbackContextWrapper", agent.NewCallbackContext(ancestor, nil)},
+			{"toolContextWrapper", agent.NewToolContext(ancestor, "fc-1", nil, nil)},
+		} {
+			if got := contextPath(tc.ctx); got != ancestorPath {
+				t.Fatalf("%s: contextPath() = %q, want %q", tc.name, got, ancestorPath)
+			}
+		}
+	})
+
+	t.Run("end_to_end_span_selection_uses_explicit_path", func(t *testing.T) {
+		overridingPath := "child/explicit/node"
+
+		cbOverridden := &overridingCallbackCtx{Context: agent.NewCallbackContext(ancestor, nil), override: overridingPath}
+		cbEmpty := &overridingCallbackCtx{Context: agent.NewCallbackContext(ancestor, nil), override: ""}
+
+		if got := identityOf(cbOverridden); got.path != overridingPath {
+			t.Fatalf("identityOf(cbOverridden).path = %q, want %q", got.path, overridingPath)
+		}
+		if got := identityOf(cbEmpty); got.path != "" {
+			t.Fatalf("identityOf(cbEmpty).path = %q, want empty string", got.path)
+		}
+
+		// Verify traceManager records each explicit Path() accurately and selects
+		// open spans (both child parentSpanID and out-of-order popAgentSpan) using
+		// explicit Path() rather than inherited ancestor path or LIFO order.
+		tmRecord := newTraceManager()
+		ancID := identityOf(ancestor)
+		ovID := identityOf(cbOverridden)
+		emptyID := identityOf(cbEmpty)
+		recAncSpan, _ := tmRecord.pushAgentSpan(ancestor, ancID)
+		recOvSpan, _ := tmRecord.pushAgentSpan(cbOverridden, ovID)
+		recEmptySpan, _ := tmRecord.pushAgentSpan(cbEmpty, emptyID)
+		if recAncSpan.spanID == recOvSpan.spanID || recOvSpan.spanID == recEmptySpan.spanID || recAncSpan.spanID == recEmptySpan.spanID {
+			t.Fatalf("expected 3 distinct recorded spans, got (%q, %q, %q)", recAncSpan.spanID, recOvSpan.spanID, recEmptySpan.spanID)
+		}
+
+		tmRecord.mu.Lock()
+		recInv := tmRecord.invocations[ancID.invocationID]
+		tmRecord.mu.Unlock()
+		if recInv == nil {
+			t.Fatalf("missing invocationTrace for %q", ancID.invocationID)
+		}
+		recInv.mu.Lock()
+		recordedPaths := make(map[string]string, len(recInv.agentStack))
+		for _, rec := range recInv.agentStack {
+			recordedPaths[rec.spanID] = rec.path
+		}
+		recInv.mu.Unlock()
+		if got := recordedPaths[recAncSpan.spanID]; got != ancestorPath {
+			t.Fatalf("recorded path for ancestor span = %q, want %q", got, ancestorPath)
+		}
+		if got := recordedPaths[recOvSpan.spanID]; got != overridingPath {
+			t.Fatalf("recorded path for overridden span = %q, want %q", got, overridingPath)
+		}
+		if got := recordedPaths[recEmptySpan.spanID]; got != "" {
+			t.Fatalf("recorded path for empty override span = %q, want empty string", got)
+		}
+
+		tmSelect := newTraceManager()
+		ancRO := &readonlyNamedPathCtx{ReadonlyContext: ancestor, pathOverride: ancestorPath}
+		ovRO := &readonlyNamedPathCtx{ReadonlyContext: ancestor, pathOverride: overridingPath}
+		ancROID := identityOf(ancRO)
+		ovROID := identityOf(ovRO)
+		ancSpan, _ := tmSelect.pushAgentSpan(ancRO, ancROID)
+		ovSpan, _ := tmSelect.pushAgentSpan(ovRO, ovROID)
+		if ancSpan.spanID == ovSpan.spanID {
+			t.Fatalf("expected distinct selection spans, got %q", ovSpan.spanID)
+		}
+
+		childUnderAnc := &readonlyNamedPathCtx{ReadonlyContext: ancestor, nameOverride: "sub", pathOverride: ancestorPath + "/sub"}
+		childUnderAncID := identityOf(childUnderAnc)
+		childUnderAncSpan, _ := tmSelect.pushAgentSpan(childUnderAnc, childUnderAncID)
+		if childUnderAncSpan.parentSpanID != ancSpan.spanID {
+			t.Fatalf("childUnderAnc.parentSpanID = %q, want ancestor span %q (not top span %q)",
+				childUnderAncSpan.parentSpanID, ancSpan.spanID, ovSpan.spanID)
+		}
+
+		childUnderOv := &readonlyNamedPathCtx{ReadonlyContext: ancestor, nameOverride: "sub", pathOverride: overridingPath + "/sub"}
+		childUnderOvID := identityOf(childUnderOv)
+		childUnderOvSpan, _ := tmSelect.pushAgentSpan(childUnderOv, childUnderOvID)
+		if childUnderOvSpan.parentSpanID != ovSpan.spanID {
+			t.Fatalf("childUnderOv.parentSpanID = %q, want overridden span %q", childUnderOvSpan.parentSpanID, ovSpan.spanID)
+		}
+
+		if got := tmSelect.popAgentSpan(childUnderAnc, childUnderAncID); got.spanID != childUnderAncSpan.spanID {
+			t.Fatalf("popAgentSpan(childUnderAnc) = %q, want %q", got.spanID, childUnderAncSpan.spanID)
+		}
+		if got := tmSelect.popAgentSpan(childUnderOv, childUnderOvID); got.spanID != childUnderOvSpan.spanID {
+			t.Fatalf("popAgentSpan(childUnderOv) = %q, want %q", got.spanID, childUnderOvSpan.spanID)
+		}
+		// Pop out of LIFO order: ancSpan sits beneath ovSpan with the same agent
+		// name and branch, so findAgent must select ancSpan by its Path().
+		popAnc := tmSelect.popAgentSpan(ancRO, ancROID)
+		popOv := tmSelect.popAgentSpan(ovRO, ovROID)
+		if popAnc.spanID != ancSpan.spanID || popOv.spanID != ovSpan.spanID {
+			t.Fatalf("out-of-order popAgentSpan mismatch: got (%q, %q), want (%q, %q)",
+				popAnc.spanID, popOv.spanID, ancSpan.spanID, ovSpan.spanID)
+		}
+	})
+}
+
+type overridingCallbackCtx struct {
+	agent.Context
+	override string
+}
+
+func (c *overridingCallbackCtx) Path() string { return c.override }
+
+type readonlyNamedPathCtx struct {
+	agent.ReadonlyContext
+	nameOverride string
+	pathOverride string
+}
+
+func (c *readonlyNamedPathCtx) AgentName() string {
+	if c.nameOverride != "" {
+		return c.nameOverride
+	}
+	return c.ReadonlyContext.AgentName()
+}
+
+func (c *readonlyNamedPathCtx) Path() string { return c.pathOverride }

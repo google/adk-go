@@ -1581,6 +1581,13 @@ type zeroOuterConfigAgent struct {
 	Config llmagent.Config
 }
 
+func (z *zeroOuterConfigAgent) Unwrap() agent.Agent { return z.Agent }
+
+type unannotatedUserAgentWrapper struct {
+	agent.Agent
+	Config llmagent.Config
+}
+
 func TestAgentStartingData(t *testing.T) {
 	helper, err := llmagent.New(llmagent.Config{Name: "helper", Description: "Helps"})
 	if err != nil {
@@ -1629,10 +1636,15 @@ func TestAgentStartingData(t *testing.T) {
 			wantAttrs:   map[string]any{"agent_description": "Plans trips", "model": "scripted-model", "sub_agents": []string{"helper"}},
 		},
 		{
-			name:        "wrapper with zero outer Config falls through to embedded base agent",
+			name:        "wrapper with Unwrap and zero outer Config falls through to embedded base agent",
 			agent:       &zeroOuterConfigAgent{Agent: planner},
 			wantContent: "Plan the trip.",
 			wantAttrs:   map[string]any{"agent_description": "Plans trips", "model": "scripted-model", "sub_agents": []string{"helper"}},
+		},
+		{
+			name:      "unannotated user wrapper without Unwrap omits embedded base agent config",
+			agent:     &unannotatedUserAgentWrapper{Agent: planner},
+			wantAttrs: map[string]any{"agent_description": "Plans trips", "sub_agents": []string{"helper"}},
 		},
 		{
 			name:      "instruction provider",
@@ -5776,7 +5788,10 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 	worker := newTestAgent(t, "worker", helper)
 	root := newTestAgent(t, "root", worker)
 
-	type parentsKey struct{}
+	runnerKey := discoverParentMapCtxKey()
+	if runnerKey == nil {
+		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil runner parent map key")
+	}
 	tests := []struct {
 		name    string
 		runner  agent.Agent
@@ -5813,7 +5828,7 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 			tm.rememberAgentTree(root)
 			ctx := context.Background()
 			if tc.parents != nil {
-				ctx = context.WithValue(ctx, parentsKey{}, tc.parents)
+				ctx = context.WithValue(ctx, runnerKey, tc.parents)
 			}
 			id := identity{invocationID: "inv-earlier-runner", agentName: tc.runner.Name()}
 			if got := tm.invocationSpan(ctx, id, tc.runner).rootAgentName; got != tc.wantRoot {
@@ -32275,9 +32290,10 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			var selfParams any
 			selfParams = &selfParams
 
-			hasValueKeys := contextPathReaderOnce() != nil && parentMapReaderOnce() != nil
+			hasPathKey := contextPathReaderOnce() != nil
+			hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey() != nil
 			wantPath := ""
-			if hasValueKeys {
+			if hasPathKey {
 				wantPath = "wf_cycle@1/leaf@1"
 			}
 
@@ -32287,9 +32303,9 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				ctx:               &selfCtx,
 				invocationContext: capturedIC,
 			}
-			if parents := contextParentMap(roWrapped); hasValueKeys && parents["wf_cycle"] != parentRoot {
+			if parents := contextParentMap(roWrapped); hasParentMap && parents["wf_cycle"] != parentRoot {
 				t.Errorf("contextParentMap(roWrapped)[wf_cycle] = %v, want %v (via Value)", parents["wf_cycle"], parentRoot)
-			} else if !hasValueKeys && parents != nil {
+			} else if !hasParentMap && parents != nil {
 				t.Errorf("contextParentMap(roWrapped) = %v, want nil (non-ADK wrapper ignored)", parents)
 			}
 			if got := contextPath(roWrapped); got != wantPath {
@@ -32304,9 +32320,9 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				params:            &selfParams,
 				ctx:               &selfCtx,
 			}
-			if got := contextParentMap(icWrapped); hasValueKeys && got["wf_cycle"] != parentRoot {
+			if got := contextParentMap(icWrapped); hasParentMap && got["wf_cycle"] != parentRoot {
 				t.Errorf("contextParentMap(icWrapped)[wf_cycle] = %v, want %v (via Value)", got["wf_cycle"], parentRoot)
-			} else if !hasValueKeys && got != nil {
+			} else if !hasParentMap && got != nil {
 				t.Errorf("contextParentMap(icWrapped) = %v, want nil (non-ADK wrapper ignored)", got)
 			}
 			if got := contextPath(icWrapped); got != wantPath {
@@ -32335,10 +32351,12 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 
 		// Mutex-guarded application contexts with fields concurrently mutated under -race
 		// never have their struct fields reflected by contextPath or contextParentMap; when
-		// the ADK core provides private Value keys, Value delegation reads them race-free.
-		hasValueKeys := contextPathReaderOnce() != nil && parentMapReaderOnce() != nil
+		// ADK provides private Value keys or runner parent-map key discovery succeeds, Value
+		// delegation reads them race-free.
+		hasPathKey := contextPathReaderOnce() != nil
+		hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey() != nil
 		wantRacePath := ""
-		if hasValueKeys {
+		if hasPathKey {
 			wantRacePath = "wf_cycle@1/leaf@1"
 		}
 		type concurrentAppInvocationWrapper struct {
@@ -32401,17 +32419,17 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			if got := contextPath(appInv); got != wantRacePath {
 				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want %q", got, wantRacePath)
 			}
-			if got := contextParentMap(appInv); hasValueKeys && got["wf_cycle"] != parentRoot {
+			if got := contextParentMap(appInv); hasParentMap && got["wf_cycle"] != parentRoot {
 				t.Errorf("contextParentMap(concurrentAppInvocationWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
-			} else if !hasValueKeys && got != nil {
+			} else if !hasParentMap && got != nil {
 				t.Errorf("contextParentMap(concurrentAppInvocationWrapper) = %v, want nil", got)
 			}
 			if got := contextPath(appRO); got != wantRacePath {
 				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want %q", got, wantRacePath)
 			}
-			if got := contextParentMap(appRO); hasValueKeys && got["wf_cycle"] != parentRoot {
+			if got := contextParentMap(appRO); hasParentMap && got["wf_cycle"] != parentRoot {
 				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
-			} else if !hasValueKeys && got != nil {
+			} else if !hasParentMap && got != nil {
 				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper) = %v, want nil", got)
 			}
 		}
@@ -36106,11 +36124,20 @@ func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
 		{name: "via_root_with_context", viaWorker: false},
 	}
 
+	requiresValueLineageWalker := func(shape string) bool {
+		switch shape {
+		case "nil_optional_embedded_pointer", "unrelated_context_side_field", "unexported_parent_wrapper":
+			return true
+		default:
+			return false
+		}
+	}
+
 	for _, shape := range shapes {
 		for _, carrier := range carriers {
 			t.Run(shape+"/"+carrier.name, func(t *testing.T) {
-				if lineageWalkerOnce() == nil && shape != "direct" {
-					t.Skip("custom-wrapper Value lineage across goroutines requires ADK core > v2.8.0")
+				if lineageWalkerOnce() == nil && requiresValueLineageWalker(shape) {
+					t.Skipf("shape %q requires ADK core > v2.8.0 Value lineage walker", shape)
 				}
 				p, requests, _ := setupTestPlugin(t)
 				leaf := newOneEventAgent(t, "leaf", nil)
@@ -36229,23 +36256,90 @@ func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
 	}
 }
 
+var pkgCtxMu sync.RWMutex
+
+type pkgMutexEmbeddedContext struct {
+	context.Context
+}
+
+func (c *pkgMutexEmbeddedContext) Deadline() (time.Time, bool) {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *pkgMutexEmbeddedContext) Done() <-chan struct{} {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *pkgMutexEmbeddedContext) Err() error {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *pkgMutexEmbeddedContext) Value(key any) any {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Value(key)
+}
+
+func (c *pkgMutexEmbeddedContext) Unwrap() context.Context {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context
+}
+
+type pkgMutexNoUnwrapContext struct {
+	context.Context
+}
+
+func (c *pkgMutexNoUnwrapContext) Deadline() (time.Time, bool) {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *pkgMutexNoUnwrapContext) Done() <-chan struct{} {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *pkgMutexNoUnwrapContext) Err() error {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *pkgMutexNoUnwrapContext) Value(key any) any {
+	pkgCtxMu.RLock()
+	defer pkgCtxMu.RUnlock()
+	return c.Context.Value(key)
+}
+
 // TestRunner_ConcurrentLookalike_SynchronizedContextLineage verifies that a
-// custom context.Context guarding its parent Context field with an RWMutex can
-// be mutated concurrently under Lock while pushAgentSpan resolves launch
-// lineage without a data race, attributing the child to the launching worker.
+// custom context.Context guarding its parent Context field with an RWMutex (or
+// package-level RWMutex) can be mutated concurrently under Lock while
+// pushAgentSpan resolves launch lineage without a data race, attributing the
+// child to the launching worker.
 func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 	type swapKey int
 	for _, tc := range []struct {
 		name      string
-		embedded  bool
+		kind      string
 		viaWorker bool
 	}{
-		{name: "named_field_via_worker_with_context", embedded: false, viaWorker: true},
-		{name: "embedded_field_via_root_with_context", embedded: true, viaWorker: false},
+		{name: "named_field_via_worker_with_context", kind: "named", viaWorker: true},
+		{name: "embedded_field_via_root_with_context", kind: "embedded", viaWorker: false},
+		{name: "pkg_level_mutex_with_unwrap", kind: "pkg_unwrap", viaWorker: false},
+		{name: "pkg_level_mutex_without_unwrap", kind: "pkg_no_unwrap", viaWorker: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if lineageWalkerOnce() == nil {
-				t.Skip("custom-wrapper Value lineage across goroutines requires ADK core with ADKWalkLineage")
+			if lineageWalkerOnce() == nil && tc.kind != "pkg_unwrap" {
+				t.Skip("custom-wrapper Value lineage across goroutines without Unwrap() requires ADK core with ADKWalkLineage")
 			}
 			p, requests, _ := setupTestPlugin(t)
 			leaf := newOneEventAgent(t, "leaf", nil)
@@ -36274,7 +36368,8 @@ func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 
 						var wrapped context.Context
 						var mutateOnce func(toggle bool)
-						if tc.embedded {
+						switch tc.kind {
+						case "embedded":
 							sc := &rwMutexEmbeddedContext{Context: altA}
 							wrapped = sc
 							mutateOnce = func(toggle bool) {
@@ -36286,7 +36381,7 @@ func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 								}
 								sc.mu.Unlock()
 							}
-						} else {
+						case "named":
 							sc := &rwMutexNamedContext{Context: altA}
 							wrapped = sc
 							mutateOnce = func(toggle bool) {
@@ -36297,6 +36392,30 @@ func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 									sc.Context = altA
 								}
 								sc.mu.Unlock()
+							}
+						case "pkg_unwrap":
+							sc := &pkgMutexEmbeddedContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								pkgCtxMu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								pkgCtxMu.Unlock()
+							}
+						case "pkg_no_unwrap":
+							sc := &pkgMutexNoUnwrapContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								pkgCtxMu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								pkgCtxMu.Unlock()
 							}
 						}
 
@@ -36447,11 +36566,8 @@ func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
 		"deep_with_value_chain",
 	} {
 		t.Run(shape, func(t *testing.T) {
-			if lineageWalkerOnce() == nil {
-				t.Skip("Value-based lineage requires ADK core > v2.8.0")
-			}
 			wrapped := wrapLineageShape(w2Act, rootAct, shape)
-			child := mkADKCtx(wrapped, "leaf", "inv-ws-leaf")
+			child := rootAct.WithContext(wrapped)
 			lin := observeLaunchLineage(child, child, activationTokensOf(child, child))
 			got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 100}, lin)
 			if got != w2 {
@@ -37183,11 +37299,48 @@ type nilEmbeddedAgentWrapper struct {
 	agent.Agent
 }
 
+func (w *nilEmbeddedAgentWrapper) Unwrap() agent.Agent {
+	return w.Agent
+}
+
+type unannotatedNilEmbeddedAgentWrapper struct {
+	*nilEmbeddedWalkerFields
+	agent.Agent
+}
+
 type syncedAgentWrapper struct {
 	mu        sync.RWMutex
 	Config    any
 	AgentType string
 	agent.Agent
+}
+
+func (w *syncedAgentWrapper) Unwrap() agent.Agent {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.Agent
+}
+
+type swappedCounters struct {
+	hits int
+}
+
+type swappedUserConfig struct {
+	Config    string
+	AgentType string
+}
+
+type swappingAgentDecorator struct {
+	agent.Agent
+	*swappedCounters
+	*swappedUserConfig
+	mu sync.Mutex
+}
+
+func (d *swappingAgentDecorator) Unwrap() agent.Agent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent
 }
 
 func captureRunnerContextWithParentMap(t *testing.T, root agent.Agent) context.Context {
@@ -37594,6 +37747,13 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		if got := agentTypeOf(wrappedNil); got != "LLMAgent" {
 			t.Errorf("agentTypeOf(nilEmbeddedAgentWrapper) = %q, want %q", got, "LLMAgent")
 		}
+		unannotatedNil := &unannotatedNilEmbeddedAgentWrapper{Agent: llmAg}
+		if got := agentConfig(unannotatedNil); got != nil {
+			t.Errorf("agentConfig(unannotatedNilEmbeddedAgentWrapper) = %v, want nil", got)
+		}
+		if got := agentTypeOf(unannotatedNil); got != "" {
+			t.Errorf("agentTypeOf(unannotatedNilEmbeddedAgentWrapper) = %q, want empty", got)
+		}
 
 		// A mutex-bearing decorator (including one with its own mutable Config
 		// and AgentType fields) must preserve the inner ADK agent's Config and
@@ -37668,19 +37828,6 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("llmagent.New: %v", err)
-		}
-		type swappedCounters struct {
-			hits int
-		}
-		type swappedUserConfig struct {
-			Config    string
-			AgentType string
-		}
-		type swappingAgentDecorator struct {
-			agent.Agent
-			*swappedCounters
-			*swappedUserConfig
-			mu sync.Mutex
 		}
 		dec := &swappingAgentDecorator{
 			Agent:             llmAg,
@@ -37955,6 +38102,15 @@ type outerAgentDecorator struct {
 	*midAgentDecorator
 }
 
+func (d *outerAgentDecorator) Unwrap() agent.Agent {
+	if d == nil || d.midAgentDecorator == nil || d.midAgentDecorator.innerAgentDecorator == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent
+}
+
 type externalEmbeddedInvocationContext struct {
 	agent.InvocationContext
 }
@@ -38224,11 +38380,11 @@ func TestLaunchLineage_FilteringDualParentLockAndDecoratorRegressions(t *testing
 			mu sync.Mutex
 		}{Agent: llmAg}
 		_ = &mutexWrapped.mu
-		if _, ok := agentConfig(mutexWrapped).(llmagent.Config); !ok {
-			t.Fatalf("agentConfig(struct{agent.Agent; sync.Mutex}) = %T, want llmagent.Config", agentConfig(mutexWrapped))
+		if got := agentConfig(mutexWrapped); got != nil {
+			t.Fatalf("agentConfig(struct{agent.Agent; sync.Mutex}) = %#v, want nil (unannotated mutex struct)", got)
 		}
-		if got := agentTypeOf(mutexWrapped); got != "LLMAgent" {
-			t.Fatalf("agentTypeOf(struct{agent.Agent; sync.Mutex}) = %q, want %q", got, "LLMAgent")
+		if got := agentTypeOf(mutexWrapped); got != "" {
+			t.Fatalf("agentTypeOf(struct{agent.Agent; sync.Mutex}) = %q, want empty (unannotated mutex struct)", got)
 		}
 
 		nestedLLM := &outerAgentDecorator{
@@ -39326,5 +39482,599 @@ func TestRunner_ConcurrentLookalike_EmbeddedPlainHolderNamedContextPicksLeftOver
 	leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
 	if got, _ := leafStart["parent_span_id"].(string); got != leftSpan || got == rightSpan || got == rootSpan {
 		t.Fatalf("leaf parent_span_id = %q, want %q (left, not right %q or root %q)", got, leftSpan, rightSpan, rootSpan)
+	}
+}
+
+type embeddedRunAgent interface {
+	agent.Agent
+}
+
+type namedUnusedAgentDecorator struct {
+	embeddedRunAgent
+	Config string
+	Agent  agent.Agent
+}
+
+type mutexSwappingDecorator struct {
+	agent.Agent
+	mu        sync.Mutex
+	Config    string
+	AgentType string
+}
+
+type mutexSwappingNoCfgDecorator struct {
+	agent.Agent
+	mu sync.Mutex
+}
+
+func TestAgentMetadata_UnusedNamedFieldAndDecoratorLockSafety(t *testing.T) {
+	t.Run("unused_named_agent_field_instruction_not_leaked", func(t *testing.T) {
+		runningAg, err := agent.New(agent.Config{
+			Name:        "running_custom_agent",
+			Description: "actual delegate",
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		unusedAg, err := llmagent.New(llmagent.Config{
+			Name:        "unused_fallback_llm",
+			Instruction: "WRONG UNUSED INSTRUCTION",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		dec := &namedUnusedAgentDecorator{
+			embeddedRunAgent: runningAg,
+			Config:           "decorator-cfg",
+			Agent:            unusedAg,
+		}
+		content, _ := agentStartingData(dec)
+		if content == "WRONG UNUSED INSTRUCTION" {
+			t.Fatalf("agentStartingData leaked unused Agent field instruction: %v", content)
+		}
+	})
+
+	t.Run("unused_named_agent_field_ignored_for_after_agent_callbacks", func(t *testing.T) {
+		noCBAg, err := llmagent.New(llmagent.Config{
+			Name: "no_cb_agent",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(no_cb): %v", err)
+		}
+		withCBAg, err := llmagent.New(llmagent.Config{
+			Name: "with_cb_agent",
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) { return nil, nil },
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(with_cb): %v", err)
+		}
+		anonNoCB := struct{ agent.Agent }{Agent: noCBAg}
+		if agentHasAfterAgentCallbacks(anonNoCB) {
+			t.Fatalf("agentHasAfterAgentCallbacks(anonymous agent.Agent without callbacks) = true, want false")
+		}
+		dec := &namedUnusedAgentDecorator{
+			embeddedRunAgent: withCBAg,
+			Config:           "decorator-cfg",
+			Agent:            noCBAg,
+		}
+		if !agentHasAfterAgentCallbacks(dec) {
+			t.Fatalf("agentHasAfterAgentCallbacks(namedUnusedAgentDecorator) followed unused Agent field and returned false, want true")
+		}
+	})
+
+	t.Run("decorator_mutex_swapped_agent_not_read_unlocked/with_own_config_and_type", func(t *testing.T) {
+		agA, err := llmagent.New(llmagent.Config{Name: "ag_a", Instruction: "inst a"})
+		if err != nil {
+			t.Fatalf("llmagent.New(a): %v", err)
+		}
+		agB, err := llmagent.New(llmagent.Config{Name: "ag_b", Instruction: "inst b"})
+		if err != nil {
+			t.Fatalf("llmagent.New(b): %v", err)
+		}
+		dec := &mutexSwappingDecorator{
+			Agent:     agA,
+			Config:    "immutable-decorator-cfg",
+			AgentType: "CustomDecorator",
+		}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					dec.mu.Lock()
+					if i%2 == 0 {
+						dec.Agent = agB
+					} else {
+						dec.Agent = agA
+					}
+					dec.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+		for range 500 {
+			_ = agentConfig(dec)
+			_ = agentTypeOf(dec)
+			_ = agentHasAfterAgentCallbacks(dec)
+		}
+	})
+
+	t.Run("decorator_mutex_swapped_agent_not_read_unlocked/without_own_config_or_type", func(t *testing.T) {
+		agA, err := llmagent.New(llmagent.Config{Name: "ag_a_nocfg", Instruction: "inst a"})
+		if err != nil {
+			t.Fatalf("llmagent.New(a): %v", err)
+		}
+		agB, err := llmagent.New(llmagent.Config{Name: "ag_b_nocfg", Instruction: "inst b"})
+		if err != nil {
+			t.Fatalf("llmagent.New(b): %v", err)
+		}
+		dec := &mutexSwappingNoCfgDecorator{Agent: agA}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					dec.mu.Lock()
+					if i%2 == 0 {
+						dec.Agent = agB
+					} else {
+						dec.Agent = agA
+					}
+					dec.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+		for range 500 {
+			_ = agentConfig(dec)
+			_ = agentTypeOf(dec)
+			_ = agentHasAfterAgentCallbacks(dec)
+		}
+	})
+}
+
+func TestContextParentMap_AppMapWithNilEntryDoesNotDropInvocationRows(t *testing.T) {
+	type appMapKey struct{}
+	type customAgentMap map[string]agent.Agent
+
+	validAgent := newOneEventAgent(t, "root_agent", nil)
+
+	for name, raw := range map[string]any{
+		"direct_map": map[string]agent.Agent{"nil_child": nil, "valid": validAgent},
+		"named_map":  customAgentMap{"nil_child": nil, "valid": validAgent},
+	} {
+		t.Run("convert_"+name, func(t *testing.T) {
+			got, ok := convertAgentParentMap(raw)
+			if !ok {
+				t.Fatalf("convertAgentParentMap(%s) = !ok, want ok", name)
+			}
+			if _, exists := got["nil_child"]; exists {
+				t.Fatalf("convertAgentParentMap(%s) kept nil entry: %v", name, got)
+			}
+			if got["valid"] != validAgent {
+				t.Fatalf("convertAgentParentMap(%s)[valid] = %v, want %v", name, got["valid"], validAgent)
+			}
+			got["injected"] = validAgent
+			switch src := raw.(type) {
+			case map[string]agent.Agent:
+				if _, leaked := src["injected"]; leaked {
+					t.Fatalf("convertAgentParentMap(%s) aliased input map", name)
+				}
+			case customAgentMap:
+				if _, leaked := src["injected"]; leaked {
+					t.Fatalf("convertAgentParentMap(%s) aliased input named map", name)
+				}
+			}
+		})
+	}
+
+	t.Run("nil_entry_in_app_map_does_not_drop_invocation_rows", func(t *testing.T) {
+		appCtx := context.WithValue(context.Background(), appMapKey{}, map[string]agent.Agent{
+			"nil_child": nil,
+		})
+		if got := contextParentMap(appCtx); got != nil {
+			t.Fatalf("contextParentMap(appCtx) = %v, want nil (app key must not match runner key)", got)
+		}
+
+		p, requests, mCtx := setupTestPlugin(t)
+		invCtx := *mCtx
+		invCtx.ctx = appCtx
+		invCtx.agentName = "root_agent"
+		if _, err := p.BeforeRunCallback()(&invCtx); err != nil {
+			t.Fatalf("BeforeRunCallback: %v", err)
+		}
+		p.AfterRunCallback()(&invCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		types := eventTypes(rows)
+		if !slices.Contains(types, EventInvocationStarting) || !slices.Contains(types, EventInvocationCompleted) {
+			t.Fatalf("rows = %v, want both INVOCATION_STARTING and INVOCATION_COMPLETED", types)
+		}
+	})
+}
+
+type unwrapMutexSwappingDecorator struct {
+	mu sync.Mutex
+	agent.Agent
+}
+
+func (d *unwrapMutexSwappingDecorator) Name() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.Name()
+}
+
+func (d *unwrapMutexSwappingDecorator) Description() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.Description()
+}
+
+func (d *unwrapMutexSwappingDecorator) SubAgents() []agent.Agent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.SubAgents()
+}
+
+func (d *unwrapMutexSwappingDecorator) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	d.mu.Lock()
+	a := d.Agent
+	d.mu.Unlock()
+	return a.Run(ctx)
+}
+
+func (d *unwrapMutexSwappingDecorator) Unwrap() agent.Agent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent
+}
+
+type unwrappedMutexSwappingDecorator struct {
+	mu sync.Mutex
+	agent.Agent
+}
+
+func (d *unwrappedMutexSwappingDecorator) Name() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.Name()
+}
+
+func (d *unwrappedMutexSwappingDecorator) Description() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.Description()
+}
+
+func (d *unwrappedMutexSwappingDecorator) SubAgents() []agent.Agent {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Agent.SubAgents()
+}
+
+func (d *unwrappedMutexSwappingDecorator) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	d.mu.Lock()
+	a := d.Agent
+	d.mu.Unlock()
+	return a.Run(ctx)
+}
+
+type cyclicAgentUnwrapper struct {
+	agent.Agent
+	next agent.Agent
+}
+
+func (c *cyclicAgentUnwrapper) Unwrap() agent.Agent {
+	return c.next
+}
+
+func TestAgentMetadataUnwrapLockSafe(t *testing.T) {
+	llmA, err := llmagent.New(llmagent.Config{
+		Name:        "unwrap_a",
+		Instruction: "inst",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(a): %v", err)
+	}
+	llmB, err := llmagent.New(llmagent.Config{
+		Name:        "unwrap_b",
+		Instruction: "inst",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(b): %v", err)
+	}
+
+	t.Run("unwrap_under_mutex_preserves_metadata_race_free", func(t *testing.T) {
+		dec := &unwrapMutexSwappingDecorator{Agent: llmA}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					dec.mu.Lock()
+					if i%2 == 0 {
+						dec.Agent = llmB
+					} else {
+						dec.Agent = llmA
+					}
+					dec.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for range 400 {
+			cfg, ok := agentConfig(dec).(llmagent.Config)
+			if !ok || cfg.Instruction != "inst" {
+				t.Fatalf("agentConfig(unwrapMutexSwappingDecorator) = (%T, %v), want llmagent.Config(inst)", agentConfig(dec), ok)
+			}
+			if got := agentTypeOf(dec); got != "LLMAgent" {
+				t.Fatalf("agentTypeOf(unwrapMutexSwappingDecorator) = %q, want LLMAgent", got)
+			}
+			if agentHasAfterAgentCallbacks(dec) {
+				t.Fatalf("agentHasAfterAgentCallbacks(unwrapMutexSwappingDecorator) = true, want false")
+			}
+		}
+	})
+
+	t.Run("without_unwrap_mutex_swapping_is_not_read_directly", func(t *testing.T) {
+		dec := &unwrappedMutexSwappingDecorator{Agent: llmA}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					dec.mu.Lock()
+					if i%2 == 0 {
+						dec.Agent = llmB
+					} else {
+						dec.Agent = llmA
+					}
+					dec.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for range 400 {
+			if got := agentConfig(dec); got != nil {
+				t.Fatalf("agentConfig(unwrappedMutexSwappingDecorator) = %v, want nil", got)
+			}
+			if got := agentTypeOf(dec); got != "" {
+				t.Fatalf("agentTypeOf(unwrappedMutexSwappingDecorator) = %q, want empty", got)
+			}
+			if !agentHasAfterAgentCallbacks(dec) {
+				t.Fatalf("agentHasAfterAgentCallbacks(unwrappedMutexSwappingDecorator) = false, want conservative true")
+			}
+		}
+	})
+
+	t.Run("cyclic_unwrap_terminates", func(t *testing.T) {
+		cyc := &cyclicAgentUnwrapper{Agent: llmA}
+		cyc.next = cyc
+		if got := agentConfig(cyc); got != nil {
+			t.Fatalf("agentConfig(cyclicAgentUnwrapper) = %v, want nil", got)
+		}
+		if got := agentTypeOf(cyc); got != "" {
+			t.Fatalf("agentTypeOf(cyclicAgentUnwrapper) = %q, want empty", got)
+		}
+		if !agentHasAfterAgentCallbacks(cyc) {
+			t.Fatalf("agentHasAfterAgentCallbacks(cyclicAgentUnwrapper) = false, want conservative true")
+		}
+	})
+}
+
+func TestDiscoverParentMapCtxKey_NoSpans(t *testing.T) {
+	spanExp := tracetest.NewInMemoryExporter()
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp), sdktrace.WithSpanProcessor(sr))
+	installTestTracerProvider(t, tp)
+
+	key := probeParentMapCtxKey()
+	if key == nil {
+		t.Fatal("probeParentMapCtxKey() = nil, want non-nil runner parent map key")
+	}
+	if spans := spanExp.GetSpans(); len(spans) != 0 {
+		t.Fatalf("probeParentMapCtxKey() exported %d OTel spans, want 0 (%v)", len(spans), spans)
+	}
+	if started := sr.Started(); len(started) != 0 {
+		t.Fatalf("probeParentMapCtxKey() started %d spans, want 0", len(started))
+	}
+	if ended := sr.Ended(); len(ended) != 0 {
+		t.Fatalf("probeParentMapCtxKey() ended %d spans, want 0", len(ended))
+	}
+	if got := discoverParentMapCtxKey(); got == nil {
+		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil runner parent map key")
+	}
+}
+
+func TestContextParentMap_LegacyFallbackMatchesRunnerKeyOnly(t *testing.T) {
+	type spoofKey struct{}
+	type comparableBox struct {
+		x any
+	}
+	runnerKey := discoverParentMapCtxKey()
+	if runnerKey == nil {
+		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil")
+	}
+
+	root := newOneEventAgent(t, "root", nil)
+	spoof := newOneEventAgent(t, "spoof", nil)
+
+	spoofOnly := context.WithValue(context.Background(), spoofKey{}, map[string]agent.Agent{
+		"child": spoof,
+	})
+	if got := contextParentMap(spoofOnly); got != nil {
+		t.Fatalf("contextParentMap(spoofOnly) = %v, want nil", got)
+	}
+
+	uncompBox := comparableBox{x: []int{1}}
+	if sameComparableValue(uncompBox, uncompBox) {
+		t.Fatal("sameComparableValue(uncomparable box) = true, want false without panic")
+	}
+	if !sameComparableValue(runnerKey, runnerKey) {
+		t.Fatal("sameComparableValue(runnerKey, runnerKey) = false, want true")
+	}
+	if sameComparableValue(runnerKey, spoofKey{}) {
+		t.Fatal("sameComparableValue(runnerKey, spoofKey{}) = true, want false")
+	}
+
+	withBoth := context.WithValue(
+		context.WithValue(
+			context.WithValue(context.Background(), runnerKey, map[string]agent.Agent{
+				"child":     root,
+				"nil_child": nil,
+			}),
+			spoofKey{},
+			map[string]agent.Agent{"child": spoof},
+		),
+		uncompBox,
+		map[string]agent.Agent{"child": spoof},
+	)
+	got := contextParentMap(withBoth)
+	if len(got) != 1 || got["child"] != root {
+		t.Fatalf("contextParentMap(withBoth) = %v, want map[child:%v]", got, root)
+	}
+}
+
+func TestContextParentMap_DoesNotProbeWhenADKParentMapAvailable(t *testing.T) {
+	probeCalls := 0
+	got := contextParentMapWith(
+		context.Background(),
+		func(context.Context) any { return nil },
+		func() any {
+			probeCalls++
+			return struct{}{}
+		},
+	)
+	if got != nil {
+		t.Fatalf("contextParentMapWith(mockRead -> nil) = %v, want nil", got)
+	}
+	if probeCalls != 0 {
+		t.Fatalf("discover callback called %d times when ADKParentMap reader is present, want 0", probeCalls)
+	}
+}
+
+func TestRunner_PromoteADKParentMap_SnapshotDoesNotMutateRunner(t *testing.T) {
+	if parentMapReaderOnce() == nil {
+		t.Skip("ADKParentMap requires ADK core > v2.8.0")
+	}
+	adkPm, ok := agent.Promote(nil).(interface {
+		ADKParentMap(context.Context) any
+	})
+	if !ok {
+		t.Fatal("agent.Promote(nil) does not implement ADKParentMap")
+	}
+
+	var captured []context.Context
+	var mu sync.Mutex
+	child := newOneEventAgent(t, "snapshot_child", nil)
+	root, err := agent.New(agent.Config{
+		Name:      "snapshot_root",
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				mu.Lock()
+				captured = append(captured, ctx)
+				mu.Unlock()
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "snapshot_root"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(snapshot_root): %v", err)
+	}
+
+	r, err := runner.New(runner.Config{
+		AppName:           "snapshot-test",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "one"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("first Run: %v", runErr)
+		}
+	}
+
+	mu.Lock()
+	ctx1 := captured[0]
+	mu.Unlock()
+
+	raw1 := adkPm.ADKParentMap(ctx1)
+	rv1 := reflect.ValueOf(raw1)
+	if !rv1.IsValid() || rv1.Kind() != reflect.Map {
+		t.Fatalf("ADKParentMap(ctx1) = %T, want map", raw1)
+	}
+	rv1.SetMapIndex(reflect.ValueOf("injected"), reflect.ValueOf(child))
+	rv1.SetMapIndex(reflect.ValueOf("snapshot_child"), reflect.Value{})
+
+	raw1Again := adkPm.ADKParentMap(ctx1)
+	rv1Again := reflect.ValueOf(raw1Again)
+	if rv1Again.MapIndex(reflect.ValueOf("injected")).IsValid() {
+		t.Fatal("mutating ADKParentMap snapshot leaked injected entry into subsequent read")
+	}
+	gotChild := rv1Again.MapIndex(reflect.ValueOf("snapshot_child"))
+	if !gotChild.IsValid() || gotChild.Interface() != root {
+		t.Fatalf("ADKParentMap(ctx1)[snapshot_child] = %v, want %v after snapshot deletion", gotChild, root)
+	}
+
+	for _, runErr := range r.Run(t.Context(), "u1", "s2", textContent("user", "two"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("second Run: %v", runErr)
+		}
+	}
+	mu.Lock()
+	ctx2 := captured[1]
+	mu.Unlock()
+	rv2 := reflect.ValueOf(adkPm.ADKParentMap(ctx2))
+	if rv2.MapIndex(reflect.ValueOf("injected")).IsValid() {
+		t.Fatal("mutating ADKParentMap snapshot leaked injected entry into subsequent runner.Run")
+	}
+	gotChild2 := rv2.MapIndex(reflect.ValueOf("snapshot_child"))
+	if !gotChild2.IsValid() || gotChild2.Interface() != root {
+		t.Fatalf("ADKParentMap(ctx2)[snapshot_child] = %v, want %v", gotChild2, root)
 	}
 }

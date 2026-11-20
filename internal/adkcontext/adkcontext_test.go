@@ -342,3 +342,35 @@ func TestReadPathAndParentMap(t *testing.T) {
 		t.Fatalf("ReadParentMap = %#v, want leaf->root", adkcontext.ReadParentMap(withPath))
 	}
 }
+
+func TestReadParentMap_ReturnsSnapshotAndFiltersNil(t *testing.T) {
+	type sampleParentMap map[string]any
+	src := sampleParentMap{"c": "p", "n": nil}
+	ctx := context.WithValue(context.Background(), adkcontext.ParentMapKey, src)
+
+	raw := adkcontext.ReadParentMap(ctx)
+	got, ok := raw.(sampleParentMap)
+	if !ok {
+		t.Fatalf("ReadParentMap() type = %T, want sampleParentMap", raw)
+	}
+	if _, hasNil := got["n"]; hasNil {
+		t.Fatalf("ReadParentMap() kept nil entry: %#v", got)
+	}
+	if got["c"] != "p" {
+		t.Fatalf("ReadParentMap()[c] = %v, want p", got["c"])
+	}
+	got["evil"] = "x"
+	if _, leaked := src["evil"]; leaked {
+		t.Fatalf("mutating ReadParentMap() output mutated caller map: %#v", src)
+	}
+
+	// Nil map and non-map values under ParentMapKey return nil.
+	nilMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, sampleParentMap(nil))
+	if gotNil := adkcontext.ReadParentMap(nilMapCtx); gotNil != nil {
+		t.Fatalf("ReadParentMap(typed-nil map) = %#v, want nil", gotNil)
+	}
+	nonMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, "not-a-map")
+	if gotNonMap := adkcontext.ReadParentMap(nonMapCtx); gotNonMap != nil {
+		t.Fatalf("ReadParentMap(non-map) = %#v, want nil", gotNonMap)
+	}
+}
