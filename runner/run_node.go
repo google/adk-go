@@ -193,6 +193,16 @@ func (r *Runner) runNode(
 			continue
 		}
 
+		// Partial streaming events are sent fire-and-forget by the node
+		// scheduler, so the producer goroutine may still read the event it
+		// yielded (e.g. checking lastEvent.IsFinalResponse). Clone partial
+		// events so subsequent mutations (author, timestamp, compaction,
+		// plugins) do not race with the producer.
+		if event != nil && event.LLMResponse.Partial {
+			clone := *event
+			event = &clone
+		}
+
 		// Stamp the agent as author on engine control events that have
 		// none, else a later turn's findAgentToRun logs a spurious
 		// "unknown agent" warning for the empty author.
