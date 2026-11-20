@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 
@@ -797,6 +798,17 @@ func TestAgentNode_OutputSchemaToolOptIn(t *testing.T) {
 				}
 				if !offersTool(req, "set_model_response") {
 					t.Error("set_model_response was not offered to the model")
+				}
+				if req.Config == nil || req.Config.SystemInstruction == nil {
+					t.Error("set_model_response instruction missing")
+				} else {
+					var instruction strings.Builder
+					for _, part := range req.Config.SystemInstruction.Parts {
+						instruction.WriteString(part.Text)
+					}
+					if !withTools && strings.Contains(instruction.String(), "other tools") {
+						t.Error("no-tools opt-in must not claim other tools are available")
+					}
 				}
 				if len(llm.reqs) != 1 {
 					t.Errorf("model calls = %d, want 1", len(llm.reqs))
