@@ -153,8 +153,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 }
 
 // errInferencePanicked stands for a panic that unwound a model call while its
-// span was open. Its error type is the conventions' fallback value, _OTHER,
-// since a panic value has no stable, low-cardinality name.
+// span was open.
 var errInferencePanicked = errors.New("model call panicked")
 
 // notCanceledError is the error the inference span, its event and its metrics

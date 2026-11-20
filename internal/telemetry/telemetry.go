@@ -331,9 +331,6 @@ func RecordError(span trace.Span, err error) {
 
 // errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
 func errorType(err error) attribute.KeyValue {
-	if errors.Is(err, errInferencePanicked) {
-		return semconv.ErrorTypeOther
-	}
 	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
 		return semconv.ErrorTypeKey.String(strconv.Itoa(apiErr.Code))
 	}

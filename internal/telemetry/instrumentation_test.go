@@ -510,7 +510,7 @@ func TestInstrumentGenerateContent_CanceledIsNotAnError(t *testing.T) {
 }
 
 // A panic that unwinds the call while its span is open keeps propagating, and
-// the span and the metrics both record it as an error of type _OTHER.
+// the span and the metrics both record it as an error.
 func TestInstrumentGenerateContent_Panic(t *testing.T) {
 	t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
 	spans := setupTestTracer(t)
@@ -541,8 +541,8 @@ func TestInstrumentGenerateContent_Panic(t *testing.T) {
 	if got[0].Status.Code != codes.Error {
 		t.Errorf("span status = %v, want %v", got[0].Status.Code, codes.Error)
 	}
-	if v := attributesToMap(got[0].Attributes)[semconv.ErrorTypeKey]; v != "_OTHER" {
-		t.Errorf("span error.type = %q, want _OTHER", v)
+	if v := attributesToMap(got[0].Attributes)[semconv.ErrorTypeKey]; v != "*errors.errorString" {
+		t.Errorf("span error.type = %q, want *errors.errorString", v)
 	}
 	for _, name := range []string{
 		"gen_ai.client.inference.duration",
@@ -550,8 +550,8 @@ func TestInstrumentGenerateContent_Panic(t *testing.T) {
 		"gen_ai.client.inference.operation.output_tokens",
 	} {
 		points := collectMetrics(t, reader)[name]
-		if len(points) != 1 || points[0].Attrs[semconv.ErrorTypeKey] != "_OTHER" {
-			t.Errorf("%s = %+v, want one point with error.type _OTHER", name, points)
+		if len(points) != 1 || points[0].Attrs[semconv.ErrorTypeKey] != "*errors.errorString" {
+			t.Errorf("%s = %+v, want one point with error.type *errors.errorString", name, points)
 		}
 	}
 }
