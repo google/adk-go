@@ -63,7 +63,7 @@ func TestWorkflowAgent_EndOfAgentEvent_ResumedNodeFinishesWithoutOtherInterrupt(
 	if len(turn2.errs) != 0 {
 		t.Fatalf("turn 2 Run() errors = %v, want none", turn2.errs)
 	}
-	if diff := cmp.Diff([]string{"two:", "wf:END"}, describeAll(turn2.events)); diff != "" {
+	if diff := cmp.Diff([]string{"two:", "wf:", "wf:END"}, describeAll(turn2.events)); diff != "" {
 		t.Errorf("turn 2 yielded events (-want +got):\n%s", diff)
 	}
 }
