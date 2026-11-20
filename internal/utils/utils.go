@@ -79,28 +79,12 @@ func Content(ev *session.Event) *genai.Content {
 // TODO: Use generics.
 // FunctionCalls extracts all FunctionCall parts from the content.
 func FunctionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
-	if c == nil {
-		return nil
-	}
-	for _, p := range c.Parts {
-		if p != nil && p.FunctionCall != nil {
-			ret = append(ret, p.FunctionCall)
-		}
-	}
-	return ret
+	return (&model.LLMResponse{Content: c}).FunctionCalls()
 }
 
 // FunctionResponses extracts all FunctionResponse parts from the content.
 func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
-	if c == nil {
-		return nil
-	}
-	for _, p := range c.Parts {
-		if p != nil && p.FunctionResponse != nil {
-			ret = append(ret, p.FunctionResponse)
-		}
-	}
-	return ret
+	return (&model.LLMResponse{Content: c}).FunctionResponses()
 }
 
 // TextParts extracts all Text parts from the content.

@@ -123,41 +123,10 @@ func TestIsGemini3xLive(t *testing.T) {
 	}
 }
 
-func TestNeedsOutputSchemaProcessor(t *testing.T) {
-	testCases := []struct {
-		name    string
-		model   string
-		variant genai.Backend
-		want    bool
-	}{
-		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, true},
-		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
-		// Gemini API never supports output schema + tools natively, so the
-		// processor is required regardless of version.
-		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, true},
-		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, false},
-		// Non-Vertex backends (incl. unspecified) need the processor too.
-		{"CustomGemini2", "gemini-2.0-hack", genai.BackendUnspecified, true},
-		{"CustomGemini3", "gemini-3.0-hack", genai.BackendUnspecified, true},
-		// Gemini 1.x on Vertex predates native combo support → processor.
-		{"Gemini1.5_Vertex", "gemini-1.5-pro", genai.BackendVertexAI, true},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := NeedsOutputSchemaProcessor(&mockGoogleLLM{
-				variant: tc.variant,
-				nameVal: tc.model,
-			})
-			if got != tc.want {
-				t.Errorf("NeedsOutputSchemaProcessor(%q) = %v, want %v", tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCanUseOutputSchemaWithTools(t *testing.T) {
+// TestGeminiOutputSchemaAndTools pins adk-python's
+// gemini_output_schema_and_tools (models/_capabilities.py): any Gemini model
+// name on Vertex AI, with no version check, and nothing else.
+func TestGeminiOutputSchemaAndTools(t *testing.T) {
 	testCases := []struct {
 		name    string
 		model   string
@@ -166,22 +135,25 @@ func TestCanUseOutputSchemaWithTools(t *testing.T) {
 	}{
 		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, true},
 		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, true},
-		{"Gemini1.5_Vertex", "gemini-1.5-pro", genai.BackendVertexAI, false},
+		{"Gemini1.5_Vertex", "gemini-1.5-pro", genai.BackendVertexAI, true},
 		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, false},
+		{"Gemini2.0_Unspecified", "gemini-2.0-flash", genai.BackendUnspecified, false},
 		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CanUseOutputSchemaWithTools(&mockGoogleLLM{
+			got := GeminiOutputSchemaAndTools(&mockGoogleLLM{
 				variant: tc.variant,
 				nameVal: tc.model,
 			})
 			if got != tc.want {
-				t.Errorf("CanUseOutputSchemaWithTools(%q) = %v, want %v", tc.model, got, tc.want)
+				t.Errorf("GeminiOutputSchemaAndTools(%q) = %v, want %v", tc.model, got, tc.want)
 			}
 		})
+	}
+	if GeminiOutputSchemaAndTools(nil) {
+		t.Error("GeminiOutputSchemaAndTools(nil) = true, want false")
 	}
 }
 

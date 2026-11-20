@@ -18,6 +18,7 @@ package model
 import (
 	"context"
 	"iter"
+	"slices"
 
 	"google.golang.org/genai"
 )
@@ -28,12 +29,51 @@ type LLM interface {
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
 }
 
+// Capabilities holds the resolved capabilities of an [LLM] instance.
+//
+// Each field reports whether the model supports a specific optional feature.
+// The zero value (Capabilities{}) indicates that none of the optional
+// capabilities are supported. Capabilities is a value type and is safe for
+// concurrent use.
+type Capabilities struct {
+	// OutputSchemaAndTools reports whether the model can accept a native
+	// output schema (GenerateContentConfig.ResponseSchema) and tools in the
+	// same request.
+	//
+	// When false and an agent has both an OutputSchema and tools (or
+	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
+	// request config and uses the set_model_response tool workaround instead.
+	OutputSchemaAndTools bool
+}
+
+// CapabilitiesProvider is an optional interface that an [LLM] may implement to
+// declare its [Capabilities].
+//
+// When an [LLM] implements CapabilitiesProvider, ADK uses the returned
+// [Capabilities] directly instead of inferring support from the model name or
+// backend variant. When an [LLM] does not implement CapabilitiesProvider, ADK
+// falls back to granting OutputSchemaAndTools only to Gemini models on the
+// Vertex AI backend.
+//
+// Implementations of Capabilities must be safe for concurrent use and must not
+// mutate the model or have observable side effects.
+type CapabilitiesProvider interface {
+	Capabilities() Capabilities
+}
+
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
 	Model    string
 	Contents []*genai.Content
 	Config   *genai.GenerateContentConfig
 
+	// Tools maps a tool name to the tool that answers a function call of that
+	// name. Tools add themselves while the LLM flow prepares the request,
+	// usually through toolutils.PackTool. When preparation ends, the flow
+	// deletes every entry whose Declaration method returns nil, so the model
+	// and the callbacks see only declared tools. An entry added later, for
+	// example by a before-model callback, stays in Tools; if it has no
+	// declaration, a function call to its name gets the tool-not-found result.
 	Tools map[string]any `json:"-"`
 
 	// CacheConfig turns on context caching for this request when non-nil. The
@@ -53,8 +93,12 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content                              `json:"content,omitempty"`
-	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	Content          *genai.Content          `json:"content,omitempty"`
+	CitationMetadata *genai.CitationMetadata `json:"citationMetadata,omitempty"`
+	// GroundingMetadata is the grounding metadata of the model's first
+	// candidate. The Gemini model turns a candidate that has no content parts
+	// and a finish reason other than STOP into an error response (ErrorCode
+	// set), and such a response carries no grounding metadata.
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`
@@ -67,6 +111,22 @@ type LLMResponse struct {
 	// The Runner fully processes only the final non-partial event, partial
 	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool `json:"partial,omitempty"`
+	// PartialSet reports whether Partial was set explicitly on this response.
+	//
+	// adk-python has no such field: its LlmResponse.partial is an
+	// Optional[bool], so an unset partial (None) and an explicit False differ
+	// there. Partial here is a plain bool whose zero value is false, so a
+	// response that leaves Partial unset cannot otherwise be told apart from
+	// one that sets Partial: false. An AfterModelCallback replacement with
+	// Partial: false and PartialSet: true for a partial model response
+	// therefore produces a non-partial event, instead of inheriting
+	// Partial: true from the response it replaces.
+	//
+	// When Partial is true, the response is always treated as explicitly
+	// partial regardless of PartialSet. The zero value (Partial: false,
+	// PartialSet: false) means Partial was left unset. PartialSet is never
+	// written to JSON.
+	PartialSet bool `json:"-"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
 	TurnComplete bool `json:"turnComplete,omitempty"`
@@ -82,4 +142,53 @@ type LLMResponse struct {
 	// this response, set when the request had a CacheConfig. Only complete
 	// responses carry it, not partial streaming chunks.
 	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
+}
+
+// FunctionCalls returns the FunctionCall of each part of r.Content that has
+// one, in part order. It returns nil when r is nil, r.Content is nil, or no
+// part holds a function call. Nil entries in r.Content.Parts are skipped.
+// The returned pointers are the ones stored in r.Content; they are not copies.
+func (r *LLMResponse) FunctionCalls() []*genai.FunctionCall {
+	if r == nil || r.Content == nil {
+		return nil
+	}
+	var calls []*genai.FunctionCall
+	for _, p := range r.Content.Parts {
+		if p != nil && p.FunctionCall != nil {
+			calls = append(calls, p.FunctionCall)
+		}
+	}
+	return calls
+}
+
+// FunctionResponses returns the FunctionResponse of each part of r.Content
+// that has one, in part order, under the same rules as FunctionCalls.
+func (r *LLMResponse) FunctionResponses() []*genai.FunctionResponse {
+	if r == nil || r.Content == nil {
+		return nil
+	}
+	var responses []*genai.FunctionResponse
+	for _, p := range r.Content.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			responses = append(responses, p.FunctionResponse)
+		}
+	}
+	return responses
+}
+
+// HasTrailingCodeExecutionResult reports whether the last non-nil part of
+// r.Content holds a CodeExecutionResult. It returns false when r is nil,
+// r.Content is nil, or no non-nil part exists.
+func (r *LLMResponse) HasTrailingCodeExecutionResult() bool {
+	if r == nil || r.Content == nil {
+		return false
+	}
+	// A nil entry after a code execution result does not hide it: the
+	// trailing part is the last non-nil one.
+	for _, p := range slices.Backward(r.Content.Parts) {
+		if p != nil {
+			return p.CodeExecutionResult != nil
+		}
+	}
+	return false
 }

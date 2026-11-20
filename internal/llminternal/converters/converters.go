@@ -20,6 +20,20 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// Genai2LLMResponse turns the first candidate of res into an LLMResponse, as
+// adk-python's LlmResponse.create does.
+//
+//   - A candidate with parts, or with finish reason STOP, gives a success
+//     response: content, grounding metadata, finish reason, citations, log
+//     probabilities, usage and model version.
+//   - Any other candidate gives an error response: ErrorCode is the finish
+//     reason, ErrorMessage the finish message, and it carries the finish
+//     reason, citations, log probabilities, usage and model version. It
+//     carries no content and no grounding metadata.
+//   - No candidates and a prompt feedback gives an error response from the
+//     block reason, with usage and model version.
+//   - No candidates and no prompt feedback gives a successful response with
+//     empty model content.
 func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
@@ -37,15 +51,14 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 			}
 		}
 		return &model.LLMResponse{
-			ErrorCode:         string(candidate.FinishReason),
-			ErrorMessage:      candidate.FinishMessage,
-			GroundingMetadata: candidate.GroundingMetadata,
-			FinishReason:      candidate.FinishReason,
-			CitationMetadata:  candidate.CitationMetadata,
-			AvgLogprobs:       candidate.AvgLogprobs,
-			LogprobsResult:    candidate.LogprobsResult,
-			UsageMetadata:     usageMetadata,
-			ModelVersion:      res.ModelVersion,
+			ErrorCode:        string(candidate.FinishReason),
+			ErrorMessage:     candidate.FinishMessage,
+			FinishReason:     candidate.FinishReason,
+			CitationMetadata: candidate.CitationMetadata,
+			AvgLogprobs:      candidate.AvgLogprobs,
+			LogprobsResult:   candidate.LogprobsResult,
+			UsageMetadata:    usageMetadata,
+			ModelVersion:     res.ModelVersion,
 		}
 	}
 	if res.PromptFeedback != nil {

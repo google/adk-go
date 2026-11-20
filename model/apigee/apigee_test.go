@@ -378,3 +378,35 @@ func TestGenerateContentWithRequestModel(t *testing.T) {
 		})
 	}
 }
+
+// TestApigeeModel_CapabilitiesFollowDelegateBackend checks that the Apigee
+// model reports the capabilities of the Gemini model it forwards to: a
+// vertex_ai model ID can take an output schema next to tools, and a gemini
+// (Gemini API) model ID cannot, and neither can a vertex_ai model ID that
+// names no Gemini model. adk-python's ApigeeLlm extends Gemini, so Gemini's
+// rule applies to its model ID (models/_capabilities.py:30-51).
+func TestApigeeModel_CapabilitiesFollowDelegateBackend(t *testing.T) {
+	tests := []struct {
+		modelName string
+		want      bool
+	}{
+		{modelName: "apigee/vertex_ai/gemini-2.5-flash", want: true},
+		{modelName: "apigee/gemini/gemini-2.5-flash", want: false},
+		{modelName: "apigee/vertex_ai/claude-3-7-sonnet", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelName, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			t.Setenv(googleGenaiUseVertexAIEnvVar, "")
+			t.Setenv(projectEnvVar, "test-project")
+			t.Setenv(locationEnvVar, "test-location")
+			m, err := NewModel(t.Context(), tt.modelName, WithProxyURL(proxyURL), WithHTTPClient(&http.Client{}))
+			if err != nil {
+				t.Fatalf("NewModel(%q) error = %v", tt.modelName, err)
+			}
+			if got := m.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

@@ -22,6 +22,8 @@ import (
 
 	oaishared "github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/version"
 )
 
 // RequestTimeout reports the bound the caller asked for, or zero for none; the
@@ -58,6 +60,19 @@ var IgnoredHTTPOptionFields = []string{"Headers"}
 // list; those it has today belong to ClientConfig (BaseURL, APIVersion), shape a
 // Gemini body (ExtraBody), or set a retry schedule openai-go already owns.
 var SupportedHTTPOptionFields = []string{"Timeout"}
+
+// RunHTTPOptions returns the fields of a run's HTTP options both endpoints
+// accept, Timeout and Headers (SupportedHTTPOptionFields and
+// IgnoredHTTPOptionFields), or nil when opts sets neither. The agent flow
+// merges only these into a request (see agent.RunConfig.HTTPOptions), so an
+// option set for every agent of a run, such as RetryOptions, does not make
+// these endpoints refuse the request.
+func RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts == nil || (opts.Timeout == nil && opts.Headers == nil) {
+		return nil
+	}
+	return &genai.HTTPOptions{Timeout: opts.Timeout, Headers: opts.Headers}
+}
 
 // ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning
 // effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
@@ -183,6 +198,22 @@ var SupportedConfigFields = []string{
 	"CandidateCount",
 	// Accepted with no effect: neither API pauses a generation with CONTINUATION.
 	"AutomaticContinuation",
+	// Only the label the agent flow adds; HasUnsupportedLabels refuses the rest
+	// first. Neither API has a field to send it in.
+	"Labels",
+}
+
+// HasUnsupportedLabels reports whether labels holds a label the OpenAI
+// endpoints would have to send. Neither API has request labels, so any label
+// does, except version.AgentNameLabel, which the agent flow adds to every
+// request and which is dropped. A non-nil empty map counts as unsupported: the
+// caller asked for labels. labels is not modified.
+func HasUnsupportedLabels(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	_, hasAgentName := labels[version.AgentNameLabel]
+	return !hasAgentName || len(labels) > 1
 }
 
 // SupportedThinkingConfigFields names the ThinkingConfig fields both endpoints

@@ -25,10 +25,12 @@ import (
 	"log"
 	"maps"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -43,6 +45,7 @@ import (
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -152,9 +155,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 			if lastEvent.IsFinalResponse() {
 				// A thought-only ("thinking") turn reports as final but has no
-				// answer; don't stop on it — call the model again. Give up once
-				// the model has produced only thoughts too many times in a row,
-				// leaving the last thinking event as the result.
+				// answer; don't stop on it — call the model again. A
+				// thought-only turn that finished with STOP is not one of these:
+				// applyEmptyResponsePolicy gave it an error code, and it ends
+				// the run. Give up once the model has produced only thoughts too
+				// many times in a row, leaving the last thinking event as the
+				// result.
 				if !isThoughtOnlyTurn(lastEvent) {
 					return
 				}
@@ -184,9 +190,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 // isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
 // whose parts are all model "thinking" (Thought) parts — no surfaced answer.
 // Thought signatures ride on substantive parts (text, function calls), which
-// are not Thought, so any such part makes the turn non-thought-only.
+// are not Thought, so any such part makes the turn non-thought-only. A turn
+// with an error code is never thought-only: it is a final response, as in
+// adk-python (Event.is_final_response), whatever its parts are. This is what
+// ends the run on a thought-only STOP turn that applyEmptyResponsePolicy marked.
 func isThoughtOnlyTurn(ev *session.Event) bool {
-	if ev == nil || ev.LLMResponse.Partial {
+	if ev == nil || ev.LLMResponse.Partial || ev.LLMResponse.ErrorCode != "" {
 		return false
 	}
 	content := ev.LLMResponse.Content
@@ -199,6 +208,132 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 		}
 	}
 	return true
+}
+
+// isPythonWhitespace reports whether r is whitespace for Python's str.strip,
+// which also strips the file, group, record and unit separators U+001C to
+// U+001F that unicode.IsSpace does not report.
+func isPythonWhitespace(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// hasMeaningfulContent reports whether resp holds a part a caller can act on:
+// a function call or response, executable code or its result, inline or file
+// data, or text that is not a thought and not only whitespace. It follows
+// adk-python's has_meaningful_content (flows/llm_flows/core/_finalizer.py).
+func hasMeaningfulContent(resp *model.LLMResponse) bool {
+	if !hasParts(resp) {
+		return false
+	}
+	for _, p := range resp.Content.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionCall != nil || p.FunctionResponse != nil || p.ExecutableCode != nil ||
+			p.CodeExecutionResult != nil || p.InlineData != nil || p.FileData != nil {
+			return true
+		}
+		if !p.Thought && strings.TrimFunc(p.Text, isPythonWhitespace) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParts reports whether resp has content with at least one part.
+func hasParts(resp *model.LLMResponse) bool {
+	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
+}
+
+// streamingMode returns the streaming mode of the invocation.
+func streamingMode(ctx agent.InvocationContext) agent.StreamingMode {
+	if rc := ctx.RunConfig(); rc != nil {
+		return rc.StreamingMode
+	}
+	return agent.StreamingModeNone
+}
+
+// agentName returns the name of the invocation's agent, or "" without one.
+func agentName(ctx agent.InvocationContext) string {
+	if ctx == nil || ctx.Agent() == nil {
+		return ""
+	}
+	return ctx.Agent().Name()
+}
+
+// Error code and messages applyEmptyResponsePolicy sets, as in adk-python
+// (flows/llm_flows/core/_model_call.py).
+const (
+	noContentErrorCode              = "MODEL_RETURNED_NO_CONTENT"
+	noContentErrorMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	noMeaningfulContentErrorMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// applyEmptyResponsePolicy marks a completed response that finished with STOP
+// but holds no meaningful content (no parts, only thought parts, or only
+// whitespace text) as an error, so that the turn ends with an error event the
+// caller can act on instead of a silent empty answer. It sets resp.ErrorCode
+// to MODEL_RETURNED_NO_CONTENT and, unless resp already has an error message,
+// a message that says whether the response had no parts or only thought or
+// whitespace parts. It follows adk-python's apply_empty_response_policy
+// (flows/llm_flows/core/_model_call.py).
+//
+// It leaves resp unchanged when resp is partial, already has an error code, or
+// finished for another reason. Under SSE streaming it also leaves a response
+// without parts unchanged: the streaming aggregator ends a turn with a
+// finish-only chunk, which adk-python does not mark either.
+//
+// It must run after the after-model callbacks and before the response
+// processors: emptiness is a property of what the model returned, and a
+// processor may clear the content on purpose, as the code execution processor
+// does.
+func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMResponse) {
+	if resp == nil || resp.Partial || resp.ErrorCode != "" || resp.FinishReason != genai.FinishReasonStop || hasMeaningfulContent(resp) {
+		return
+	}
+	withParts := hasParts(resp)
+	if !withParts && streamingMode(ctx) == agent.StreamingModeSSE {
+		return
+	}
+	resp.ErrorCode = noContentErrorCode
+	if resp.ErrorMessage != "" {
+		return
+	}
+	resp.ErrorMessage = noContentErrorMessage
+	if withParts {
+		resp.ErrorMessage = noMeaningfulContentErrorMessage
+	}
+}
+
+// stampAgentNameLabel records the name of the invocation's agent in
+// req.Config.Labels under version.AgentNameLabel, so that billing reports can
+// be split per agent, as adk-python's call_llm_async does
+// (flows/llm_flows/core/_model_call.py). The name is used as it is, without
+// sanitizing, as in adk-python. It keeps a value already set under the key.
+// Neither the config nor the labels map found in the request is ever
+// modified: the label is added to a copy of the map, set on a shallow copy of
+// the config (a new config when req.Config is nil), and that copy replaces
+// req.Config, because a before-model callback may have attached a config or
+// map it shares with other invocations. Without an agent it does nothing.
+func stampAgentNameLabel(ctx agent.InvocationContext, req *model.LLMRequest) {
+	name := agentName(ctx)
+	if name == "" {
+		return
+	}
+	var cfg genai.GenerateContentConfig
+	if req.Config != nil {
+		if _, ok := req.Config.Labels[version.AgentNameLabel]; ok {
+			return
+		}
+		cfg = *req.Config
+	}
+	labels := maps.Clone(cfg.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[version.AgentNameLabel] = name
+	cfg.Labels = labels
+	req.Config = &cfg
 }
 
 type activeTask struct {
@@ -491,7 +626,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		nreq := &model.LLMRequest{
 			Model: f.Model.Name(),
 		}
-		for ev, err := range f.preprocess(ctx, nreq) {
+		// The live callable map is built from f.Tools, so it needs the names
+		// of the tools that registered themselves without a declaration.
+		dropped := make(map[string]struct{})
+		for ev, err := range f.preprocessRecording(ctx, nreq, dropped) {
 			if err != nil {
 				sess.pushError(err)
 				return
@@ -762,6 +900,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if len(fnCalls) > 0 {
 						tools = make(map[string]tool.Tool, len(f.Tools))
 						for _, t := range f.Tools {
+							if _, ok := dropped[t.Name()]; ok {
+								continue
+							}
 							tools[t.Name()] = t
 						}
 						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
@@ -938,6 +1079,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
 			if err := f.postprocess(ctx, req, resp); err != nil {
 				yield(nil, err)
 				return
@@ -958,6 +1100,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
 						return
 					}
+					continue
+				}
+				// An entry registered after preprocess, for example by a
+				// before-model callback, is still subject to the rule.
+				if undeclared(tool) {
 					continue
 				}
 				tools[k] = tool
@@ -1041,7 +1188,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 	}
 }
 
+// preprocess runs the request processors, then the tools and toolsets of the
+// agent, over req. See preprocessRecording.
 func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return f.preprocessRecording(ctx, req, nil)
+}
+
+// preprocessRecording is preprocess. When it has run the last tool and toolset
+// ProcessRequest without error, it deletes from req.Tools every entry for
+// which undeclared is true. When dropped is not nil it also records each
+// deleted name in dropped.
+func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRequest, dropped map[string]struct{}) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// apply request processor functions to the request in the configured order.
 		for _, processor := range f.RequestProcessors {
@@ -1064,7 +1221,33 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 			yield(nil, err)
 			return
 		}
+		// A tool without a declaration is not registered, as in adk-python's
+		// LlmRequest.append_tools, so the model cannot call it.
+		maps.DeleteFunc(req.Tools, func(name string, t any) bool {
+			if !undeclared(t) {
+				return false
+			}
+			if dropped != nil {
+				dropped[name] = struct{}{}
+			}
+			return true
+		})
 	}
+}
+
+// undeclared reports whether t has a Declaration method that returns nil. A
+// nil pointer, and a value without a Declaration method, are not undeclared.
+func undeclared(t any) bool {
+	d, ok := t.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		return false
+	}
+	if v := reflect.ValueOf(t); v.Kind() == reflect.Pointer && v.IsNil() {
+		return false
+	}
+	return d.Declaration() == nil
 }
 
 // toolPreprocess runs tool preprocess on the given request
@@ -1129,8 +1312,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 
-		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
-		// to help with slicing the billing reports on a per-agent basis.
+		stampAgentNameLabel(ctx, req)
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		// Streaming mode comes from the invocation context's RunConfig rather than
@@ -1216,12 +1398,16 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // creates one. If it drops CacheMetadata, the session loses track of the cache
 // the call used: the next turn creates another instead of reusing it.
 //
-// Partial and TurnComplete are plain bools, so an unset value cannot be told
-// apart from an explicit false; a delta is never final while the stream
-// continues, so a partial original keeps its replacement partial, and a
-// response that ended the turn keeps its replacement ending it. UsageMetadata
-// and CacheMetadata set on the replacement are respected. The replacement is
-// copied rather than modified, and returned as is when nothing needs filling.
+// A delta is never final while the stream continues, so a replacement that
+// leaves Partial unset takes Partial and PartialSet from the original. Partial
+// counts as set when it is true or PartialSet is true, so a replacement with
+// Partial: false and PartialSet: true keeps its explicit false and becomes a
+// non-partial event, while later chunks of the stream still follow.
+// TurnComplete is a plain bool, so an unset value cannot be told apart from an
+// explicit false; a response that ended the turn keeps its replacement ending
+// it. UsageMetadata and CacheMetadata set on the replacement are respected.
+// The replacement is copied rather than modified, and returned as is when
+// nothing needs filling.
 //
 // adk-python carries the first three fields but not the cache state
 // (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
@@ -1230,7 +1416,9 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	if original == nil {
 		return replacement
 	}
-	inheritPartial := original.Partial && !replacement.Partial
+	replacementHasPartial := replacement.Partial || replacement.PartialSet
+	originalHasPartial := original.Partial || original.PartialSet
+	inheritPartial := originalHasPartial && !replacementHasPartial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
 	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
@@ -1239,7 +1427,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	merged := *replacement
 	if inheritPartial {
-		merged.Partial = true
+		merged.Partial = original.Partial
+		merged.PartialSet = original.PartialSet
 	}
 	if inheritTurnComplete {
 		merged.TurnComplete = true
