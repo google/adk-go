@@ -368,7 +368,7 @@ var probedMethods = []string{
 // one method appears in it.
 func parseAllow(allow string) []string {
 	var got []string
-	for _, method := range strings.Split(allow, ",") {
+	for method := range strings.SplitSeq(allow, ",") {
 		if method = strings.TrimSpace(method); method != "" {
 			got = append(got, method)
 		}

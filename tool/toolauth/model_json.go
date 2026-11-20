@@ -49,8 +49,8 @@ func fieldsOf(t reflect.Type) *modelFields {
 		return f.(*modelFields)
 	}
 	f := &modelFields{aliases: map[string]bool{}, names: map[string]string{}}
-	for i := range t.NumField() {
-		alias, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+	for field := range t.Fields() {
+		alias, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 		if alias == "" || alias == "-" {
 			continue
 		}
@@ -114,28 +114,28 @@ func decode(data []byte, v any, extra *map[string]any, typeName string, pythonNa
 	known := make(map[string]json.RawMessage, len(raw))
 	var unknown map[string]any
 	for key, val := range raw {
-		alias := key
-		if !fields.aliases[key] {
-			name, isName := fields.names[key]
-			if !isName || !pythonNames {
-				dec := json.NewDecoder(bytes.NewReader(val))
-				dec.UseNumber()
-				var x any
-				if err := dec.Decode(&x); err != nil {
-					return decodeError(typeName, err)
-				}
-				if unknown == nil {
-					unknown = map[string]any{}
-				}
-				unknown[key] = x
-				continue
-			}
-			if _, both := raw[name]; both {
-				continue
-			}
-			alias = name
+		if fields.aliases[key] {
+			known[key] = val
+			continue
 		}
-		known[alias] = val
+		name, isName := fields.names[key]
+		if !isName || !pythonNames {
+			dec := json.NewDecoder(bytes.NewReader(val))
+			dec.UseNumber()
+			var x any
+			if err := dec.Decode(&x); err != nil {
+				return decodeError(typeName, err)
+			}
+			if unknown == nil {
+				unknown = map[string]any{}
+			}
+			unknown[key] = x
+			continue
+		}
+		if _, both := raw[name]; both {
+			continue
+		}
+		known[name] = val
 	}
 	for _, name := range required {
 		if val, ok := known[name]; !ok || bytes.Equal(bytes.TrimSpace(val), []byte("null")) {
@@ -159,16 +159,14 @@ func decode(data []byte, v any, extra *map[string]any, typeName string, pythonNa
 // not make came from a nested model's UnmarshalJSON, which has already left
 // the value out.
 func decodeError(typeName string, err error) error {
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) {
+	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 		got, _, _ := strings.Cut(typeErr.Value, " ")
 		if typeErr.Field == "" {
 			return fmt.Errorf("toolauth: %s: want a JSON object, got %s", typeName, got)
 		}
 		return fmt.Errorf("toolauth: %s: field %s: cannot use a JSON %s as %s", typeName, typeErr.Field, got, typeErr.Type)
 	}
-	var syntaxErr *json.SyntaxError
-	if errors.As(err, &syntaxErr) {
+	if syntaxErr, ok := errors.AsType[*json.SyntaxError](err); ok {
 		return fmt.Errorf("toolauth: %s: malformed JSON at offset %d", typeName, syntaxErr.Offset)
 	}
 	return err

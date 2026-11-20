@@ -82,7 +82,7 @@ func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*mo
 		},
 		UsageMetadata:  usageMeta,
 		FinishReason:   finishReason,
-		ModelVersion:   string(msg.Model),
+		ModelVersion:   msg.Model,
 		Partial:        false,
 		TurnComplete:   true,
 		CustomMetadata: customMeta,
@@ -176,10 +176,7 @@ func extractUsageMetadata(usage anthropic.Usage) (*genai.GenerateContentResponse
 
 	var thinkingTokens int64
 	if usage.OutputTokensDetails.ThinkingTokens > 0 || usage.OutputTokensDetails.JSON.ThinkingTokens.Valid() {
-		thinkingTokens = max(usage.OutputTokensDetails.ThinkingTokens, 0)
-		if thinkingTokens > outputTokens {
-			thinkingTokens = outputTokens
-		}
+		thinkingTokens = min(max(usage.OutputTokensDetails.ThinkingTokens, 0), outputTokens)
 	}
 
 	candidatesTokens := outputTokens - thinkingTokens

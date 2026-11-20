@@ -231,7 +231,7 @@ func TestA2AInputRequired(t *testing.T) {
 			}
 
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg2a, task2a.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
@@ -300,7 +300,7 @@ func TestA2ARunnerResumesMixedFunctionResponses(t *testing.T) {
 					t.Fatalf("initial Run() reported error: %s", event.ErrorMessage)
 				}
 				if id, _ := adka2a.GetA2ATaskInfo(event); id != "" {
-					taskID = a2a.TaskID(id)
+					taskID = id
 				}
 				for _, response := range utils.FunctionResponses(event.Content) {
 					if response.Name == approvalToolName {
@@ -459,7 +459,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromText(modelTextWaitingForApproval),
 			}, []string{}),
@@ -476,7 +476,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromFunctionCall(approvalToolName, nil),
 				genai.NewPartFromFunctionResponse(approvalToolName, map[string]any{"status": string(approvalStatusPending)}),
@@ -549,7 +549,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 				}),
 			}
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg3, task2.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
@@ -628,9 +628,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan a2a.Event, 10)
 	remoteStreamingChan := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(statusUpdateEventChan)
 		remoteStreaming := false
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
@@ -648,7 +646,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			}
 			statusUpdateEventChan <- event
 		}
-	}()
+	})
 
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
@@ -656,9 +654,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	taskID := firstUpdate.TaskInfo().TaskID
 	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *a2a.Task, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
 		if err != nil {
@@ -666,7 +662,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			return
 		}
 		cancelResultChan <- task
-	}()
+	})
 
 	// Check the streaming message sender got a canceled state task in their response
 	var lastStreamingUpdate a2a.Event
@@ -1374,7 +1370,6 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-	recording := false
 	transport, recording := newGeminiTestClientConfig(t, trace)
 	if recording { // if we are recording httprr trace, don't use the fakeKey.
 		apiKey = ""

@@ -69,9 +69,16 @@ func NewEventarcControllerWithConfig(cfg ControllerConfig) (*EventarcController,
 	if err := retriable.validateCompaction(); err != nil {
 		return nil, err
 	}
+	// A non-positive MaxConcurrentRuns means "no limit": leave semaphore nil so
+	// the guard in EventarcTriggerHandler is skipped. make(chan, 0) would be an
+	// unbuffered channel (not nil), which would make every request block forever.
+	var semaphore chan struct{}
+	if cfg.TriggerConfig.MaxConcurrentRuns > 0 {
+		semaphore = make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns)
+	}
 	return &EventarcController{
 		runner:    retriable,
-		semaphore: make(chan struct{}, cfg.TriggerConfig.MaxConcurrentRuns),
+		semaphore: semaphore,
 	}, nil
 }
 
@@ -104,8 +111,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		if err != nil {
 			// A body over the limit set by MaxBytesMiddleware is a client
 			// error, reported the same way as in the structured branch above.
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to read body: %v", err))
 				return
 			}

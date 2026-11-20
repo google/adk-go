@@ -362,7 +362,7 @@ func validateTriggerOIDC(name string, t triggerConfigFlags) error {
 		return fmt.Errorf("%s %q has surrounding whitespace", audFlag, t.oidcAudience)
 	}
 	if t.oidcServiceAccounts != "" {
-		for _, account := range strings.Split(t.oidcServiceAccounts, ",") {
+		for account := range strings.SplitSeq(t.oidcServiceAccounts, ",") {
 			if strings.TrimSpace(account) == "" {
 				return fmt.Errorf("%s %q has an empty entry", saFlag, t.oidcServiceAccounts)
 			}
@@ -382,7 +382,7 @@ func checkOIDCValuesAreNotFlags(audFlag, saFlag, audience, accounts string) erro
 	if strings.HasPrefix(strings.TrimSpace(accounts), "-") {
 		return fmt.Errorf("%s %q starts with \"-\", as when an unset variable makes a flag take the next flag as its value", saFlag, accounts)
 	}
-	for _, account := range strings.Split(accounts, ",") {
+	for account := range strings.SplitSeq(accounts, ",") {
 		if strings.HasPrefix(strings.TrimSpace(account), "-") {
 			return fmt.Errorf("%s %q has an entry starting with \"-\"", saFlag, accounts)
 		}
