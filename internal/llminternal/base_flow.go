@@ -25,12 +25,14 @@ import (
 	"log"
 	"maps"
 	"net"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -1597,7 +1599,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						case err == lookupErr: // No on-tool-error callback answered.
 							result = toolNotFoundResponse(fnCall.Name, toolNames)
 						case err != nil:
-							result = map[string]any{"error": err.Error()}
+							errText, _ := toolinternal.ModelErrorText(fnCall.Name, err)
+							result = map[string]any{"error": errText}
 						}
 					}
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
@@ -1618,7 +1621,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, args) {
+							for chunk, err := range recoverStreamPanic(streamTool, cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1644,7 +1647,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}()
 					} else {
 						var sb strings.Builder
-						for chunk, err := range streamTool.RunStream(toolCtx, args) {
+						for chunk, err := range recoverStreamPanic(streamTool, toolCtx, args) {
 							if err != nil {
 								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
 								result = map[string]any{"error": errText}
@@ -1660,7 +1663,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					err := newToolNotFoundError(fnCall.Name, toolNames)
 					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
-						result = map[string]any{"error": err.Error()}
+						errText, _ := toolinternal.ModelErrorText(fnCall.Name, err)
+						result = map[string]any{"error": errText}
 					}
 				} else {
 					result = f.callTool(toolCtx, funcTool, args)
@@ -1753,29 +1757,90 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 }
 
 func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
-	pluginManager := pluginManagerFromContext(toolCtx)
-	if pluginManager != nil {
-		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-		if result != nil || err != nil {
-			return result, err
+	return recoverToolPanic(toolCtx, tool.Name(), "OnToolError", func() (map[string]any, error) {
+		pluginManager := pluginManagerFromContext(toolCtx)
+		if pluginManager != nil {
+			result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+			if result != nil || err != nil {
+				return result, err
+			}
 		}
+		return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	})
+}
+
+// recoverToolPanic runs one step of a tool call and turns a panic in it into
+// the error a panicking function tool returns, so that the step fails the call
+// instead of ending the process. callback is the kind of callback the step
+// runs, or empty when it runs the tool itself.
+//
+// adk-python ends the run when one of these steps raises, unless the step runs
+// the tool and an on_tool_error callback answers, and cancels the calls of the
+// turn that are still running. ADK Go fails only this call, because an error
+// from a tool callback already becomes the call's function response.
+//
+// The error is also recorded on the tool's span when content capture on spans
+// is enabled, because callbacks are optional. A panic recovered inside a tool
+// built with functiontool, or inside recoverStreamPanic, does not reach this
+// function and is not recorded here.
+func recoverToolPanic(toolCtx agent.Context, toolName, callback string, step func() (map[string]any, error)) (result map[string]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			var panicErr *toolinternal.PanicError
+			if callback == "" {
+				panicErr = toolinternal.NewPanicError(toolName, r, stack)
+			} else {
+				panicErr = toolinternal.NewCallbackPanicError(callback, toolName, r, stack)
+			}
+			telemetry.RecordPanic(trace.SpanFromContext(toolCtx), panicErr)
+			result, err = nil, panicErr
+		}
+	}()
+	return step()
+}
+
+// recoverStreamPanic returns the stream of streamTool with a panic in it turned
+// into the error a panicking streaming function tool yields.
+func recoverStreamPanic(streamTool toolinternal.StreamingFunctionTool, toolCtx agent.Context, args any) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		// Consumer panics must propagate, and a stopped consumer cannot receive errors.
+		canYield := true
+		callerYield := yield
+		yield = func(chunk string, err error) bool {
+			canYield = false
+			canYield = callerYield(chunk, err)
+			return canYield
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				if !canYield {
+					panic(r)
+				}
+				yield("", toolinternal.NewPanicError(streamTool.Name(), r, debug.Stack()))
+			}
+		}()
+		streamTool.RunStream(toolCtx, args)(yield)
 	}
-	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
 func (f *Flow) runBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
-	if pluginManager := pluginManagerFromContext(toolCtx); pluginManager != nil {
-		if result, err := pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs); result != nil || err != nil {
-			return result, err
+	return recoverToolPanic(toolCtx, tool.Name(), "BeforeTool", func() (map[string]any, error) {
+		if pluginManager := pluginManagerFromContext(toolCtx); pluginManager != nil {
+			if result, err := pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs); result != nil || err != nil {
+				return result, err
+			}
 		}
-	}
-	return f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+		return f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+	})
 }
 
 func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	response, err := f.runBeforeToolCallbacks(toolCtx, tool, fArgs)
 	if response == nil && err == nil {
-		response, err = tool.Run(toolCtx, fArgs)
+		response, err = recoverToolPanic(toolCtx, tool.Name(), "", func() (map[string]any, error) {
+			return tool.Run(toolCtx, fArgs)
+		})
 	}
 	return f.finishToolCall(toolCtx, tool, fArgs, response, err)
 }
@@ -1787,11 +1852,8 @@ func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, resp
 	pluginManager := pluginManagerFromContext(toolCtx)
 	var errorResponse map[string]any
 	var cbErr error
-	if err != nil && pluginManager != nil {
-		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-	}
-	if err != nil && errorResponse == nil && cbErr == nil {
-		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	if err != nil {
+		errorResponse, cbErr = f.runOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 	}
 	if errorResponse != nil || cbErr != nil {
 		response = errorResponse
@@ -1801,10 +1863,14 @@ func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, resp
 	var alteredResponse map[string]any
 	var alteredErr error
 	if pluginManager != nil {
-		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = recoverToolPanic(toolCtx, tool.Name(), "AfterTool", func() (map[string]any, error) {
+			return pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		})
 	}
 	if alteredResponse == nil && alteredErr == nil {
-		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = recoverToolPanic(toolCtx, tool.Name(), "AfterTool", func() (map[string]any, error) {
+			return f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+		})
 	}
 	if alteredResponse != nil || alteredErr != nil {
 		response = alteredResponse

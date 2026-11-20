@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"reflect"
 	"runtime"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 	"weak"
 
 	"github.com/google/uuid"
@@ -38,6 +40,9 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/platform"
+	baseplugin "google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -62,9 +67,13 @@ var agentInterfaceType = reflect.TypeFor[agent.Agent]()
 // workflow packages, and adkPkgPrefix is the import path prefix that all of
 // ADK's packages share, as runtime.Stack names their functions.
 var (
-	agentPkgPath    = agentInterfaceType.PkgPath()
-	workflowPkgPath = reflect.TypeFor[workflow.Edge]().PkgPath()
-	adkPkgPrefix    = agentPkgPath[:strings.LastIndexByte(agentPkgPath, '/')+1]
+	agentPkgPath           = agentInterfaceType.PkgPath()
+	workflowPkgPath        = reflect.TypeFor[workflow.Edge]().PkgPath()
+	adkPkgPrefix           = agentPkgPath[:strings.LastIndexByte(agentPkgPath, '/')+1]
+	internalContextPkgPath = adkPkgPrefix + "internal/context"
+	internalLLMPkgPath     = adkPkgPrefix + "internal/llminternal"
+	remoteAgentPkgPath     = adkPkgPrefix + "agent/remoteagent/v2"
+	a2aServerPkgPath       = adkPkgPrefix + "server/adka2a/v2"
 )
 
 // schedulerCreator and errgroupCreator are the functions that runtime.Stack
@@ -166,6 +175,10 @@ type spanRecord struct {
 	// child task-mode sub-agent completed via finish_task, which is the only
 	// case where re-entry retirement is safe.
 	hasResponse bool
+	// ownResponse reports that this activation itself produced a final event or
+	// responded via its own AfterModelCallback / concurrent peer reclaim, rather
+	// than only inheriting hasResponse from a child via markRespondedLocked.
+	ownResponse bool
 	// modelResponded reports that AfterModelCallback (popLLMSpan) set
 	// hasResponse on this activation via activationKey, so a concurrent peer on
 	// the same branch and node path never reclaims it.
@@ -200,6 +213,11 @@ type spanRecord struct {
 	goroutineID uint64
 	origin      goroutineOrigin
 	attempt     attemptSite
+	// startPlatformTime holds the activation's start timestamp on the platform
+	// clock (platform.Now), so session events stamped on the same non-concurrent
+	// goroutine strictly after startPlatformTime can prove they did not originate
+	// from an already-retired non-custom predecessor.
+	startPlatformTime time.Time
 	// completed records that the activation's own AfterAgentCallback ran (see
 	// popAgentSpan). ADK runs it only once the agent's Run returned all its
 	// events, which for a ParallelAgent is once every branch returned (see
@@ -286,22 +304,19 @@ type spanRecord struct {
 	// AfterAgentCallback, and an ancestor LLM agent under which a resumed
 	// nested task was parented is still active in its own runChat loop.
 	taskDelegated bool
-	// finishedTasks holds the function call IDs of the finish_task calls
-	// that the activation's own tool callbacks saw complete (see
-	// noteTaskFinished), so that the function response event that reports
-	// one of them ends this activation rather than another run of the same
-	// agent on the same branch, on another node path or, if no other run on
-	// the event's node path saw a call with that ID complete, on the same one
-	// (see finishedTaskLocked and popTaskAgentSpan).
-	finishedTasks []string
-	// failedTasks holds, likewise, the function call IDs of the finish_task
-	// calls that this plugin's tool callback saw end the activation with a
-	// classified tool result error (see noteTaskFinished). Keeping them apart
-	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
-	// and a completed call that share a reused ID when both runs are open on
-	// the same path, while still matching across both lists when an
-	// agent-level AfterToolCallback alters the error flag afterwards.
-	failedTasks []string
+	// eventClockStart is platform.Now(ctx) read before inv.mu when a task-mode
+	// agent activation opens (zero for non-task agents so ordinary runs do not
+	// advance a custom platform TimeProvider), matching the clock with which
+	// session.NewEvent stamps events so an event created before this activation
+	// started cannot be attributed to it.
+	eventClockStart time.Time
+	// taskAttempts holds the finish_task calls that this activation's own tool
+	// callbacks observed, keeping observed completions (taskAttemptCompleted and
+	// taskAttemptFailedEnd) strictly separate from pending/non-ending attempts
+	// (taskAttemptPending) until the FunctionResponse event arrives (see
+	// noteTaskStart, noteTaskAttempt, retireFailedTaskAttempts, and
+	// finishedTaskLocked).
+	taskAttempts []taskAttempt
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -331,6 +346,20 @@ type spanRecord struct {
 	// AfterAgentCallback for it (see popTaskAgentSpan). An agent of another
 	// mode may have a tool of its own that is named finish_task.
 	taskMode bool
+	// hasAfterAgentCallbacks reports that the activation has (or conservatively
+	// may have) agent- or plugin-level AfterAgentCallbacks that ADK runs outside
+	// this plugin's AfterAgentCallback.
+	hasAfterAgentCallbacks bool
+	// hasCustomUUIDProvider reports that the activation's context had an active
+	// custom platform.WithUUIDProvider at start.
+	hasCustomUUIDProvider bool
+	// runEndSeq and runEndPlatformTime record the sequence and platform time of
+	// the first retirement of an enclosing span that left this activation open
+	// after its run was known to be over (runDone): the run created all its
+	// events by then, so a later retirement of the activation is dated there
+	// (see recordRetiredActivationLocked).
+	runEndSeq          uint64
+	runEndPlatformTime time.Time
 	// callStarted reports that pushLLMSpan or pushToolSpan started the model
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
@@ -363,6 +392,59 @@ type spanRecord struct {
 	// which the name, branch and path of the span do not. It is nil when the
 	// context does not show it.
 	activation any
+	// popRetirement holds transient retirement metadata for
+	// recordRetiredActivationLocked, so that the retired activation's entry
+	// receives it before any pruning inspects it.
+	popRetirement *popRetirement
+	// recordedAfterAgentCredit and recordedModelCredits hold monotonic
+	// high-water credit grants already transferred from this span into
+	// retiredActivations, preventing compacted-hull replay from re-granting
+	// previously issued or settled credits.
+	recordedAfterAgentCredit bool
+	recordedModelCredits     int
+}
+
+// popRetirement carries per-retirement metadata into
+// recordRetiredActivationLocked: whether the retirement counted as a peer
+// retirement, any after-agent or model response credits left behind, the
+// action maps of the context in which its after-agent callbacks run and the
+// value that keeps them reachable (see callbackAfterAgentActions), and the
+// goroutine running those callbacks.
+type popRetirement struct {
+	peerRetirement       bool
+	afterAgentCredit     bool
+	modelCredits         int
+	afterAgentActions    actionMaps
+	afterAgentActionsRef any
+	goroutineID          uint64
+}
+
+// retiredSwallower identifies a retired custom ancestor that drained a child
+// failure without its own context failing, so recovery content from that
+// activation's AfterAgentCallback may clear the cause without clearing causes
+// owned by other activations of the same agent. anyName and anyBranch mark a
+// global cap-overflow hull folded across distinct agent names or branches.
+type retiredSwallower struct {
+	spanID    string
+	seq       uint64
+	name      string
+	branch    string
+	path      string
+	anyName   bool
+	anyBranch bool
+}
+
+// matchesIdentity reports whether (name, branch) matches this swallower's
+// agent and branch identity, respecting wildcard flags on cap-overflow hulls.
+func (s retiredSwallower) matchesIdentity(name, branch string) bool {
+	return (s.anyName || s.name == name) && (s.anyBranch || s.branch == branch)
+}
+
+// matches reports whether recovery content authored by (name, branch, path)
+// matches this swallower's identity. An empty path on either side matches any
+// path, as in findAgent.
+func (s retiredSwallower) matches(name, branch, path string) bool {
+	return s.matchesIdentity(name, branch) && (path == "" || s.path == "" || s.path == path)
 }
 
 // retiredCause is the failure cause of an activation that retired under an
@@ -370,13 +452,373 @@ type spanRecord struct {
 // path of the retired activation. swallowableBySelf reports that the retired
 // activation drained an inherited child failure without its own context
 // failing and is not a built-in workflow agent, so recovery content from its
-// own AfterAgentCallback may clear the cause.
+// own AfterAgentCallback may clear the cause. swallowers holds the retired
+// custom swallower activations whose recovery responses may clear this cause.
 type retiredCause struct {
 	err               error
 	name              string
 	branch            string
 	path              string
 	swallowableBySelf bool
+	swallowers        []retiredSwallower
+	swallowerShared   *atomic.Int64
+}
+
+// addSwallower records rec as a retired custom swallower eligible to clear c on
+// a later recovery response from that specific activation of rec.
+//
+// swallowerShared tracks how many slots of the backing array have been claimed
+// so linear ancestor chains grow geometrically, reducing backing-array slice
+// copies across an N-ancestor chain from O(N^2) to O(N) while duplicate
+// checking remains O(N^2) comparisons across chain length N. Value-copied
+// branches allocate a fresh backing array instead of overwriting a sibling's
+// elements.
+func (c *retiredCause) addSwallower(rec *spanRecord) {
+	if rec == nil {
+		return
+	}
+	if rec.spanID != "" {
+		for _, s := range c.swallowers {
+			if s.spanID == rec.spanID {
+				return
+			}
+		}
+	} else {
+		for _, s := range c.swallowers {
+			if s.spanID == "" && s.name == rec.name && s.branch == rec.branch && s.path == rec.path {
+				return
+			}
+		}
+	}
+	elem := retiredSwallower{
+		spanID: rec.spanID,
+		seq:    rec.seq,
+		name:   rec.name,
+		branch: rec.branch,
+		path:   rec.path,
+	}
+	n := len(c.swallowers)
+	if c.swallowerShared != nil && n < cap(c.swallowers) && c.swallowerShared.CompareAndSwap(int64(n), int64(n+1)) {
+		c.swallowers = append(c.swallowers, elem)
+		return
+	}
+	next := make([]retiredSwallower, n+1, max(4, 2*(n+1)))
+	copy(next, c.swallowers)
+	next[n] = elem
+	shared := new(atomic.Int64)
+	shared.Store(int64(n + 1))
+	c.swallowers = next
+	c.swallowerShared = shared
+}
+
+func (c retiredCause) hasSwallowerSpan(spanID string) bool {
+	if spanID == "" {
+		return false
+	}
+	for _, s := range c.swallowers {
+		if s.spanID == spanID {
+			return true
+		}
+	}
+	return false
+}
+
+// uuidProviderState is what the agent activations under one key of a
+// uuidProviderLedger started with: a custom platform.UUIDProvider on their
+// context, the default generator (no provider, or a nil one installed with
+// platform.WithUUIDProvider(ctx, nil), which shadows any provider further up
+// ctx, so that session.NewEvent falls back to a UUIDv4), or a mix of both.
+type uuidProviderState uint8
+
+const (
+	uuidProviderUnseen uuidProviderState = iota
+	uuidProviderCustom
+	uuidProviderDefault
+	uuidProviderMixed
+)
+
+// with returns the state of a key that saw both s and o.
+func (s uuidProviderState) with(o uuidProviderState) uuidProviderState {
+	switch {
+	case s == uuidProviderUnseen || s == o:
+		return o
+	case o == uuidProviderUnseen:
+		return s
+	default:
+		return uuidProviderMixed
+	}
+}
+
+// uuidProviderKey is a key of a uuidProviderLedger: the agent name, branch and
+// node path of the activations it covers, where anyBranch and anyPath make it
+// cover the activations of the name on every branch or at every path.
+type uuidProviderKey struct {
+	name, branch, path string
+	anyBranch, anyPath bool
+}
+
+const (
+	// maxUUIDProviderEntries bounds the number of keys recorded in a live
+	// uuidProviderLedger. Once reached, new path-specific keys fold into
+	// author/branch summary keys without growing states.
+	maxUUIDProviderEntries = 512
+	// maxCompletedUUIDProviderEntries bounds the number of summary keys
+	// retained on a completedTrace after compactForCompleted drops
+	// per-path entries.
+	maxCompletedUUIDProviderEntries = 32
+	// maxUUIDProviderAncestorSteps bounds the number of node-path prefix
+	// lookups in eventUUIDProviderFor before falling back to anyPath.
+	maxUUIDProviderAncestorSteps = 8
+)
+
+// uuidProviderLedger records, for the agent activations of one invocation,
+// whether each started with a custom platform.UUIDProvider on its context (see
+// traceManager.eventUUIDProvider). An invocation gets one only once a custom
+// provider is seen in it, so one that never sees a custom provider records
+// nothing. The invocation's live trace, its evicted identity, its completed
+// entry and its late state share it, and mu guards it.
+type uuidProviderLedger struct {
+	mu sync.Mutex
+	// runCustom reports that the context of the run's BeforeRunCallback or
+	// OnUserMessageCallback carried a custom provider.
+	runCustom bool
+	// compacted reports that compactForCompleted dropped per-path keys for
+	// completedTrace retention and lowered the states cap to
+	// maxCompletedUUIDProviderEntries.
+	compacted bool
+	// pathOverflowed reports that at least one path-specific (!anyPath)
+	// entry was omitted or compacted into the anyPath summary keys.
+	pathOverflowed bool
+	// branchOverflowed reports that at least one per-branch (anyPath &&
+	// !anyBranch) entry was omitted or compacted into the author-wide
+	// (anyBranch && anyPath) summary key.
+	branchOverflowed bool
+	// authorOverflow aggregates observations whose author-wide summary key
+	// could not fit in states.
+	authorOverflow uuidProviderState
+	// branchSummaryOverflow aggregates branch-wide provider observations that
+	// could not fit in branchStates.
+	branchSummaryOverflow uuidProviderState
+	states                map[uuidProviderKey]uuidProviderState
+	// branchStates summarizes per-branch provider state across all authors on
+	// non-empty branches, bounded separately at capEntries so states retains its
+	// author/branch summary budget cleanly.
+	branchStates map[string]uuidProviderState
+}
+
+// note records that an activation of name on branch at path started with
+// (custom) or without a custom provider, under its own key and under the keys
+// that cover any branch, any path, or both. Once states reaches its entry cap,
+// new finer-grained keys fold conservatively into coarser summary keys without
+// growing states.
+func (l *uuidProviderLedger) note(name, branch, path string, custom bool) {
+	s := uuidProviderDefault
+	if custom {
+		s = uuidProviderCustom
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	capEntries := maxUUIDProviderEntries
+	if l.compacted {
+		capEntries = maxCompletedUUIDProviderEntries
+	}
+
+	if branch != "" {
+		if cur, ok := l.branchStates[branch]; ok {
+			l.branchStates[branch] = cur.with(s)
+		} else if l.branchSummaryOverflow == uuidProviderUnseen && len(l.branchStates) < capEntries {
+			if l.branchStates == nil {
+				l.branchStates = map[string]uuidProviderState{}
+			}
+			l.branchStates[branch] = s
+		} else {
+			l.branchSummaryOverflow = l.branchSummaryOverflow.with(s)
+		}
+	}
+
+	authorKey := uuidProviderKey{name: name, anyBranch: true, anyPath: true}
+	if cur, ok := l.states[authorKey]; ok {
+		l.states[authorKey] = cur.with(s)
+	} else if l.authorOverflow == uuidProviderUnseen && len(l.states) < capEntries {
+		l.states[authorKey] = s
+	} else {
+		l.authorOverflow = l.authorOverflow.with(s)
+		l.branchOverflowed = true
+		l.pathOverflowed = true
+		return
+	}
+
+	branchKey := uuidProviderKey{name: name, branch: branch, anyPath: true}
+	if cur, ok := l.states[branchKey]; ok {
+		l.states[branchKey] = cur.with(s)
+	} else if !l.branchOverflowed && len(l.states) < capEntries {
+		l.states[branchKey] = s
+	} else {
+		l.branchOverflowed = true
+		l.pathOverflowed = true
+		return
+	}
+
+	if l.pathOverflowed {
+		return
+	}
+
+	exact := uuidProviderKey{name: name, branch: branch, path: path}
+	anyBranchPath := uuidProviderKey{name: name, path: path, anyBranch: true}
+	needed := 0
+	if _, ok := l.states[exact]; !ok {
+		needed++
+	}
+	if _, ok := l.states[anyBranchPath]; !ok && anyBranchPath != exact {
+		needed++
+	}
+	if len(l.states)+needed > capEntries {
+		l.pathOverflowed = true
+		return
+	}
+	l.states[exact] = l.states[exact].with(s)
+	l.states[anyBranchPath] = l.states[anyBranchPath].with(s)
+}
+
+// compactForCompleted drops per-path entries and caps retained summary entries
+// in a freshly allocated small map so a completedTrace holds < 1 KB even after
+// tens of thousands of distinct workflow node paths.
+func (l *uuidProviderLedger) compactForCompleted() *uuidProviderLedger {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.compacted = true
+	l.pathOverflowed = true
+	summaryCount := 0
+	for k := range l.states {
+		if k.anyPath {
+			summaryCount++
+		}
+	}
+	compact := make(map[uuidProviderKey]uuidProviderState, min(summaryCount, maxCompletedUUIDProviderEntries))
+	for k, s := range l.states {
+		if !k.anyPath || !k.anyBranch {
+			continue
+		}
+		if len(compact) < maxCompletedUUIDProviderEntries {
+			compact[k] = s
+		} else {
+			l.authorOverflow = l.authorOverflow.with(s)
+			l.branchOverflowed = true
+		}
+	}
+	for k, s := range l.states {
+		if !k.anyPath || k.anyBranch {
+			continue
+		}
+		// Retain a branch key only when its author-wide key also fit in compact.
+		authorKey := uuidProviderKey{name: k.name, anyBranch: true, anyPath: true}
+		if _, ok := compact[authorKey]; ok && len(compact) < maxCompletedUUIDProviderEntries {
+			compact[k] = s
+		} else {
+			l.branchOverflowed = true
+		}
+	}
+	l.states = compact
+	if len(l.branchStates) > 0 {
+		compactBranches := make(map[string]uuidProviderState, min(len(l.branchStates), maxCompletedUUIDProviderEntries))
+		for b, s := range l.branchStates {
+			if len(compactBranches) < maxCompletedUUIDProviderEntries {
+				compactBranches[b] = s
+			} else {
+				l.branchSummaryOverflow = l.branchSummaryOverflow.with(s)
+			}
+		}
+		l.branchStates = compactBranches
+	}
+	return l
+}
+
+func (l *uuidProviderLedger) branchState(branch string) uuidProviderState {
+	if l == nil || branch == "" {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.branchStates[branch]
+}
+
+func (l *uuidProviderLedger) branchOverflow() uuidProviderState {
+	if l == nil {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.branchSummaryOverflow
+}
+
+// stateAt returns the state of k, which is uuidProviderUnseen when l is nil.
+// When finer-grained keys have overflowed or been compacted, stateAt falls back
+// conservatively to the corresponding summary tier so mixed custom/default
+// histories return uuidProviderMixed while pure custom histories stay custom.
+func (l *uuidProviderLedger) stateAt(k uuidProviderKey) uuidProviderState {
+	if l == nil {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !k.anyPath {
+		if l.pathOverflowed {
+			return uuidProviderUnseen
+		}
+		return l.states[k]
+	}
+	if s := l.states[k]; s != uuidProviderUnseen {
+		return s
+	}
+	if !k.anyBranch && l.branchOverflowed {
+		authorKey := uuidProviderKey{name: k.name, anyBranch: true, anyPath: true}
+		if s := l.states[authorKey]; s != uuidProviderUnseen {
+			return s
+		}
+	}
+	if l.authorOverflow != uuidProviderUnseen {
+		eff := l.authorOverflow
+		if !l.runCustom {
+			eff = eff.with(uuidProviderDefault)
+		}
+		return eff
+	}
+	return uuidProviderUnseen
+}
+
+// isRunCustom reports l.runCustom, which is false when l is nil.
+func (l *uuidProviderLedger) isRunCustom() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.runCustom
+}
+
+// actionMaps holds pointers to the StateDelta and ArtifactDelta maps of a
+// session.EventActions, nil for a nil map. Storing unsafe.Pointer rather than
+// a uintptr address keeps each captured map reachable for as long as the
+// actionMaps value is, so the GC can neither free the map nor give its address
+// to a new map that an unrelated event would then appear to share. ADK
+// initializes the callback context's EventActions with both maps and yields the
+// event of an after-agent callback's content with a copy of EventActions.
+// Unless a callback replaces both map fields on the live EventActions via
+// ctx.WithDelta(nil).Actions(), the yielded event shares at least one of the
+// captured maps (and an earlier plugin's OnEventCallback that copies only one
+// map leaves the other in place).
+type actionMaps struct {
+	stateDelta, artifactDelta unsafe.Pointer
+}
+
+// shares reports whether a and b hold a common non-nil map.
+func (a actionMaps) shares(b actionMaps) bool {
+	return (a.stateDelta != nil && a.stateDelta == b.stateDelta) ||
+		(a.artifactDelta != nil && a.artifactDelta == b.artifactDelta)
 }
 
 // firstRetiredCause returns the first failure cause that an activation that
@@ -397,6 +839,2613 @@ func (rec *spanRecord) clearRetiredCauseFor(name, branch, path string) {
 	rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
 		return c.swallowableBySelf && c.name == name && c.branch == branch && (path == "" || c.path == "" || c.path == path)
 	})
+}
+
+type agentIdentityKey struct {
+	name   string
+	branch string
+}
+
+// retiredActivation records a retired agent activation after it leaves
+// agentStack, along with any custom ancestors that were still open on
+// agentStack at retirement and might buffer its events across later runs, plus
+// the sequence and platform-clock metadata used to prove later session events
+// did not originate from it.
+type retiredActivation struct {
+	swallower    retiredSwallower
+	parentSpanID string
+	guardSpanIDs []string
+	// ancestorSpanIDs holds the span IDs along the enclosing agent chain from
+	// rec's immediate parent up to the top-level agent at retirement, keeping
+	// settlement scoped to descendants of the recovering ancestor.
+	ancestorSpanIDs []string
+	// openEnclosingSpanIDs holds the sorted, deduplicated span IDs of the
+	// lowest still-open enclosing agent ancestors tracking when this
+	// activation's enclosing run(s) return, and enclosingRetiredUnjoined
+	// records that an enclosing chain exited without synchronizing (completed
+	// or runDone) so parentRunOver cannot later fire across it.
+	openEnclosingSpanIDs     []string
+	enclosingRetiredUnjoined bool
+	retiredAtSeq             uint64
+	completedOrTask          bool
+	// joinedAtRetire reports that the activation's run synchronized and exited
+	// at retirement (completed || runDone), excluding finish_task retirements
+	// whose goroutine is not guaranteed to have returned.
+	joinedAtRetire bool
+	// hasUnjoinedTask records monotonically across compaction folds whether this
+	// entry (or any member folded into it) retired as an unjoined task
+	// (taskMode && !joinedAtRetire) whose goroutine may still emit events.
+	hasUnjoinedTask bool
+	// settledByParent reports that this activation retired cleanly or had every
+	// cause cleared by an ancestor with no surviving failures along the chain;
+	// exclusion still requires event ID and post-start/post-retirement ordering.
+	settledByParent        bool
+	concurrentPeer         bool
+	unrespondedAtPop       bool
+	hasAfterAgentCallbacks bool
+	hasCustomUUIDProvider  bool
+	// afterAgentActions holds the action maps of the context in which the
+	// activation's after-agent callbacks ran, which the event that ADK builds
+	// from their content carries (see actionMaps), and afterAgentActionsRef
+	// holds the EventActions that holds both maps (see
+	// callbackAfterAgentActions), which keeps them reachable so that their
+	// addresses cannot be reused while they are compared, without keeping the
+	// callback context or anything else of the run. They are recorded for
+	// every activation with after-agent callbacks and kept until that event
+	// arrives or nothing can take it for another activation's event anymore
+	// (see settleAfterAgentActionsLocked).
+	afterAgentActions    actionMaps
+	afterAgentActionsRef any
+	// afterAgentEventSeen records that the event that ADK built from the
+	// activation's after-agent callbacks was delivered. ADK builds at most one
+	// such event per activation, so no event created after the activation
+	// retired is its own from then on (see canOwnEventCreatedAt).
+	afterAgentEventSeen bool
+	// afterAgentCredit records that the activation retired unresponded while
+	// an open peer of the same agent, branch and node path ran, with no model
+	// or tool event pending, so that reconcileConcurrentResponseOnPopLocked
+	// added one unrespondedRetired credit for the response that it may still
+	// deliver. Its own after-agent event settles that credit and no other (see
+	// consumeAfterAgentCreditLocked).
+	afterAgentCredit bool
+	// modelCredits records how many pending model-event credits in
+	// unrespondedRetired the activation contributed when it retired, so that
+	// its own buffered run events settle at most those credits and never steal a
+	// peer's credit.
+	modelCredits int
+	// creditSettled records that an event of the activation settled the
+	// credit that afterAgentCredit recorded, its after-agent event or an
+	// event of its run, so that no other event of the activation settles a
+	// credit (see settleRetiredResponseCreditLocked). creditGroupID links
+	// overlapping credit-bearing entries whose ambiguous events share a
+	// bounded group credit pool (see invocationTrace.creditGroupRem).
+	creditSettled bool
+	creditGroupID uint64
+	// foldedCredits preserves credit-group memberships and remaining credit
+	// capacities per exact (name, branch, path) when credit-bearing entries are
+	// folded into a cap-128 hull so surviving group peers keep consistent
+	// shared creditGroupRem pools and hulls never leak or over-consume credits.
+	foldedCredits []foldedCredit
+	// peerRetirement records that reconcileConcurrentResponseOnPopLocked
+	// counted the activation's retirement in retiredPeerCount, so that the
+	// retired peers that still have entries of their own can be told from
+	// those that were pruned or compacted (see soleOpenAuthorLocked).
+	peerRetirement bool
+	// popGoroutineID is the goroutine on which popAgentSpan retired the
+	// activation, 0 when unknown. ADK runs the activation's after-agent
+	// callbacks and builds their event on that goroutine right after
+	// popAgentSpan returns, before the goroutine starts or ends another
+	// agent other than one that a callback runs, which starts and ends
+	// inside them (see markAfterAgentCallbacksReturnedOnLocked).
+	popGoroutineID uint64
+	// afterAgentDone records that the activation's after-agent callbacks
+	// returned, or that the run of its parent returned, so that their event,
+	// if they built one and anyone can still deliver it, was created by then
+	// (see settleAfterAgentActionsLocked). afterAgentDoneAt is the platform
+	// time at which that was seen, zero when unknown: the activation created
+	// no event after it, its after-agent event included (see
+	// canOwnEventCreatedAt).
+	afterAgentDone   bool
+	afterAgentDoneAt time.Time
+	// afterAgentPending marks a compacted hull that stands for activations
+	// whose after-agent events may still come and whose action maps it no
+	// longer holds (see foldPendingAfterAgentLocked): any event of its agent
+	// that one of them can have created may be such an event, so the hull can
+	// own an event created after its members retired, and no later activation
+	// excludes it by event-creation timestamp provenance.
+	afterAgentPending           bool
+	compactedHull               bool
+	grantedAfterAgentCredit     bool
+	grantedModelCredits         int
+	goroutineID                 uint64
+	startPlatformTime           time.Time
+	retiredAtPlatformTime       time.Time
+	parentRetiredAtPlatformTime time.Time
+}
+
+type foldedCredit struct {
+	swallower        retiredSwallower
+	credits          int
+	creditGroupID    uint64
+	afterAgentCredit bool
+}
+
+func appendFoldedCredit(dst []foldedCredit, sw retiredSwallower, credits int, gid uint64, afterAgentCredit bool) []foldedCredit {
+	if credits <= 0 || gid == 0 {
+		return dst
+	}
+	exact := retiredSwallower{name: sw.name, branch: sw.branch, path: sw.path}
+	for i := range dst {
+		if dst[i].creditGroupID == gid && dst[i].swallower.name == exact.name && dst[i].swallower.branch == exact.branch && dst[i].swallower.path == exact.path {
+			dst[i].credits += credits
+			dst[i].afterAgentCredit = dst[i].afterAgentCredit || afterAgentCredit
+			return dst
+		}
+	}
+	return append(dst, foldedCredit{
+		swallower:        exact,
+		credits:          credits,
+		creditGroupID:    gid,
+		afterAgentCredit: afterAgentCredit,
+	})
+}
+
+func (ra retiredActivation) remainingCredits() int {
+	n := ra.modelCredits
+	if ra.afterAgentCredit {
+		n++
+	}
+	return n
+}
+
+func (ra *retiredActivation) normalizeGrantedCredits() {
+	if ra.afterAgentCredit {
+		ra.grantedAfterAgentCredit = true
+	}
+	if ra.modelCredits > ra.grantedModelCredits {
+		ra.grantedModelCredits = ra.modelCredits
+	}
+}
+
+func (inv *invocationTrace) allocCreditGroupIDLocked() uint64 {
+	inv.nextCreditGroupID++
+	if inv.creditGroupRem == nil {
+		inv.creditGroupRem = make(map[uint64]int)
+	}
+	return inv.nextCreditGroupID
+}
+
+func (inv *invocationTrace) settleCreditGroupIfExhaustedLocked(gid uint64, name, branch, path string) {
+	if gid == 0 || inv.creditGroupRem == nil {
+		return
+	}
+	if rem, ok := inv.creditGroupRem[gid]; ok && rem > 0 {
+		return
+	}
+	delete(inv.creditGroupRem, gid)
+	var settled bool
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		if ra.compactedHull {
+			if len(ra.foldedCredits) > 0 {
+				prevLen := len(ra.foldedCredits)
+				ra.foldedCredits = slices.DeleteFunc(ra.foldedCredits, func(fc foldedCredit) bool {
+					return fc.creditGroupID == gid
+				})
+				if len(ra.foldedCredits) != prevLen {
+					settled = true
+					if len(ra.foldedCredits) == 0 {
+						ra.foldedCredits = nil
+						ra.creditSettled = true
+					}
+				}
+			}
+			continue
+		}
+		if ra.creditGroupID == gid {
+			ra.normalizeGrantedCredits()
+			ra.afterAgentCredit = false
+			ra.modelCredits = 0
+			ra.creditSettled = true
+			ra.creditGroupID = 0
+			settled = true
+		}
+	}
+	if settled {
+		inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+			return ra.swallower.matches(name, branch, path)
+		})
+	}
+}
+
+func (inv *invocationTrace) mergeCreditGroupsLocked(indices []int, name, branch, path string) uint64 {
+	if len(indices) == 0 {
+		return 0
+	}
+	exactKey := func(sw retiredSwallower) bool {
+		return sw.name == name && sw.branch == branch && sw.path == path
+	}
+	var targetGID uint64
+	oldGIDs := make(map[uint64]bool)
+	totalRem := 0
+	for _, idx := range indices {
+		ra := &inv.retiredActivations[idx]
+		if ra.compactedHull {
+			for _, fc := range ra.foldedCredits {
+				if !exactKey(fc.swallower) || fc.credits <= 0 {
+					continue
+				}
+				if fc.creditGroupID != 0 {
+					if targetGID == 0 {
+						targetGID = fc.creditGroupID
+					}
+					if !oldGIDs[fc.creditGroupID] {
+						oldGIDs[fc.creditGroupID] = true
+						totalRem += inv.creditGroupRem[fc.creditGroupID]
+					}
+				} else {
+					totalRem += fc.credits
+				}
+			}
+			continue
+		}
+		ra.normalizeGrantedCredits()
+		if ra.creditGroupID != 0 {
+			if targetGID == 0 {
+				targetGID = ra.creditGroupID
+			}
+			if !oldGIDs[ra.creditGroupID] {
+				oldGIDs[ra.creditGroupID] = true
+				totalRem += inv.creditGroupRem[ra.creditGroupID]
+			}
+		} else {
+			totalRem += ra.remainingCredits()
+		}
+	}
+	if targetGID == 0 {
+		targetGID = inv.allocCreditGroupIDLocked()
+	}
+	for gid := range oldGIDs {
+		if gid != targetGID {
+			delete(inv.creditGroupRem, gid)
+		}
+	}
+	memberCap := 0
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		if ra.compactedHull {
+			if len(ra.foldedCredits) == 0 {
+				continue
+			}
+			var merged []foldedCredit
+			remapped := false
+			for _, fc := range ra.foldedCredits {
+				if !exactKey(fc.swallower) || fc.credits <= 0 {
+					merged = append(merged, fc)
+					continue
+				}
+				if oldGIDs[fc.creditGroupID] {
+					fc.creditGroupID = targetGID
+					remapped = true
+				}
+				if fc.creditGroupID == targetGID {
+					memberCap += fc.credits
+				}
+				if fc.creditGroupID == 0 {
+					merged = append(merged, fc)
+				} else {
+					merged = appendFoldedCredit(merged, fc.swallower, fc.credits, fc.creditGroupID, fc.afterAgentCredit)
+				}
+			}
+			if remapped {
+				ra.foldedCredits = merged
+			}
+			continue
+		}
+		if oldGIDs[ra.creditGroupID] {
+			ra.creditGroupID = targetGID
+		}
+		if ra.creditGroupID == targetGID {
+			memberCap += ra.remainingCredits()
+		}
+	}
+	for _, idx := range indices {
+		ra := &inv.retiredActivations[idx]
+		if ra.compactedHull {
+			if len(ra.foldedCredits) == 0 {
+				continue
+			}
+			var merged []foldedCredit
+			assigned := false
+			for _, fc := range ra.foldedCredits {
+				if exactKey(fc.swallower) && fc.credits > 0 && fc.creditGroupID == 0 {
+					fc.creditGroupID = targetGID
+					memberCap += fc.credits
+					assigned = true
+				}
+				if fc.creditGroupID == 0 {
+					merged = append(merged, fc)
+				} else {
+					merged = appendFoldedCredit(merged, fc.swallower, fc.credits, fc.creditGroupID, fc.afterAgentCredit)
+				}
+			}
+			if assigned {
+				ra.foldedCredits = merged
+			}
+			continue
+		}
+		if ra.creditGroupID == 0 {
+			ra.creditGroupID = targetGID
+			memberCap += ra.remainingCredits()
+		}
+	}
+	if inv.creditGroupRem == nil {
+		inv.creditGroupRem = make(map[uint64]int)
+	}
+	inv.creditGroupRem[targetGID] = min(totalRem, memberCap)
+	return targetGID
+}
+
+// clearExhaustedAfterAgentCreditsLocked settles any remaining afterAgentCredit
+// or modelCredits on exact-key non-hull entries of (name, branch, path) once
+// unrespondedRetired[k] has reached 0, and releases any after-agent action maps
+// that matching entries no longer need. inv.mu must be held.
+func (inv *invocationTrace) clearExhaustedAfterAgentCreditsLocked(name, branch, path string) {
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		if ra.compactedHull {
+			if len(ra.foldedCredits) > 0 {
+				kept := ra.foldedCredits[:0]
+				for _, fc := range ra.foldedCredits {
+					if fc.swallower.name == name && fc.swallower.branch == branch && fc.swallower.path == path {
+						if fc.creditGroupID != 0 {
+							delete(inv.creditGroupRem, fc.creditGroupID)
+						}
+						continue
+					}
+					kept = append(kept, fc)
+				}
+				if len(kept) == 0 {
+					ra.foldedCredits = nil
+					ra.creditSettled = true
+				} else {
+					ra.foldedCredits = kept
+				}
+			}
+			continue
+		}
+		if (ra.afterAgentCredit || ra.modelCredits > 0 || ra.creditGroupID != 0) &&
+			ra.swallower.name == name && ra.swallower.branch == branch && ra.swallower.path == path {
+			ra.normalizeGrantedCredits()
+			if ra.creditGroupID != 0 {
+				delete(inv.creditGroupRem, ra.creditGroupID)
+				ra.creditGroupID = 0
+			}
+			ra.afterAgentCredit = false
+			ra.modelCredits = 0
+			ra.creditSettled = true
+		}
+	}
+	inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+		return ra.swallower.matches(name, branch, path)
+	})
+}
+
+// consumeAfterAgentCreditLocked settles, for the after-agent event of
+// retiredActivations[idx], the unrespondedRetired credit that the activation
+// left when it retired (see retiredActivation.afterAgentCredit), and nothing
+// else: the model and tool credits that it left stand for events of its run
+// that may still come, whatever the after-agent event's content, and a credit
+// of another activation of the same agent stands for that activation's
+// response. It reports whether a credit was consumed. inv.mu must be held.
+func (inv *invocationTrace) consumeAfterAgentCreditLocked(idx int) bool {
+	if idx < 0 || idx >= len(inv.retiredActivations) {
+		return false
+	}
+	ra := &inv.retiredActivations[idx]
+	if !ra.afterAgentCredit {
+		return false
+	}
+	ra.normalizeGrantedCredits()
+	name, branch, path := ra.swallower.name, ra.swallower.branch, ra.swallower.path
+	k := llmKey(identity{path: path, agentName: name, branch: branch})
+	if ra.creditGroupID != 0 && inv.creditGroupRem[ra.creditGroupID] <= 0 {
+		inv.settleCreditGroupIfExhaustedLocked(ra.creditGroupID, name, branch, path)
+		return false
+	}
+	ra.afterAgentCredit = false
+	if ra.modelCredits == 0 {
+		ra.creditSettled = true
+	}
+	if gid := ra.creditGroupID; gid != 0 {
+		inv.creditGroupRem[gid]--
+		inv.settleCreditGroupIfExhaustedLocked(gid, name, branch, path)
+	}
+	if inv.unrespondedRetired[k] > 0 {
+		inv.unrespondedRetired[k]--
+	}
+	if inv.unrespondedRetired[k] <= 0 {
+		inv.clearExhaustedAfterAgentCreditsLocked(name, branch, path)
+	}
+	return true
+}
+
+// settleRetiredResponseCreditLocked settles one unrespondedRetired credit of
+// the key k, the llmKey of (name, branch, path), for a session event that
+// completeResponse absorbs as the response of a retired activation and that
+// carries no action map of a retired activation's after-agent callbacks. If
+// exactly one active credit-bearing retired activation matching (name, branch,
+// path) can have created the event in its run (either as the unique matching
+// entry or when all credits on k are tracked without wildcard ambiguity and
+// only one credit-holder matches), the event settles one credit of that
+// activation. Overlapping credit-holders merge into a bounded credit group so
+// a single wave can never consume disjoint peer credits; when no matching
+// credit-holder exists and trackedGroupCredits >= unrespondedRetired[k], the
+// event settles nothing. It reports whether a credit was settled. inv.mu must
+// be held.
+func (inv *invocationTrace) settleRetiredResponseCreditLocked(k, name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	if inv.unrespondedRetired[k] <= 0 {
+		return false
+	}
+	author := -1
+	trackedGroupCredits := 0
+	var seenGroup map[uint64]bool
+	var matchedHolders []int
+	matchedWildcard := false
+	hasExactFoldedCredit := func(fc foldedCredit) bool {
+		return fc.swallower.name == name && fc.swallower.branch == branch && fc.swallower.path == path &&
+			fc.credits > 0 && (fc.creditGroupID == 0 || inv.creditGroupRem[fc.creditGroupID] > 0)
+	}
+	hasActiveCredit := func(ra retiredActivation) bool {
+		if ra.compactedHull {
+			return slices.ContainsFunc(ra.foldedCredits, hasExactFoldedCredit)
+		}
+		return ra.swallower.name == name && ra.swallower.branch == branch && ra.swallower.path == path &&
+			(ra.afterAgentCredit || ra.modelCredits > 0) &&
+			(ra.creditGroupID == 0 || inv.creditGroupRem[ra.creditGroupID] > 0)
+	}
+	addGroupCredits := func(ra retiredActivation, skipGroups map[uint64]bool, seen *map[uint64]bool) int {
+		total := 0
+		addOne := func(gid uint64, fallback int) {
+			if gid != 0 {
+				if skipGroups[gid] {
+					return
+				}
+				if *seen == nil {
+					*seen = make(map[uint64]bool)
+				}
+				if !(*seen)[gid] {
+					(*seen)[gid] = true
+					total += inv.creditGroupRem[gid]
+				}
+				return
+			}
+			total += fallback
+		}
+		if ra.compactedHull {
+			for _, fc := range ra.foldedCredits {
+				if hasExactFoldedCredit(fc) {
+					addOne(fc.creditGroupID, fc.credits)
+				}
+			}
+			return total
+		}
+		addOne(ra.creditGroupID, ra.remainingCredits())
+		return total
+	}
+	for j, ra := range inv.retiredActivations {
+		activeCredit := hasActiveCredit(ra)
+		if activeCredit {
+			trackedGroupCredits += addGroupCredits(ra, nil, &seenGroup)
+		}
+		if !ra.swallower.matches(name, branch, path) {
+			continue
+		}
+		hasTimestamp := hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider)
+		canOwnMaplessAfterAgent := false
+		if activeCredit {
+			if ra.compactedHull {
+				canOwnMaplessAfterAgent = slices.ContainsFunc(ra.foldedCredits, func(fc foldedCredit) bool {
+					return hasExactFoldedCredit(fc) && fc.afterAgentCredit
+				})
+			} else {
+				canOwnMaplessAfterAgent = ra.afterAgentCredit && ra.afterAgentActions == (actionMaps{})
+			}
+		}
+		if !ra.createdInRun(evCreatedAt, hasTimestamp) && !(canOwnMaplessAfterAgent && hasTimestamp && ra.canOwnEventCreatedAt(evCreatedAt, true)) {
+			continue
+		}
+		if ra.swallower.path != path {
+			matchedWildcard = true
+		}
+		if activeCredit {
+			matchedHolders = append(matchedHolders, j)
+		}
+		if ra.compactedHull || author != -1 {
+			author = -2
+		} else {
+			author = j
+		}
+	}
+	if (author >= 0 && inv.retiredActivations[author].swallower.path == path) ||
+		(trackedGroupCredits >= inv.unrespondedRetired[k] && !matchedWildcard && len(matchedHolders) == 1 && !inv.retiredActivations[matchedHolders[0]].compactedHull) {
+		hIdx := author
+		if hIdx < 0 {
+			hIdx = matchedHolders[0]
+		}
+		ra := &inv.retiredActivations[hIdx]
+		switch {
+		case ra.afterAgentCredit:
+			return inv.consumeAfterAgentCreditLocked(hIdx)
+		case ra.modelCredits > 0:
+			if gid := ra.creditGroupID; gid != 0 && inv.creditGroupRem[gid] <= 0 {
+				inv.settleCreditGroupIfExhaustedLocked(gid, name, branch, path)
+				return false
+			}
+			ra.normalizeGrantedCredits()
+			ra.modelCredits--
+			if !ra.afterAgentCredit && ra.modelCredits == 0 {
+				ra.creditSettled = true
+			}
+			if gid := ra.creditGroupID; gid != 0 {
+				inv.creditGroupRem[gid]--
+				inv.settleCreditGroupIfExhaustedLocked(gid, name, branch, path)
+			}
+			inv.unrespondedRetired[k]--
+			if inv.unrespondedRetired[k] <= 0 {
+				inv.clearExhaustedAfterAgentCreditsLocked(name, branch, path)
+			}
+			return true
+		default:
+			return false
+		}
+	}
+	if len(matchedHolders) == 0 {
+		if trackedGroupCredits >= inv.unrespondedRetired[k] {
+			return false
+		}
+		inv.unrespondedRetired[k]--
+		if inv.unrespondedRetired[k] <= 0 {
+			inv.clearExhaustedAfterAgentCreditsLocked(name, branch, path)
+		}
+		return true
+	}
+
+	matchedIdxSet := make(map[int]bool, len(matchedHolders))
+	matchedGroups := make(map[uint64]bool, len(matchedHolders))
+	for _, idx := range matchedHolders {
+		matchedIdxSet[idx] = true
+		ra := inv.retiredActivations[idx]
+		if ra.compactedHull {
+			for _, fc := range ra.foldedCredits {
+				if hasExactFoldedCredit(fc) && fc.creditGroupID != 0 {
+					matchedGroups[fc.creditGroupID] = true
+				}
+			}
+			continue
+		}
+		if ra.creditGroupID != 0 {
+			matchedGroups[ra.creditGroupID] = true
+		}
+	}
+	unmatchedGroupCredits := 0
+	var seenUnmatchedGroup map[uint64]bool
+	for j, ra := range inv.retiredActivations {
+		if matchedIdxSet[j] || !hasActiveCredit(ra) {
+			continue
+		}
+		unmatchedGroupCredits += addGroupCredits(ra, matchedGroups, &seenUnmatchedGroup)
+	}
+
+	var targetGID uint64
+	if len(matchedHolders) >= 2 || trackedGroupCredits >= inv.unrespondedRetired[k] {
+		targetGID = inv.mergeCreditGroupsLocked(matchedHolders, name, branch, path)
+	}
+	if trackedGroupCredits >= inv.unrespondedRetired[k] && targetGID != 0 {
+		inv.creditGroupRem[targetGID]--
+		inv.settleCreditGroupIfExhaustedLocked(targetGID, name, branch, path)
+	}
+	inv.unrespondedRetired[k]--
+	if inv.unrespondedRetired[k] <= 0 {
+		inv.clearExhaustedAfterAgentCreditsLocked(name, branch, path)
+	} else if inv.unrespondedRetired[k] <= unmatchedGroupCredits {
+		if targetGID != 0 && inv.creditGroupRem != nil {
+			inv.creditGroupRem[targetGID] = 0
+			inv.settleCreditGroupIfExhaustedLocked(targetGID, name, branch, path)
+		} else {
+			for gid := range matchedGroups {
+				if inv.creditGroupRem != nil {
+					inv.creditGroupRem[gid] = 0
+					inv.settleCreditGroupIfExhaustedLocked(gid, name, branch, path)
+				}
+			}
+			for _, idx := range matchedHolders {
+				mra := &inv.retiredActivations[idx]
+				if mra.compactedHull {
+					continue
+				}
+				mra.normalizeGrantedCredits()
+				mra.afterAgentCredit = false
+				mra.modelCredits = 0
+				mra.creditSettled = true
+			}
+			inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+				return ra.swallower.matches(name, branch, path)
+			})
+		}
+	}
+	return true
+}
+
+// createdInRun reports whether the retired activation ra can have
+// created, in its run, an event created at evCreatedAt, which hasEventID
+// reports to be its creation time: the event was created after ra started
+// and no later than ra retired. An event without creation evidence can be
+// any activation's.
+func (ra retiredActivation) createdInRun(evCreatedAt time.Time, hasEventID bool) bool {
+	if evCreatedAt.IsZero() || !hasEventID {
+		return true
+	}
+	if !ra.startPlatformTime.IsZero() && evCreatedAt.Before(ra.startPlatformTime) {
+		return false
+	}
+	return ra.retiredAtPlatformTime.IsZero() || ra.unjoinedTaskRetirement() || !evCreatedAt.After(ra.retiredAtPlatformTime)
+}
+
+// activeSwallower pairs a retired activation's slice index in
+// retiredActivations with its swallower identity for per-agent lookup.
+type activeSwallower struct {
+	idx       int
+	swallower retiredSwallower
+}
+
+// afterAgentState holds what tells whether a retired activation still needs
+// the action maps of its after-agent callbacks (see
+// needsAfterAgentActionsLocked): the spans that a recorded cause names as
+// swallowers, and the spans that an open agent span runs under, which may
+// have retired already. When such an open span retires later, its failure
+// cause moves up with the activation among its swallowers, so the activation's
+// after-agent event may still have to recover it.
+type afterAgentState struct {
+	swallowers    map[string]bool
+	underOpen     map[string]bool
+	openSet       map[string]bool
+	activeByAgent map[agentIdentityKey][]activeSwallower
+}
+
+func (inv *invocationTrace) afterAgentStateLocked() afterAgentState {
+	st := afterAgentState{
+		swallowers: make(map[string]bool),
+		underOpen:  make(map[string]bool),
+		openSet:    inv.openSpanSetLocked(),
+	}
+	if st.openSet == nil {
+		st.openSet = map[string]bool{}
+	}
+	for _, rec := range inv.agentStack {
+		for _, c := range rec.retiredCauses {
+			for _, s := range c.swallowers {
+				if s.spanID != "" {
+					st.swallowers[s.spanID] = true
+				}
+			}
+		}
+	}
+	if len(inv.agentStack) > 1 {
+		for _, r := range inv.agentStack[1:] {
+			for p := r.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+				if p.spanID != "" {
+					st.underOpen[p.spanID] = true
+				}
+			}
+		}
+	}
+	if len(st.swallowers) > 0 || len(st.underOpen) > 0 {
+		st.activeByAgent = make(map[agentIdentityKey][]activeSwallower)
+		for idx, ra := range inv.retiredActivations {
+			if !ra.compactedHull && (st.swallowers[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID]) {
+				k := agentIdentityKey{name: ra.swallower.name, branch: ra.swallower.branch}
+				st.activeByAgent[k] = append(st.activeByAgent[k], activeSwallower{idx: idx, swallower: ra.swallower})
+			}
+		}
+	}
+	return st
+}
+
+// holdsAfterAgentEvent reports whether ra still recognizes an after-agent
+// event that may come: it keeps the action maps of its after-agent callbacks,
+// or it is a hull that stands for activations whose events may (see
+// afterAgentPending).
+func (ra retiredActivation) holdsAfterAgentEvent() bool {
+	return ra.afterAgentActions != (actionMaps{}) || ra.afterAgentPending
+}
+
+// markAfterAgentDone records that ra's after-agent callbacks returned, as
+// seen at the platform time at, zero when unknown. Each time at which that is
+// seen bounds the events of ra, so the earliest known one is kept.
+func (ra *retiredActivation) markAfterAgentDone(at time.Time) {
+	ra.afterAgentDone = true
+	if !at.IsZero() && (ra.afterAgentDoneAt.IsZero() || at.Before(ra.afterAgentDoneAt)) {
+		ra.afterAgentDoneAt = at
+	}
+}
+
+// dropAfterAgentEvent forgets the after-agent event that ra recognizes (see
+// holdsAfterAgentEvent).
+func (ra *retiredActivation) dropAfterAgentEvent() {
+	ra.afterAgentActions = actionMaps{}
+	ra.afterAgentActionsRef = nil
+	ra.afterAgentPending = false
+}
+
+type unrespondedPathSet struct {
+	hasWildcard bool
+	paths       map[string]struct{}
+}
+
+func (ps unrespondedPathSet) matchesPath(path string) bool {
+	if !ps.hasWildcard && len(ps.paths) == 0 {
+		return false
+	}
+	if path == "" || ps.hasWildcard {
+		return true
+	}
+	_, ok := ps.paths[path]
+	return ok
+}
+
+func addUnrespondedPath(ps *unrespondedPathSet, kp string) {
+	if kp == "" {
+		ps.hasWildcard = true
+		return
+	}
+	if ps.paths == nil {
+		ps.paths = make(map[string]struct{}, 1)
+	}
+	ps.paths[kp] = struct{}{}
+}
+
+// unrespondedRetiredIndex indexes inv.unrespondedRetired once per pruning or
+// compaction pass so retired-activation matching runs in O(R + U) instead of
+// scanning and parsing inv.unrespondedRetired for every retired entry.
+type unrespondedRetiredIndex struct {
+	nonEmpty bool
+	allPaths unrespondedPathSet
+	byAgent  map[agentIdentityKey]unrespondedPathSet
+	byName   map[string]unrespondedPathSet
+	byBranch map[string]unrespondedPathSet
+}
+
+func (inv *invocationTrace) newUnrespondedRetiredIndexLocked() unrespondedRetiredIndex {
+	if len(inv.unrespondedRetired) == 0 {
+		return unrespondedRetiredIndex{}
+	}
+	var idx unrespondedRetiredIndex
+	for k, count := range inv.unrespondedRetired {
+		if count <= 0 {
+			continue
+		}
+		kp, kn, kb, ok := parseLLMKey(k)
+		if !ok {
+			continue
+		}
+		if !idx.nonEmpty {
+			idx.nonEmpty = true
+			n := len(inv.unrespondedRetired)
+			idx.byAgent = make(map[agentIdentityKey]unrespondedPathSet, n)
+			idx.byName = make(map[string]unrespondedPathSet, n)
+			idx.byBranch = make(map[string]unrespondedPathSet, n)
+		}
+		addUnrespondedPath(&idx.allPaths, kp)
+		ak := agentIdentityKey{name: kn, branch: kb}
+		ps := idx.byAgent[ak]
+		addUnrespondedPath(&ps, kp)
+		idx.byAgent[ak] = ps
+		nps := idx.byName[kn]
+		addUnrespondedPath(&nps, kp)
+		idx.byName[kn] = nps
+		bps := idx.byBranch[kb]
+		addUnrespondedPath(&bps, kp)
+		idx.byBranch[kb] = bps
+	}
+	return idx
+}
+
+func (idx unrespondedRetiredIndex) matches(s retiredSwallower) bool {
+	if !idx.nonEmpty {
+		return false
+	}
+	switch {
+	case s.anyName && s.anyBranch:
+		return idx.allPaths.matchesPath(s.path)
+	case s.anyBranch:
+		return idx.byName[s.name].matchesPath(s.path)
+	case s.anyName:
+		return idx.byBranch[s.branch].matchesPath(s.path)
+	default:
+		return idx.byAgent[agentIdentityKey{name: s.name, branch: s.branch}].matchesPath(s.path)
+	}
+}
+
+func (inv *invocationTrace) shrinkRetiredActivationsLocked() {
+	n := len(inv.retiredActivations)
+	if n == 0 {
+		inv.retiredActivations = nil
+		return
+	}
+	c := cap(inv.retiredActivations)
+	if c > 2*maxRetiredActivationsPerInvocation && n*4 <= c {
+		shrunk := make([]retiredActivation, n, max(n, maxRetiredActivationsPerInvocation))
+		copy(shrunk, inv.retiredActivations)
+		inv.retiredActivations = shrunk
+	}
+}
+
+func (inv *invocationTrace) hasUnrespondedRetiredSwallowerLocked(s retiredSwallower, includeTools bool) bool {
+	matchMap := func(m map[string]int) bool {
+		for k, count := range m {
+			if count <= 0 {
+				continue
+			}
+			kp, kn, kb, ok := parseLLMKey(k)
+			if ok && s.matches(kn, kb, kp) {
+				return true
+			}
+		}
+		return false
+	}
+	return matchMap(inv.unrespondedRetired) || (includeTools && matchMap(inv.unrespondedRetiredTools))
+}
+
+// hasUnrespondedRetiredForLocked reports whether inv.unrespondedRetired (or,
+// when includeTools is true, inv.unrespondedRetiredTools) holds a positive
+// credit for a key matching (name, branch, path), using wildcard path
+// semantics where an empty path on either side matches any path. inv.mu must
+// be held.
+func (inv *invocationTrace) hasUnrespondedRetiredForLocked(name, branch, path string, includeTools bool) bool {
+	return inv.hasUnrespondedRetiredSwallowerLocked(retiredSwallower{name: name, branch: branch, path: path}, includeTools)
+}
+
+// needsAfterAgentActionsLocked reports whether retiredActivations[idx] keeps
+// the action maps of its after-agent callbacks (see
+// retiredActivation.afterAgentActions), or, for a hull, keeps standing for
+// the after-agent events of its members (see afterAgentPending). Its
+// after-agent event is recognized by them alone, so that an event that it
+// builds after the activation retired is never taken for another
+// activation's: one that started meanwhile, or one whose run the event's
+// timestamp falls in. The maps are kept while
+//
+//   - the event may recover a failure that the activation swallowed, or one
+//     that an open span under it carries and that moves up with it among its
+//     swallowers once that span retires (see afterAgentState);
+//   - its after-agent callbacks may still run (see afterAgentDone), so that
+//     an activation of the same agent that starts meanwhile could be taken
+//     for the event's author;
+//   - the event may settle the credit that the activation left (see
+//     afterAgentCredit);
+//   - or, once the callbacks returned, another activation of the agent could
+//     be taken for the event's author or lose something to it: one is open,
+//     one swallowed a failure that is still recorded or has an open span
+//     under it, or a credit of the agent is outstanding.
+//
+// An activation of the agent that starts after the callbacks returned
+// started after their event was created, so it does not own that event,
+// unless both fall in one tick of a coarse clock, which the maps cover while
+// that activation is open, and an event that a retired activation of the
+// agent, other than a swallower, is taken to have created recovers nothing.
+// Nor is the activation a possible author of an event created after its
+// callbacks were seen to return (see afterAgentDoneAt), whether its
+// after-agent event was delivered unrecognized or never came, so an open
+// activation's later recovery counts without the maps. That the activation
+// retired without a response, or that a custom ancestor may still hold its
+// after-agent event, keeps nothing by itself once its callbacks returned:
+// the event would only show that it responded, which no failure depends on,
+// and keeping the maps until such an event arrives would keep them for every
+// activation whose callbacks build none, while a custom ancestor runs.
+// inv.mu must be held.
+func (inv *invocationTrace) needsAfterAgentActionsLocked(idx int, st afterAgentState) bool {
+	if idx < 0 || idx >= len(inv.retiredActivations) {
+		return false
+	}
+	ra := &inv.retiredActivations[idx]
+	if !ra.holdsAfterAgentEvent() {
+		return false
+	}
+	if !ra.compactedHull && (st.swallowers[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID]) {
+		return true
+	}
+	openSet := st.openSet
+	if openSet == nil {
+		openSet = inv.openSpanSetLocked()
+	}
+	canHoldEvent := openSet[ra.parentSpanID] || slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+		return openSet[g]
+	})
+	name, branch, path := ra.swallower.name, ra.swallower.branch, ra.swallower.path
+	if (!ra.afterAgentDone && canHoldEvent) || (ra.afterAgentCredit && inv.hasUnrespondedRetiredSwallowerLocked(ra.swallower, false)) {
+		return true
+	}
+	if inv.hasUnrespondedRetiredSwallowerLocked(ra.swallower, true) {
+		return true
+	}
+	if !canHoldEvent {
+		return false
+	}
+	if len(inv.agentStack) > 1 {
+		for _, rec := range inv.agentStack[1:] {
+			if rec.kind == spanKindAgent && ra.swallower.matches(rec.name, rec.branch, rec.path) {
+				return true
+			}
+		}
+	}
+	if len(st.swallowers) > 0 || len(st.underOpen) > 0 {
+		if st.activeByAgent != nil && !ra.swallower.anyName && !ra.swallower.anyBranch {
+			for _, other := range st.activeByAgent[agentIdentityKey{name: name, branch: branch}] {
+				if other.idx != idx && other.swallower.matches(name, branch, path) {
+					return true
+				}
+			}
+		} else {
+			for j, other := range inv.retiredActivations {
+				if j != idx && !other.compactedHull && ra.swallower.matches(other.swallower.name, other.swallower.branch, other.swallower.path) && (st.swallowers[other.swallower.spanID] || st.underOpen[other.swallower.spanID]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// settleAfterAgentActionsLocked drops the after-agent action maps of the
+// retired activations for which match reports true that no longer need them
+// (see needsAfterAgentActionsLocked). inv.mu must be held.
+func (inv *invocationTrace) settleAfterAgentActionsLocked(match func(ra *retiredActivation) bool) {
+	if match == nil {
+		return
+	}
+	var st afterAgentState
+	for idx := range inv.retiredActivations {
+		ra := &inv.retiredActivations[idx]
+		if !ra.holdsAfterAgentEvent() || !match(ra) {
+			continue
+		}
+		if st.swallowers == nil {
+			st = inv.afterAgentStateLocked()
+		}
+		if !inv.needsAfterAgentActionsLocked(idx, st) {
+			ra.dropAfterAgentEvent()
+		}
+	}
+}
+
+// afterAgentCallbacksReturnedOnLocked records, when an agent starts or ends
+// on the goroutine goid at the platform time at, that the after-agent
+// callbacks of the activations that popAgentSpan retired on that goroutine
+// earlier returned, and by when (see markAfterAgentCallbacksReturnedOnLocked),
+// and drops the action maps that they no longer need. inv.mu must be held.
+func (inv *invocationTrace) afterAgentCallbacksReturnedOnLocked(goid uint64, at time.Time, running int) {
+	if inv.markAfterAgentCallbacksReturnedOnLocked(goid, at, running) {
+		inv.settleAfterAgentActionsOnLocked(goid)
+	}
+}
+
+// markAfterAgentCallbacksReturnedOnLocked records, when an agent starts or
+// ends on the goroutine goid at the platform time at, that the after-agent
+// callbacks of the activations that popAgentSpan retired on that goroutine
+// earlier returned (see retiredActivation.popGoroutineID), and by when (see
+// retiredActivation.afterAgentDoneAt), except for those that are still
+// running: running is the number of runs of after-agent callbacks that
+// enclose the start or end on that goroutine, other than the ending
+// activation's own (see afterAgentCallbackRunsOfTrace), as when a callback
+// runs an agent itself. Each start or end on goid records every activation
+// retired there except the ones whose callbacks enclose it, and those runs
+// nest, so the activations whose callbacks still run are the ones that
+// retired first among those on goid not recorded yet: the activation retired
+// last may have returned from its callbacks or still run them, and every
+// other one encloses it. It reports whether it recorded any. goid 0 is
+// unknown and shows nothing. inv.mu must be held.
+func (inv *invocationTrace) markAfterAgentCallbacksReturnedOnLocked(goid uint64, at time.Time, running int) bool {
+	if goid == 0 {
+		return false
+	}
+	running = max(running, 0)
+	var pending []int
+	for idx := range inv.retiredActivations {
+		if ra := &inv.retiredActivations[idx]; ra.popGoroutineID == goid && !ra.afterAgentDone {
+			pending = append(pending, idx)
+		}
+	}
+	if len(pending) <= running {
+		return false
+	}
+	slices.SortStableFunc(pending, func(a, b int) int {
+		return cmp.Compare(inv.retiredActivations[a].retiredAtSeq, inv.retiredActivations[b].retiredAtSeq)
+	})
+	for _, idx := range pending[running:] {
+		inv.retiredActivations[idx].markAfterAgentDone(at)
+	}
+	return true
+}
+
+// settleAfterAgentActionsOnLocked drops the after-agent action maps of the
+// activations that popAgentSpan retired on the goroutine goid that no longer
+// need them (see needsAfterAgentActionsLocked). inv.mu must be held.
+func (inv *invocationTrace) settleAfterAgentActionsOnLocked(goid uint64) {
+	if goid == 0 {
+		return
+	}
+	inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+		return ra.popGoroutineID == goid
+	})
+}
+
+func (inv *invocationTrace) openSpanSetLocked() map[string]bool {
+	if len(inv.agentStack) <= 1 {
+		return nil
+	}
+	openSet := make(map[string]bool, len(inv.agentStack)-1)
+	for _, r := range inv.agentStack[1:] {
+		openSet[r.spanID] = true
+	}
+	return openSet
+}
+
+func customGuardSpanIDsLocked(rec *spanRecord, openSet map[string]bool) []string {
+	if rec == nil {
+		return nil
+	}
+	var guards []string
+	for cur, p := rec, rec.parent; p != nil && p.kind == spanKindAgent; cur, p = p, p.parent {
+		if openSet[p.spanID] && (!p.propagatesChildError || (p.isWorkflow && cur.goroutineID != 0 && !cur.isNodeAgentOf(p))) {
+			guards = append(guards, p.spanID)
+		}
+	}
+	return guards
+}
+
+func filterOpenSpanIDs(ids []string, openSet map[string]bool) []string {
+	var open []string
+	for _, g := range ids {
+		if openSet[g] && !slices.Contains(open, g) {
+			open = append(open, g)
+		}
+	}
+	slices.Sort(open)
+	return open
+}
+
+func unionOpenSpanIDs(a, b []string, openSet map[string]bool) []string {
+	var merged []string
+	for _, id := range a {
+		if openSet[id] && !slices.Contains(merged, id) {
+			merged = append(merged, id)
+		}
+	}
+	for _, id := range b {
+		if openSet[id] && !slices.Contains(merged, id) {
+			merged = append(merged, id)
+		}
+	}
+	slices.Sort(merged)
+	return merged
+}
+
+func (inv *invocationTrace) findRetiredActivationIndexLocked(spanID string) int {
+	if spanID == "" {
+		return -1
+	}
+	for i := range inv.retiredActivations {
+		if !inv.retiredActivations[i].compactedHull && inv.retiredActivations[i].swallower.spanID == spanID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (inv *invocationTrace) recordRetiredActivationEntryLocked(entry retiredActivation) {
+	if entry.swallower.spanID == "" {
+		return
+	}
+	for i := range inv.retiredActivations {
+		if !inv.retiredActivations[i].compactedHull && !entry.compactedHull && inv.retiredActivations[i].swallower.spanID == entry.swallower.spanID {
+			for _, g := range entry.guardSpanIDs {
+				if !slices.Contains(inv.retiredActivations[i].guardSpanIDs, g) {
+					inv.retiredActivations[i].guardSpanIDs = append(inv.retiredActivations[i].guardSpanIDs, g)
+				}
+			}
+			for _, a := range entry.ancestorSpanIDs {
+				if !slices.Contains(inv.retiredActivations[i].ancestorSpanIDs, a) {
+					inv.retiredActivations[i].ancestorSpanIDs = append(inv.retiredActivations[i].ancestorSpanIDs, a)
+				}
+			}
+			for _, id := range entry.openEnclosingSpanIDs {
+				if !slices.Contains(inv.retiredActivations[i].openEnclosingSpanIDs, id) {
+					inv.retiredActivations[i].openEnclosingSpanIDs = append(inv.retiredActivations[i].openEnclosingSpanIDs, id)
+				}
+			}
+			slices.Sort(inv.retiredActivations[i].openEnclosingSpanIDs)
+			ra := &inv.retiredActivations[i]
+			ra.enclosingRetiredUnjoined = ra.enclosingRetiredUnjoined || entry.enclosingRetiredUnjoined
+			ra.completedOrTask = ra.completedOrTask || entry.completedOrTask
+			ra.joinedAtRetire = ra.joinedAtRetire || entry.joinedAtRetire
+			ra.hasUnjoinedTask = (ra.hasUnjoinedTask || entry.hasUnjoinedTask || (entry.completedOrTask && !entry.joinedAtRetire)) && !ra.joinedAtRetire
+			ra.settledByParent = ra.settledByParent || entry.settledByParent
+			ra.peerRetirement = ra.peerRetirement || entry.peerRetirement
+			ra.retiredAtSeq = max(ra.retiredAtSeq, entry.retiredAtSeq)
+			if !entry.startPlatformTime.IsZero() && (ra.startPlatformTime.IsZero() || entry.startPlatformTime.Before(ra.startPlatformTime)) {
+				ra.startPlatformTime = entry.startPlatformTime
+			}
+			if entry.retiredAtPlatformTime.After(ra.retiredAtPlatformTime) {
+				ra.retiredAtPlatformTime = entry.retiredAtPlatformTime
+			}
+			if entry.parentRetiredAtPlatformTime.After(ra.parentRetiredAtPlatformTime) {
+				ra.parentRetiredAtPlatformTime = entry.parentRetiredAtPlatformTime
+			}
+			if entry.afterAgentDone {
+				ra.markAfterAgentDone(entry.afterAgentDoneAt)
+			}
+			if (entry.completedOrTask || entry.joinedAtRetire) && !entry.unrespondedAtPop {
+				ra.unrespondedAtPop = false
+			}
+			ra.hasAfterAgentCallbacks = ra.hasAfterAgentCallbacks || entry.hasAfterAgentCallbacks
+			ra.hasCustomUUIDProvider = ra.hasCustomUUIDProvider || entry.hasCustomUUIDProvider
+			ra.normalizeGrantedCredits()
+			entry.normalizeGrantedCredits()
+			if entry.creditSettled && !ra.creditSettled {
+				if gid := ra.creditGroupID; gid != 0 {
+					rem := ra.remainingCredits()
+					ra.afterAgentCredit = false
+					ra.modelCredits = 0
+					ra.creditSettled = true
+					ra.creditGroupID = 0
+					if inv.creditGroupRem != nil {
+						inv.creditGroupRem[gid] = max(0, inv.creditGroupRem[gid]-rem)
+						inv.settleCreditGroupIfExhaustedLocked(gid, ra.swallower.name, ra.swallower.branch, ra.swallower.path)
+					}
+				} else {
+					ra.afterAgentCredit = false
+					ra.modelCredits = 0
+					ra.creditSettled = true
+				}
+			} else if !entry.creditSettled && (!ra.creditSettled || ra.grantedAfterAgentCredit || ra.grantedModelCredits > 0) {
+				hadUnassignedCredits := ra.creditGroupID == 0 && ra.remainingCredits() > 0
+				delta := 0
+				if entry.grantedAfterAgentCredit && !ra.grantedAfterAgentCredit {
+					ra.grantedAfterAgentCredit = true
+					ra.afterAgentCredit = true
+					delta++
+				}
+				if entry.grantedModelCredits > ra.grantedModelCredits {
+					inc := entry.grantedModelCredits - ra.grantedModelCredits
+					ra.grantedModelCredits = entry.grantedModelCredits
+					ra.modelCredits += inc
+					delta += inc
+				}
+				if delta > 0 {
+					ra.creditSettled = false
+				}
+				if delta > 0 || hadUnassignedCredits {
+					if ra.creditGroupID == 0 {
+						ra.creditGroupID = inv.allocCreditGroupIDLocked()
+						inv.creditGroupRem[ra.creditGroupID] = ra.remainingCredits()
+					} else {
+						if inv.creditGroupRem == nil {
+							inv.creditGroupRem = make(map[uint64]int)
+						}
+						inv.creditGroupRem[ra.creditGroupID] += delta
+					}
+				}
+			}
+			if ra.popGoroutineID == 0 {
+				ra.popGoroutineID = entry.popGoroutineID
+			}
+			if ra.afterAgentActions == (actionMaps{}) && !ra.afterAgentEventSeen {
+				ra.afterAgentActions, ra.afterAgentActionsRef = entry.afterAgentActions, entry.afterAgentActionsRef
+			}
+			return
+		}
+	}
+	entry.normalizeGrantedCredits()
+	if entry.completedOrTask && !entry.joinedAtRetire {
+		entry.hasUnjoinedTask = true
+	}
+	entry.guardSpanIDs = slices.Clone(entry.guardSpanIDs)
+	entry.ancestorSpanIDs = slices.Clone(entry.ancestorSpanIDs)
+	entry.openEnclosingSpanIDs = slices.Clone(entry.openEnclosingSpanIDs)
+	slices.Sort(entry.openEnclosingSpanIDs)
+	if !entry.compactedHull {
+		if credits := entry.remainingCredits(); credits > 0 && !entry.creditSettled && entry.creditGroupID == 0 {
+			gid := inv.allocCreditGroupIDLocked()
+			entry.creditGroupID = gid
+			inv.creditGroupRem[gid] = credits
+		}
+	} else {
+		entry.creditGroupID = 0
+	}
+	inv.retiredActivations = append(inv.retiredActivations, entry)
+}
+
+// parentJoinsChildOnceReturned reports whether p's return guarantees that c's
+// run and callbacks have also finished: c's own run ended without remaining
+// after-agent callbacks still running after popAgentSpan ((c.runDone &&
+// !c.completed) || (c.completed && !c.hasAfterAgentCallbacks)), c ran on the
+// same goroutine as p (or without goroutine tracking in synthetic tests), or p
+// is a structured ADK parent that joins c before returning (see
+// joinsOnceReturned). A custom parent returning on its own goroutine without
+// joining a detached child goroutine (including one that popped this plugin's
+// AfterAgentCallback while another AfterAgentCallback is still running on that
+// child goroutine) returns false.
+func parentJoinsChildOnceReturned(p, c *spanRecord) bool {
+	if p == nil || c == nil {
+		return false
+	}
+	if (c.runDone && !c.completed) || (c.completed && !c.hasAfterAgentCallbacks) {
+		return true
+	}
+	if p.goroutineID == 0 || c.goroutineID == 0 || p.goroutineID == c.goroutineID {
+		return true
+	}
+	return p.joinsOnceReturned(c)
+}
+
+// unjoinedDirectParentRetiring reports whether ra has no tracked
+// openEnclosingSpanIDs yet its direct parent pRec is a custom agent retiring on
+// another goroutine without having joined it. Entries recorded via
+// recordRetiredActivationLocked whose hop to an open parent satisfied
+// parentJoinsChildOnceReturned (including non-pop runDone children and
+// callback-free completed children on another goroutine) carry that parent in
+// openEnclosingSpanIDs, and entries retiring in the same batch are already
+// classified in recordRetiredActivationLocked.
+func (ra *retiredActivation) unjoinedDirectParentRetiring(retiredBySpan map[string]*spanRecord) bool {
+	if ra.enclosingRetiredUnjoined || len(ra.openEnclosingSpanIDs) > 0 || ra.afterAgentDone || !ra.parentRetiredAtPlatformTime.IsZero() {
+		return false
+	}
+	if retiredBySpan[ra.swallower.spanID] != nil {
+		return false
+	}
+	pRec := retiredBySpan[ra.parentSpanID]
+	return pRec != nil &&
+		ra.goroutineID != 0 && pRec.goroutineID != 0 && ra.goroutineID != pRec.goroutineID &&
+		!pRec.propagatesChildError && !pRec.isParallel && !pRec.isWorkflow
+}
+
+func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]bool, retiredAt time.Time, recs ...*spanRecord) {
+	if len(recs) == 0 {
+		return
+	}
+	retiredParents := make(map[string]bool, len(recs))
+	retiredBySpan := make(map[string]*spanRecord, len(recs))
+	retiredAncestorAgents := make(map[agentIdentityKey]bool)
+	// runOver holds the retired parents whose runs returned. When every hop
+	// from a descendant up to such a parent joined the activation below it (see
+	// parentJoinsChildOnceReturned), the descendant's run and after-agent
+	// callbacks have also finished by then; an unjoined detached child goroutine
+	// under a custom parent is excluded via enclosingRetiredUnjoined because an
+	// outer ancestor or callback on that child goroutine can still emit events.
+	runOver := make(map[string]bool, len(recs))
+	var pruneKeys []agentIdentityKey
+	addPruneKey := func(name, branch string) {
+		k := agentIdentityKey{name: name, branch: branch}
+		if !slices.Contains(pruneKeys, k) {
+			pruneKeys = append(pruneKeys, k)
+		}
+	}
+	for _, rec := range recs {
+		if rec != nil && rec.kind == spanKindAgent && rec.spanID != "" {
+			retiredParents[rec.spanID] = true
+			retiredBySpan[rec.spanID] = rec
+			if rec.completed || rec.runDone {
+				runOver[rec.spanID] = true
+			}
+			addPruneKey(rec.name, rec.branch)
+			for p := rec.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+				if p.spanID != "" && !openSet[p.spanID] {
+					retiredAncestorAgents[agentIdentityKey{name: p.name, branch: p.branch}] = true
+					addPruneKey(p.name, p.branch)
+				}
+			}
+		}
+	}
+	for _, rec := range recs {
+		inv.recordRetiredActivationLocked(rec, openSet, runOver, retiredAt)
+	}
+	unrespIdx := inv.newUnrespondedRetiredIndexLocked()
+	if len(retiredParents) > 0 {
+		affectedByRetired := func(ra *retiredActivation) bool {
+			if retiredParents[ra.parentSpanID] {
+				return true
+			}
+			for _, g := range ra.guardSpanIDs {
+				if retiredParents[g] {
+					return true
+				}
+			}
+			for _, a := range ra.ancestorSpanIDs {
+				if retiredParents[a] {
+					return true
+				}
+			}
+			for _, x := range ra.openEnclosingSpanIDs {
+				if retiredParents[x] || !openSet[x] {
+					return true
+				}
+			}
+			return false
+		}
+		var st afterAgentState
+		for i := range inv.retiredActivations {
+			ra := &inv.retiredActivations[i]
+			if !affectedByRetired(ra) {
+				continue
+			}
+			if ra.unjoinedDirectParentRetiring(retiredBySpan) {
+				ra.enclosingRetiredUnjoined = true
+			}
+			anySatisfiedByRunOver := false
+			if len(ra.openEnclosingSpanIDs) > 0 {
+				var nextOpen []string
+				addOpen := func(id string) {
+					if id != "" && !slices.Contains(nextOpen, id) {
+						nextOpen = append(nextOpen, id)
+					}
+				}
+				for _, x := range ra.openEnclosingSpanIDs {
+					if openSet[x] {
+						addOpen(x)
+						continue
+					}
+					if runOver[x] {
+						anySatisfiedByRunOver = true
+						continue
+					}
+					if r := retiredBySpan[x]; r != nil {
+						resolved := false
+						for c, p := r, r.parent; p != nil && p.kind == spanKindAgent; c, p = p, p.parent {
+							if !parentJoinsChildOnceReturned(p, c) {
+								break
+							}
+							if p.spanID != "" && openSet[p.spanID] {
+								addOpen(p.spanID)
+								resolved = true
+								break
+							}
+							if runOver[p.spanID] {
+								anySatisfiedByRunOver = true
+								resolved = true
+								break
+							}
+						}
+						if !resolved {
+							ra.enclosingRetiredUnjoined = true
+						}
+					} else {
+						xIdx := slices.Index(ra.ancestorSpanIDs, x)
+						if xIdx < 0 {
+							// x was intersected away from ra.ancestorSpanIDs (a multi-parent
+							// hull) and disappeared from openSet outside
+							// recordRetiredActivationsAtLocked, so intermediate ancestors
+							// below ra.ancestorSpanIDs[0] may still be open.
+							ra.enclosingRetiredUnjoined = true
+							continue
+						}
+						resolved := false
+						for _, a := range ra.ancestorSpanIDs[xIdx+1:] {
+							if runOver[a] {
+								anySatisfiedByRunOver = true
+								resolved = true
+								break
+							}
+							if openSet[a] {
+								addOpen(a)
+								resolved = true
+								break
+							}
+						}
+						if !resolved {
+							ra.enclosingRetiredUnjoined = true
+						}
+					}
+				}
+				slices.Sort(nextOpen)
+				ra.openEnclosingSpanIDs = nextOpen
+			}
+			parentRunOver := !ra.enclosingRetiredUnjoined &&
+				!openSet[ra.parentSpanID] &&
+				len(ra.openEnclosingSpanIDs) == 0 &&
+				(anySatisfiedByRunOver || runOver[ra.parentSpanID])
+			if !retiredAt.IsZero() && ra.parentRetiredAtPlatformTime.IsZero() && (retiredParents[ra.parentSpanID] || !openSet[ra.parentSpanID]) && parentRunOver {
+				ra.parentRetiredAtPlatformTime = retiredAt
+			}
+			if parentRunOver {
+				ra.markAfterAgentDone(retiredAt)
+			}
+			if st.swallowers == nil {
+				st = inv.afterAgentStateLocked()
+			}
+			if (ra.swallower.anyName || ra.swallower.anyBranch) && len(ra.guardSpanIDs) > 0 {
+				ra.guardSpanIDs = filterOpenSpanIDs(ra.guardSpanIDs, openSet)
+			}
+			hasOpenGuard := slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+				return openSet[g]
+			})
+			// Once the parent retired, only an open custom ancestor that holds
+			// the activation's events can still deliver its after-agent event,
+			// so without one the maps go, unless the event may still recover a
+			// cause that the activation swallowed, or one that an open span under
+			// it carries and moves up with it among its swallowers once that span
+			// retires (see afterAgentState). With one, they stay as long
+			// as the activation needs them (see needsAfterAgentActionsLocked).
+			if !hasOpenGuard && (retiredParents[ra.parentSpanID] || !openSet[ra.parentSpanID]) && (ra.compactedHull || (!st.swallowers[ra.swallower.spanID] && !st.underOpen[ra.swallower.spanID])) {
+				ra.dropAfterAgentEvent()
+			}
+			if !ra.swallower.anyName && !ra.swallower.anyBranch {
+				addPruneKey(
+					ra.swallower.name,
+					ra.swallower.branch,
+				)
+			}
+		}
+		inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+			return affectedByRetired(ra) || (!ra.swallower.anyName && !ra.swallower.anyBranch && retiredAncestorAgents[agentIdentityKey{name: ra.swallower.name, branch: ra.swallower.branch}])
+		})
+		inv.retiredActivations = slices.DeleteFunc(inv.retiredActivations, func(ra retiredActivation) bool {
+			if !ra.swallower.anyName && !ra.swallower.anyBranch {
+				return false
+			}
+			if ra.holdsAfterAgentEvent() || (ra.peerRetirement && inv.hasOpenPeerLocked(ra)) || unrespIdx.matches(ra.swallower) {
+				return false
+			}
+			return !slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+				return openSet[g]
+			})
+		})
+	}
+	for _, k := range pruneKeys {
+		inv.pruneSettledRetiredActivationsWithIndexLocked(k.name, k.branch, unrespIdx)
+	}
+	inv.enforceRetiredActivationCapWithIndexLocked(unrespIdx)
+	inv.shrinkRetiredActivationsLocked()
+}
+
+func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openSet, runOver map[string]bool, retiredAt time.Time) {
+	if rec == nil || rec.kind != spanKindAgent || rec.spanID == "" {
+		return
+	}
+	var ancestorSpanIDs []string
+	for p := rec.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+		if p.spanID != "" {
+			ancestorSpanIDs = append(ancestorSpanIDs, p.spanID)
+		}
+	}
+	// An activation that an enclosing retirement left open after its run was
+	// over (see spanRecord.runEndSeq) created all its events by then, so its
+	// retirement is dated there. Dated when a buffered event later lets a
+	// parent retire it, which can come after a later activation of the same
+	// agent started, it would look like a peer that could have created the
+	// later activation's events.
+	retiredAtSeq := inv.nextSeqLocked()
+	if rec.runEndSeq != 0 && rec.runEndSeq < retiredAtSeq {
+		retiredAtSeq = rec.runEndSeq
+		if !rec.runEndPlatformTime.IsZero() {
+			retiredAt = rec.runEndPlatformTime
+		}
+	}
+	// Any transient popRetirement metadata attached to rec goes into the entry
+	// now, before recordRetiredActivationsAtLocked prunes the entries of rec's
+	// agent, branch and node path, which keeps an entry that still expects
+	// its after-agent event or holds a credit (see
+	// pruneSettledRetiredActivationsLocked).
+	var pop popRetirement
+	if rec.popRetirement != nil {
+		pop = *rec.popRetirement
+		rec.popRetirement = nil
+	}
+	newAfterAgentCredit := pop.afterAgentCredit && !rec.recordedAfterAgentCredit
+	if pop.afterAgentCredit {
+		rec.recordedAfterAgentCredit = true
+	}
+	newModelCredits := max(0, pop.modelCredits-rec.recordedModelCredits)
+	if pop.modelCredits > rec.recordedModelCredits {
+		rec.recordedModelCredits = pop.modelCredits
+	}
+	var openEnclosing []string
+	var enclosingRetiredUnjoined bool
+	var parentDone bool
+	var earlierAncestorDone bool
+	for c, p := rec, rec.parent; p != nil && p.kind == spanKindAgent; c, p = p, p.parent {
+		if !parentJoinsChildOnceReturned(p, c) {
+			openEnclosing = nil
+			parentDone = false
+			earlierAncestorDone = false
+			enclosingRetiredUnjoined = true
+			break
+		}
+		if p.spanID != "" && openSet[p.spanID] {
+			openEnclosing = []string{p.spanID}
+			break
+		}
+		if runOver[p.spanID] {
+			openEnclosing = nil
+			parentDone = true
+			break
+		}
+		if rec.runEndSeq != 0 && (p.completed || p.runDone) {
+			earlierAncestorDone = true
+		}
+	}
+	if !parentDone && len(openEnclosing) == 0 && earlierAncestorDone {
+		parentDone = true
+	}
+	if !parentDone && len(openEnclosing) == 0 && rec.parent != nil && rec.parent.kind == spanKindAgent {
+		enclosingRetiredUnjoined = true
+	}
+	entry := retiredActivation{
+		swallower: retiredSwallower{
+			spanID: rec.spanID,
+			seq:    rec.seq,
+			name:   rec.name,
+			branch: rec.branch,
+			path:   rec.path,
+		},
+		parentSpanID:             rec.parentSpanID,
+		guardSpanIDs:             customGuardSpanIDsLocked(rec, openSet),
+		ancestorSpanIDs:          ancestorSpanIDs,
+		openEnclosingSpanIDs:     openEnclosing,
+		enclosingRetiredUnjoined: enclosingRetiredUnjoined,
+		retiredAtSeq:             retiredAtSeq,
+		completedOrTask:          rec.completed || rec.taskMode,
+		joinedAtRetire:           rec.completed || rec.runDone,
+		hasUnjoinedTask:          rec.taskMode && !rec.completed && !rec.runDone,
+		concurrentPeer:           rec.concurrentPeer,
+		unrespondedAtPop:         !rec.ownResponse && !rec.contextEnded && !rec.taskMode,
+		hasAfterAgentCallbacks:   rec.hasAfterAgentCallbacks,
+		hasCustomUUIDProvider:    rec.hasCustomUUIDProvider,
+		afterAgentActions:        pop.afterAgentActions,
+		afterAgentActionsRef:     pop.afterAgentActionsRef,
+		afterAgentCredit:         newAfterAgentCredit,
+		modelCredits:             newModelCredits,
+		grantedAfterAgentCredit:  rec.recordedAfterAgentCredit,
+		grantedModelCredits:      rec.recordedModelCredits,
+		peerRetirement:           pop.peerRetirement,
+		popGoroutineID:           pop.goroutineID,
+		goroutineID:              rec.goroutineID,
+		startPlatformTime:        rec.startPlatformTime,
+		retiredAtPlatformTime:    retiredAt,
+	}
+	if parentDone {
+		if !retiredAt.IsZero() {
+			entry.parentRetiredAtPlatformTime = retiredAt
+		}
+		entry.markAfterAgentDone(retiredAt)
+	}
+	inv.recordRetiredActivationEntryLocked(entry)
+}
+
+func (inv *invocationTrace) markSettledRetiredActivationsLocked(recoveringSpanID string, includeSelf bool) {
+	if recoveringSpanID == "" || len(inv.retiredActivations) == 0 {
+		return
+	}
+	openBySpan := make(map[string]*spanRecord, len(inv.agentStack))
+	survivingSwallowers := make(map[string]bool)
+	for _, rec := range inv.agentStack {
+		if rec.kind == spanKindAgent && rec.spanID != "" {
+			openBySpan[rec.spanID] = rec
+		}
+		for _, c := range rec.retiredCauses {
+			for _, s := range c.swallowers {
+				if s.spanID != "" {
+					survivingSwallowers[s.spanID] = true
+				}
+			}
+		}
+	}
+	openCalls := inv.openCallOwnersLocked(nil)
+	unrecBySpan := make(map[string]bool)
+	for _, e := range inv.unrecoveredErrors {
+		if !e.collateral && e.spanID != "" {
+			unrecBySpan[e.spanID] = true
+		}
+	}
+	spanHasSurvivingFailure := func(spanID string, allowOpen bool) bool {
+		if spanID == "" || survivingSwallowers[spanID] || unrecBySpan[spanID] || openCalls[spanID] {
+			return true
+		}
+		if rec := openBySpan[spanID]; rec != nil {
+			if !allowOpen || len(rec.retiredCauses) > 0 || rec.contextFailureCause() != nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	var pruneKeys []agentIdentityKey
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		// Fail closed on compacted hulls: a hull merges multiple activations
+		// and intersects their ancestor chains, so neither individual member
+		// failures nor unshared intermediate ancestor failures can be verified.
+		if !ra.joinedAtRetire || ra.settledByParent || ra.compactedHull {
+			continue
+		}
+		isSelf := ra.swallower.spanID == recoveringSpanID
+		if !((includeSelf && isSelf) || slices.Contains(ra.ancestorSpanIDs, recoveringSpanID)) {
+			continue
+		}
+		if spanHasSurvivingFailure(ra.swallower.spanID, false) {
+			continue
+		}
+		blocked := false
+		if !isSelf {
+			for _, ancID := range ra.ancestorSpanIDs {
+				isRecovering := ancID == recoveringSpanID
+				if spanHasSurvivingFailure(ancID, isRecovering) {
+					blocked = true
+					break
+				}
+				if isRecovering {
+					break
+				}
+			}
+		}
+		if blocked {
+			continue
+		}
+		ra.settledByParent = true
+		k := agentIdentityKey{name: ra.swallower.name, branch: ra.swallower.branch}
+		if !slices.Contains(pruneKeys, k) {
+			pruneKeys = append(pruneKeys, k)
+		}
+	}
+	for _, k := range pruneKeys {
+		inv.pruneSettledRetiredActivationsLocked(k.name, k.branch)
+	}
+}
+
+// unjoinedTaskRetirement reports that a finish_task function response retired
+// the activation (completedOrTask without completed) before its run
+// synchronized (!joinedAtRetire), so its goroutine may still be creating
+// events after retiredAtPlatformTime. Both fields are part of compactKey, so
+// a compacted hull has the same value as each of its members.
+func (ra retiredActivation) unjoinedTaskRetirement() bool {
+	return ra.hasUnjoinedTask || (ra.completedOrTask && !ra.joinedAtRetire)
+}
+
+// canOwnEventCreatedAt reports whether ra can have created an event created
+// at evCreatedAt. An activation without after-agent callbacks creates no event
+// after it retired, unless it is an unjoined finish_task retirement (see
+// unjoinedTaskRetirement), whose run may outlast its retirement, and neither
+// does one whose after-agent event was already delivered (see
+// afterAgentEventSeen). The enclosing activation's run returns only after ra's
+// run did, so its retirement bounds ra's events in either case. So does the
+// time at which ra's after-agent callbacks were seen to have returned (see
+// afterAgentDoneAt), which is only seen once ra's run returned: ADK builds
+// their event before the goroutine that ran them starts or ends another
+// agent, and before the run of ra's parent returns, so an event created later
+// is not that event, even if that event never comes or is not recognized. An
+// agent that the callbacks run on that goroutine shows nothing (see
+// markAfterAgentCallbacksReturnedOnLocked).
+func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEventID bool) bool {
+	return ra.canOwnEventAt(evCreatedAt, hasEventID, false)
+}
+
+// canOwnEventAt is canOwnEventCreatedAt for an event that, if afterAgentEvent
+// is set, carries an action map of the context in which ra's after-agent
+// callbacks ran (see actionMaps). Such an event is ra's after-agent event
+// whenever it was created, so post-retirement upper bounds
+// (retiredAtPlatformTime, afterAgentDoneAt, and parentRetiredAtPlatformTime)
+// do not bound it, as for callbacks that run an agent on another goroutine and
+// wait for it, which the goroutine that ran them does not show.
+func (ra retiredActivation) canOwnEventAt(evCreatedAt time.Time, hasEventID, afterAgentEvent bool) bool {
+	if evCreatedAt.IsZero() {
+		return true
+	}
+	if !hasEventID {
+		return false
+	}
+	if !ra.startPlatformTime.IsZero() && evCreatedAt.Before(ra.startPlatformTime) {
+		return false
+	}
+	if !afterAgentEvent {
+		if (!ra.hasAfterAgentCallbacks || ra.afterAgentEventSeen) && !ra.unjoinedTaskRetirement() && !ra.retiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.retiredAtPlatformTime) {
+			return false
+		}
+		if !ra.afterAgentDoneAt.IsZero() && evCreatedAt.After(ra.afterAgentDoneAt) {
+			return false
+		}
+		if !ra.parentRetiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.parentRetiredAtPlatformTime) {
+			return false
+		}
+	}
+	return true
+}
+
+func (ra retiredActivation) excludedByEventTimestamp(laterSpanID string, laterSeq, laterGoroutineID uint64, laterConcurrentPeer bool, laterStartPlatformTime, evCreatedAt time.Time, hasEventID bool) bool {
+	// Events created before a pending hull's callbacks or parent return, or
+	// while a mapless entry/hull with after-agent callbacks (whose event is
+	// unrecognized without action maps) can still create events, cannot be
+	// excluded.
+	if (ra.afterAgentPending || (ra.hasAfterAgentCallbacks && ra.afterAgentActions == (actionMaps{}))) && ra.canOwnEventCreatedAt(evCreatedAt, hasEventID) {
+		return false
+	}
+	settledMatch := ra.joinedAtRetire && ra.settledByParent
+	joinedResponded := ra.joinedAtRetire && !ra.unrespondedAtPop
+	if (!ra.compactedHull && ra.swallower.spanID == laterSpanID) ||
+		!(ra.completedOrTask || settledMatch || joinedResponded) ||
+		ra.concurrentPeer ||
+		laterConcurrentPeer ||
+		(ra.unrespondedAtPop && !settledMatch) ||
+		(!(settledMatch || joinedResponded) && (laterGoroutineID == 0 || ra.goroutineID != laterGoroutineID)) ||
+		ra.swallower.seq >= laterSeq ||
+		ra.retiredAtSeq >= laterSeq ||
+		!hasEventID ||
+		evCreatedAt.IsZero() ||
+		laterStartPlatformTime.IsZero() {
+		return false
+	}
+	if evCreatedAt.After(laterStartPlatformTime) {
+		return true
+	}
+	// On a coarse clock the event can share the tick in which the later
+	// activation started. A joined activation's run returned before it
+	// retired, so an event that ra could not have created by then (see
+	// canOwnEventCreatedAt) is the later activation's.
+	return (settledMatch || joinedResponded) &&
+		!evCreatedAt.Before(laterStartPlatformTime) &&
+		!ra.canOwnEventCreatedAt(evCreatedAt, hasEventID)
+}
+
+func minPlatformTime(a, b time.Time) time.Time {
+	if a.IsZero() || b.IsZero() {
+		return time.Time{}
+	}
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func maxPlatformTime(a, b time.Time) time.Time {
+	if a.IsZero() || b.IsZero() {
+		return time.Time{}
+	}
+	if a.After(b) {
+		return a
+	}
+	return b
+}
+
+// pruneOrphanedCreditGroupsLocked clears stale creditGroupIDs on zero-credit
+// entries and deletes creditGroupRem entries with no remaining live holder.
+func (inv *invocationTrace) pruneOrphanedCreditGroupsLocked() {
+	if len(inv.creditGroupRem) == 0 {
+		return
+	}
+	live := make(map[uint64]bool, len(inv.creditGroupRem))
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		if ra.compactedHull {
+			if len(ra.foldedCredits) > 0 {
+				kept := ra.foldedCredits[:0]
+				for _, fc := range ra.foldedCredits {
+					if fc.creditGroupID != 0 && fc.credits > 0 {
+						live[fc.creditGroupID] = true
+						kept = append(kept, fc)
+					}
+				}
+				if len(kept) == 0 {
+					ra.foldedCredits = nil
+				} else {
+					ra.foldedCredits = kept
+				}
+			}
+			continue
+		}
+		if ra.creditGroupID != 0 {
+			if ra.afterAgentCredit || ra.modelCredits > 0 {
+				live[ra.creditGroupID] = true
+			} else {
+				ra.creditGroupID = 0
+			}
+		}
+	}
+	for gid := range inv.creditGroupRem {
+		if !live[gid] {
+			delete(inv.creditGroupRem, gid)
+		}
+	}
+}
+
+// pruneSettledRetiredActivationsLocked drops the entries of (name, branch) in
+// retiredActivations across all node paths that nothing needs anymore and
+// compacts the rest per (name, branch, path) bucket (see below). An entry
+// stays as long as a recorded cause names it as a swallower, or an open custom
+// ancestor of it may still deliver its events (guardSpanIDs). An entry also
+// stays, whatever its ancestors, while it still recognizes an after-agent
+// event that may come (see needsAfterAgentActionsLocked), has an open span
+// under it, whose failure moves up with it among its swallowers once that span
+// retires, while a path-compatible unrespondedRetired credit remains
+// outstanding (so credit attribution cannot be stranded or stolen), or while
+// it counted as a peer retirement and a peer of it is open (see
+// soleOpenAuthorLocked), as for the agent of a workflow node or the agent that
+// the runner runs, which have no custom ancestor. Such an entry is not
+// compacted either while it keeps its maps, holds or settled a credit with
+// compatible unrespondedRetired credits still outstanding, has an open span
+// under it, or, while a peer of it is open, counted as a peer retirement, so
+// that the entries that the peer's own events depend on stay as many as the
+// activations that retired while it runs. An entry's maps go once nothing
+// needs them, so that, as for the activations of an agent that a custom agent
+// runs one after another, a wave of activations whose runs are over and whose
+// after-agent events cannot be taken for another activation's leaves no more
+// entries than compaction keeps, and the entries that keep their maps only
+// because their after-agent events may still come are bounded too (see
+// foldPendingAfterAgentLocked and enforceRetiredActivationCapLocked). inv.mu
+// must be held.
+func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch string) {
+	inv.pruneSettledRetiredActivationsWithIndexLocked(name, branch, inv.newUnrespondedRetiredIndexLocked())
+}
+
+func (inv *invocationTrace) pruneSettledRetiredActivationsWithIndexLocked(name, branch string, unrespIdx unrespondedRetiredIndex) {
+	defer inv.pruneOrphanedCreditGroupsLocked()
+	if len(inv.retiredActivations) == 0 {
+		return
+	}
+	openSet := inv.openSpanSetLocked()
+	for idx := range inv.retiredActivations {
+		ra := &inv.retiredActivations[idx]
+		if !ra.swallower.anyName && !ra.swallower.anyBranch && ra.swallower.name == name && ra.swallower.branch == branch && len(ra.guardSpanIDs) > 0 {
+			ra.guardSpanIDs = filterOpenSpanIDs(ra.guardSpanIDs, openSet)
+		}
+	}
+	inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+		if ra.swallower.anyName || ra.swallower.anyBranch || ra.swallower.name != name || ra.swallower.branch != branch {
+			return false
+		}
+		if ra.afterAgentDone {
+			return true
+		}
+		return !openSet[ra.parentSpanID] && !slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+			return openSet[g]
+		})
+	})
+	st := inv.afterAgentStateLocked()
+	surviving := st.swallowers
+	openPeer := inv.hasOpenPeerLocked
+	// pinned reports that ra stays as it is, neither dropped nor compacted.
+	// A peer retirement stays uncompacted while a peer of it is open, as it
+	// stays undeleted below: soleOpenAuthorLocked gives an open activation an
+	// event only while every retired peer that retiredPeerCount counts has
+	// an entry of its own, so a hull that took the place of such entries
+	// would keep the open activation's recovery from counting. Credit-bearing
+	// or creditSettled entries stay pinned while compatible
+	// unrespondedRetired credits remain outstanding.
+	pinned := func(ra retiredActivation) bool {
+		return ra.holdsAfterAgentEvent() ||
+			((ra.afterAgentCredit || ra.modelCredits > 0 || ra.creditSettled || len(ra.foldedCredits) > 0) && unrespIdx.matches(ra.swallower)) ||
+			(!ra.compactedHull && st.underOpen[ra.swallower.spanID]) ||
+			(ra.peerRetirement && openPeer(ra))
+	}
+	inv.retiredActivations = slices.DeleteFunc(inv.retiredActivations, func(ra retiredActivation) bool {
+		if ra.swallower.anyName || ra.swallower.anyBranch || ra.swallower.name != name || ra.swallower.branch != branch || (!ra.compactedHull && surviving[ra.swallower.spanID]) ||
+			pinned(ra) ||
+			unrespIdx.matches(ra.swallower) {
+			return false
+		}
+		return !slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+			return openSet[g]
+		})
+	})
+	inv.foldPendingAfterAgentWithIndexLocked(name, branch, st, unrespIdx)
+
+	type compactKey struct {
+		name                     string
+		branch                   string
+		path                     string
+		guards                   string
+		openEnclosing            string
+		openParentSpanID         string
+		completedOrTask          bool
+		joinedAtRetire           bool
+		hasUnjoinedTask          bool
+		settledByParent          bool
+		enclosingRetiredUnjoined bool
+		concurrentPeer           bool
+		unrespondedAtPop         bool
+		hasAfterAgentCallbacks   bool
+		afterAgentEventSeen      bool
+		hasCustomUUIDProvider    bool
+		hasStartTime             bool
+		hasRetiredTime           bool
+		hasParentRetiredTime     bool
+	}
+	type bucket struct {
+		firstIdx    int
+		lastIdx     int
+		anyFirstIdx int
+		anyLastIdx  int
+		members     []int
+	}
+	buckets := make(map[compactKey]*bucket)
+	beforeEntry := func(a, b retiredActivation, aIdx, bIdx int) bool {
+		if a.retiredAtSeq != b.retiredAtSeq {
+			return a.retiredAtSeq < b.retiredAtSeq
+		}
+		if a.swallower.seq != b.swallower.seq {
+			return a.swallower.seq < b.swallower.seq
+		}
+		return aIdx < bIdx
+	}
+	for idx := range inv.retiredActivations {
+		ra := &inv.retiredActivations[idx]
+		if ra.swallower.anyName || ra.swallower.anyBranch || ra.swallower.name != name || ra.swallower.branch != branch || (!ra.compactedHull && surviving[ra.swallower.spanID]) || pinned(*ra) {
+			continue
+		}
+		openParent := ""
+		if openSet[ra.parentSpanID] {
+			openParent = ra.parentSpanID
+		}
+		ck := compactKey{
+			name:                     ra.swallower.name,
+			branch:                   ra.swallower.branch,
+			path:                     ra.swallower.path,
+			guards:                   strings.Join(ra.guardSpanIDs, "\x00"),
+			openEnclosing:            strings.Join(ra.openEnclosingSpanIDs, "\x00"),
+			openParentSpanID:         openParent,
+			completedOrTask:          ra.completedOrTask,
+			joinedAtRetire:           ra.joinedAtRetire,
+			hasUnjoinedTask:          ra.unjoinedTaskRetirement(),
+			settledByParent:          ra.settledByParent,
+			enclosingRetiredUnjoined: ra.enclosingRetiredUnjoined,
+			concurrentPeer:           ra.concurrentPeer,
+			unrespondedAtPop:         ra.unrespondedAtPop,
+			hasAfterAgentCallbacks:   ra.hasAfterAgentCallbacks,
+			afterAgentEventSeen:      ra.afterAgentEventSeen,
+			hasCustomUUIDProvider:    ra.hasCustomUUIDProvider,
+			hasStartTime:             !ra.startPlatformTime.IsZero(),
+			hasRetiredTime:           !ra.retiredAtPlatformTime.IsZero(),
+			hasParentRetiredTime:     !ra.parentRetiredAtPlatformTime.IsZero(),
+		}
+		b, ok := buckets[ck]
+		if !ok {
+			b = &bucket{
+				firstIdx:    -1,
+				lastIdx:     -1,
+				anyFirstIdx: idx,
+				anyLastIdx:  idx,
+			}
+			buckets[ck] = b
+		} else {
+			if beforeEntry(*ra, inv.retiredActivations[b.anyFirstIdx], idx, b.anyFirstIdx) {
+				b.anyFirstIdx = idx
+			}
+			if beforeEntry(inv.retiredActivations[b.anyLastIdx], *ra, b.anyLastIdx, idx) {
+				b.anyLastIdx = idx
+			}
+		}
+		if !ra.compactedHull {
+			if b.firstIdx == -1 || beforeEntry(*ra, inv.retiredActivations[b.firstIdx], idx, b.firstIdx) {
+				b.firstIdx = idx
+			}
+			if b.lastIdx == -1 || beforeEntry(inv.retiredActivations[b.lastIdx], *ra, b.lastIdx, idx) {
+				b.lastIdx = idx
+			}
+		}
+		b.members = append(b.members, idx)
+	}
+	needsCompaction := false
+	for _, b := range buckets {
+		if len(b.members) > 3 {
+			needsCompaction = true
+			break
+		}
+	}
+	if !needsCompaction {
+		inv.enforceRetiredActivationCapWithIndexLocked(unrespIdx)
+		inv.shrinkRetiredActivationsLocked()
+		return
+	}
+	keep := make(map[int]bool, 3*len(buckets))
+	midHullAt := make(map[int]retiredActivation, len(buckets))
+	for _, b := range buckets {
+		firstIdx, lastIdx := b.firstIdx, b.lastIdx
+		if firstIdx == -1 {
+			firstIdx, lastIdx = b.anyFirstIdx, b.anyLastIdx
+		}
+		keep[firstIdx] = true
+		keep[lastIdx] = true
+		if len(b.members) <= 3 {
+			for _, idx := range b.members {
+				keep[idx] = true
+			}
+			continue
+		}
+		firstMidIdx := -1
+		var hull retiredActivation
+		for _, idx := range b.members {
+			if idx == firstIdx || idx == lastIdx {
+				continue
+			}
+			m := inv.retiredActivations[idx]
+			if firstMidIdx == -1 {
+				// The fields of compactKey — joinedAtRetire, settledByParent,
+				// afterAgentEventSeen, and hasCustomUUIDProvider among them —
+				// are the same for every member of the bucket, so the hull
+				// keeps those of its first member.
+				firstMidIdx = idx
+				hull = m
+				hull.guardSpanIDs = slices.Clone(m.guardSpanIDs)
+				hull.ancestorSpanIDs = slices.Clone(m.ancestorSpanIDs)
+				hull.openEnclosingSpanIDs = filterOpenSpanIDs(m.openEnclosingSpanIDs, openSet)
+				hull.compactedHull = true
+				hull.afterAgentActions = actionMaps{}
+				hull.afterAgentActionsRef = nil
+				hull.afterAgentCredit = false
+				hull.modelCredits = 0
+				hull.creditSettled = false
+				hull.creditGroupID = 0
+				hull.peerRetirement = false
+				hull.popGoroutineID = 0
+				continue
+			}
+			if m.swallower.seq > hull.swallower.seq {
+				hull.swallower.seq = m.swallower.seq
+				if m.swallower.spanID != "" {
+					hull.swallower.spanID = m.swallower.spanID
+				}
+			}
+			hull.retiredAtSeq = max(hull.retiredAtSeq, m.retiredAtSeq)
+			if hull.parentSpanID != m.parentSpanID {
+				hull.parentSpanID = ""
+			}
+			if hull.goroutineID != m.goroutineID {
+				hull.goroutineID = 0
+			}
+			hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
+				return !slices.Contains(m.ancestorSpanIDs, id)
+			})
+			hull.openEnclosingSpanIDs = unionOpenSpanIDs(hull.openEnclosingSpanIDs, m.openEnclosingSpanIDs, openSet)
+			hull.enclosingRetiredUnjoined = hull.enclosingRetiredUnjoined || m.enclosingRetiredUnjoined
+			hull.afterAgentEventSeen = hull.afterAgentEventSeen && m.afterAgentEventSeen
+			hull.hasCustomUUIDProvider = hull.hasCustomUUIDProvider && m.hasCustomUUIDProvider
+			hull.startPlatformTime = minPlatformTime(hull.startPlatformTime, m.startPlatformTime)
+			hull.retiredAtPlatformTime = maxPlatformTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
+			hull.parentRetiredAtPlatformTime = maxPlatformTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
+			hull.afterAgentDone = hull.afterAgentDone && m.afterAgentDone
+			hull.afterAgentDoneAt = maxPlatformTime(hull.afterAgentDoneAt, m.afterAgentDoneAt)
+		}
+		if firstMidIdx != -1 {
+			midHullAt[firstMidIdx] = hull
+		}
+	}
+	out := inv.retiredActivations[:0]
+	for idx, ra := range inv.retiredActivations {
+		if hull, ok := midHullAt[idx]; ok {
+			out = append(out, hull)
+			continue
+		}
+		if ra.swallower.anyName || ra.swallower.anyBranch || ra.swallower.name != name || ra.swallower.branch != branch || (!ra.compactedHull && surviving[ra.swallower.spanID]) || keep[idx] || pinned(ra) {
+			out = append(out, ra)
+		}
+	}
+	clear(inv.retiredActivations[len(out):])
+	inv.retiredActivations = out
+	inv.enforceRetiredActivationCapWithIndexLocked(unrespIdx)
+	inv.shrinkRetiredActivationsLocked()
+}
+
+// maxRetiredActivationsPerInvocation bounds the total number of
+// retiredActivation entries retained per invocation across all agents,
+// branches, and node paths.
+const maxRetiredActivationsPerInvocation = 128
+
+func foldRetiredCapHull(members []retiredActivation, openSet map[string]bool) retiredActivation {
+	m0 := members[0]
+	hull := m0
+	hull.swallower.spanID = ""
+	hull.guardSpanIDs = filterOpenSpanIDs(m0.guardSpanIDs, openSet)
+	hull.ancestorSpanIDs = slices.Clone(m0.ancestorSpanIDs)
+	hull.openEnclosingSpanIDs = filterOpenSpanIDs(m0.openEnclosingSpanIDs, openSet)
+	hull.hasUnjoinedTask = m0.unjoinedTaskRetirement()
+	hull.afterAgentPending = m0.holdsAfterAgentEvent()
+	hull.afterAgentEventSeen = !hull.afterAgentPending && m0.afterAgentEventSeen
+	hull.creditSettled = m0.creditSettled
+	hull.compactedHull = true
+	hull.afterAgentActions = actionMaps{}
+	hull.afterAgentActionsRef = nil
+	hull.afterAgentCredit = false
+	hull.modelCredits = 0
+	hull.grantedAfterAgentCredit = false
+	hull.grantedModelCredits = 0
+	hull.creditGroupID = 0
+	hull.foldedCredits = nil
+	hull.popGoroutineID = 0
+	var foldedCredits []foldedCredit
+	collectCredits := func(m retiredActivation) {
+		if m.compactedHull {
+			for _, fc := range m.foldedCredits {
+				foldedCredits = appendFoldedCredit(foldedCredits, fc.swallower, fc.credits, fc.creditGroupID, fc.afterAgentCredit)
+			}
+			return
+		}
+		if !m.creditSettled {
+			if rem := m.remainingCredits(); rem > 0 {
+				foldedCredits = appendFoldedCredit(foldedCredits, m.swallower, rem, m.creditGroupID, m.afterAgentCredit)
+			}
+		}
+	}
+	collectCredits(m0)
+	for _, m := range members[1:] {
+		if !hull.swallower.anyName && (m.swallower.anyName || m.swallower.name != hull.swallower.name) {
+			hull.swallower.name = ""
+			hull.swallower.anyName = true
+		}
+		if !hull.swallower.anyBranch && (m.swallower.anyBranch || m.swallower.branch != hull.swallower.branch) {
+			hull.swallower.branch = ""
+			hull.swallower.anyBranch = true
+		}
+		if hull.swallower.path != m.swallower.path {
+			hull.swallower.path = ""
+		}
+		hull.swallower.seq = max(hull.swallower.seq, m.swallower.seq)
+		hull.retiredAtSeq = max(hull.retiredAtSeq, m.retiredAtSeq)
+		if hull.parentSpanID != m.parentSpanID {
+			hull.parentSpanID = ""
+		}
+		if hull.goroutineID != m.goroutineID {
+			hull.goroutineID = 0
+		}
+		for _, g := range m.guardSpanIDs {
+			if openSet[g] && !slices.Contains(hull.guardSpanIDs, g) {
+				hull.guardSpanIDs = append(hull.guardSpanIDs, g)
+			}
+		}
+		hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
+			return !slices.Contains(m.ancestorSpanIDs, id)
+		})
+		hull.openEnclosingSpanIDs = unionOpenSpanIDs(hull.openEnclosingSpanIDs, m.openEnclosingSpanIDs, openSet)
+		hull.enclosingRetiredUnjoined = hull.enclosingRetiredUnjoined || m.enclosingRetiredUnjoined
+		hull.completedOrTask = hull.completedOrTask && m.completedOrTask
+		hull.joinedAtRetire = hull.joinedAtRetire && m.joinedAtRetire
+		hull.hasUnjoinedTask = hull.hasUnjoinedTask || m.unjoinedTaskRetirement()
+		hull.settledByParent = hull.settledByParent && m.settledByParent
+		hull.concurrentPeer = hull.concurrentPeer || m.concurrentPeer
+		hull.unrespondedAtPop = hull.unrespondedAtPop || m.unrespondedAtPop
+		hull.peerRetirement = hull.peerRetirement || m.peerRetirement
+		hull.hasAfterAgentCallbacks = hull.hasAfterAgentCallbacks || m.hasAfterAgentCallbacks
+		hull.hasCustomUUIDProvider = hull.hasCustomUUIDProvider && m.hasCustomUUIDProvider
+		hull.afterAgentPending = hull.afterAgentPending || m.holdsAfterAgentEvent()
+		hull.afterAgentEventSeen = !hull.afterAgentPending && hull.afterAgentEventSeen && m.afterAgentEventSeen
+		hull.creditSettled = hull.creditSettled || m.creditSettled
+		collectCredits(m)
+		hull.startPlatformTime = minPlatformTime(hull.startPlatformTime, m.startPlatformTime)
+		hull.retiredAtPlatformTime = maxPlatformTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
+		hull.parentRetiredAtPlatformTime = maxPlatformTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
+		hull.afterAgentDone = hull.afterAgentDone && m.afterAgentDone
+		if hull.afterAgentDone {
+			hull.afterAgentDoneAt = maxPlatformTime(hull.afterAgentDoneAt, m.afterAgentDoneAt)
+		} else {
+			hull.afterAgentDoneAt = time.Time{}
+		}
+	}
+	hull.foldedCredits = foldedCredits
+	slices.Sort(hull.guardSpanIDs)
+	return hull
+}
+
+// enforceRetiredActivationCapLocked bounds len(inv.retiredActivations) at
+// maxRetiredActivationsPerInvocation by dropping fully settled entries and
+// folding the oldest overflow entries into a conservative summary hull while
+// keeping recent entries uncompacted. inv.mu must be held.
+func (inv *invocationTrace) enforceRetiredActivationCapLocked() {
+	if len(inv.retiredActivations) <= maxRetiredActivationsPerInvocation {
+		return
+	}
+	inv.enforceRetiredActivationCapWithIndexLocked(inv.newUnrespondedRetiredIndexLocked())
+}
+
+func (inv *invocationTrace) enforceRetiredActivationCapWithIndexLocked(unrespIdx unrespondedRetiredIndex) {
+	if len(inv.retiredActivations) <= maxRetiredActivationsPerInvocation {
+		return
+	}
+	defer inv.pruneOrphanedCreditGroupsLocked()
+	st := inv.afterAgentStateLocked()
+	openSet := st.openSet
+	surviving := st.swallowers
+	inv.retiredActivations = slices.DeleteFunc(inv.retiredActivations, func(ra retiredActivation) bool {
+		if (!ra.compactedHull && (surviving[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID])) ||
+			ra.holdsAfterAgentEvent() ||
+			(ra.peerRetirement && inv.hasOpenPeerLocked(ra)) ||
+			unrespIdx.matches(ra.swallower) {
+			return false
+		}
+		return !slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+			return openSet[g]
+		})
+	})
+	if len(inv.retiredActivations) <= maxRetiredActivationsPerInvocation {
+		inv.shrinkRetiredActivationsLocked()
+		return
+	}
+	need := len(inv.retiredActivations) - maxRetiredActivationsPerInvocation + 1
+	var tier1, tier2, tier3, tier4 []int
+	for idx, ra := range inv.retiredActivations {
+		switch {
+		case !ra.compactedHull && (surviving[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID]):
+			tier4 = append(tier4, idx)
+		case ra.remainingCredits() > 0 || len(ra.foldedCredits) > 0:
+			tier3 = append(tier3, idx)
+		case ra.peerRetirement && inv.hasOpenPeerLocked(ra):
+			tier2 = append(tier2, idx)
+		default:
+			tier1 = append(tier1, idx)
+		}
+	}
+	selected := make([]int, 0, need)
+	for _, tier := range [][]int{tier1, tier2, tier3, tier4} {
+		for _, idx := range tier {
+			if len(selected) >= need {
+				break
+			}
+			selected = append(selected, idx)
+		}
+		if len(selected) >= need {
+			break
+		}
+	}
+	if len(selected) < 2 {
+		return
+	}
+	slices.Sort(selected)
+	foldedSet := make(map[int]bool, len(selected))
+	members := make([]retiredActivation, 0, len(selected))
+	for _, idx := range selected {
+		foldedSet[idx] = true
+		ra := &inv.retiredActivations[idx]
+		if !ra.compactedHull && !ra.creditSettled && ra.remainingCredits() > 0 && ra.creditGroupID == 0 {
+			ra.creditGroupID = inv.allocCreditGroupIDLocked()
+			inv.creditGroupRem[ra.creditGroupID] = ra.remainingCredits()
+		}
+		members = append(members, *ra)
+	}
+	firstIdx := selected[0]
+	hull := foldRetiredCapHull(members, openSet)
+	out := inv.retiredActivations[:0]
+	for idx, ra := range inv.retiredActivations {
+		if idx == firstIdx {
+			out = append(out, hull)
+			continue
+		}
+		if !foldedSet[idx] {
+			out = append(out, ra)
+		}
+	}
+	clear(inv.retiredActivations[len(out):])
+	inv.retiredActivations = out
+	inv.shrinkRetiredActivationsLocked()
+}
+
+// hasOpenPeerLocked reports whether an activation of the agent and branch of
+// the retired activation ra with a wildcard-compatible node path is open, a
+// peer of ra in the sense of retiredPeerCount (see soleOpenAuthorLocked).
+// inv.mu must be held.
+func (inv *invocationTrace) hasOpenPeerLocked(ra retiredActivation) bool {
+	if len(inv.agentStack) <= 1 {
+		return false
+	}
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind == spanKindAgent && ra.swallower.matches(rec.name, rec.branch, rec.path) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxPendingAfterAgent bounds, per parent activation, agent and branch, the
+// retired activations that keep the action maps of their after-agent
+// callbacks only because their after-agent events may still come (see
+// foldPendingAfterAgentLocked).
+const maxPendingAfterAgent = 8
+
+// foldPendingAfterAgentLocked bounds the entries of the agent name on branch
+// that keep their after-agent action maps only because their after-agent
+// events may still come: those that hold no credit and that no recorded
+// cause names as a swallower or has an open span under it. Nothing may show
+// when the after-agent callbacks of such an activation return, as for the
+// activations that a parent runs on goroutines of their own and does not wait
+// for, until the parent's run returns (see recordRetiredActivationsAtLocked).
+// Of those under one parent, at most maxPendingAfterAgent stay; the oldest of
+// the others fold into one compacted hull that stands for their after-agent
+// events (see afterAgentPending). An event that one of them can have created
+// may then be such an event, so it is no one's alone and clears no failure,
+// and an open activation of the agent that an ancestor of theirs may hold
+// events for clears no failure with its own events either (see
+// hasGuardedRetiredPeerForEventLocked), until the hull no longer needs to
+// stand for them (see needsAfterAgentActionsLocked).
+// A hull of activations on different node paths matches any path.
+//
+// While a peer of an entry is open (see hasOpenPeerLocked), the entry is not
+// folded if it counted as a peer retirement, since soleOpenAuthorLocked gives
+// the open peer its events only while every retired peer that
+// retiredPeerCount counts has an entry of its own, nor if its callbacks were
+// seen to return (afterAgentDone): it keeps its maps then because the open
+// peer could be taken for the author of its after-agent event, not because
+// that event may still come, and a hull would stand for it as one that may.
+// Such entries stay as they are until no peer is open, as pruning keeps them
+// (see pruneSettledRetiredActivationsLocked). inv.mu must be held.
+func (inv *invocationTrace) foldPendingAfterAgentLocked(name, branch string, st afterAgentState) {
+	inv.foldPendingAfterAgentWithIndexLocked(name, branch, st, inv.newUnrespondedRetiredIndexLocked())
+}
+
+func (inv *invocationTrace) foldPendingAfterAgentWithIndexLocked(name, branch string, st afterAgentState, unrespIdx unrespondedRetiredIndex) {
+	defer inv.pruneOrphanedCreditGroupsLocked()
+	openSet := st.openSet
+	if openSet == nil {
+		openSet = inv.openSpanSetLocked()
+	}
+	type foldGroupKey struct {
+		openParent           string
+		hasParentRetiredTime bool
+	}
+	groups := make(map[foldGroupKey][]int)
+	for idx, ra := range inv.retiredActivations {
+		if ra.swallower.anyName || ra.swallower.anyBranch || ra.swallower.name != name || ra.swallower.branch != branch || !ra.holdsAfterAgentEvent() ||
+			((ra.afterAgentCredit || ra.modelCredits > 0 || ra.creditSettled || len(ra.foldedCredits) > 0) && unrespIdx.matches(ra.swallower)) ||
+			(!ra.compactedHull && (st.swallowers[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID])) {
+			continue
+		}
+		if (ra.peerRetirement || (ra.afterAgentDone && !ra.compactedHull)) && inv.hasOpenPeerLocked(ra) {
+			continue
+		}
+		openParent := ""
+		if openSet[ra.parentSpanID] {
+			openParent = ra.parentSpanID
+		}
+		gk := foldGroupKey{
+			openParent:           openParent,
+			hasParentRetiredTime: !ra.parentRetiredAtPlatformTime.IsZero(),
+		}
+		groups[gk] = append(groups[gk], idx)
+	}
+	folded := make(map[int]bool)
+	for _, members := range groups {
+		if len(members) <= maxPendingAfterAgent {
+			continue
+		}
+		slices.SortFunc(members, func(a, b int) int {
+			return cmp.Or(
+				cmp.Compare(inv.retiredActivations[a].retiredAtSeq, inv.retiredActivations[b].retiredAtSeq),
+				cmp.Compare(inv.retiredActivations[a].swallower.seq, inv.retiredActivations[b].swallower.seq),
+				cmp.Compare(a, b),
+			)
+		})
+		var hulls, nonHulls []int
+		for _, idx := range members {
+			if inv.retiredActivations[idx].compactedHull {
+				hulls = append(hulls, idx)
+			} else {
+				nonHulls = append(nonHulls, idx)
+			}
+		}
+		var fold []int
+		if len(hulls) > 0 {
+			fold = append(fold, hulls...)
+			if extraNonHulls := len(members) - maxPendingAfterAgent - (len(hulls) - 1); extraNonHulls > 0 {
+				fold = append(fold, nonHulls[:extraNonHulls]...)
+			}
+		} else {
+			fold = members[:len(members)-maxPendingAfterAgent+1]
+		}
+		hull := &inv.retiredActivations[fold[0]]
+		hull.compactedHull = true
+		hull.hasAfterAgentCallbacks = true
+		hull.hasUnjoinedTask = hull.unjoinedTaskRetirement()
+		hull.guardSpanIDs = filterOpenSpanIDs(hull.guardSpanIDs, openSet)
+		hull.openEnclosingSpanIDs = filterOpenSpanIDs(hull.openEnclosingSpanIDs, openSet)
+		for _, idx := range fold[1:] {
+			m := inv.retiredActivations[idx]
+			if m.swallower.seq > hull.swallower.seq {
+				hull.swallower.seq = m.swallower.seq
+				hull.swallower.spanID = m.swallower.spanID
+			}
+			if hull.swallower.path != m.swallower.path {
+				hull.swallower.path = ""
+			}
+			if hull.parentSpanID != m.parentSpanID {
+				hull.parentSpanID = ""
+			}
+			hull.retiredAtSeq = max(hull.retiredAtSeq, m.retiredAtSeq)
+			for _, g := range m.guardSpanIDs {
+				if openSet[g] && !slices.Contains(hull.guardSpanIDs, g) {
+					hull.guardSpanIDs = append(hull.guardSpanIDs, g)
+				}
+			}
+			hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
+				return !slices.Contains(m.ancestorSpanIDs, id)
+			})
+			hull.openEnclosingSpanIDs = unionOpenSpanIDs(hull.openEnclosingSpanIDs, m.openEnclosingSpanIDs, openSet)
+			hull.enclosingRetiredUnjoined = hull.enclosingRetiredUnjoined || m.enclosingRetiredUnjoined
+			if hull.goroutineID != m.goroutineID {
+				hull.goroutineID = 0
+			}
+			hull.startPlatformTime = minPlatformTime(hull.startPlatformTime, m.startPlatformTime)
+			hull.retiredAtPlatformTime = maxPlatformTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
+			hull.parentRetiredAtPlatformTime = maxPlatformTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
+			hull.completedOrTask = hull.completedOrTask && m.completedOrTask
+			hull.joinedAtRetire = hull.joinedAtRetire && m.joinedAtRetire
+			hull.hasUnjoinedTask = hull.hasUnjoinedTask || m.unjoinedTaskRetirement()
+			hull.settledByParent = hull.settledByParent && m.settledByParent
+			hull.concurrentPeer = hull.concurrentPeer || m.concurrentPeer
+			hull.unrespondedAtPop = hull.unrespondedAtPop || m.unrespondedAtPop
+			hull.afterAgentDone = hull.afterAgentDone && m.afterAgentDone
+			hull.afterAgentDoneAt = maxPlatformTime(hull.afterAgentDoneAt, m.afterAgentDoneAt)
+			hull.hasCustomUUIDProvider = hull.hasCustomUUIDProvider && m.hasCustomUUIDProvider
+			folded[idx] = true
+		}
+		slices.Sort(hull.guardSpanIDs)
+		hull.ancestorSpanIDs = slices.Clone(hull.ancestorSpanIDs)
+		hull.afterAgentActions = actionMaps{}
+		hull.afterAgentActionsRef = nil
+		hull.afterAgentPending = true
+		hull.afterAgentEventSeen = false
+		hull.afterAgentCredit = false
+		hull.modelCredits = 0
+		hull.creditSettled = false
+		hull.creditGroupID = 0
+		hull.peerRetirement = false
+		hull.popGoroutineID = 0
+	}
+	if len(folded) == 0 {
+		return
+	}
+	out := inv.retiredActivations[:0]
+	for idx, ra := range inv.retiredActivations {
+		if !folded[idx] {
+			out = append(out, ra)
+		}
+	}
+	clear(inv.retiredActivations[len(out):])
+	inv.retiredActivations = out
+	inv.shrinkRetiredActivationsLocked()
+}
+
+// hasGuardedRetiredPeerForEventLocked reports whether an earlier activation
+// matching rec's (name, branch, path) retired while a non-propagating ancestor
+// remained open to buffer and later replay its events, or left a retiredCause
+// swallow token on agentStack, and cannot be excluded by event-creation
+// timestamp provenance. When true, an event arriving while rec is still open on
+// agentStack cannot safely clear rec's failure state. An ancestor that buffers
+// events replays them with the time at which they were created, so a retired
+// activation that cannot have created an event at that time (see
+// canOwnEventCreatedAt), such as one without after-agent callbacks that had
+// retired by then, does not guard it. inv.mu must be held.
+func (inv *invocationTrace) hasGuardedRetiredPeerForEventLocked(rec *spanRecord, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	if rec == nil || rec.kind != spanKindAgent {
+		return false
+	}
+	openSet := inv.openSpanSetLocked()
+	for _, ra := range inv.retiredActivations {
+		hasPeerID := hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider)
+		hasBothID := hasEventID || (evNonEmptyID && rec.hasCustomUUIDProvider && ra.hasCustomUUIDProvider)
+		if (ra.compactedHull || ra.swallower.spanID != rec.spanID) && ra.swallower.matches(rec.name, rec.branch, path) &&
+			slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+				return openSet[g]
+			}) &&
+			(!hasPeerID || ra.canOwnEventCreatedAt(evCreatedAt, hasPeerID)) &&
+			!ra.excludedByEventTimestamp(rec.spanID, rec.seq, rec.goroutineID, rec.concurrentPeer, rec.startPlatformTime, evCreatedAt, hasBothID) {
+			return true
+		}
+	}
+	for _, s := range inv.agentStack {
+		for _, c := range s.retiredCauses {
+			for _, sw := range c.swallowers {
+				if sw.spanID != rec.spanID && sw.matches(rec.name, rec.branch, path) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// soleOpenAuthorLocked returns the index on agentStack of the only activation
+// that can have created a session event created at evCreatedAt, if that is
+// one of the open activations at peerIdxs, or -1. Open activations that
+// started after the event was created did not create it. A retired activation
+// of the same agent, branch and node path did not either if it cannot own the
+// event (see canOwnEventCreatedAt): the event was created before it started,
+// after its enclosing activation retired, after its after-agent callbacks
+// were seen to return, or after it retired itself once its run returned,
+// unless its after-agent event may still come. An event with no
+// creation evidence, a retired peer that no longer has its own entry in
+// retiredActivations (see retiredPeerCount), or a swallower that a retired
+// cause names leaves the author unproven. inv.mu must be held.
+func (inv *invocationTrace) soleOpenAuthorLocked(peerIdxs []int, path string, evCreatedAt time.Time, hasIDFor func(*spanRecord) bool, hasIDForRetired func(retiredActivation) bool) int {
+	if evCreatedAt.IsZero() || len(peerIdxs) == 0 || hasIDFor == nil || hasIDForRetired == nil {
+		return -1
+	}
+	author := -1
+	for _, j := range peerIdxs {
+		if j <= 0 || j >= len(inv.agentStack) {
+			continue
+		}
+		rec := inv.agentStack[j]
+		if hasIDFor(rec) && !rec.startPlatformTime.IsZero() && evCreatedAt.Before(rec.startPlatformTime) {
+			continue
+		}
+		if author >= 0 {
+			return -1
+		}
+		author = j
+	}
+	if author < 0 || !hasIDFor(inv.agentStack[author]) {
+		return -1
+	}
+	rec := inv.agentStack[author]
+	var trackedByKey map[string]int
+	if len(inv.retiredPeerCount) > 0 {
+		trackedByKey = make(map[string]int)
+	}
+	for _, ra := range inv.retiredActivations {
+		if trackedByKey != nil && ra.peerRetirement && !ra.compactedHull && ra.swallower.matches(rec.name, rec.branch, path) {
+			pk := llmKey(identity{path: ra.swallower.path, agentName: ra.swallower.name, branch: ra.swallower.branch})
+			trackedByKey[pk]++
+		}
+		if (ra.compactedHull || ra.swallower.spanID != rec.spanID) && ra.swallower.matches(rec.name, rec.branch, path) && (!hasIDForRetired(ra) || ra.canOwnEventCreatedAt(evCreatedAt, true)) {
+			return -1
+		}
+	}
+	for pk, want := range inv.retiredPeerCount {
+		if want <= 0 {
+			continue
+		}
+		kp, kn, kb, ok := parseLLMKey(pk)
+		if ok && kn == rec.name && kb == rec.branch && (path == "" || kp == "" || kp == path) && trackedByKey[pk] < want {
+			return -1
+		}
+	}
+	for _, s := range inv.agentStack {
+		for _, c := range s.retiredCauses {
+			for _, sw := range c.swallowers {
+				if sw.spanID != rec.spanID && sw.matches(rec.name, rec.branch, path) {
+					return -1
+				}
+			}
+		}
+	}
+	return author
+}
+
+// provenAfterAllRetiredLocked reports whether at least one retired activation
+// matches rec's (name, branch, path), every matching retired activation is
+// excluded by event-creation timestamp provenance against rec, and none carries a
+// surviving retiredCause swallow token on agentStack. inv.mu must be held.
+func (inv *invocationTrace) provenAfterAllRetiredLocked(rec *spanRecord, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	if rec == nil || rec.kind != spanKindAgent || len(inv.retiredActivations) == 0 {
+		return false
+	}
+	sawMatch := false
+	for _, ra := range inv.retiredActivations {
+		if (!ra.compactedHull && ra.swallower.spanID == rec.spanID) || !ra.swallower.matches(rec.name, rec.branch, path) {
+			continue
+		}
+		sawMatch = true
+		hasBothID := hasEventID || (evNonEmptyID && rec.hasCustomUUIDProvider && ra.hasCustomUUIDProvider)
+		if !ra.excludedByEventTimestamp(rec.spanID, rec.seq, rec.goroutineID, rec.concurrentPeer, rec.startPlatformTime, evCreatedAt, hasBothID) {
+			return false
+		}
+	}
+	if !sawMatch {
+		return false
+	}
+	for _, s := range inv.agentStack {
+		for _, c := range s.retiredCauses {
+			for _, sw := range c.swallowers {
+				if sw.spanID != rec.spanID && sw.matches(rec.name, rec.branch, path) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // rowSpan places a row in the trace of its invocation. It holds the
@@ -487,6 +3536,12 @@ type invocationTrace struct {
 	// from other runners, which may have run the same agent instance as a
 	// sub-agent, does not replace it.
 	ancestryFromContext bool
+	// uuidProviders is nil until the run or one of its agent activations
+	// starts with a custom platform.UUIDProvider (see noteUUIDProviderLocked),
+	// except that a late state starts with the ledger of the finished run (see
+	// lateLocked). noteUUIDProviderLocked sets it with mu held, and it is read
+	// without mu (see traceManager.eventUUIDProvider).
+	uuidProviders atomic.Pointer[uuidProviderLedger]
 	// agentStack holds the invocation span, followed by the spans of the
 	// running agents in the order they started. Agents that run
 	// concurrently, such as the sub-agents of a parallel agent or
@@ -521,13 +3576,16 @@ type invocationTrace struct {
 	lastSeq uint64
 	// completedTools holds the tool calls that OnToolErrorCallback ended,
 	// so that the AfterToolCallback that ADK runs next for the same call
-	// finds its span instead of ending another one. ADK runs
-	// OnToolErrorCallback alone for a call of a tool that does not exist;
-	// such records last as long as the invocation, or until the next call
-	// with the same key starts. A record answers only the AfterToolCallback
-	// of the attempt that it ended (see toolAttempt): a later call that
-	// reuses the function call ID, and whose start an earlier plugin hid
-	// from this one, is a call of its own.
+	// finds its span instead of ending another one. ADK skips
+	// AfterToolCallback when an unanswered missing-tool lookup or a
+	// non-FunctionTool fails; completeResponseWithActions clears any matching
+	// entry whose live attempt matches the response's EventActions maps (or
+	// whose tool context is no longer live), pushToolSpan clears any remaining
+	// entry when a later call starts, and popToolSpan consumes any entry read
+	// by AfterToolCallback. A stored record answers only the AfterToolCallback
+	// of the attempt that it ended (see toolAttempt): a later call that reuses
+	// the function call ID, and whose start an earlier plugin hid from this
+	// one, is a call of its own.
 	completedTools map[string]*spanRecord
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -551,12 +3609,28 @@ type invocationTrace struct {
 	// buffered event yielded after its author retired does not mask a failing
 	// peer activation.
 	unrespondedRetired map[string]int
+	// unrespondedRetiredTools counts completed tool-event credits
+	// (awaitingToolEvent) left unyielded when a retired activation leaves a
+	// peer open or retires under a buffering custom guard, kept separate from
+	// unrespondedRetired so a buffered FunctionResponse consumes a retired tool
+	// credit rather than a dropped model credit or an open peer's toolSpan.
+	unrespondedRetiredTools map[string]int
 	// retiredPeerCount counts retired peer activations per llmKey when
 	// concurrent activations of the same (path, agentName, branch) overlapped,
 	// so trailer events emitted from a retired peer's own AfterAgentCallback
 	// are absorbed rather than attributed to a remaining peer with an
-	// unrecovered model or tool error.
+	// unrecovered model or tool error. soleOpenAuthorLocked consumes this count
+	// when checking whether an event can only belong to a remaining open peer.
 	retiredPeerCount map[string]int
+	// retiredActivations records retired agent activations by span ID while an
+	// enclosing custom ancestor remains open on agentStack, or while an
+	// unguarded entry is pinned by after-agent state, compatible
+	// unrespondedRetired credits, an open span under it, or an open peer (and
+	// is dropped or compacted once none of those holds). creditGroupRem tracks
+	// the remaining credits of each overlapping component credit group.
+	retiredActivations []retiredActivation
+	creditGroupRem     map[uint64]int
+	nextCreditGroupID  uint64
 	// lastSessionEventPartial reports that the most recent session event that
 	// onEvent observed was a partial event. lastEventPartial reports that, in
 	// addition, no work started since that shows that the run went on after
@@ -698,8 +3772,9 @@ func (inv *invocationTrace) setRootAgentLocked(name string) {
 	}
 }
 
-// restoreEvicted restores the root span identity and trace metadata saved when
-// inv was previously evicted or completed, before it is returned to a callback.
+// restoreEvicted restores the root span identity, trace metadata and UUID
+// provider ledger saved when inv was previously evicted or completed, before it
+// is returned to a callback.
 func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.evicted = true
 	if ev.traceID != "" {
@@ -712,6 +3787,9 @@ func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.rootParentSpanID = ev.parentSpanID
 	inv.agentStack[0].parentSpanID = ev.parentSpanID
 	inv.setRootAgentLocked(ev.rootAgentName)
+	if ev.uuidProviders != nil && inv.uuidProviders.Load() == nil {
+		inv.uuidProviders.Store(ev.uuidProviders)
+	}
 }
 
 // ambientSpanContext returns the OpenTelemetry SpanContext that ctx carries,
@@ -880,6 +3958,187 @@ func (inv *invocationTrace) applyEdgesLocked(edges []agentEdge) {
 	}
 }
 
+// noteUUIDProviderLocked records in inv's uuidProviderLedger whether the agent
+// activation of id started with a custom platform.UUIDProvider on its context
+// (custom), or, when run is true, whether the run did. Until a custom provider
+// is seen, inv has no ledger and this records nothing: without one, every
+// event of the invocation is taken to have been created without a custom
+// provider anyway. Because uuidProviders stays nil until a custom
+// platform.UUIDProvider appears in the invocation, any activation of an author
+// A that started earlier in the invocation under the default provider left no
+// ledger entry; if another activation of A later starts with a custom provider
+// in the same invocation (either re-running on the same (name, branch, path) or
+// running concurrently or later on another path or branch), a hand-built
+// non-UUIDv4 event from that earlier unrecorded activation evaluated once the
+// custom activation has started can match uuidProviderCustom either on the
+// shared key or through eventUUIDProvider fallback keys (non-empty ancestor
+// paths, anyPath, and anyBranch when ev.Branch == ""). inv.mu must be held.
+func (inv *invocationTrace) noteUUIDProviderLocked(id identity, custom, run bool) {
+	l := inv.uuidProviders.Load()
+	if l == nil {
+		if !custom {
+			return
+		}
+		l = &uuidProviderLedger{
+			compacted:      inv.isLate,
+			pathOverflowed: inv.isLate,
+			states:         map[uuidProviderKey]uuidProviderState{},
+		}
+		inv.uuidProviders.Store(l)
+	}
+	switch {
+	case run:
+		l.mu.Lock()
+		l.runCustom = l.runCustom || custom
+		l.mu.Unlock()
+	case id.agentName != "":
+		l.note(id.agentName, id.branch, id.path, custom)
+	}
+}
+
+// isTrackedInvocation reports whether invID is currently tracked in
+// tm.invocations, tm.completed, or tm.evicted.
+//
+// isTrackedInvocation acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) isTrackedInvocation(invID string) bool {
+	if tm == nil || invID == "" {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.invocations[invID] != nil || tm.completed[invID] != nil {
+		return true
+	}
+	_, evicted := tm.evicted[invID]
+	return evicted
+}
+
+// eventUUIDProvider reports whether an event that author created in the
+// invocation invID, on branch at the node path path, was created under a
+// custom platform.UUIDProvider, judging by what the activations of author in
+// that invocation started with (see uuidProviderLedger). It looks at the
+// activations on branch, or on any branch when branch is empty, as a custom
+// agent's session.NewEvent leaves the event's branch empty; and at path, or
+// else at the nearest non-empty '/' ancestor of path (up to
+// maxUUIDProviderAncestorSteps lookups, stopping before "" so a nested workflow
+// path such as wf@1/fn@1 never falls back to a direct top-level activation at
+// path == ""), as the events of function and dynamic workflow nodes carry the
+// node's path and the name of the workflow agent that runs them, or else at
+// any path, as the events of a nested workflow agent carry paths that start at
+// it (inner@1/fn@1) while its own path is that of its node (outer@1/inner@1).
+// The first of these that has any recorded activation decides, and only if all
+// recorded activations under that key started alike: a key that covers
+// recorded activations with and without a custom provider, as of a worker that
+// ran on the same branch and path once with a custom provider and once
+// without, gives false, so that an ID that one activation built by hand is not
+// taken for one that the other's provider made. Because uuidProviders stays
+// nil until a custom platform.UUIDProvider appears in the invocation, any
+// activation of author A that started earlier in the invocation under the
+// default provider left no ledger entry; if another activation of A later
+// starts with a custom provider in the same invocation (either re-running on
+// the same (name, branch, path) or running concurrently or later on another
+// path or branch), a hand-built non-UUIDv4 event from that earlier unrecorded
+// activation evaluated once the custom activation has started can match
+// uuidProviderCustom either on the shared key or through the fallback keys
+// above (non-empty ancestor paths, anyPath, and anyBranch when branch == "").
+// An event of no recorded activation is judged by how the run started. tracked
+// reports that invID is a live, evicted or completed invocation; custom is
+// false when it is not.
+//
+// eventUUIDProvider acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) eventUUIDProvider(invID, author, branch, path string) (custom, tracked bool) {
+	return tm.eventUUIDProviderFor(invID, author, branch, path, "", "")
+}
+
+// eventUUIDProviderFor is eventUUIDProvider with an optional fallbackAuthor and
+// fallbackBranch from the delivering context's identity. When author is empty
+// or "user" (such as a synthesized task response or user-role content yielded
+// by a worker activation), fallbackAuthor is checked before falling back to how
+// the run started so a worker that called platform.WithUUIDProvider(ctx, nil)
+// fails closed rather than inheriting run.isRunCustom().
+//
+// eventUUIDProviderFor acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) eventUUIDProviderFor(invID, author, branch, path, fallbackAuthor, fallbackBranch string) (custom, tracked bool) {
+	if tm == nil || invID == "" {
+		return false, false
+	}
+	var run, late *uuidProviderLedger
+	tm.mu.Lock()
+	if inv := tm.invocations[invID]; inv != nil {
+		tracked = true
+		run = inv.uuidProviders.Load()
+	} else if c := tm.completed[invID]; c != nil {
+		tracked = true
+		run = c.uuidProviders
+		if c.late != nil {
+			late = c.late.uuidProviders.Load()
+		}
+	} else if ev, ok := tm.evicted[invID]; ok {
+		tracked = true
+		run = ev.uuidProviders
+	}
+	tm.mu.Unlock()
+	if late == run {
+		late = nil
+	}
+	if run == nil && late == nil {
+		return false, tracked
+	}
+	stateAt := func(k uuidProviderKey) uuidProviderState {
+		return run.stateAt(k).with(late.stateAt(k))
+	}
+	lookupAuthor := func(name, br, p string) uuidProviderState {
+		if name == "" {
+			return uuidProviderUnseen
+		}
+		k := uuidProviderKey{name: name, branch: br, path: p, anyBranch: br == ""}
+		for range maxUUIDProviderAncestorSteps {
+			if s := stateAt(k); s != uuidProviderUnseen {
+				return s
+			}
+			slash := strings.LastIndexByte(k.path, '/')
+			if slash <= 0 {
+				break
+			}
+			k.path = k.path[:slash]
+		}
+		k.path = ""
+		k.anyPath = true
+		return stateAt(k)
+	}
+	if s := lookupAuthor(author, branch, path); s != uuidProviderUnseen {
+		return s == uuidProviderCustom, true
+	}
+	if (author == "" || author == userAuthor) && fallbackAuthor != "" && fallbackAuthor != author {
+		if s := lookupAuthor(fallbackAuthor, cmp.Or(branch, fallbackBranch), path); s != uuidProviderUnseen {
+			return s == uuidProviderCustom, true
+		}
+	}
+	if effectiveBranch := cmp.Or(branch, fallbackBranch); effectiveBranch != "" {
+		cur := effectiveBranch
+		var branchHit uuidProviderState
+		for {
+			if bs := run.branchState(cur).with(late.branchState(cur)); bs != uuidProviderUnseen {
+				branchHit = bs
+				break
+			}
+			dot := strings.LastIndexByte(cur, '.')
+			if dot <= 0 {
+				break
+			}
+			cur = cur[:dot]
+		}
+		if branchHit != uuidProviderUnseen {
+			if branchHit != uuidProviderCustom {
+				return false, true
+			}
+		} else if ov := run.branchOverflow().with(late.branchOverflow()); ov != uuidProviderUnseen && ov != uuidProviderCustom {
+			return false, true
+		}
+	}
+	return run.isRunCustom() || late.isRunCustom(), true
+}
+
 // noteRootAgentLocked records the invocation's root agent and agent hierarchy
 // from in, which was collected before acquiring inv.mu.
 //
@@ -1012,6 +4271,12 @@ type agentChildren struct {
 	// llmagent.ModeTask. Neither a placement nor the runner binds task mode
 	// for an agent that does not declare it.
 	taskMode bool
+	// hasAfterAgentCallbacks reports that the agent configures (or
+	// conservatively may configure) agent-level AfterAgentCallbacks or ctx
+	// carries (or conservatively may carry) another plugin with an
+	// AfterAgentCallback, any of which can populate the single post-retirement
+	// after-agent event that ADK builds after all AfterAgentCallbacks run.
+	hasAfterAgentCallbacks bool
 	// names holds the names of the sub-agents.
 	names []string
 }
@@ -1024,7 +4289,7 @@ type agentChildren struct {
 // The callback context logs a warning from Agent, so the agent is read from
 // the invocation context that WithICDelta derives from it. SubAgents and Name
 // are user code, so callers must not hold a lock.
-func runningAgentChildren(ctx context.Context, name string) agentChildren {
+func runningAgentChildren(ctx context.Context, name string, selfPlugin *baseplugin.Plugin) agentChildren {
 	return orZero(func() agentChildren {
 		c, ok := ctx.(interface {
 			WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
@@ -1043,12 +4308,13 @@ func runningAgentChildren(ctx context.Context, name string) agentChildren {
 		cfg, isLLM := agentConfig(a).(llmagent.Config)
 		agType := orZero(func() string { return agentTypeOf(a) })
 		children := agentChildren{
-			parent:               name,
-			nonLLM:               !isLLM,
-			propagatesChildError: isBuiltInWorkflowAgent(a),
-			isParallel:           agType == "ParallelAgent",
-			isWorkflow:           agType == "WorkflowAgent",
-			taskMode:             isLLM && cfg.Mode == llmagent.ModeTask,
+			parent:                 name,
+			nonLLM:                 !isLLM,
+			propagatesChildError:   isBuiltInWorkflowAgent(a),
+			isParallel:             agType == "ParallelAgent",
+			isWorkflow:             agType == "WorkflowAgent",
+			taskMode:               isLLM && cfg.Mode == llmagent.ModeTask,
+			hasAfterAgentCallbacks: agentHasAfterAgentCallbacks(a) || contextHasAfterAgentPlugin(ctx, selfPlugin),
 		}
 		for _, sub := range a.SubAgents() {
 			if sub == nil {
@@ -2480,6 +5746,7 @@ type traceManager struct {
 	traceSeed       string
 	inserts         int
 	logf            func(string, ...any)
+	selfPlugin      weak.Pointer[baseplugin.Plugin]
 
 	// maxTracked, ttl and now are fields so that tests can change them.
 	maxTracked int
@@ -2494,6 +5761,7 @@ type evictedTrace struct {
 	parentSpanID  string
 	rootAgentName string
 	lastActive    int64
+	uuidProviders *uuidProviderLedger
 }
 
 // completedTrace is what the callbacks that run after a run ended need of it.
@@ -2515,7 +5783,11 @@ type completedTrace struct {
 	// AfterModelCallback or AfterToolCallback that ADK may still run for them
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
-	position                *list.Element
+	// uuidProviders is the compacted uuidProviderLedger of the finished run,
+	// nil if it had none. The late state starts with the same ledger (see
+	// lateLocked).
+	uuidProviders *uuidProviderLedger
+	position      *list.Element
 }
 
 func (c *completedTrace) hasPendingOrOpenLateSpans() bool {
@@ -2631,10 +5903,17 @@ func (tm *traceManager) invocation(ctx context.Context, id identity) *invocation
 // that is derived from the invocation ID. Other callbacks after AfterRun use
 // the completed identity without restarting active tracking.
 func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start, reserveSpan bool) *invocationTrace {
+	return tm.lookupInvocationWithUUID(ctx, id, start, reserveSpan, false)
+}
+
+func (tm *traceManager) lookupInvocationWithUUID(ctx context.Context, id identity, start, reserveSpan, customUUIDs bool) *invocationTrace {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
 		inv := newInvocationTraceWithSpan(sc, "", now)
+		if customUUIDs {
+			inv.uuidProviders.Store(&uuidProviderLedger{states: map[uuidProviderKey]uuidProviderState{}})
+		}
 		if reserveSpan {
 			inv.pendingSpans.Add(1)
 		}
@@ -2653,6 +5932,13 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 					late := tm.lateLocked(completed, sc, tm.traceIDFor(id.invocationID), now)
 					late.lastActive.Store(now.UnixNano())
 					tm.completionOrder.MoveToBack(completed.position)
+					if customUUIDs && late.uuidProviders.Load() == nil {
+						late.uuidProviders.Store(&uuidProviderLedger{
+							compacted:      late.isLate,
+							pathOverflowed: late.isLate,
+							states:         map[uuidProviderKey]uuidProviderState{},
+						})
+					}
 					if reserveSpan {
 						late.pendingSpans.Add(1)
 					}
@@ -2671,6 +5957,13 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 			warnIDs = tm.evictLocked(now, id.invocationID)
 			maxTracked = tm.maxTracked
 			logf = tm.logf
+		}
+		if customUUIDs && inv.uuidProviders.Load() == nil {
+			inv.uuidProviders.Store(&uuidProviderLedger{
+				compacted:      inv.isLate,
+				pathOverflowed: inv.isLate,
+				states:         map[uuidProviderKey]uuidProviderState{},
+			})
 		}
 		inv.lastActive.Store(now.UnixNano())
 		if reserveSpan {
@@ -2751,8 +6044,14 @@ func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, in
 	var ev evictedTrace
 	if inv != nil {
 		ev = inv.savedIdentity()
+		if ev.uuidProviders != nil {
+			ev.uuidProviders = ev.uuidProviders.compactForCompleted()
+		}
 	} else {
 		ev.lastActive = now.UnixNano()
+	}
+	if prev, ok := tm.evicted[invocationID]; ok && ev.uuidProviders == nil {
+		ev.uuidProviders = prev.uuidProviders
 	}
 	tm.evicted[invocationID] = ev
 }
@@ -2765,6 +6064,7 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 		parentSpanID:  inv.rootParentSpanID,
 		rootAgentName: rootAgent,
 		lastActive:    inv.lastActive.Load(),
+		uuidProviders: inv.uuidProviders.Load(),
 	}
 }
 
@@ -2840,6 +6140,18 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 		defer inv.mu.Unlock()
 		_ = inv.agentStack[0]
 		lastSeq := inv.lastSeq
+		// A completed entry has a ledger already only if AfterRun ran again for an
+		// invocation that endInvocation had removed, or forceEndInvocation ran for
+		// one after endInvocation had removed it. Then inv is a fresh trace that
+		// recorded nothing (or restored completed.identity), so the compacted
+		// ledger of the earlier run stays.
+		var compactedProviders *uuidProviderLedger
+		if existing != nil && existing.uuidProviders != nil {
+			compactedProviders = existing.uuidProviders
+		} else {
+			compactedProviders = inv.uuidProviders.Load().compactForCompleted()
+		}
+		savedID.uuidProviders = compactedProviders
 		models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
 		maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
 		tools, endedTools := startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
@@ -2866,10 +6178,14 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 			if existing != nil && existing.late != nil {
 				preparedLate = existing.late
+				if preparedLate.uuidProviders.Load() == nil && compactedProviders != nil {
+					preparedLate.uuidProviders.Store(compactedProviders)
+				}
 			} else {
 				preparedLate = newInvocationTraceWithKnownSpan(trace.SpanContext{}, savedID.traceID, savedID.spanID, now)
 				preparedLate.isLate = true
 				preparedLate.restoreEvicted(savedID)
+				preparedLate.uuidProviders.Store(compactedProviders)
 				if existing != nil {
 					maps.Copy(preparedLate.completedModels, existing.endedModels)
 					maps.Copy(preparedLate.completedTools, existing.endedTools)
@@ -2877,6 +6193,9 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 		} else if existing != nil && existing.late != nil {
 			preparedLate = existing.late
+			if preparedLate.uuidProviders.Load() == nil && compactedProviders != nil {
+				preparedLate.uuidProviders.Store(compactedProviders)
+			}
 		}
 
 		if preparedLate != nil {
@@ -2921,6 +6240,11 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 			delete(tm.invocations, invocationID)
 		}
+		if existing.identity.spanID != "" && existing.identity.spanID == savedID.spanID {
+			savedID.traceID = cmp.Or(savedID.traceID, existing.identity.traceID)
+			savedID.rootAgentName = cmp.Or(savedID.rootAgentName, existing.identity.rootAgentName)
+		}
+		existing.uuidProviders = compactedProviders
 		existing.identity = savedID
 		if inv.pendingSpans.Load() > 0 {
 			existing.livePending = inv.pendingSpans
@@ -2937,6 +6261,10 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 
 		inv.agentStack[0].dropContexts()
 		inv.runnerAgent = nil
+		// The late state keeps no context of the run's callbacks: the calls that
+		// are open drop theirs here, and those that ended did when they ended.
+		// The open ones are marked as handed over, so that the run waits for late
+		// calls only while one of them is open (see waitsForLateCalls).
 		for _, rec := range models {
 			rec.dropContexts()
 		}
@@ -2969,6 +6297,10 @@ func (tm *traceManager) publishCompletedIdentityLocked(invocationID string, save
 			completed.livePending = nil
 		}
 	}
+	if completed.uuidProviders == nil && saved.uuidProviders != nil {
+		completed.uuidProviders = saved.uuidProviders.compactForCompleted()
+	}
+	saved.uuidProviders = completed.uuidProviders
 	completed.identity = saved
 }
 
@@ -2990,6 +6322,9 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		late := newInvocationTraceWithKnownSpan(sc, cmp.Or(traceID, completed.identity.traceID), completed.identity.spanID, now)
 		late.isLate = true
 		late.restoreEvicted(completed.identity)
+		// Sharing the run's ledger lets the activations that start after
+		// AfterRun mark the keys they reuse as mixed (see eventUUIDProvider).
+		late.uuidProviders.Store(completed.uuidProviders)
 		maps.Copy(late.completedModels, completed.endedModels)
 		maps.Copy(late.completedTools, completed.endedTools)
 		completed.endedModels, completed.endedTools = nil, nil
@@ -3137,7 +6472,8 @@ func (p *spanRecord) joinsOnceReturned(c *spanRecord) bool {
 // agent that the runner runs, runner, which is used to record the root
 // agent.
 func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner agent.Agent) rowSpan {
-	inv := tm.lookupInvocation(ctx, id, true, false)
+	customUUIDs := contextHasCustomUUIDProvider(ctx)
+	inv := tm.lookupInvocationWithUUID(ctx, id, true, false, customUUIDs)
 	now := tm.now()
 	rememberedRoot := tm.rememberAgentTree(runner)
 	ambient := ambientTraceID(ctx)
@@ -3145,6 +6481,7 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
+	inv.noteUUIDProviderLocked(id, customUUIDs, true)
 	inv.noteRootAgentLocked(id, rootIn, false)
 	inv.agentStack[0].canceled = canceledFunc(ctx)
 	span := inv.rowSpan(inv.agentStack[0], nil, ambient)
@@ -3302,8 +6639,17 @@ func (tm *traceManager) endInvocationTarget(ctx context.Context, id identity, ta
 		func() {
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
-			if cur := tm.invocations[id.invocationID]; cur != nil && cur != inv && cur.rootSpanID != inv.rootSpanID {
-				finishDetachedTrace(inv)
+			if cur := tm.invocations[id.invocationID]; cur != nil && cur != inv {
+				if cur.rootSpanID != inv.rootSpanID {
+					finishDetachedTrace(inv)
+					return
+				}
+				// The same root span was evicted and restored into cur between lookup
+				// and publication: publish inv first (keeping any adopted trace ID and
+				// calls from inv), then publish and unlink cur so cur does not remain
+				// active in tm.invocations or tm.evicted.
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
 				return
 			}
 			// Publish the final identity, including any trace adopted by rowSpan,
@@ -3399,7 +6745,12 @@ func (tm *traceManager) completeRunEndTarget(id identity, target runEndTarget, n
 			return
 		}
 		if cur := tm.invocations[id.invocationID]; cur != nil {
-			if cur == target.inv || (target.inv.rootSpanID != "" && cur.rootSpanID == target.inv.rootSpanID) {
+			if cur == target.inv {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
+				return
+			}
+			if target.inv.rootSpanID != "" && cur.rootSpanID == target.inv.rootSpanID {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, target.inv, now)
 				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
 				return
 			}
@@ -3543,12 +6894,20 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 // the earlier attempt's InvocationContext is not read on its strength (see
 // spanRecord.nodeRunEnded).
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan, []unclosedAgentSpan) {
-	inv := tm.lookupInvocation(ctx, id, false, true)
+	customUUIDs := contextHasCustomUUIDProvider(ctx)
+	inv := tm.lookupInvocationWithUUID(ctx, id, false, true, customUUIDs)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	// SubAgents is user code, so it is read before mu is taken.
-	children := runningAgentChildren(ctx, id.agentName)
+	selfPlugin := tm.selfPlugin.Value()
+	// SubAgents and any custom platform TimeProvider are user code, so both are
+	// read before mu is taken; non-task agents skip platform.Now so registering
+	// the plugin does not advance an application clock on ordinary runs.
+	children := runningAgentChildren(ctx, id.agentName, selfPlugin)
+	var eventClockStart time.Time
+	if children.taskMode {
+		eventClockStart = platform.Now(ctx)
+	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	activation := activationKey(ctx)
 	ended := endedFunc(ctx)
@@ -3588,6 +6947,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
+	inv.noteUUIDProviderLocked(id, customUUIDs, false)
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
@@ -3733,30 +7093,32 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		}
 	}
 	rec := &spanRecord{
-		spanID:               newSpanID(),
-		parentSpanID:         parent.spanID,
-		kind:                 spanKindAgent,
-		path:                 id.path,
-		name:                 id.agentName,
-		branch:               id.branch,
-		start:                now,
-		lastActivity:         now,
-		canceled:             canceledFunc(ctx),
-		ended:                ended,
-		goroutineID:          goid,
-		origin:               origin,
-		attempt:              attempt,
-		activation:           activation,
-		parent:               parent,
-		stopPoint:            parent.kind == spanKindInvocation || id.path != parent.path || id.branch != parent.branch,
-		nonLLM:               children.nonLLM,
-		propagatesChildError: children.propagatesChildError,
-		isParallel:           children.isParallel,
-		isWorkflow:           children.isWorkflow,
-		concurrentPeer:       concurrentPeer,
-		taskMode:             children.taskMode,
-		children:             children.names,
-		seq:                  inv.nextSeqLocked(),
+		spanID:                 newSpanID(),
+		parentSpanID:           parent.spanID,
+		kind:                   spanKindAgent,
+		path:                   id.path,
+		name:                   id.agentName,
+		branch:                 id.branch,
+		start:                  now,
+		lastActivity:           now,
+		eventClockStart:        eventClockStart,
+		canceled:               canceledFunc(ctx),
+		ended:                  ended,
+		goroutineID:            goid,
+		origin:                 origin,
+		attempt:                attempt,
+		activation:             activation,
+		parent:                 parent,
+		stopPoint:              parent.kind == spanKindInvocation || id.path != parent.path || id.branch != parent.branch,
+		nonLLM:                 children.nonLLM,
+		propagatesChildError:   children.propagatesChildError,
+		isParallel:             children.isParallel,
+		isWorkflow:             children.isWorkflow,
+		concurrentPeer:         concurrentPeer,
+		taskMode:               children.taskMode,
+		hasAfterAgentCallbacks: children.hasAfterAgentCallbacks || (selfPlugin != nil && children.parent == ""),
+		children:               children.names,
+		seq:                    inv.nextSeqLocked(),
 	}
 	inv.pushAgentLocked(rec)
 	if rec.isNodeAgentOf(parent) {
@@ -4059,6 +7421,102 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 	}
 }
 
+type taskAttemptKind uint8
+
+const (
+	// taskAttemptPending is a finish_task call that has started or whose
+	// observed result in afterTool did not carry the task-ending sentinel,
+	// which a later AfterToolCallback may still promote before the
+	// FunctionResponse event is emitted.
+	taskAttemptPending taskAttemptKind = iota
+	// taskAttemptCompleted is a finish_task call whose observed result in
+	// afterTool carried the task-ending sentinel without a classified tool
+	// result error.
+	taskAttemptCompleted
+	// taskAttemptFailedEnd is a finish_task call whose observed result in
+	// afterTool carried the task-ending sentinel together with a classified
+	// tool result error.
+	taskAttemptFailedEnd
+)
+
+// taskDispatchMaps holds weak references to the StateDelta and ArtifactDelta
+// map headers allocated for a tool call's EventActions. ADK copies EventActions
+// by struct value onto the resulting FunctionResponse session.Event
+// (ev.Actions = *toolCtx.Actions()), so both map headers remain reachable on
+// any buffered single-part or leading-part FunctionResponse event without
+// taskAttempt retaining user state payloads or risking recycled uintptr
+// addresses after garbage collection.
+type taskDispatchMaps struct {
+	stateDelta    weak.Pointer[byte]
+	artifactDelta weak.Pointer[byte]
+}
+
+func mapHeaderWeakPtr[K comparable, V any](m map[K]V) weak.Pointer[byte] {
+	if m == nil {
+		return weak.Pointer[byte]{}
+	}
+	p := (*byte)(reflect.ValueOf(m).UnsafePointer())
+	if p == nil {
+		return weak.Pointer[byte]{}
+	}
+	return weak.Make(p)
+}
+
+func dispatchMapsOf(actions *session.EventActions) taskDispatchMaps {
+	if actions == nil {
+		return taskDispatchMaps{}
+	}
+	return taskDispatchMaps{
+		stateDelta:    mapHeaderWeakPtr(actions.StateDelta),
+		artifactDelta: mapHeaderWeakPtr(actions.ArtifactDelta),
+	}
+}
+
+func (d taskDispatchMaps) hasLiveMap() bool {
+	return d.stateDelta.Value() != nil || d.artifactDelta.Value() != nil
+}
+
+func (d taskDispatchMaps) matches(other taskDispatchMaps) bool {
+	if d.stateDelta.Value() != nil && d.stateDelta == other.stateDelta {
+		return true
+	}
+	return d.artifactDelta.Value() != nil && d.artifactDelta == other.artifactDelta
+}
+
+type taskAttempt struct {
+	callID      string
+	kind        taskAttemptKind
+	startedOnly bool
+	recordedAt  time.Time
+	seq         uint64
+	dispatch    taskDispatchMaps
+}
+
+func isObservedEndingAttempt(kind taskAttemptKind) bool {
+	return kind == taskAttemptCompleted || kind == taskAttemptFailedEnd
+}
+
+type taskMatchStatus uint8
+
+const (
+	taskMatchUnobserved taskMatchStatus = iota
+	taskMatchFound
+	taskMatchAmbiguous
+)
+
+func earlierTaskAttempt(aTime time.Time, aSeq uint64, bTime time.Time, bSeq uint64) bool {
+	if !aTime.IsZero() && !bTime.IsZero() && !aTime.Equal(bTime) {
+		return aTime.Before(bTime)
+	}
+	if aSeq != bSeq && (aSeq == 0) == (bSeq == 0) {
+		return aSeq < bSeq
+	}
+	if aSeq != 0 && bSeq == 0 {
+		return true
+	}
+	return false
+}
+
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
 // a finish_task function response (which ADK does without running
 // AfterAgentCallback), and marks its delegating agent activation as having
@@ -4075,18 +7533,30 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 //
 // failed reports that the response also carries a classified tool result
 // error, with which ADK ends the activation as well, but which fails its task.
-// The response ends the activation on the event's node path whose finish_task
-// call with one of the call IDs in calls ended the activation (using failed to
-// disambiguate when two runs on that path share a call ID; see
-// finishedTaskLocked), and otherwise, when no such activation is open or more
-// than one is, as for a response whose call this plugin did not see complete,
-// the activation that findAgentForContext finds. OnEventCallback runs on the runner's goroutine
-// with the runner's context, and the event does not show that the run that
-// wrote it returned: a custom agent can forward the event of a sub-agent that
-// it runs on another goroutine and wait for that goroutine later. So the span
-// is retired without the activation's InvocationContext being read and
-// without its run being taken to be over (see retireAgentLocked).
-func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string, failed bool) (span rowSpan, ok bool) {
+// All ending call IDs on the event are evaluated together before any attempt is
+// consumed (see resolveFinishedTaskLocked): single-call ties resolve to the
+// earliest-recorded attempt so overlapping runs reusing call_0 all close
+// cleanly, while disjoint multi-call matches leave spans open rather than
+// guessing across conflicting call IDs. An unobserved call falls back to
+// unobservedTaskLocked. OnEventCallback runs on the runner's goroutine with
+// the runner's context, and the event does not show that the run that wrote it
+// returned: a custom agent can forward the event of a sub-agent that it runs
+// on another goroutine and wait for that goroutine later. So the span is
+// retired without the activation's InvocationContext being read and without
+// its run being taken to be over (see retireAgentLocked).
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, callID string, failed bool, eventTime time.Time) (span rowSpan, ok bool) {
+	var endingCallIDs []string
+	if callID != "" {
+		endingCallIDs = []string{callID}
+	}
+	return tm.popTaskAgentSpanForCalls(ctx, id, endingCallIDs, failed, eventTime)
+}
+
+func (tm *traceManager) popTaskAgentSpanForCalls(ctx context.Context, id identity, endingCallIDs []string, failed bool, eventTime time.Time) (span rowSpan, ok bool) {
+	return tm.popTaskAgentSpanForEvent(ctx, id, endingCallIDs, "", taskDispatchMaps{}, failed, len(endingCallIDs) > 1, eventTime)
+}
+
+func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identity, endingCallIDs []string, leadingActionCallID string, evDispatch taskDispatchMaps, failed, mergedResponse bool, eventTime time.Time) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -4094,9 +7564,19 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls, failed)
-	if i < 0 {
-		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	i, status := inv.resolveFinishedTaskLocked(id, endingCallIDs, leadingActionCallID, evDispatch, failed, mergedResponse, eventTime)
+	switch status {
+	case taskMatchAmbiguous:
+		return rowSpan{}, false
+	case taskMatchUnobserved:
+		fallbackCallID := ""
+		for _, cid := range endingCallIDs {
+			if cid != "" {
+				fallbackCallID = cid
+				break
+			}
+		}
+		i = inv.unobservedTaskLocked(ctx, id, fallbackCallID, eventTime)
 	}
 	if i < 0 {
 		return rowSpan{}, false
@@ -4129,65 +7609,559 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	return span, true
 }
 
-// finishedTaskLocked returns the index in agentStack of the open activation
-// of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls end the activation (see noteTaskFinished), or -1 if there is
-// none, or more than one. Both finishedTasks and failedTasks are searched
-// because agent-level AfterToolCallbacks run after this plugin and can add or
-// clear a tool result error flag before the FunctionResponse event is emitted.
-// A function call ID is scoped to the activation that made the call, not
-// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
-// such as "call_0" (see toolKey). When more than one open run on the event's
-// node path recorded the call ID, failed narrows the lookup to the list
-// matching the event's classification; if none or more than one still matches,
-// -1 is returned. As in findAgent, a node path that either side lacks matches
-// any. inv.mu must be held.
-func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
-	const ambiguous = -2
-	anyFound := -1
-	matchedFound := -1
-	for i := len(inv.agentStack) - 1; i > 0; i-- {
+func (inv *invocationTrace) matchesTaskAgentLocked(rec *spanRecord, id identity) bool {
+	return rec.kind == spanKindAgent && rec.taskMode &&
+		rec.name == id.agentName && rec.branch == id.branch &&
+		(id.path == "" || rec.path == "" || rec.path == id.path)
+}
+
+// finishedTaskLocked resolves and consumes a single ending finish_task callID
+// on id, delegating to resolveFinishedTaskLocked. inv.mu must be held.
+func (inv *invocationTrace) finishedTaskLocked(id identity, callID string, failed bool, eventTime time.Time) (int, taskMatchStatus) {
+	if callID == "" {
+		return -1, taskMatchUnobserved
+	}
+	return inv.resolveFinishedTaskLocked(id, []string{callID}, "", taskDispatchMaps{}, failed, false, eventTime)
+}
+
+// resolveFinishedTaskLocked evaluates all non-empty endingCallIDs of a
+// finish_task completion event before consuming any attempt:
+//
+//  1. Leading-part EventActions map identity (weak references to StateDelta and
+//     ArtifactDelta on the first FunctionResponse part) selects the exact
+//     producing activation immediately when matched, and deprioritizes
+//     disproved attempts when another candidate or open activation exists.
+//  2. Timestamp plausibility (excluding activations started after eventTime, and
+//     excluding attempts recorded after eventTime on single-response events
+//     while keeping parallel merged-response attempts whose sibling part
+//     stamped an earlier event timestamp) and O(N log N) suffix-maximum causal
+//     supersession narrow candidates across all endingCallIDs.
+//  3. Across multiple observed call IDs in one merged event, an activation must
+//     account for every surviving observed call ID; disjoint matches across
+//     different activations return taskMatchAmbiguous without consuming any
+//     attempt. Same-set ties choose the highest tier (1: matching failed, 2:
+//     opposite terminal flag, 3: pending) and then the earliest-recorded
+//     attempt (recordedAt, seq, stack order) so overlapping call_0 runs all
+//     close cleanly.
+//
+// inv.mu must be held.
+func (inv *invocationTrace) resolveFinishedTaskLocked(id identity, endingCallIDs []string, leadingActionCallID string, evDispatch taskDispatchMaps, failed, mergedResponse bool, eventTime time.Time) (int, taskMatchStatus) {
+	var callIDs []string
+	for _, cid := range endingCallIDs {
+		if cid != "" && !slices.Contains(callIDs, cid) {
+			callIDs = append(callIDs, cid)
+		}
+	}
+	if len(callIDs) == 0 {
+		return -1, taskMatchUnobserved
+	}
+
+	wantKind := taskAttemptCompleted
+	altEndKind := taskAttemptFailedEnd
+	if failed {
+		wantKind = taskAttemptFailedEnd
+		altEndKind = taskAttemptCompleted
+	}
+
+	var matchingOpen []int
+	hasPlausibleOpenWithoutEnding := false
+	for i := 1; i < len(inv.agentStack); i++ {
 		rec := inv.agentStack[i]
-		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
-			(id.path != "" && rec.path != "" && rec.path != id.path) {
+		if !inv.matchesTaskAgentLocked(rec, id) {
 			continue
 		}
-		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
-		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
-		if !inFinished && !inFailed {
+		matchingOpen = append(matchingOpen, i)
+		if !eventTime.IsZero() && !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
 			continue
 		}
-		if anyFound == -1 {
-			anyFound = i
-		} else {
-			anyFound = ambiguous
+		hasEnding := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+			return isObservedEndingAttempt(att.kind)
+		})
+		if !hasEnding {
+			hasPlausibleOpenWithoutEnding = true
 		}
-		if (failed && inFailed) || (!failed && inFinished) {
-			if matchedFound == -1 {
-				matchedFound = i
-			} else {
-				matchedFound = ambiguous
+	}
+	if len(matchingOpen) == 0 {
+		return -1, taskMatchUnobserved
+	}
+
+	type tierChoice struct {
+		ok              bool
+		recordedAt      time.Time
+		seq             uint64
+		actionMatched   bool
+		actionDisproved bool
+	}
+	betterAttempt := func(cur, cand tierChoice) bool {
+		if !cur.ok {
+			return true
+		}
+		if cand.actionMatched != cur.actionMatched {
+			return cand.actionMatched
+		}
+		if cand.actionDisproved != cur.actionDisproved {
+			return !cand.actionDisproved
+		}
+		return earlierTaskAttempt(cand.recordedAt, cand.seq, cur.recordedAt, cur.seq)
+	}
+
+	type taskCandidate struct {
+		idx             int
+		callID          string
+		kind            taskAttemptKind
+		tier            uint8
+		recordedAt      time.Time
+		seq             uint64
+		actionMatched   bool
+		actionDisproved bool
+	}
+
+	var candidates []taskCandidate
+	for _, cid := range callIDs {
+		checkAction := cid == leadingActionCallID && evDispatch.hasLiveMap()
+		for _, i := range matchingOpen {
+			rec := inv.agentStack[i]
+			var wantC, altC, pendingC tierChoice
+			for _, att := range rec.taskAttempts {
+				if att.callID != cid {
+					continue
+				}
+				matched := checkAction && att.dispatch.matches(evDispatch)
+				disproved := checkAction && !matched && att.dispatch.hasLiveMap()
+				cand := tierChoice{
+					ok:              true,
+					recordedAt:      att.recordedAt,
+					seq:             att.seq,
+					actionMatched:   matched,
+					actionDisproved: disproved,
+				}
+				switch att.kind {
+				case wantKind:
+					if betterAttempt(wantC, cand) {
+						wantC = cand
+					}
+				case altEndKind:
+					if betterAttempt(altC, cand) {
+						altC = cand
+					}
+				case taskAttemptPending:
+					if betterAttempt(pendingC, cand) {
+						pendingC = cand
+					}
+				}
+			}
+			// An exact dispatch-map match on a lower tier outranks a stale
+			// non-matching attempt on the same activation; otherwise keep tier
+			// precedence (wantKind -> altEndKind -> pending).
+			switch {
+			case wantC.ok && (wantC.actionMatched || (!altC.actionMatched && !pendingC.actionMatched)):
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: wantKind, tier: 1,
+					recordedAt: wantC.recordedAt, seq: wantC.seq,
+					actionMatched: wantC.actionMatched, actionDisproved: wantC.actionDisproved,
+				})
+			case altC.ok && (altC.actionMatched || !pendingC.actionMatched):
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: altEndKind, tier: 2,
+					recordedAt: altC.recordedAt, seq: altC.seq,
+					actionMatched: altC.actionMatched, actionDisproved: altC.actionDisproved,
+				})
+			case pendingC.ok:
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: taskAttemptPending, tier: 3,
+					recordedAt: pendingC.recordedAt, seq: pendingC.seq,
+					actionMatched: pendingC.actionMatched, actionDisproved: pendingC.actionDisproved,
+				})
 			}
 		}
 	}
-	if anyFound >= 0 {
-		return anyFound
+	if len(candidates) == 0 {
+		return -1, taskMatchUnobserved
 	}
-	if matchedFound >= 0 {
-		return matchedFound
+
+	consumeWinner := func(winnerIdx int, source []taskCandidate) (int, taskMatchStatus) {
+		rec := inv.agentStack[winnerIdx]
+		for _, cid := range callIDs {
+			var wantConsumeKind taskAttemptKind
+			foundKind := false
+			for _, c := range source {
+				if c.idx == winnerIdx && c.callID == cid {
+					wantConsumeKind = c.kind
+					foundKind = true
+					break
+				}
+			}
+			if !foundKind {
+				continue
+			}
+			checkAction := cid == leadingActionCallID && evDispatch.hasLiveMap()
+			bestJ := -1
+			for j, att := range rec.taskAttempts {
+				if att.callID != cid || att.kind != wantConsumeKind {
+					continue
+				}
+				if checkAction && att.dispatch.matches(evDispatch) {
+					bestJ = j
+					break
+				}
+				if bestJ < 0 || earlierTaskAttempt(att.recordedAt, att.seq, rec.taskAttempts[bestJ].recordedAt, rec.taskAttempts[bestJ].seq) {
+					bestJ = j
+				}
+			}
+			if bestJ >= 0 {
+				rec.taskAttempts = slices.Delete(rec.taskAttempts, bestJ, bestJ+1)
+			}
+		}
+		return winnerIdx, taskMatchFound
 	}
-	return -1
+
+	// 1. Exact leading-part EventActions map match identifies the producing
+	// activation directly, even on frozen clocks.
+	var exactMatches []taskCandidate
+	for _, c := range candidates {
+		if c.actionMatched {
+			exactMatches = append(exactMatches, c)
+		}
+	}
+	if len(exactMatches) > 0 {
+		best := exactMatches[0]
+		for _, c := range exactMatches[1:] {
+			if c.tier < best.tier ||
+				(c.tier == best.tier && (earlierTaskAttempt(c.recordedAt, c.seq, best.recordedAt, best.seq) ||
+					(c.recordedAt.Equal(best.recordedAt) && c.seq == best.seq && c.idx < best.idx))) {
+				best = c
+			}
+		}
+		return consumeWinner(best.idx, candidates)
+	}
+
+	// 2. Drop candidates whose recorded live dispatch maps conflict with the
+	// event's leading-part maps when another candidate or an open activation
+	// without a recorded ending attempt explains the event.
+	hasDisproved := slices.ContainsFunc(candidates, func(c taskCandidate) bool { return c.actionDisproved })
+	if hasDisproved {
+		nonDisproved := make([]taskCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			if !c.actionDisproved {
+				nonDisproved = append(nonDisproved, c)
+			}
+		}
+		if len(nonDisproved) > 0 {
+			candidates = nonDisproved
+		} else if hasPlausibleOpenWithoutEnding {
+			return -1, taskMatchUnobserved
+		}
+	}
+
+	// 3. Timestamp plausibility filter. For merged multi-part FunctionResponse
+	// events, ADK stamps ev.Timestamp from events[0], which can precede a
+	// concurrent sibling tool's AfterToolCallback recordedAt, so only
+	// rec.eventClockStart bounds merged events.
+	if !eventTime.IsZero() && (len(candidates) >= 2 || hasPlausibleOpenWithoutEnding) {
+		plausible := make([]taskCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			rec := inv.agentStack[c.idx]
+			if !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
+				continue
+			}
+			if !mergedResponse && !c.recordedAt.IsZero() && eventTime.Before(c.recordedAt) {
+				continue
+			}
+			plausible = append(plausible, c)
+		}
+		if len(plausible) > 0 {
+			candidates = plausible
+		} else if len(candidates) == 1 && hasPlausibleOpenWithoutEnding {
+			return -1, taskMatchUnobserved
+		}
+	}
+
+	// 4. O(N log N) suffix-maximum causal supersession across all surviving
+	// candidates: a candidate cOld with a non-zero recordedAt is superseded when
+	// another activation idx != cOld.idx has a plausible strictly-later
+	// recordedAt and either started after cOld (recNew.seq > cOld.seq) or opened
+	// its event clock after cOld was recorded (cOld.recordedAt < recNew.eventClockStart).
+	if len(candidates) >= 2 && !eventTime.IsZero() {
+		order := make([]int, len(candidates))
+		for k := range order {
+			order[k] = k
+		}
+		slices.SortFunc(order, func(a, b int) int {
+			ta, tb := candidates[a].recordedAt, candidates[b].recordedAt
+			switch {
+			case ta.Equal(tb):
+				return cmp.Compare(a, b)
+			case ta.After(tb):
+				return -1
+			default:
+				return 1
+			}
+		})
+
+		type idxSeq struct {
+			idx int
+			seq uint64
+		}
+		type idxClk struct {
+			idx int
+			clk time.Time
+		}
+		var topSeq1, topSeq2 idxSeq
+		var topClk1, topClk2 idxClk
+		addWitness := func(c taskCandidate) {
+			if c.recordedAt.IsZero() {
+				return
+			}
+			recNew := inv.agentStack[c.idx]
+			if mergedResponse {
+				if !recNew.eventClockStart.IsZero() && eventTime.Before(recNew.eventClockStart) {
+					return
+				}
+			} else if eventTime.Before(c.recordedAt) {
+				return
+			}
+			if recNew.seq > 0 {
+				if topSeq1.idx == c.idx {
+					topSeq1.seq = max(topSeq1.seq, recNew.seq)
+				} else if recNew.seq > topSeq1.seq {
+					topSeq2 = topSeq1
+					topSeq1 = idxSeq{idx: c.idx, seq: recNew.seq}
+				} else if topSeq2.idx == c.idx {
+					topSeq2.seq = max(topSeq2.seq, recNew.seq)
+				} else if recNew.seq > topSeq2.seq {
+					topSeq2 = idxSeq{idx: c.idx, seq: recNew.seq}
+				}
+			}
+			if !recNew.eventClockStart.IsZero() {
+				if topClk1.idx == c.idx {
+					if recNew.eventClockStart.After(topClk1.clk) {
+						topClk1.clk = recNew.eventClockStart
+					}
+				} else if topClk1.clk.IsZero() || recNew.eventClockStart.After(topClk1.clk) {
+					topClk2 = topClk1
+					topClk1 = idxClk{idx: c.idx, clk: recNew.eventClockStart}
+				} else if topClk2.idx == c.idx {
+					if recNew.eventClockStart.After(topClk2.clk) {
+						topClk2.clk = recNew.eventClockStart
+					}
+				} else if topClk2.clk.IsZero() || recNew.eventClockStart.After(topClk2.clk) {
+					topClk2 = idxClk{idx: c.idx, clk: recNew.eventClockStart}
+				}
+			}
+		}
+
+		superseded := make([]bool, len(candidates))
+		for start := 0; start < len(order); {
+			batchTime := candidates[order[start]].recordedAt
+			end := start + 1
+			for end < len(order) && candidates[order[end]].recordedAt.Equal(batchTime) {
+				end++
+			}
+			if !batchTime.IsZero() {
+				for _, pos := range order[start:end] {
+					cOld := candidates[pos]
+					maxSeq := topSeq1.seq
+					if topSeq1.idx == cOld.idx {
+						maxSeq = topSeq2.seq
+					}
+					maxClk := topClk1.clk
+					if topClk1.idx == cOld.idx {
+						maxClk = topClk2.clk
+					}
+					if (maxSeq > 0 && cOld.seq < maxSeq) || (!maxClk.IsZero() && cOld.recordedAt.Before(maxClk)) {
+						superseded[pos] = true
+					}
+				}
+			}
+			for _, pos := range order[start:end] {
+				addWitness(candidates[pos])
+			}
+			start = end
+		}
+
+		unsuperseded := make([]taskCandidate, 0, len(candidates))
+		for k, c := range candidates {
+			if !superseded[k] {
+				unsuperseded = append(unsuperseded, c)
+			}
+		}
+		if len(unsuperseded) > 0 {
+			candidates = unsuperseded
+		}
+	}
+
+	// 5. Aggregate across observed call IDs in the event. Every call ID in one
+	// session.Event was emitted by a single activation; if surviving observed
+	// call IDs split across disjoint activations so no single activation covers
+	// all of them, leave spans open rather than guessing.
+	observedCallIDs := make(map[string]struct{}, len(callIDs))
+	type actSummary struct {
+		idx        int
+		matchCount int
+		bestTier   uint8
+		recordedAt time.Time
+		seq        uint64
+	}
+	var summaries []actSummary
+	summaryByIdx := make(map[int]int, len(candidates))
+	for _, c := range candidates {
+		observedCallIDs[c.callID] = struct{}{}
+		pos, ok := summaryByIdx[c.idx]
+		if !ok {
+			summaryByIdx[c.idx] = len(summaries)
+			summaries = append(summaries, actSummary{
+				idx:        c.idx,
+				matchCount: 1,
+				bestTier:   c.tier,
+				recordedAt: c.recordedAt,
+				seq:        c.seq,
+			})
+			continue
+		}
+		s := &summaries[pos]
+		s.matchCount++
+		if c.tier < s.bestTier || (c.tier == s.bestTier && earlierTaskAttempt(c.recordedAt, c.seq, s.recordedAt, s.seq)) {
+			s.bestTier = c.tier
+			s.recordedAt = c.recordedAt
+			s.seq = c.seq
+		}
+	}
+
+	wantMatches := len(observedCallIDs)
+	var fullMatches []actSummary
+	for _, s := range summaries {
+		if s.matchCount == wantMatches {
+			fullMatches = append(fullMatches, s)
+		}
+	}
+	if len(fullMatches) == 0 {
+		return -1, taskMatchAmbiguous
+	}
+
+	best := fullMatches[0]
+	for _, s := range fullMatches[1:] {
+		if s.bestTier < best.bestTier {
+			best = s
+			continue
+		}
+		if s.bestTier > best.bestTier {
+			continue
+		}
+		if earlierTaskAttempt(s.recordedAt, s.seq, best.recordedAt, best.seq) ||
+			(s.recordedAt.Equal(best.recordedAt) && s.seq == best.seq && s.idx < best.idx) {
+			best = s
+		}
+	}
+	return consumeWinner(best.idx, candidates)
 }
 
-// noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, or, if failed is set, ended
-// the activation with a classified tool result error, so that the function
-// response event that reports it ends that activation (see popTaskAgentSpan).
-// The tool callbacks get the context of the activation that made the call,
-// which the event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string, failed bool) {
+// unobservedTaskLocked resolves the open task-mode activation of id for a
+// finish_task completion event whose callID was not observed by any open
+// activation's tool callbacks (for example, when an earlier plugin answered
+// BeforeToolCallback and AfterToolCallback, or in synthetic event-only tests
+// without call IDs). Activations that already hold an unconsumed observed
+// ending attempt for another call are skipped when another candidate exists,
+// eventTime excludes activations started after the event was created, and ties
+// fall back to ctx's activation (when in pool) or the newest plausible
+// matching activation as on main. inv.mu must be held.
+func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, _ string, eventTime time.Time) int {
+	var withoutEnding, allMatching []int
+	for i := 1; i < len(inv.agentStack); i++ {
+		rec := inv.agentStack[i]
+		if !inv.matchesTaskAgentLocked(rec, id) {
+			continue
+		}
+		allMatching = append(allMatching, i)
+		hasEnding := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+			return isObservedEndingAttempt(att.kind)
+		})
+		if !hasEnding {
+			withoutEnding = append(withoutEnding, i)
+		}
+	}
+	pool := withoutEnding
+	if len(pool) == 0 {
+		pool = allMatching
+	}
+	if len(pool) == 0 {
+		return -1
+	}
+	if len(pool) >= 2 && !eventTime.IsZero() {
+		plausible := make([]int, 0, len(pool))
+		for _, idx := range pool {
+			rec := inv.agentStack[idx]
+			if rec.eventClockStart.IsZero() || !eventTime.Before(rec.eventClockStart) {
+				plausible = append(plausible, idx)
+			}
+		}
+		if len(plausible) > 0 {
+			pool = plausible
+		}
+	}
+	if len(pool) == 1 {
+		return pool[0]
+	}
+	if ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
+		return ctxIdx
+	}
+	return pool[len(pool)-1]
+}
+
+// noteTaskStart records that the activation of ctx and id started a
+// finish_task call with callID, so the pending attempt is still attributed to
+// that activation if an earlier plugin's AfterToolCallback short-circuits
+// before noteTaskAttempt runs.
+func (tm *traceManager) noteTaskStart(ctx context.Context, id identity, callID string) {
 	if callID == "" {
 		return
+	}
+	recordedAt := platform.Now(ctx)
+	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		rec := inv.agentStack[i]
+		for j := range rec.taskAttempts {
+			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
+				if dispatch.hasLiveMap() {
+					rec.taskAttempts[j].dispatch = dispatch
+				}
+				return
+			}
+		}
+		rec.taskAttempts = append(rec.taskAttempts, taskAttempt{
+			callID:      callID,
+			kind:        taskAttemptPending,
+			startedOnly: true,
+			recordedAt:  recordedAt,
+			seq:         inv.lastSeq,
+			dispatch:    dispatch,
+		})
+	}
+}
+
+// noteTaskAttempt records the outcome of a finish_task call on the agent
+// activation that ctx and id identify, distinguishing calls whose result
+// already ended the task in afterTool (ends), with a classified tool result
+// error or not (failed), from attempts that did not end it, which a later
+// AfterToolCallback may still promote before the FunctionResponse event is
+// emitted (see popTaskAgentSpan and retireFailedTaskAttempts).
+func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID string, ends, failed bool) {
+	if callID == "" {
+		return
+	}
+	recordedAt := platform.Now(ctx)
+	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	kind := taskAttemptPending
+	if ends {
+		if failed {
+			kind = taskAttemptFailedEnd
+		} else {
+			kind = taskAttemptCompleted
+		}
 	}
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
@@ -4196,10 +8170,207 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
-		if failed {
-			rec.failedTasks = append(rec.failedTasks, callID)
-		} else {
-			rec.finishedTasks = append(rec.finishedTasks, callID)
+		for j := range rec.taskAttempts {
+			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
+				rec.taskAttempts[j].kind = kind
+				rec.taskAttempts[j].startedOnly = false
+				rec.taskAttempts[j].recordedAt = recordedAt
+				rec.taskAttempts[j].seq = inv.lastSeq
+				if dispatch.hasLiveMap() {
+					rec.taskAttempts[j].dispatch = dispatch
+				}
+				return
+			}
+		}
+		rec.taskAttempts = append(rec.taskAttempts, taskAttempt{
+			callID:     callID,
+			kind:       kind,
+			recordedAt: recordedAt,
+			seq:        inv.lastSeq,
+			dispatch:   dispatch,
+		})
+	}
+}
+
+// retireFailedTaskAttempts removes pending (non-ending) finish_task attempts
+// for failedCalls once their FunctionResponse event arrives without ending the
+// task. Observed ending attempts (taskAttemptCompleted and
+// taskAttemptFailedEnd) are never deleted for failedCalls, so an unobserved
+// failure on a newer activation cannot wipe out another open activation's
+// observed completion; overruledEndingCalls (sentinel-bearing responses behind
+// a failed first finish_task response in the same merged event) are retired on
+// the activation where failedCalls matched, or when no pending failed ID
+// matched (for example when the first failed response had an empty call ID), on
+// a plausible matching activation holding an observed ending attempt for that ID.
+func (tm *traceManager) retireFailedTaskAttempts(ctx context.Context, id identity, failedCalls, overruledEndingCalls []string) {
+	tm.retireFailedTaskAttemptsForEvent(ctx, id, failedCalls, overruledEndingCalls, "", taskDispatchMaps{}, len(failedCalls)+len(overruledEndingCalls) > 1, time.Time{})
+}
+
+func (tm *traceManager) retireFailedTaskAttemptsForEvent(ctx context.Context, id identity, failedCalls, overruledEndingCalls []string, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+	if len(failedCalls) == 0 && len(overruledEndingCalls) == 0 {
+		return
+	}
+	remaining := make(map[string]int, len(failedCalls))
+	total := 0
+	for _, call := range failedCalls {
+		if call != "" {
+			remaining[call]++
+			total++
+		}
+	}
+	overruledTotal := 0
+	var overruled map[string]int
+	if len(overruledEndingCalls) > 0 {
+		overruled = make(map[string]int, len(overruledEndingCalls))
+		for _, call := range overruledEndingCalls {
+			if call != "" {
+				overruled[call]++
+				overruledTotal++
+			}
+		}
+	}
+	if total == 0 && overruledTotal == 0 {
+		return
+	}
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
+}
+
+func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
+	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
+}
+
+// retireFailedTaskAttemptsAtLocked compacts pending finish_task attempts
+// matching remaining across plausible open activations of id, preferring an
+// exact leading-part EventActions map match first, excluding activations and
+// single-call attempts recorded after eventTime so a delayed older failure
+// cannot erase a newer activation's pending attempt, and retiring
+// overruledEndingCalls on the activation where remaining matched or on a
+// plausible matching activation when remaining was empty. inv.mu must be held.
+func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+	matchesAgent := func(rec *spanRecord) bool {
+		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
+			(id.path != "" && rec.path != "" && rec.path != id.path) || len(rec.taskAttempts) == 0 {
+			return false
+		}
+		if !eventTime.IsZero() && !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
+			return false
+		}
+		return true
+	}
+	plausibleAttempt := func(att taskAttempt, skipDisproved bool) bool {
+		if !eventTime.IsZero() && !mergedResponse && !att.recordedAt.IsZero() && eventTime.Before(att.recordedAt) {
+			return false
+		}
+		if skipDisproved && att.callID == leadingActionCallID && evDispatch.hasLiveMap() && att.dispatch.hasLiveMap() && !att.dispatch.matches(evDispatch) {
+			return false
+		}
+		return true
+	}
+	retireOnRec := func(rec *spanRecord, skipDisproved bool) {
+		matchedFailedOnRec := false
+		for _, att := range rec.taskAttempts {
+			if att.kind == taskAttemptPending && remaining[att.callID] > 0 && plausibleAttempt(att, skipDisproved) {
+				matchedFailedOnRec = true
+				break
+			}
+		}
+		if !matchedFailedOnRec {
+			return
+		}
+		write := 0
+		for _, att := range rec.taskAttempts {
+			if total > 0 && att.kind == taskAttemptPending && remaining[att.callID] > 0 && plausibleAttempt(att, skipDisproved) {
+				remaining[att.callID]--
+				total--
+				continue
+			}
+			if overruledTotal > 0 && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				overruled[att.callID]--
+				overruledTotal--
+				continue
+			}
+			rec.taskAttempts[write] = att
+			write++
+		}
+		clear(rec.taskAttempts[write:])
+		rec.taskAttempts = rec.taskAttempts[:write]
+	}
+
+	// Pass 1: exact leading-part EventActions map match identifies the
+	// activation that produced the failed response even on equal timestamps.
+	if total > 0 && leadingActionCallID != "" && remaining[leadingActionCallID] > 0 && evDispatch.hasLiveMap() {
+		for i := len(inv.agentStack) - 1; i > 0 && total > 0; i-- {
+			rec := inv.agentStack[i]
+			if !matchesAgent(rec) {
+				continue
+			}
+			hasExact := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+				return att.kind == taskAttemptPending && att.callID == leadingActionCallID && att.dispatch.matches(evDispatch)
+			})
+			if hasExact {
+				retireOnRec(rec, true)
+				break
+			}
+		}
+	}
+
+	// Pass 2: plausible non-disproved pending attempts, then fallback if needed.
+	for _, skipDisproved := range []bool{true, false} {
+		for i := len(inv.agentStack) - 1; i > 0 && total > 0; i-- {
+			rec := inv.agentStack[i]
+			if !matchesAgent(rec) {
+				continue
+			}
+			retireOnRec(rec, skipDisproved)
+		}
+		if total == 0 || !evDispatch.hasLiveMap() {
+			break
+		}
+	}
+
+	if overruledTotal <= 0 {
+		return
+	}
+	retireOverruledOn := func(rec *spanRecord) {
+		hasMatch := false
+		for _, att := range rec.taskAttempts {
+			if isObservedEndingAttempt(att.kind) && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				hasMatch = true
+				break
+			}
+		}
+		if !hasMatch {
+			return
+		}
+		write := 0
+		for _, att := range rec.taskAttempts {
+			if overruledTotal > 0 && isObservedEndingAttempt(att.kind) && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				overruled[att.callID]--
+				overruledTotal--
+				continue
+			}
+			rec.taskAttempts[write] = att
+			write++
+		}
+		clear(rec.taskAttempts[write:])
+		rec.taskAttempts = rec.taskAttempts[:write]
+	}
+	ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	if ctxIdx > 0 && activationKey(ctx) != nil && matchesAgent(inv.agentStack[ctxIdx]) {
+		retireOverruledOn(inv.agentStack[ctxIdx])
+	}
+	// When no concrete activation context matched, prefer the earliest-recorded
+	// plausible overruled attempt so a failed merged batch on an older open run
+	// retires its own overruled ending call before a concurrent newer run's.
+	for i := 1; i < len(inv.agentStack) && overruledTotal > 0; i++ {
+		if i == ctxIdx && activationKey(ctx) != nil {
+			continue
+		}
+		if rec := inv.agentStack[i]; matchesAgent(rec) {
+			retireOverruledOn(rec)
 		}
 	}
 }
@@ -4767,6 +8938,10 @@ type unclosedAgentSpan struct {
 // branch and node path while the callback of the event that called the tool
 // runs, which would be taken for the activation that the agent runs under.
 func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string, calls []string) {
+	tm.completeResponseWithActions(ctx, id, author, branch, calls, nil)
+}
+
+func (tm *traceManager) completeResponseWithActions(ctx context.Context, id identity, author, branch string, calls []string, eventActions *session.EventActions) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -4842,6 +9017,11 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 			delete(inv.toolSpans, key)
 		}
 	}
+	for key, rec := range inv.completedTools {
+		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) && eventActionsMatchLiveAttempt(eventActions, rec.errorAttempt.Value()) {
+			delete(inv.completedTools, key)
+		}
+	}
 	inv.syncOpenCallsLocked()
 	inv.markRespondedLocked(inv.lineageLocked(i))
 	inv.markRespondedLocked(under)
@@ -4856,6 +9036,27 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	// calls made returned, so none is marked as finished here (see
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
+}
+
+func sameMapPtr[K comparable, V any](a, b map[K]V) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return reflect.ValueOf(a).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
+}
+
+func eventActionsMatchLiveAttempt(eventActions, live *session.EventActions) bool {
+	if live == nil {
+		return true
+	}
+	if live.StateDelta != nil || live.ArtifactDelta != nil {
+		if eventActions == nil {
+			return false
+		}
+		return sameMapPtr(eventActions.StateDelta, live.StateDelta) ||
+			sameMapPtr(eventActions.ArtifactDelta, live.ArtifactDelta)
+	}
+	return eventActions == nil || (eventActions.StateDelta == nil && eventActions.ArtifactDelta == nil)
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed
@@ -6067,21 +10268,10 @@ func attemptSiteOfTrace(trace []byte, complete bool) attemptSite {
 	// "function(arguments)" line followed by a tab-indented "file:line" one,
 	// and ends with a "created by" line for the goroutine.
 	var names []string
-	for line := range strings.SplitSeq(frames, "\n") {
-		if line == "" || line[0] == '\t' {
-			continue
-		}
-		if strings.HasPrefix(line, "created by ") {
-			break
-		}
-		if strings.HasPrefix(line, "...") {
-			return attemptNone
-		}
-		paren := strings.LastIndexByte(line, '(')
-		if paren <= 0 {
-			return attemptNone
-		}
-		names = append(names, line[:paren])
+	if !visitTraceFrameNames(frames, func(name string) {
+		names = append(names, name)
+	}) {
+		return attemptNone
 	}
 	agentRun := agentPkgPath + ".(*agent).Run"
 	i := len(names) - 1
@@ -6147,17 +10337,189 @@ const maxGoroutineTraceSize = 1 << 20
 // BeforeAgentCallback, the attempt site of the agent activation that starts
 // (see attemptSiteOfTrace), or zero values for what the stack trace does not
 // show.
+//
+// runtime.Stack is called directly here rather than through
+// currentGoroutineTrace so that no extra helper frame pushes a stack right at
+// Go's 100-frame traceback limit into "...frames elided...".
 func currentGoroutine() (uint64, goroutineOrigin, attemptSite) {
+	buf := make([]byte, 8<<10)
+	var n int
+	for {
+		n = runtime.Stack(buf, false)
+		if n < len(buf) || len(buf) >= maxGoroutineTraceSize {
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	trace, complete := buf[:n], n < len(buf)
+	id, origin := parseGoroutineTrace(trace, complete)
+	return id, origin, attemptSiteOfTrace(trace, complete)
+}
+
+// currentGoroutineTrace returns the stack trace of the caller's goroutine as
+// runtime.Stack(buf, false) writes it, and whether it fit in the buffer.
+func currentGoroutineTrace() (trace []byte, complete bool) {
 	buf := make([]byte, 8<<10)
 	for {
 		n := runtime.Stack(buf, false)
 		if n < len(buf) || len(buf) >= maxGoroutineTraceSize {
-			complete := n < len(buf)
-			id, origin := parseGoroutineTrace(buf[:n], complete)
-			return id, origin, attemptSiteOfTrace(buf[:n], complete)
+			return buf[:n], n < len(buf)
 		}
 		buf = make([]byte, 2*len(buf))
 	}
+}
+
+// visitTraceFrameNames parses frames written by runtime.Stack (lines after the
+// goroutine header) up to "created by ", calling visit with each frame's
+// function name. It returns false if frames were elided by the runtime or a
+// frame line is malformed.
+func visitTraceFrameNames(frames string, visit func(name string)) bool {
+	for line := range strings.SplitSeq(frames, "\n") {
+		if line == "" || line[0] == '\t' {
+			continue
+		}
+		if strings.HasPrefix(line, "created by ") {
+			break
+		}
+		if strings.HasPrefix(line, "...") {
+			return false
+		}
+		paren := strings.LastIndexByte(line, '(')
+		if paren <= 0 {
+			return false
+		}
+		visit(line[:paren])
+	}
+	return true
+}
+
+// isGoroutineTraceHeader reports whether header is the line with which
+// runtime.Stack starts the trace of a goroutine:
+//
+//	goroutine 7 [chan receive, 2 minutes]:
+//	goroutine 7 gp=0xc000002380 m=0 mp=0x5b7e60 [running]:
+//	goroutine 7 [running labels:{"k": "v"}]:
+//	goroutine 7 [running] {k: "v w"}:
+//
+// The second form is that of GOTRACEBACK=system and above. The last two show
+// pprof labels: Go 1.26 prints them inside the bracket when
+// GODEBUG=tracebacklabels=1, and Go 1.27 after it, by default in a main module
+// that declares go 1.27 or later. A label key or value can hold brackets and
+// braces, which the runtime then quotes (Go 1.26 quotes every one), so labels
+// are read as quoted strings rather than searched for delimiters.
+func isGoroutineTraceHeader(header string) bool {
+	rest, ok := strings.CutPrefix(header, "goroutine ")
+	if !ok {
+		return false
+	}
+	// A header with no space after the ID has no bracket either, and so
+	// fails below, as does one with no bracket.
+	idText, rest, _ := strings.Cut(rest, " ")
+	if _, err := strconv.ParseUint(idText, 10, 64); err != nil {
+		return false
+	}
+	fields, rest, _ := strings.Cut(rest, "[")
+	if (fields != "" && !strings.HasSuffix(fields, " ")) || strings.ContainsAny(fields, `]{}"`) {
+		return false
+	}
+	// The status, such as "chan receive, 2 minutes", runs up to the closing
+	// bracket, or up to the labels that Go 1.26 prints inside it.
+	end := strings.IndexAny(rest, `[]{}"`)
+	if end <= 0 {
+		return false
+	}
+	if status, ok := strings.CutSuffix(rest[:end], " labels:"); ok {
+		return status != "" && cutTracebackLabels(rest[end:], true) == "]:"
+	}
+	if labels, ok := strings.CutPrefix(rest[end:], "] "); ok {
+		return cutTracebackLabels(labels, false) == ":"
+	}
+	return rest[end:] == "]:"
+}
+
+// cutTracebackLabels returns what follows the pprof labels that s starts with
+// in a goroutine header (see isGoroutineTraceHeader), "{" and "}" around
+// "key: value" pairs that ", " separates, or "" if s does not start with
+// labels. quoted requires every key and value to be quoted, as in Go 1.26.
+func cutTracebackLabels(s string, quoted bool) string {
+	s, ok := strings.CutPrefix(s, "{")
+	if !ok {
+		return ""
+	}
+	for {
+		if s, ok = strings.CutPrefix(cutTracebackLabelString(s, quoted), ": "); !ok {
+			return ""
+		}
+		s = cutTracebackLabelString(s, quoted)
+		if rest, ok := strings.CutPrefix(s, "}"); ok {
+			return rest
+		}
+		if s, ok = strings.CutPrefix(s, ", "); !ok {
+			return ""
+		}
+	}
+}
+
+// cutTracebackLabelString returns what follows the label key or value that s
+// starts with: a string in double quotes, in which a backslash escapes the
+// character after it, or, unless quoted is true, a possibly empty run of the
+// letters, digits, '.', '/' and '_' that Go 1.27 leaves unquoted. It returns
+// "" if s starts with a quote that is not closed, or with no quote although
+// quoted is true.
+func cutTracebackLabelString(s string, quoted bool) string {
+	if s, ok := strings.CutPrefix(s, `"`); ok {
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				i++
+			case '"':
+				return s[i+1:]
+			}
+		}
+		return ""
+	}
+	if quoted {
+		return ""
+	}
+	return strings.TrimLeftFunc(s, func(r rune) bool {
+		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '.' || r == '/' || r == '_'
+	})
+}
+
+// afterAgentCallbackRunsOfTrace returns how many runs of after-agent
+// callbacks the goroutine whose stack trace runtime.Stack(buf, false) wrote is
+// in, complete reporting whether the trace fit in buf: the frames of
+// agent.runAfterAgentCallbacks, which runs an activation's plugin and agent
+// after-agent callbacks on the goroutine that ran the activation until all
+// callbacks finish or one returns non-nil content or an error (skipping later
+// callbacks, including this plugin's AfterAgentCallback when an earlier plugin
+// returns content or an error). An agent run started synchronously on that
+// same goroutine (such as a custom agent.New runner) runs inside that frame,
+// whereas a runner-driven llmagent executes as a workflow node on its own
+// scheduler goroutine and therefore sees 0 outer runAfterAgentCallbacks frames
+// during BeforeAgentCallbacks/Run and 1 (its own) during its
+// AfterAgentCallback rather than 2. The second result is false when the trace
+// is not a valid goroutine stack trace (including "goroutine N [...]:" or
+// "goroutine N [...] {...}:"), is incomplete, or had frames elided by the
+// runtime.
+func afterAgentCallbackRunsOfTrace(trace []byte, complete bool) (int, bool) {
+	if !complete {
+		return 0, false
+	}
+	header, frames, ok := strings.Cut(string(trace), "\n")
+	if !ok || !isGoroutineTraceHeader(header) {
+		return 0, false
+	}
+	fn := agentPkgPath + ".runAfterAgentCallbacks"
+	runs := 0
+	if !visitTraceFrameNames(frames, func(name string) {
+		if name == fn {
+			runs++
+		}
+	}) {
+		return 0, false
+	}
+	return runs, true
 }
 
 // parseGoroutineTrace parses the stack trace of one goroutine as
@@ -6918,9 +11280,43 @@ func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord
 }
 
 // llmKey identifies the model call of an agent activation: an agent makes
-// one model call at a time per node path and branch.
+// one model call at a time per node path and branch. Length-prefixed encoding
+// keeps parseLLMKey exact even when path, agentName, or branch contains NUL
+// bytes or colons.
 func llmKey(id identity) string {
-	return id.path + "\x00" + id.agentName + "\x00" + id.branch
+	var b strings.Builder
+	b.Grow(len(id.path) + len(id.agentName) + len(id.branch) + 12)
+	b.WriteString(strconv.Itoa(len(id.path)))
+	b.WriteByte(':')
+	b.WriteString(id.path)
+	b.WriteString(strconv.Itoa(len(id.agentName)))
+	b.WriteByte(':')
+	b.WriteString(id.agentName)
+	b.WriteByte(':')
+	b.WriteString(id.branch)
+	return b.String()
+}
+
+// parseLLMKey extracts (path, agentName, branch) from a key created by llmKey.
+func parseLLMKey(k string) (path, name, branch string, ok bool) {
+	pathLenStr, rest, ok := strings.Cut(k, ":")
+	if !ok {
+		return "", "", "", false
+	}
+	pathLen, err := strconv.Atoi(pathLenStr)
+	if err != nil || pathLen < 0 || pathLen > len(rest) {
+		return "", "", "", false
+	}
+	path, rest = rest[:pathLen], rest[pathLen:]
+	nameLenStr, rest, ok := strings.Cut(rest, ":")
+	if !ok {
+		return "", "", "", false
+	}
+	nameLen, err := strconv.Atoi(nameLenStr)
+	if err != nil || nameLen < 0 || nameLen+1 > len(rest) || rest[nameLen] != ':' {
+		return "", "", "", false
+	}
+	return path, rest[:nameLen], rest[nameLen+1:], true
 }
 
 // toolKey identifies a tool call within its owning agent activation by
@@ -6940,9 +11336,129 @@ func toolKeyCall(key string) string {
 	return key[strings.LastIndexByte(key, 0)+1:]
 }
 
+type contextStructQueue struct {
+	inline   [16]reflect.Value
+	head     int
+	tail     int
+	count    int
+	overflow []reflect.Value
+	overHead int
+}
+
+func (q *contextStructQueue) push(v reflect.Value) {
+	if !v.IsValid() || ((v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) && v.IsNil()) {
+		return
+	}
+	if q.overflow != nil {
+		q.overflow = append(q.overflow, v)
+		return
+	}
+	if q.count == len(q.inline) {
+		q.overflow = make([]reflect.Value, len(q.inline)+1, len(q.inline)*2)
+		for i := range q.count {
+			idx := (q.head + i) & (len(q.inline) - 1)
+			q.overflow[i] = q.inline[idx]
+			q.inline[idx] = reflect.Value{}
+		}
+		q.overflow[q.count] = v
+		q.head, q.tail, q.count = 0, 0, 0
+		return
+	}
+	q.inline[q.tail] = v
+	q.tail = (q.tail + 1) & (len(q.inline) - 1)
+	q.count++
+}
+
+func (q *contextStructQueue) pop() (reflect.Value, bool) {
+	if q.overflow != nil {
+		if q.overHead >= len(q.overflow) {
+			return reflect.Value{}, false
+		}
+		v := q.overflow[q.overHead]
+		q.overflow[q.overHead] = reflect.Value{}
+		q.overHead++
+		return v, true
+	}
+	if q.count == 0 {
+		return reflect.Value{}, false
+	}
+	v := q.inline[q.head]
+	q.inline[q.head] = reflect.Value{}
+	q.head = (q.head + 1) & (len(q.inline) - 1)
+	q.count--
+	return v, true
+}
+
+func sameContextChild(a, b reflect.Value) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return false
+	}
+	if a.Kind() == reflect.Interface && !a.IsNil() {
+		a = a.Elem()
+	}
+	if b.Kind() == reflect.Interface && !b.IsNil() {
+		b = b.Elem()
+	}
+	return a.Kind() == reflect.Pointer && b.Kind() == reflect.Pointer && a.Pointer() == b.Pointer() && a.Type() == b.Type()
+}
+
+// adkContextChildren returns up to two inner context fields from allowlisted
+// Go stdlib and ADK context wrapper structs, ignoring application-owned types.
+func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
+	vt := v.Type()
+	switch vt.PkgPath() {
+	case "context":
+		if f := directStructField(v, "Context"); f.IsValid() {
+			return f, reflect.Value{}
+		}
+		if f := directStructField(v, "cancelCtx"); f.IsValid() {
+			return f, reflect.Value{}
+		}
+		return directStructField(v, "c"), reflect.Value{}
+	case agentPkgPath:
+		switch vt.Name() {
+		case "commonContext":
+			c1, c2 := directStructField(v, "Context"), directStructField(v, "invocationContext")
+			if sameContextChild(c1, c2) {
+				return c1, reflect.Value{}
+			}
+			return c1, c2
+		case "invocationContext":
+			return directStructField(v, "Context"), reflect.Value{}
+		case "callbackContextWrapper", "toolContextWrapper":
+			return directStructField(v, "context"), reflect.Value{}
+		}
+	case internalContextPkgPath:
+		switch vt.Name() {
+		case "InvocationContext":
+			return directStructField(v, "Context"), reflect.Value{}
+		case "ReadonlyContext":
+			c1, c2 := directStructField(v, "Context"), directStructField(v, "InvocationContext")
+			if sameContextChild(c1, c2) {
+				return c1, reflect.Value{}
+			}
+			return c1, c2
+		}
+	case internalLLMPkgPath:
+		if vt.Name() == "cancelledToolContext" {
+			return directStructField(v, "Context"), directStructField(v, "cancelCtx")
+		}
+	case remoteAgentPkgPath:
+		if vt.Name() == "authContext" {
+			return directStructField(v, "InvocationContext"), directStructField(v, "ctx")
+		}
+	case a2aServerPkgPath:
+		if vt.Name() == "executorContext" {
+			return directStructField(v, "Context"), reflect.Value{}
+		}
+	}
+	return reflect.Value{}, reflect.Value{}
+}
+
 // contextParentMap returns the child-to-parent agent map that ADK's runner
 // attaches to ctx via internal/agent/parentmap, or nil if ctx does not carry
-// one.
+// one. Only Go stdlib and ADK context wrappers are unwrapped; fields of
+// third-party or user context types are never read.
 func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -6952,9 +11468,192 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	if ctx == nil {
 		return nil
 	}
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
+	var q contextStructQueue
+	q.push(reflect.ValueOf(ctx))
+	var seen map[visitedContextStruct]bool
+	for steps := range 512 {
+		item, ok := q.pop()
+		if !ok {
+			break
+		}
+		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
+		if !ok {
+			continue
+		}
+		if v.Type().PkgPath() == "context" {
+			if key, val := directStructField(v, "key"), directStructField(v, "val"); key.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Kind() == reflect.Map &&
+					val.Type().Key().Kind() == reflect.String &&
+					val.Type().Elem() == agentInterfaceType {
+					if keyVal, ok := exportContextKey(key); ok {
+						lookupCtx := ctx
+						if v.CanAddr() && v.Addr().CanInterface() {
+							if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
+								lookupCtx = c
+							}
+						}
+						if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
+							if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
+								out := make(map[string]agent.Agent, m.Len())
+								iter := m.MapRange()
+								for iter.Next() {
+									if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
+										out[iter.Key().String()] = a
+									}
+								}
+								return out
+							}
+						}
+					}
+				}
+			}
+		}
+		c1, c2 := adkContextChildren(v)
+		q.push(c1)
+		q.push(c2)
+	}
+	return nil
+}
+
+var (
+	contextInterfaceType = reflect.TypeFor[context.Context]()
+	pluginPtrType        = reflect.TypeFor[*baseplugin.Plugin]()
+	uuidProviderType     = reflect.TypeFor[platform.UUIDProvider]()
+	pluginManagerPkgPath = adkPkgPrefix + "internal/plugininternal"
+
+	uuidProviderKeyOnce sync.Once
+	uuidProviderCtxKey  any
+
+	pluginManagerKeyOnce      sync.Once
+	pluginManagerCtxKey       any
+	pluginManagerStructType   reflect.Type
+	pluginManagerPluginsField = -1
+
+	errPluginManagerProbe = errors.New("plugin manager key probe")
+)
+
+type probeLiveAgent struct {
+	agent.Agent
+	onRunLive func(agent.InvocationContext)
+}
+
+func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if a.onRunLive != nil {
+		a.onRunLive(ctx)
+	}
+	return nil, nil, errPluginManagerProbe
+}
+
+func isContextField(f reflect.Value) bool {
+	return f.IsValid() && (f.Type().Implements(contextInterfaceType) ||
+		(f.Kind() == reflect.Struct && reflect.PointerTo(f.Type()).Implements(contextInterfaceType)))
+}
+
+// directStructField returns the direct field of v named name without traversing
+// embedded struct pointers, so a nil embedded pointer cannot panic.
+func directStructField(v reflect.Value, name string) reflect.Value {
+	t := v.Type()
+	for i, n := 0, t.NumField(); i < n; i++ {
+		if t.Field(i).Name == name {
+			return v.Field(i)
+		}
+	}
+	return reflect.Value{}
+}
+
+func isPluginManagerType(t reflect.Type) bool {
+	return t != nil && t.Kind() == reflect.Struct &&
+		t.Name() == "PluginManager" && t.PkgPath() == pluginManagerPkgPath
+}
+
+func discoverUUIDProviderCtxKey() any {
+	uuidProviderKeyOnce.Do(func() {
+		probe := platform.WithUUIDProvider(context.Background(), func() string { return "" })
+		cur := reflect.ValueOf(probe)
+		for cur.IsValid() {
+			for cur.Kind() == reflect.Pointer || cur.Kind() == reflect.Interface {
+				if cur.IsNil() {
+					return
+				}
+				cur = cur.Elem()
+			}
+			if !cur.IsValid() || cur.Kind() != reflect.Struct {
+				return
+			}
+			if key, val := directStructField(cur, "key"), directStructField(cur, "val"); key.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Type() == uuidProviderType {
+					if k, ok := exportContextKey(key); ok {
+						uuidProviderCtxKey = k
+						return
+					}
+				}
+			}
+			cur = directStructField(cur, "Context")
+		}
+	})
+	return uuidProviderCtxKey
+}
+
+func discoverPluginManagerCtxKey() any {
+	pluginManagerKeyOnce.Do(func() {
+		key, structType, pluginsField := probePluginManagerCtxKey()
+		if key != nil && structType != nil && pluginsField >= 0 {
+			pluginManagerStructType = structType
+			pluginManagerPluginsField = pluginsField
+			pluginManagerCtxKey = key
+		}
+	})
+	return pluginManagerCtxKey
+}
+
+// probePluginManagerCtxKey discovers ADK's unexported PluginManager context
+// key, struct type, and plugins slice field index via runner.RunLive. RunLive
+// is used rather than Run because it binds the PluginManager context value
+// without starting OTel invocation or agent spans, and platform.WithUUIDProvider
+// prevents the invocation context from reading crypto/rand.
+func probePluginManagerCtxKey() (key any, structType reflect.Type, pluginsField int) {
+	pluginsField = -1
+	defer func() {
+		if r := recover(); r != nil {
+			key, structType, pluginsField = nil, nil, -1
+		}
+	}()
+	baseAgent, err := agent.New(agent.Config{
+		Name: "plugin-manager-key-probe",
+	})
+	if err != nil {
+		return nil, nil, -1
+	}
+	var probeCtx context.Context
+	probeAgent := &probeLiveAgent{
+		Agent: baseAgent,
+		onRunLive: func(ctx agent.InvocationContext) {
+			probeCtx = ctx
+		},
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "plugin-manager-key-probe",
+		Agent:             probeAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		return nil, nil, -1
+	}
+	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "probe" })
+	_, _, _ = r.RunLive(ctx, "probe-user", "probe-session", agent.LiveRunConfig{})
+	if probeCtx == nil {
+		return nil, nil, -1
+	}
+	queue := []reflect.Value{reflect.ValueOf(probeCtx)}
 	seen := map[visitedContextStruct]bool{}
-	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
+	for len(queue) > 0 {
 		v := queue[0]
 		queue = queue[1:]
 		var ptr uintptr
@@ -6978,42 +11677,283 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 			}
 			seen[visitKey] = true
 		}
-		if key, val := v.FieldByName("key"), v.FieldByName("val"); key.IsValid() && val.IsValid() {
-			if val.Kind() == reflect.Interface && !val.IsNil() {
+		if kVal, val := directStructField(v, "key"), directStructField(v, "val"); kVal.IsValid() && val.IsValid() {
+			for val.Kind() == reflect.Pointer || val.Kind() == reflect.Interface {
+				if val.IsNil() {
+					val = reflect.Value{}
+					break
+				}
 				val = val.Elem()
 			}
-			if val.IsValid() && val.Kind() == reflect.Map &&
-				val.Type().Key().Kind() == reflect.String &&
-				val.Type().Elem() == agentInterfaceType {
-				if keyVal, ok := exportContextKey(key); ok {
-					lookupCtx := ctx
-					if v.CanAddr() && v.Addr().CanInterface() {
-						if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
-							lookupCtx = c
-						}
-					}
-					if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
-						if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
-							out := make(map[string]agent.Agent, m.Len())
-							iter := m.MapRange()
-							for iter.Next() {
-								if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
-									out[iter.Key().String()] = a
-								}
-							}
-							return out
+			if val.IsValid() && isPluginManagerType(val.Type()) {
+				vt := val.Type()
+				for sf := range vt.Fields() {
+					if len(sf.Index) == 1 && sf.Name == "plugins" && sf.Type.Kind() == reflect.Slice && sf.Type.Elem() == pluginPtrType {
+						if k, ok := exportContextKey(kVal); ok {
+							return k, vt, sf.Index[0]
 						}
 					}
 				}
 			}
 		}
-		for _, field := range []string{"context", "Context", "ctx", "invocationContext"} {
-			if next := v.FieldByName(field); next.IsValid() {
+		for _, field := range []string{"Context", "context", "c", "cancelCtx"} {
+			if next := directStructField(v, field); isContextField(next) {
 				queue = append(queue, next)
 			}
 		}
 	}
-	return nil
+	return nil, nil, -1
+}
+
+// contextHasAfterAgentPlugin queries ctx for ADK's PluginManager using the
+// once-discovered context key and reports whether any other registered plugin
+// (before or after self) defines an AfterAgentCallback, since ADK builds the
+// single after-agent event after all AfterAgentCallbacks run. When self != nil
+// and PluginManager or self cannot be resolved (for example, when self is
+// wrapped inside a composing plugin), it conservatively reports true so
+// post-retirement after-agent events are never falsely excluded. When self is
+// nil (as in direct traceManager unit tests), it falls back to matching
+// pluginName once and reports false if ctx carries no PluginManager.
+func contextHasAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugin) (res bool) {
+	unknown := self != nil
+	if ctx == nil {
+		return unknown
+	}
+	key := discoverPluginManagerCtxKey()
+	if key == nil || pluginManagerStructType == nil || pluginManagerPluginsField < 0 {
+		return unknown
+	}
+	raw, ok := func() (val any, ok bool) {
+		defer func() {
+			if recover() != nil {
+				val, ok = nil, false
+			}
+		}()
+		return ctx.Value(key), true
+	}()
+	if !ok || raw == nil {
+		return unknown
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = true
+		}
+	}()
+	v := reflect.ValueOf(raw)
+	if !v.IsValid() || v.Kind() != reflect.Pointer || v.IsNil() {
+		return unknown
+	}
+	elem := v.Elem()
+	if elem.Type() != pluginManagerStructType {
+		return unknown
+	}
+	plugins := elem.Field(pluginManagerPluginsField)
+	n := plugins.Len()
+	pluginElemType := pluginPtrType.Elem()
+	selfIdx := -1
+	if self != nil {
+		selfPtr := reflect.ValueOf(self).Pointer()
+		for i := range n {
+			elem := plugins.Index(i)
+			if elem.Kind() == reflect.Pointer && !elem.IsNil() && elem.Pointer() == selfPtr {
+				selfIdx = i
+				break
+			}
+		}
+		if selfIdx < 0 {
+			return true
+		}
+	} else {
+		for i := range n {
+			elem := plugins.Index(i)
+			if elem.Kind() != reflect.Pointer || elem.IsNil() || elem.Elem().Type() != pluginElemType {
+				return true
+			}
+			nameField := directStructField(elem.Elem(), "name")
+			if !nameField.IsValid() || nameField.Kind() != reflect.String {
+				return true
+			}
+			if nameField.String() == pluginName {
+				selfIdx = i
+				break
+			}
+		}
+	}
+	for k := range n {
+		if k == selfIdx {
+			continue
+		}
+		elem := plugins.Index(k)
+		if elem.Kind() != reflect.Pointer || elem.IsNil() || elem.Elem().Type() != pluginElemType {
+			return true
+		}
+		cb := directStructField(elem.Elem(), "afterAgentCallback")
+		if !cb.IsValid() || cb.Kind() != reflect.Func {
+			return true
+		}
+		if !cb.IsNil() {
+			return true
+		}
+	}
+	return false
+}
+
+// contextHasCustomUUIDProvider queries ctx for ADK's platform.WithUUIDProvider
+// entry using the once-discovered context key and reports whether the active
+// provider is non-nil without invoking it.
+func contextHasCustomUUIDProvider(ctx context.Context) (res bool) {
+	if ctx == nil {
+		return false
+	}
+	key := discoverUUIDProviderCtxKey()
+	if key == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+	p, ok := ctx.Value(key).(platform.UUIDProvider)
+	return ok && p != nil
+}
+
+// callbackAfterAgentActionMaps returns the action maps of the EventActions of
+// ADK's callback context ctx (see actionMaps), so that onEvent can recognize
+// the event that runAfterAgentCallbacks builds from that EventActions.
+// On a callback context, Actions() logs that it is unsupported and returns nil;
+// a callback can still reach the live *session.EventActions via
+// ctx.WithDelta(nil).Actions() and replace StateDelta or ArtifactDelta (in
+// which case the yielded event carries the replacement map rather than the one
+// captured here). Only immutable Go stdlib context and ADK agent context
+// structs are unwrapped—never fields of arbitrary user-defined context types.
+func callbackAfterAgentActionMaps(ctx context.Context) actionMaps {
+	am, _ := extractCallbackAfterAgentActions(ctx)
+	return am
+}
+
+// callbackAfterAgentActions returns callbackAfterAgentActionMaps(ctx) and, when
+// they are not zero, a value that keeps the captured StateDelta and
+// ArtifactDelta maps reachable directly (as [2]unsafe.Pointer, referring to
+// nothing of ctx or the EventActions struct). Retaining keep prevents garbage
+// collection and address reuse of those captured map objects while keep is held
+// (see actionMaps), even if a callback subsequently replaces StateDelta or
+// ArtifactDelta on ctx.WithDelta(nil).Actions() with new maps (in which case the
+// yielded event carries the replacement maps rather than the captured ones).
+func callbackAfterAgentActions(ctx context.Context) (actionMaps, any) {
+	am, pins := extractCallbackAfterAgentActions(ctx)
+	if am == (actionMaps{}) {
+		return actionMaps{}, nil
+	}
+	return am, pins
+}
+
+func extractCallbackAfterAgentActions(ctx context.Context) (actionMaps, [2]unsafe.Pointer) {
+	if ctx == nil {
+		return actionMaps{}, [2]unsafe.Pointer{}
+	}
+	return extractCallbackAfterAgentActionsValue(reflect.ValueOf(ctx))
+}
+
+func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pins [2]unsafe.Pointer) {
+	defer func() {
+		if r := recover(); r != nil {
+			am = actionMaps{}
+			pins = [2]unsafe.Pointer{}
+		}
+	}()
+	var seen map[visitedContextStruct]bool
+	for steps := 0; cur.IsValid() && steps < 512; steps++ {
+		var ok bool
+		cur, ok = derefContextStructValueLazy(cur, &seen, steps >= 32)
+		if !ok {
+			return actionMaps{}, [2]unsafe.Pointer{}
+		}
+		vt := cur.Type()
+		if vt.PkgPath() == agentPkgPath && vt.Name() == "commonContext" {
+			actions, ok := derefContextStructValueLazy(directStructField(cur, "actions"), &seen, steps >= 32)
+			if !ok {
+				return actionMaps{}, [2]unsafe.Pointer{}
+			}
+			pins = [2]unsafe.Pointer{
+				mapPointer(directStructField(actions, "StateDelta")),
+				mapPointer(directStructField(actions, "ArtifactDelta")),
+			}
+			return actionMaps{
+				stateDelta:    pins[0],
+				artifactDelta: pins[1],
+			}, pins
+		}
+		var next reflect.Value
+		switch vt.PkgPath() {
+		case "context":
+			if f := directStructField(cur, "Context"); f.IsValid() {
+				next = f
+			} else if f := directStructField(cur, "cancelCtx"); f.IsValid() {
+				next = f
+			} else if f := directStructField(cur, "c"); f.IsValid() {
+				next = f
+			}
+		case agentPkgPath:
+			if f := directStructField(cur, "context"); f.IsValid() {
+				next = f
+			}
+		default:
+			// Never read fields of third-party or user context structs without
+			// their synchronization.
+			return actionMaps{}, [2]unsafe.Pointer{}
+		}
+		cur = next
+	}
+	return actionMaps{}, [2]unsafe.Pointer{}
+}
+
+func derefContextStructValue(v reflect.Value, seen map[visitedContextStruct]bool) (reflect.Value, bool) {
+	return derefContextStructValueLazy(v, &seen, seen != nil)
+}
+
+func derefContextStructValueLazy(v reflect.Value, seen *map[visitedContextStruct]bool, track bool) (reflect.Value, bool) {
+	for derefs := 0; v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
+		if derefs >= 512 || v.IsNil() {
+			return reflect.Value{}, false
+		}
+		if v.Kind() == reflect.Pointer && (*seen != nil || track || derefs >= 4) {
+			if *seen == nil {
+				*seen = make(map[visitedContextStruct]bool, 8)
+			}
+			visitKey := visitedContextStruct{ptr: v.Pointer(), typ: v.Type()}
+			if (*seen)[visitKey] {
+				return reflect.Value{}, false
+			}
+			(*seen)[visitKey] = true
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	return v, true
+}
+
+// mapPointer returns an unsafe.Pointer to the map that v holds, or nil when v
+// is not a non-nil map. Storing it keeps the map object live for the GC.
+func mapPointer(v reflect.Value) unsafe.Pointer {
+	if !v.IsValid() || v.Kind() != reflect.Map || v.IsNil() {
+		return nil
+	}
+	return v.UnsafePointer()
+}
+
+// eventActionMaps returns the action maps of ev (see actionMaps), zero when ev
+// is nil.
+func eventActionMaps(ev *session.Event) actionMaps {
+	if ev == nil {
+		return actionMaps{}
+	}
+	return actionMaps{
+		stateDelta:    mapPointer(reflect.ValueOf(ev.Actions.StateDelta)),
+		artifactDelta: mapPointer(reflect.ValueOf(ev.Actions.ArtifactDelta)),
+	}
 }
 
 func exportContextKey(key reflect.Value) (any, bool) {
