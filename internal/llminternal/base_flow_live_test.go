@@ -1376,3 +1376,162 @@ func TestRunLiveKeepsResumptionHandleOutOfCallerConfig(t *testing.T) {
 		t.Errorf("caller's SessionResumption.Handle = %q, want it left empty", callerConfig.Handle)
 	}
 }
+
+// TestRunLiveFinalizesSetModelResponse pins the live loop's structured output:
+// set_model_response reaches the model through outputSchemaRequestProcessor,
+// as in production, so the call must find a tool that is packed into the
+// request and not listed in Flow.Tools. An invalid call yields only its
+// feedback; a valid one yields its function response, then the final text
+// event, and the model still receives the function response.
+func TestRunLiveFinalizesSetModelResponse(t *testing.T) {
+	const (
+		invalidCall = `{"toolCall":{"functionCalls":[{"id":"t1","name":"set_model_response","args":{"count":"bad"}}]}}`
+		validCall   = `{"toolCall":{"functionCalls":[{"id":"t2","name":"set_model_response","args":{"count":42}}]}}`
+	)
+
+	// The server answers each function response with its next frame. The
+	// final event is pushed before the second function response is queued, so
+	// "thanks" can only follow it.
+	var mu sync.Mutex
+	var responsePayloads []string
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if connNum != 1 {
+			blockUntilClientCloses(conn)
+			return
+		}
+		frames := []string{invalidCall, validCall, serverContentThanks}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(frames[0])); err != nil {
+			t.Errorf("writing the first toolCall failed: %v", err)
+			return
+		}
+		frames = frames[1:]
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if !strings.Contains(string(data), "functionResponse") {
+				continue
+			}
+			mu.Lock()
+			responsePayloads = append(responsePayloads, string(data))
+			mu.Unlock()
+			if len(frames) == 0 {
+				continue
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(frames[0])); err != nil {
+				t.Errorf("writing frame failed: %v", err)
+				return
+			}
+			frames = frames[1:]
+		}
+	})
+
+	liveModel := &fakeLiveModel{client: client}
+	llmAgent := &mockLLMAgent{
+		Agent: utils.Must(agent.New(agent.Config{Name: "live_schema_agent"})),
+		s: &State{
+			Model: liveModel,
+			OutputSchema: &genai.Schema{
+				Type:       genai.TypeObject,
+				Properties: map[string]*genai.Schema{"count": {Type: genai.TypeInteger}},
+				Required:   []string{"count"},
+			},
+			Tools: []tool.Tool{&mockFunctionTool{name: "other_tool"}},
+		},
+	}
+	f := &Flow{
+		Model: liveModel,
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
+			liveConfigProcessor, outputSchemaRequestProcessor,
+		},
+	}
+	baseCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(baseCtx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live:          &agent.LiveRunConfig{},
+		}),
+		icontext.InvocationContextParams{Agent: llmAgent},
+	)
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	// describe names an event by its first part, so the sequence reads as one
+	// literal.
+	describe := func(ev *session.Event) string {
+		p := ev.LLMResponse.Content.Parts[0]
+		switch {
+		case p.FunctionCall != nil:
+			return "call " + p.FunctionCall.ID
+		case p.FunctionResponse != nil:
+			return "response " + p.FunctionResponse.ID
+		}
+		return "text " + p.Text
+	}
+	const safetyLimit = 20
+	var events []*session.Event
+	var got []string
+	for len(events) < safetyLimit {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatalf("iterator ended after %v", got)
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error after %v: %v", got, err)
+		}
+		if ev == nil || ev.LLMResponse.Content == nil || len(ev.LLMResponse.Content.Parts) == 0 {
+			continue
+		}
+		events = append(events, ev)
+		got = append(got, describe(ev))
+		if got[len(got)-1] == "text thanks" {
+			break
+		}
+	}
+
+	want := []string{"call t1", "response t1", "call t2", "response t2", `text {"count":42}`, "text thanks"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("event sequence mismatch (-want +got):\n%s", diff)
+	}
+
+	feedback := events[1].LLMResponse.Content.Parts[0].FunctionResponse.Response
+	if errText, _ := feedback["error"].(string); !strings.HasPrefix(errText, "Validation Error found:") {
+		t.Errorf("invalid call response = %v, want validation feedback under \"error\"", feedback)
+	}
+	if events[1].Actions.SetModelResponse != nil {
+		t.Errorf("invalid call stored %v, want nothing", events[1].Actions.SetModelResponse)
+	}
+	answer := map[string]any{"count": float64(42)}
+	if diff := cmp.Diff(answer, events[3].LLMResponse.Content.Parts[0].FunctionResponse.Response); diff != "" {
+		t.Errorf("valid call response mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(answer, events[3].Actions.SetModelResponse); diff != "" {
+		t.Errorf("valid call stored answer mismatch (-want +got):\n%s", diff)
+	}
+	final := events[4]
+	if final.Author != "live_schema_agent" || final.LLMResponse.Content.Role != "model" {
+		t.Errorf("final event Author = %q, Role = %q, want %q, %q", final.Author, final.LLMResponse.Content.Role, "live_schema_agent", "model")
+	}
+
+	mu.Lock()
+	payloads := append([]string(nil), responsePayloads...)
+	mu.Unlock()
+	if len(payloads) != 2 || !strings.Contains(payloads[1], `"t2"`) {
+		t.Errorf("function responses on the wire = %v, want two, the second for t2", payloads)
+	}
+
+	cancel()
+	for {
+		if _, _, ok := next(); !ok {
+			break
+		}
+	}
+}

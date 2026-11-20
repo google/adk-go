@@ -49,6 +49,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -61,8 +62,12 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// New is a constructor for LLMAgent.
+// New is a constructor for LLMAgent. It returns an error if both
+// Config.OutputSchema and Config.OutputJsonSchema are set.
 func New(cfg Config) (agent.Agent, error) {
+	if cfg.OutputSchema != nil && cfg.OutputJsonSchema != nil {
+		return nil, fmt.Errorf("LlmAgent %q: OutputSchema and OutputJsonSchema are mutually exclusive; set at most one", cfg.Name)
+	}
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
 		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))
@@ -115,6 +120,7 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
 			InputSchema:               cfg.InputSchema,
 			OutputSchema:              cfg.OutputSchema,
+			OutputJsonSchema:          cfg.OutputJsonSchema,
 			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
@@ -341,11 +347,30 @@ type Config struct {
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
 	//
-	// When OutputSchema is set, the framework transparently injects a
-	// set_model_response tool so the model can still invoke other tools
-	// (function tools, RAG, agent transfer, etc.) while producing structured
-	// output. See internal/llminternal/outputschema_processor.go for details.
+	// The schema reaches the model in one of two ways. When the agent has
+	// Tools or Toolsets, its Model does not declare
+	// [model.Capabilities].OutputSchemaAndTools (see
+	// [model.CapabilitiesProvider]), and Mode is not ModeTask, the agent adds
+	// the set_model_response tool of package
+	// [google.golang.org/adk/v2/tool/setmodelresponsetool] to the request.
+	// The model can then call the other tools and gives its final answer
+	// through set_model_response, whose valid answer becomes the agent's
+	// final text as JSON. An answer that does not match the schema goes
+	// back to the model as feedback in the function response, and the model
+	// is called again. When the agent has no tools or toolsets, or its
+	// model declares OutputSchemaAndTools, and Mode is not ModeTask, the
+	// schema goes into the request config as
+	// GenerateContentConfig.ResponseSchema. In ModeTask the finish_task tool
+	// carries the schema instead.
 	OutputSchema *genai.Schema
+	// OutputJsonSchema is the output schema when the agent replies, given as a
+	// raw JSON schema. It carries what a *genai.Schema cannot, such as
+	// additionalProperties. It is mutually exclusive with OutputSchema.
+	// It reaches the model by the rule of OutputSchema, with
+	// GenerateContentConfig.ResponseJsonSchema in place of ResponseSchema. The
+	// set_model_response tool passes an answer for it through without
+	// validating it, as adk-python does.
+	OutputJsonSchema *jsonschema.Schema
 
 	// Callbacks are executed in the order they are provided.
 	// If a callback returns result/error, then the execution of the callback
@@ -595,7 +620,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		result := sb.String()
 
 		// TODO: add output schema validation and unmarshalling
-		if a.OutputSchema != nil {
+		if a.OutputSchema != nil || a.OutputJsonSchema != nil {
 			// If the result from the final chunk is just whitespace or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.

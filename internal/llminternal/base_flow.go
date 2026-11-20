@@ -898,12 +898,29 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
-						tools = make(map[string]tool.Tool, len(f.Tools))
+						tools = make(map[string]tool.Tool, len(f.Tools)+len(nreq.Tools))
 						for _, t := range f.Tools {
 							if _, ok := dropped[t.Name()]; ok {
 								continue
 							}
 							tools[t.Name()] = t
+						}
+						// Tools the request processors packed, such as
+						// set_model_response, are callable too, as in the
+						// normal loop; a name in f.Tools keeps its tool.
+						for name, v := range nreq.Tools {
+							if _, ok := tools[name]; ok {
+								continue
+							}
+							t, ok := v.(tool.Tool)
+							if !ok {
+								if !sess.pushError(fmt.Errorf("unexpected tool type %T for tool %v", v, name)) {
+									cleanup()
+									return
+								}
+								continue
+							}
+							tools[name] = t
 						}
 						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
 					}
@@ -953,6 +970,20 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						if respEv != nil {
 							if !sess.pushEvent(respEv) {
+								cleanup()
+								return
+							}
+							// A stored set_model_response answer ends the turn
+							// with a final event. The model still gets its
+							// function response below, as in adk-python's
+							// live flow.
+							final, err := structuredFinalEvent(ctx, respEv)
+							if err != nil {
+								sess.pushError(err)
+								cleanup()
+								return
+							}
+							if final != nil && !sess.pushEvent(final) {
 								cleanup()
 								return
 							}
@@ -1147,13 +1178,13 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// If the model response is structured, yield it as a final model response event.
-			outputSchemaResponse, err := retrieveStructuredModelResponse(ev)
+			final, err := structuredFinalEvent(ctx, ev)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			if outputSchemaResponse != "" {
-				if !yield(createFinalModelResponseEvent(ctx, outputSchemaResponse), nil) {
+			if final != nil {
+				if !yield(final, nil) {
 					return
 				}
 			}
@@ -2156,6 +2187,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 		}
 		maps.Copy(base.RequestedAuthConfigs, other.RequestedAuthConfigs)
 	}
+	if other.SetModelResponse != nil {
+		base.SetModelResponse = mergeSetModelResponse(base.SetModelResponse, other.SetModelResponse)
+	}
 	return base
 }
 
@@ -2189,6 +2223,20 @@ func deepMergeMap(dst, src map[string]any) map[string]any {
 		dst[key] = value
 	}
 	return dst
+}
+
+// mergeSetModelResponse combines the answers two parallel tool calls stored.
+// Two maps are deep merged into dst, as Python's deep_merge_dicts does; any
+// other pairing (a list, a scalar, or no earlier answer) takes src, because
+// Python overwrites the key unless both values are dicts
+// (flows/llm_flows/tools/_batch_executor.py).
+func mergeSetModelResponse(dst, src any) any {
+	dstMap, dstIsMap := dst.(map[string]any)
+	srcMap, srcIsMap := src.(map[string]any)
+	if dstIsMap && srcIsMap {
+		return deepMergeMap(dstMap, srcMap)
+	}
+	return src
 }
 
 func pluginManagerFromContext(ctx context.Context) pluginManager {

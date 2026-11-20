@@ -70,6 +70,12 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 				req.Config.ResponseSchema = schema
 				req.Config.ResponseMIMEType = "application/json"
 			}
+			// A JSON schema can say what a genai.Schema cannot, such as
+			// additionalProperties, so it goes in ResponseJsonSchema.
+			if state.OutputJsonSchema != nil {
+				req.Config.ResponseJsonSchema = clone(state.OutputJsonSchema)
+				req.Config.ResponseMIMEType = "application/json"
+			}
 		}
 
 		// TODO: missing features

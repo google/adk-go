@@ -15,6 +15,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -196,5 +197,45 @@ func TestFromSessionEvent_RoundTrip(t *testing.T) {
 
 	if diff := cmp.Diff(original.Actions, got.Actions); diff != "" {
 		t.Errorf("round-trip EventActions mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestEventActions_SetModelResponseConversion verifies that a stored
+// set_model_response answer crosses the REST API in both directions: the
+// response body carries it under setModelResponse, and a request body that
+// carries it gives it back to the session event.
+func TestEventActions_SetModelResponseConversion(t *testing.T) {
+	original := session.Event{
+		ID:     "evt-1",
+		Author: "agent",
+		Actions: session.EventActions{
+			SetModelResponse: map[string]any{"answer": "ok"},
+		},
+	}
+
+	body, err := json.Marshal(FromSessionEvent(original))
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	var wire struct {
+		Actions map[string]json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("json.Unmarshal() failed: %v", err)
+	}
+	if got, want := string(wire.Actions["setModelResponse"]), `{"answer":"ok"}`; got != want {
+		t.Errorf("REST actions.setModelResponse = %q, want %q", got, want)
+	}
+
+	var restEvent Event
+	if err := json.Unmarshal(body, &restEvent); err != nil {
+		t.Fatalf("json.Unmarshal() into Event failed: %v", err)
+	}
+	got, err := ToSessionEvent(restEvent)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"answer": "ok"}, got.Actions.SetModelResponse); diff != "" {
+		t.Errorf("ToSessionEvent() SetModelResponse mismatch (-want +got):\n%s", diff)
 	}
 }

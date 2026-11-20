@@ -107,8 +107,7 @@ func createTaskAgentFuncDeclaration(curAgent agent.Agent) *genai.FunctionDeclara
 		agentState := llminternal.Reveal(llmAgent)
 
 		if !googlellm.IsGeminiAPIVariant(agentState.Model) {
-			outputSchema := getOutputSchema(curAgent)
-			if outputSchema != nil {
+			if hasOutputSchema(curAgent) {
 				decl.ResponseJsonSchema = &genai.Schema{Type: "OBJECT"}
 			} else {
 				decl.ResponseJsonSchema = &genai.Schema{Type: "STRING"}

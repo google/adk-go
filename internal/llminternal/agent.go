@@ -17,6 +17,7 @@ package llminternal
 import (
 	"sync"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -68,8 +69,9 @@ type State struct {
 	DisallowTransferToParent bool
 	DisallowTransferToPeers  bool
 
-	InputSchema  *genai.Schema
-	OutputSchema *genai.Schema
+	InputSchema      *genai.Schema
+	OutputSchema     *genai.Schema
+	OutputJsonSchema *jsonschema.Schema
 
 	OutputKey string
 
