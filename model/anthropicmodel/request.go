@@ -468,9 +468,34 @@ func (m *anthropicModel) convertFunctionResponsePart(
 		OfToolResult: &anthropic.ToolResultBlockParam{
 			ToolUseID: toolUseID,
 			Content:   resultContent,
-			IsError:   anthropic.Bool(false),
+			IsError:   anthropic.Bool(isErrorResponse(fr.Response)),
 		},
 	}
+}
+
+// isErrorResponse reports whether a function response describes a failed tool
+// call, so that its tool_result is sent with is_error set. The agent flow
+// reports every failed call to the model as {"error": <message>}; adk-python
+// (models/anthropic_llm.py) also checks isError and is_error, which a failed
+// MCP CallToolResult carries. A key counts when its value is set: not nil,
+// false or the empty string.
+func isErrorResponse(resp map[string]any) bool {
+	for _, key := range []string{"error", "isError", "is_error"} {
+		switch v := resp[key].(type) {
+		case nil:
+		case bool:
+			if v {
+				return true
+			}
+		case string:
+			if v != "" {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func serializeFunctionResponseData(respData map[string]any) string {

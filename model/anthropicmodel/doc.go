@@ -179,6 +179,11 @@
 // [ErrUnsupportedContent] that identifies the dropped part kind, MIME type, or
 // URI scheme.
 //
+// A [genai.FunctionResponse] is sent as a `tool_result` block, with `is_error`
+// set when its `error`, `isError` or `is_error` key holds a value other than
+// nil, false or the empty string. `error` is the key the agent flow reports a
+// failed tool call under.
+//
 // # Extended Thinking and Effort
 //
 // [genai.ThinkingConfig] is mapped to the request parameters below:
