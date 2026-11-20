@@ -509,7 +509,7 @@ func withRestoredUserContent(ctx agent.Context, storedSession session.Session, p
 	if userContent == nil {
 		userContent = prior
 	}
-	base := context.Context(context.WithValue(ctx, turnMessageKey{}, restoredTurn{message: replacement, restored: userContent}))
+	base := context.WithValue(ctx, turnMessageKey{}, restoredTurn{message: replacement, restored: userContent})
 	return ctx.WithDelta(&agent.CommonContextDelta{
 		InvocationContextDelta: &agent.InvocationContextDelta{Context: &base, UserContent: &userContent},
 	})
