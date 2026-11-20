@@ -74,6 +74,18 @@ type SubLauncher interface {
 	Run(ctx context.Context, config *Config) error
 }
 
+// Runnable is a launcher that takes its own options as values and never parses
+// the process command line.
+//
+// An application that defines its own flags can hold a Runnable instead of
+// calling [Launcher.Execute], which parses every argument its caller supplies,
+// the application's own included, so the launcher's flag set rejects them as
+// unknown.
+type Runnable interface {
+	// Run executes the launcher with the configuration it was built from.
+	Run(ctx context.Context, config *Config) error
+}
+
 // Config contains parameters for web & console execution: sessions, artifacts, agents etc
 type Config struct {
 	SessionService   session.Service
