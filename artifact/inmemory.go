@@ -24,7 +24,6 @@ import (
 	"math"
 	"net/url"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -347,8 +346,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		files[key.FileName] = true
 	}
 
-	filenames := slices.Collect(maps.Keys(files))
-	sort.Strings(filenames)
+	filenames := slices.Sorted(maps.Keys(files))
 	return &ListResponse{FileNames: filenames}, nil
 }
 

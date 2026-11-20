@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -129,8 +130,26 @@ func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest
 	return nil
 }
 
+// templateSource is what instruction placeholders resolve against: {key}
+// against ReadonlyState and {artifact.name} against Artifacts. Each is read
+// only when a placeholder needs it.
+type templateSource interface {
+	ReadonlyState() session.ReadonlyState
+	Artifacts() agent.Artifacts
+}
+
+// invocationSource resolves placeholders against the session and artifacts
+// of an invocation.
+type invocationSource struct {
+	agent.InvocationContext
+}
+
+func (s invocationSource) ReadonlyState() session.ReadonlyState {
+	return s.Session().State()
+}
+
 // replaceMatch is the Go equivalent of the _replace_match async function in the Python code.
-func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
+func replaceMatch(ctx context.Context, src templateSource, match string) (string, error) {
 	// Trim curly braces: "{var_name}" -> "var_name"
 	varName := strings.TrimSpace(strings.Trim(match, "{}"))
 	optional := false
@@ -141,10 +160,11 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 
 	if after, ok := strings.CutPrefix(varName, "artifact."); ok {
 		fileName := after
-		if ctx.Artifacts() == nil {
+		artifacts := src.Artifacts()
+		if artifacts == nil {
 			return "", fmt.Errorf("artifact service is not initialized")
 		}
-		resp, err := ctx.Artifacts().Load(ctx, fileName)
+		resp, err := artifacts.Load(ctx, fileName)
 		if err != nil {
 			if optional && errors.Is(err, fs.ErrNotExist) {
 				return "", nil
@@ -158,7 +178,13 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		return match, nil // Return the original string if not a valid name
 	}
 
-	value, err := ctx.Session().State().Get(varName)
+	// A fake agent.Context, such as one built on agent.ContextMock, can have
+	// no state.
+	state := src.ReadonlyState()
+	if state == nil {
+		return "", fmt.Errorf("session state is not available")
+	}
+	value, err := state.Get(varName)
 	if err != nil {
 		if optional && errors.Is(err, session.ErrStateKeyNotExist) {
 			return "", nil
@@ -309,8 +335,19 @@ func isValidStateName(varName string) bool {
 	return false
 }
 
-// InjectSessionState populates values in an instruction template from a context.
+// InjectSessionState populates values in an instruction template from the
+// session and artifacts of an invocation.
 func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
+	return injectState(ctx, invocationSource{ctx}, template)
+}
+
+// InjectContextState populates values in an instruction template from the
+// state and artifacts of a callback or tool context.
+func InjectContextState(ctx agent.Context, template string) (string, error) {
+	return injectState(ctx, ctx, template)
+}
+
+func injectState(ctx context.Context, src templateSource, template string) (string, error) {
 	// Find all matches, then iterate through them, building the result string.
 	var result strings.Builder
 	lastIndex := 0
@@ -330,7 +367,7 @@ func InjectSessionState(ctx agent.InvocationContext, template string) (string, e
 
 		// Get the replacement for the current match
 		matchStr := template[startIndex:endIndex]
-		replacement, err := replaceMatch(ctx, matchStr)
+		replacement, err := replaceMatch(ctx, src, matchStr)
 		if err != nil {
 			return "", err // Propagate the error
 		}

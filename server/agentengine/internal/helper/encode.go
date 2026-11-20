@@ -68,7 +68,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 		// this map will hold all the fields
 		m := make(map[string]any)
 		// iterate over the fields handling all the cases
-		for i := 0; i < v.NumField(); i++ {
+		for i := range v.NumField() {
 			fv := v.Field(i)
 			fvt := vt.Field(i)
 			tag := fvt.Tag.Get("json")
@@ -117,7 +117,6 @@ func convertSnake(path, indent string, o any) (any, error) {
 					m[newName] = val
 				}
 			}
-
 		}
 		return m, nil
 	case reflect.Slice:
@@ -131,7 +130,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
 		}
 		res := []any{}
-		for i := 0; i < v.Len(); i++ {
+		for i := range v.Len() {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert slice element with path: %v err: %w", path+".[]", err)
@@ -212,7 +211,7 @@ func convertName(path, name string) string {
 	l := strings.ToLower(name)
 	b := &strings.Builder{}
 	afterUnderscore := true
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		// Ab  => _ab
 		if !afterUnderscore && i > 0 && i+1 < len(name) && name[i] != l[i] && name[i+1] == l[i+1] {
 			fmt.Fprintf(b, "_%c", l[i])

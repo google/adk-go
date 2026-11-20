@@ -105,7 +105,6 @@ func TestEvent(t *testing.T) {
 					if arr[1] != "2" {
 						t.Errorf("long_running_tool_ids[1] is not 2")
 					}
-
 				} else {
 					t.Errorf("long_running_tool_ids is not an array of length 2")
 				}
@@ -152,7 +151,6 @@ func TestEventLogProbs(t *testing.T) {
 					if arr[1] != "2" {
 						t.Errorf("long_running_tool_ids[1] is not 2")
 					}
-
 				} else {
 					t.Errorf("long_running_tool_ids is not an array of length 2")
 				}
@@ -401,7 +399,6 @@ func TestOmitEmpty(t *testing.T) {
 		if diff != "" {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
-
 	}
 }
 
