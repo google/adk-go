@@ -87,12 +87,11 @@ const maxScrubbableSecret = 4096
 // decoded is examined in full and can still be shown. 120,000 bytes of \u0041
 // decode to 20,000 and come back scrubbed rather than withheld.
 //
-// The ContinueURI is covered less thoroughly than the UserID in one shape. Where
-// the UserID is a substring of the URI and the service escapes the URI so the
-// scrub cannot match it, the UserID's marker lands inside the URI and the rest of
-// the URI stays visible around it. The contract holds as stated, since this
-// package's decoder does not reconstruct the URI from what is returned, but a
-// reader sees most of it: https://github.com/google/adk-go/issues/1539.
+// Where one secret is a substring of another — a UserID inside the ContinueURI —
+// a response that contains any escape and names the shorter secret is withheld
+// whole: the scrub cannot remove an escaped longer value as a unit, and marking
+// the shorter one inside it would leave the rest readable. A response with no
+// escapes is still scrubbed and shown.
 //
 // Two things here look like they could be simpler and cannot be.
 //
@@ -109,6 +108,9 @@ func redactedForError(s string, secrets ...string) string {
 		if len(v) > maxScrubbableSecret {
 			return withheldText
 		}
+	}
+	if splitsContainer(s, secrets) {
+		return withheldText
 	}
 	if out, ok := showable(s, secrets); ok {
 		return out
@@ -181,6 +183,47 @@ func showable(s string, secrets []string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+// splitsContainer reports whether s must be withheld because one secret contains
+// another — a UserID inside the ContinueURI — and s is written with escapes.
+// The scrub cannot match an escaped container, so it would mark the shorter
+// secret in the middle of it and leave the rest readable. Which spelling the
+// service echoed is not decided from s, which the service controls: any escape
+// in a response that names the shorter secret withholds it. A response with no
+// escapes is scrubbed normally.
+//
+// Text past [maxStraddleWindow] is not decoded, and a decode that does not finish
+// is treated as though a secret were in it.
+func splitsContainer(s string, secrets []string) bool {
+	var inners []string
+	for _, v := range secrets {
+		for _, outer := range secrets {
+			if v != "" && len(outer) > len(v) && strings.Contains(strings.ToLower(outer), strings.ToLower(v)) {
+				inners = append(inners, strings.ToLower(v))
+			}
+		}
+	}
+	if len(inners) == 0 {
+		return false
+	}
+	if !fitsStraddleWindow(s) {
+		return true
+	}
+	d, done := decodeFully(s)
+	if !done {
+		return true
+	}
+	if d == s {
+		return false
+	}
+	ls, ld := strings.ToLower(s), strings.ToLower(d)
+	for _, inner := range inners {
+		if strings.Contains(ls, inner) || strings.Contains(ld, inner) {
+			return true
+		}
+	}
+	return false
 }
 
 // recoverable reports whether any secret can be read out of x, either literally or
