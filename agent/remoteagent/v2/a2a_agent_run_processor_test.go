@@ -362,7 +362,6 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			var gotEvents []*session.Event
 
 			for _, event := range tc.events {
-
 				adkEvent, err := adka2a.ToSessionEvent(ctx, event)
 				if err != nil {
 					t.Fatalf("ToSessionEvent failed: %v", err)

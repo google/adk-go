@@ -48,24 +48,17 @@ type parsedArtifactURI struct {
 // canonical-URI encoding) therefore cannot be named in a reference URI.
 var (
 	sessionScopedArtifactURIRE = regexp.MustCompile(
-		`^artifact://apps/([^/]+)/users/([^/]+)/sessions/([^/]+)/artifacts/(.+)/versions/([1-9][0-9]*)$`,
+		`^artifact://apps/([^/]+)/users/([^/]+)/sessions/([^/]+)/artifacts/(.+)/versions/([0-9]+)$`,
 	)
 	userScopedArtifactURIRE = regexp.MustCompile(
-		`^artifact://apps/([^/]+)/users/([^/]+)/artifacts/(.+)/versions/([1-9][0-9]*)$`,
+		`^artifact://apps/([^/]+)/users/([^/]+)/artifacts/(.+)/versions/([0-9]+)$`,
 	)
 )
 
 // parseArtifactURI parses an artifact reference URI of the form
 // "artifact://apps/{app}/users/{user}/sessions/{session}/artifacts/{file}/versions/{version}"
-// or its user-scoped variant (without the sessions segment). It reports whether
-// uri was a well-formed artifact URI.
-//
-// A reference names a stored version, so the version segment requires a positive
-// value ([1-9][0-9]*): in this package version 0 is the "latest" sentinel, and
-// following a reference to "versions/0" would silently resolve to whatever the
-// target's newest version is at load time. The regexes reject such a URI.
-// adk-python accepts "versions/0" because Python has no such sentinel, so this
-// parser is deliberately stricter.
+// or its user-scoped variant (without the sessions segment), where {version} is
+// a non-negative integer. It reports whether uri was a well-formed artifact URI.
 func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 	if !strings.HasPrefix(uri, artifactURIScheme) {
 		return parsedArtifactURI{}, false

@@ -1913,7 +1913,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 					return
 				default:
 				}
-				nextTool := tool.Tool(fnTool)
+				nextTool := fnTool
 				nextAgents := []agent.Agent{localAgent}
 				if i%2 == 1 {
 					nextTool = remoteA2AAgentTool
@@ -1978,7 +1978,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 					return
 				default:
 				}
-				nextTool := tool.Tool(fnTool)
+				nextTool := fnTool
 				if i%2 == 1 {
 					nextTool = remoteA2AAgentTool
 				}

@@ -1229,15 +1229,14 @@ func (p *analyticsPlugin) emitHITLAndPauseSignals(ctx agent.InvocationContext, i
 		if fc.Name == workflow.WorkflowInputFunctionCallName {
 			emittedInput = true
 		}
-		fcCopy := fc
 		p.logSessionEvent(ctx, id, hitl.requestEvent, span, func(d *eventData) {
-			args, argsTrunc := nonNilMap(fcCopy.Args), false
+			args, argsTrunc := nonNilMap(fc.Args), false
 			applyEventBase(d)
-			d.functionCallID = fcCopy.ID
+			d.functionCallID = fc.ID
 			d.contentTruncated = argsTrunc
 			d.content = map[string]any{
-				"tool_id": fcCopy.ID,
-				"tool":    fcCopy.Name,
+				"tool_id": fc.ID,
+				"tool":    fc.Name,
 				"args":    args,
 			}
 		})
