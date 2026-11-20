@@ -1405,3 +1405,21 @@ func TestTools_ExternalAccessTokenKeepsClientTimeout(t *testing.T) {
 		t.Errorf("Run() took %v, want the client's 50ms timeout to apply", elapsed)
 	}
 }
+
+// adk-python's BigQuery user agent names no hosting runtime, so neither does
+// this one, even though BigQuery is a Google API endpoint.
+func TestUserAgentHasNoRuntimeSuffix(t *testing.T) {
+	t.Setenv("K_SERVICE", "svc")
+	t.Setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
+	c, err := newClient(t.Context(), Config{ClientOptions: []option.ClientOption{option.WithoutAuthentication()}})
+	if err != nil {
+		t.Fatalf("newClient() error = %v", err)
+	}
+	if want := "https://bigquery.googleapis.com/bigquery/v2/"; c.endpoint != want {
+		t.Fatalf("endpoint = %q, want %q", c.endpoint, want)
+	}
+	if want := userAgentPrefix + " google-adk/"; !strings.HasPrefix(c.userAgent, want) || strings.Contains(c.userAgent, "+") {
+		t.Errorf("userAgent = %q, want it to start with %q and hold no suffix", c.userAgent, want)
+	}
+}
