@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"iter"
 	"maps"
 	"reflect"
 	"runtime"
@@ -42,7 +41,6 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
-	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -11519,7 +11517,6 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 }
 
 var (
-	contextInterfaceType = reflect.TypeFor[context.Context]()
 	pluginPtrType        = reflect.TypeFor[*baseplugin.Plugin]()
 	uuidProviderType     = reflect.TypeFor[platform.UUIDProvider]()
 	pluginManagerPkgPath = adkPkgPrefix + "internal/plugininternal"
@@ -11527,30 +11524,11 @@ var (
 	uuidProviderKeyOnce sync.Once
 	uuidProviderCtxKey  any
 
-	pluginManagerKeyOnce      sync.Once
+	pluginManagerKeyMu        sync.Mutex
 	pluginManagerCtxKey       any
 	pluginManagerStructType   reflect.Type
 	pluginManagerPluginsField = -1
-
-	errPluginManagerProbe = errors.New("plugin manager key probe")
 )
-
-type probeLiveAgent struct {
-	agent.Agent
-	onRunLive func(agent.InvocationContext)
-}
-
-func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	if a.onRunLive != nil {
-		a.onRunLive(ctx)
-	}
-	return nil, nil, errPluginManagerProbe
-}
-
-func isContextField(f reflect.Value) bool {
-	return f.IsValid() && (f.Type().Implements(contextInterfaceType) ||
-		(f.Kind() == reflect.Struct && reflect.PointerTo(f.Type()).Implements(contextInterfaceType)))
-}
 
 // directStructField returns the direct field of v named name without traversing
 // embedded struct pointers, so a nil embedded pointer cannot panic.
@@ -11600,58 +11578,31 @@ func discoverUUIDProviderCtxKey() any {
 	return uuidProviderCtxKey
 }
 
-func discoverPluginManagerCtxKey() any {
-	pluginManagerKeyOnce.Do(func() {
-		key, structType, pluginsField := probePluginManagerCtxKey()
+func discoverPluginManagerCtxKey(ctx context.Context) any {
+	pluginManagerKeyMu.Lock()
+	defer pluginManagerKeyMu.Unlock()
+	if pluginManagerCtxKey == nil {
+		key, structType, pluginsField := probePluginManagerCtxKey(ctx)
 		if key != nil && structType != nil && pluginsField >= 0 {
 			pluginManagerStructType = structType
 			pluginManagerPluginsField = pluginsField
 			pluginManagerCtxKey = key
 		}
-	})
+	}
 	return pluginManagerCtxKey
 }
 
-// probePluginManagerCtxKey discovers ADK's unexported PluginManager context
-// key, struct type, and plugins slice field index via runner.RunLive. RunLive
-// is used rather than Run because it binds the PluginManager context value
-// without starting OTel invocation or agent spans, and platform.WithUUIDProvider
-// prevents the invocation context from reading crypto/rand.
-func probePluginManagerCtxKey() (key any, structType reflect.Type, pluginsField int) {
+// probePluginManagerCtxKey reads ADK's unexported PluginManager context key
+// and layout from an existing callback context. Starting a runner for discovery
+// would emit an invocation span, even if its agent returned immediately.
+func probePluginManagerCtxKey(ctx context.Context) (key any, structType reflect.Type, pluginsField int) {
 	pluginsField = -1
 	defer func() {
 		if r := recover(); r != nil {
 			key, structType, pluginsField = nil, nil, -1
 		}
 	}()
-	baseAgent, err := agent.New(agent.Config{
-		Name: "plugin-manager-key-probe",
-	})
-	if err != nil {
-		return nil, nil, -1
-	}
-	var probeCtx context.Context
-	probeAgent := &probeLiveAgent{
-		Agent: baseAgent,
-		onRunLive: func(ctx agent.InvocationContext) {
-			probeCtx = ctx
-		},
-	}
-	r, err := runner.New(runner.Config{
-		AppName:           "plugin-manager-key-probe",
-		Agent:             probeAgent,
-		SessionService:    session.InMemoryService(),
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		return nil, nil, -1
-	}
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "probe" })
-	_, _, _ = r.RunLive(ctx, "probe-user", "probe-session", agent.LiveRunConfig{})
-	if probeCtx == nil {
-		return nil, nil, -1
-	}
-	queue := []reflect.Value{reflect.ValueOf(probeCtx)}
+	queue := []reflect.Value{reflect.ValueOf(ctx)}
 	seen := map[visitedContextStruct]bool{}
 	for len(queue) > 0 {
 		v := queue[0]
@@ -11677,30 +11628,25 @@ func probePluginManagerCtxKey() (key any, structType reflect.Type, pluginsField 
 			}
 			seen[visitKey] = true
 		}
-		if kVal, val := directStructField(v, "key"), directStructField(v, "val"); kVal.IsValid() && val.IsValid() {
-			for val.Kind() == reflect.Pointer || val.Kind() == reflect.Interface {
-				if val.IsNil() {
-					val = reflect.Value{}
-					break
+		if v.Type().PkgPath() == "context" && v.Type().Name() == "valueCtx" {
+			if kVal, val := directStructField(v, "key"), directStructField(v, "val"); kVal.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
 				}
-				val = val.Elem()
-			}
-			if val.IsValid() && isPluginManagerType(val.Type()) {
-				vt := val.Type()
-				for sf := range vt.Fields() {
-					if len(sf.Index) == 1 && sf.Name == "plugins" && sf.Type.Kind() == reflect.Slice && sf.Type.Elem() == pluginPtrType {
-						if k, ok := exportContextKey(kVal); ok {
-							return k, vt, sf.Index[0]
+				if val.Kind() == reflect.Pointer && !val.IsNil() && isPluginManagerType(val.Type().Elem()) {
+					vt := val.Type().Elem()
+					for sf := range vt.Fields() {
+						if len(sf.Index) == 1 && sf.Name == "plugins" && sf.Type.Kind() == reflect.Slice && sf.Type.Elem() == pluginPtrType {
+							if k, ok := exportContextKey(kVal); ok && reflect.TypeOf(k).PkgPath() == pluginManagerPkgPath+"/plugincontext" {
+								return k, vt, sf.Index[0]
+							}
 						}
 					}
 				}
 			}
 		}
-		for _, field := range []string{"Context", "context", "c", "cancelCtx"} {
-			if next := directStructField(v, field); isContextField(next) {
-				queue = append(queue, next)
-			}
-		}
+		c1, c2 := adkContextChildren(v)
+		queue = append(queue, c1, c2)
 	}
 	return nil, nil, -1
 }
@@ -11719,7 +11665,7 @@ func contextHasAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugin) (r
 	if ctx == nil {
 		return unknown
 	}
-	key := discoverPluginManagerCtxKey()
+	key := discoverPluginManagerCtxKey(ctx)
 	if key == nil || pluginManagerStructType == nil || pluginManagerPluginsField < 0 {
 		return unknown
 	}
