@@ -111,8 +111,7 @@ func (c *EventarcController) EventarcTriggerHandler(w http.ResponseWriter, r *ht
 		if err != nil {
 			// A body over the limit set by MaxBytesMiddleware is a client
 			// error, reported the same way as in the structured branch above.
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				respondError(w, http.StatusBadRequest, fmt.Sprintf("failed to read body: %v", err))
 				return
 			}

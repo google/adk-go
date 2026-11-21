@@ -80,6 +80,8 @@ func (r *Runner) runNode(
 	// processor a different instance from the one this function reads, so the
 	// "already compacted" hand-off between the two strategies never arrived.
 	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+	ctx = r.withContextCache(ctx)
+	defer r.settleContextCaches(ctx, storedSession)
 
 	invocationFailed := false
 	emit := yield
@@ -220,7 +222,7 @@ func (r *Runner) runNode(
 				continue
 			}
 			event = fromPlugin(event, modifiedEvent, record)
-			stampTimestamp(ictx, event) // a replacement may be a struct literal too
+			stampTimestamp(ictx, event) // a plugin may have rewritten the event in place
 		}
 
 		if !event.LLMResponse.Partial {
@@ -291,6 +293,11 @@ func (r *Runner) newNodeInvocationContext(
 		}
 	}
 
+	// Answers to calls from several invocations resume the first call's
+	// invocation here. adk-python raises for an LlmAgent or Workflow root
+	// in that case; adk-go accepts resume messages adk-python rejects, as it
+	// does for unmatched responses, so runs that resume today keep working.
+	invocationID, _ := resolveInvocationID(storedSession, msg)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:    artifacts,
 		Memory:       memoryImpl,
@@ -298,7 +305,7 @@ func (r *Runner) newNodeInvocationContext(
 		Agent:        agentToRun,
 		UserContent:  msg,
 		RunConfig:    &cfg,
-		InvocationID: resolveInvocationID(storedSession, msg),
+		InvocationID: invocationID,
 	})
 	resCtx := agent.NewContext(ic)
 	return resCtx
@@ -358,7 +365,7 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	}
 	answered := map[string]struct{}{}
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		for _, id := range ev.LongRunningToolIDs {
 			open[id] = struct{}{}
@@ -418,22 +425,31 @@ func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 // resolveInvocationID reuses the paused run's invocation ID when msg is a
 // HITL resume (carries a function response), so the resume turn and the
 // pause it answers share one ID and rehydration can scope to a single
-// run. Returns "" for a fresh turn or when the answered call is not in
-// history, letting the caller mint a fresh ID. Go analog of adk-python
-// Runner._resolve_invocation_id.
-func resolveInvocationID(sess session.Session, msg *genai.Content) string {
+// run. It returns the invocation of the first answered call found in
+// history, or "" for a fresh turn or when no answered call is in history,
+// letting the caller mint a fresh ID. spansInvocations reports that the
+// answered calls belong to more than one invocation. Go analog of
+// adk-python Runner._resolve_invocation_id_from_fr.
+func resolveInvocationID(sess session.Session, msg *genai.Content) (id string, spansInvocations bool) {
 	if sess == nil || msg == nil {
-		return ""
+		return "", false
 	}
+	matched := false
 	for _, fr := range utils.FunctionResponses(msg) {
 		if fr == nil || fr.ID == "" {
 			continue
 		}
-		if ev := findEventByFunctionCallID(sess, fr.ID); ev != nil {
-			return ev.InvocationID
+		ev := findEventByFunctionCallID(sess, fr.ID)
+		if ev == nil {
+			continue
+		}
+		if !matched {
+			id, matched = ev.InvocationID, true
+		} else if ev.InvocationID != id {
+			spansInvocations = true
 		}
 	}
-	return ""
+	return id, spansInvocations
 }
 
 // findEventByFunctionCallID returns the most recent event whose content

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -377,9 +378,7 @@ func (s *fakeSession) appendEvent(ev *session.Event) {
 	s.mu.Unlock()
 	if len(ev.Actions.StateDelta) > 0 {
 		s.state.mu.Lock()
-		for k, v := range ev.Actions.StateDelta {
-			s.state.m[k] = v
-		}
+		maps.Copy(s.state.m, ev.Actions.StateDelta)
 		s.state.mu.Unlock()
 	}
 }
@@ -450,10 +449,7 @@ func (s *fakeSessionState) Set(key string, value any) error {
 func (s *fakeSessionState) All() iter.Seq2[string, any] {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snapshot := make(map[string]any, len(s.m))
-	for k, v := range s.m {
-		snapshot[k] = v
-	}
+	snapshot := maps.Clone(s.m)
 	return func(yield func(string, any) bool) {
 		for k, v := range snapshot {
 			if !yield(k, v) {

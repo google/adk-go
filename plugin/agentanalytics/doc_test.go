@@ -101,7 +101,7 @@ func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
 	}
 	flush()
 
-	const wantBulletCount = 24
+	const wantBulletCount = 26
 	if len(bullets) != wantBulletCount {
 		t.Fatalf("parsed %d behavioral-differences bullets in doc.go, want %d", len(bullets), wantBulletCount)
 	}
@@ -555,7 +555,6 @@ func TestDocParity_UsageMetadataAndContentUsageShape(t *testing.T) {
 }
 
 func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing.T) {
-	maxItems := int64(3)
 	req := &model.LLMRequest{
 		Tools: map[string]any{
 			"zebra": &declaredTool{
@@ -567,7 +566,7 @@ func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing
 						Properties: map[string]*genai.Schema{
 							"tags": {
 								Type:     genai.TypeArray,
-								MaxItems: &maxItems,
+								MaxItems: new(int64(3)),
 								Items:    &genai.Schema{Type: genai.TypeString},
 							},
 							"target": {

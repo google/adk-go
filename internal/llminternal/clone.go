@@ -68,7 +68,7 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			dst.Set(src)
 			return nil
 		}
-		for i := 0; i < src.NumField(); i++ {
+		for i := range src.NumField() {
 			if !t.Field(i).IsExported() {
 				return fmt.Errorf("%w %q in type %v", errCloneUnexported, t.Field(i).Name, t)
 			}
@@ -101,7 +101,7 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			}
 			dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
 		}
-		for i := 0; i < src.Len(); i++ {
+		for i := range src.Len() {
 			if err := deepCopy(src.Index(i), dst.Index(i), depth+1); err != nil {
 				return err
 			}
