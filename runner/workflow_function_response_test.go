@@ -41,10 +41,10 @@ import (
 	"google.golang.org/adk/v2/workflow"
 )
 
-// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a sequential
-// or parallel agent is the root, a user function response is routed to the
-// sub-agent that made the long-running call, on that sub-agent's branch, instead
-// of re-running the root.
+// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a sequential,
+// loop, or parallel agent is the root, a user function response is routed to
+// the sub-agent that made the long-running call, on that sub-agent's branch,
+// instead of re-running the root.
 func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -76,7 +76,18 @@ func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}}})
 			},
 			wantBranch:     "",
-			wantOtherCalls: 1,
+			wantOtherCalls: 0,
+		},
+		{
+			name: "loop, caller runs first",
+			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
+				return loopagent.New(loopagent.Config{
+					AgentConfig:   agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}},
+					MaxIterations: 3,
+				})
+			},
+			wantBranch:     "",
+			wantOtherCalls: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -745,19 +756,19 @@ func TestRun_FunctionResponsesSelectEveryCaller(t *testing.T) {
 		},
 		{
 			name: "sequential starts from the lowest index",
-			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
-				return mustSequential(t, "root", other, wfA, wfB)
+			newRoot: func(t *testing.T, wfA, _, other, caller agent.Agent) agent.Agent {
+				return mustSequential(t, "root", other, caller, wfA)
 			},
-			parts:   []*genai.Part{askB, askA},
-			wantRan: []string{"c", "d"},
+			parts:   []*genai.Part{askA, answerExternal},
+			wantRan: []string{"caller", "c"},
 		},
 		{
 			name: "loop starts from the lowest index",
-			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
-				return mustLoop(t, "root", 1, other, wfA, wfB)
+			newRoot: func(t *testing.T, wfA, _, other, caller agent.Agent) agent.Agent {
+				return mustLoop(t, "root", 1, other, caller, wfA)
 			},
-			parts:   []*genai.Part{askB, askA},
-			wantRan: []string{"c", "d"},
+			parts:   []*genai.Part{askA, answerExternal},
+			wantRan: []string{"caller", "c"},
 		},
 		{
 			name: "parallel of sequences narrows inside each",
