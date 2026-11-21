@@ -285,7 +285,7 @@ First install the `golangci-lint` version CI pins. A newer release reports
 findings CI does not, which reads as a failure you did not cause:
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ```
 
 Then set up the Go workspace and run every module:

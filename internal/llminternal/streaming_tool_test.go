@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -52,7 +54,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 
 	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
-			for i := 0; i < args.Count; i++ {
+			for i := range args.Count {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
 					return
 				}
@@ -225,6 +227,155 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 	}
 }
 
+// customStreamTool is a streaming tool that is not built with
+// functiontool.NewStreaming, so nothing recovers its panic before the flow.
+type customStreamTool struct {
+	stream iter.Seq2[string, error]
+}
+
+func (customStreamTool) Name() string                            { return "custom_stream" }
+func (customStreamTool) Description() string                     { return "custom stream" }
+func (customStreamTool) IsLongRunning() bool                     { return false }
+func (customStreamTool) Declaration() *genai.FunctionDeclaration { return nil }
+
+func (c customStreamTool) RunStream(agent.Context, any) iter.Seq2[string, error] {
+	return c.stream
+}
+
+func TestHandleFunctionCalls_CustomStreamingToolPanic(t *testing.T) {
+	toolsDict := map[string]tool.Tool{"custom_stream": customStreamTool{
+		stream: func(func(string, error) bool) { _ = any(12345.0).(string) },
+	}}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "custom_stream", Args: map[string]any{}},
+	}}}}
+	newInvCtx := func(t *testing.T) agent.InvocationContext {
+		return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		})
+	}
+
+	t.Run("non-live", func(t *testing.T) {
+		mergedEvent, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Invoking `custom_stream()` failed with an internal error."
+		if got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response["error"]; got != want {
+			t.Errorf("FunctionResponse error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("live", func(t *testing.T) {
+		liveSess := newLiveSessionImpl()
+		liveSess.activeTools = make(map[string][]activeTask)
+		if _, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, liveSess); err != nil {
+			t.Fatal(err)
+		}
+		// Wait for the goroutine that runs the tool to finish. An unrecovered
+		// panic in it ends the test process.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			liveSess.mu.Lock()
+			running := len(liveSess.activeTools["custom_stream"])
+			liveSess.mu.Unlock()
+			if running == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the streaming tool is still registered after it panicked")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+}
+
+// A panic in the loop that reads the stream is the reader's own, so it is not
+// turned into a tool error.
+func TestRecoverStreamPanicPropagatesConsumerPanic(t *testing.T) {
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) { yield("chunk", nil) },
+	}
+	original := errors.New("consumer panic")
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the body panics on the first chunk; the test asserts the recovered value
+			panic(original)
+		}
+	}()
+	if got != original {
+		t.Errorf("recovered panic has type %T, want the original consumer panic value", got)
+	}
+}
+
+// A consumer that stops reading stops the stream it reads.
+func TestRecoverStreamPanicStopsStreamWhenConsumerStops(t *testing.T) {
+	var stopped bool
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) { stopped = !yield("first", nil) },
+	}
+	for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the consumer stops at the first chunk; the test asserts that the stream is told
+		break
+	}
+	if !stopped {
+		t.Error("the stream was not told that its consumer stopped")
+	}
+}
+
+// A panic after the stream has yielded is recovered like one before it.
+func TestRecoverStreamPanicRecoversPanicAfterAYield(t *testing.T) {
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) {
+			if !yield("chunk", nil) {
+				return
+			}
+			panic("boom")
+		},
+	}
+	var chunks int
+	var errs []error
+	for _, err := range recoverStreamPanic(streamTool, nil, nil) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		chunks++
+	}
+	if chunks != 1 || len(errs) != 1 {
+		t.Fatalf("stream yielded %d chunks and %d errors, want one chunk and one error", chunks, len(errs))
+	}
+	if _, ok := errs[0].(*toolinternal.PanicError); !ok {
+		t.Errorf("stream yielded an error of type %T, want *toolinternal.PanicError", errs[0])
+	}
+	if text := errs[0].Error(); !strings.HasPrefix(text, `panic in tool "custom_stream": boom`) || !strings.Contains(text, "\nstack: ") || !strings.Contains(text, "runtime/debug.Stack") {
+		t.Error("the stream error does not carry the tool name, the panic value and the stack")
+	}
+}
+
+// A panic the stream raises after its consumer stopped cannot be yielded, so it
+// propagates, as it does for a streaming function tool.
+func TestRecoverStreamPanicPropagatesCleanupPanicAfterStop(t *testing.T) {
+	original := errors.New("cleanup panic")
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) {
+			defer func() { panic(original) }()
+			yield("chunk", nil)
+		},
+	}
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the consumer stops at the first chunk; the test asserts the recovered value
+			break
+		}
+	}()
+	if got != original {
+		t.Errorf("recovered panic has type %T, want the original cleanup panic value", got)
+	}
+}
+
 func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	type Args struct {
 		DelayMS int `json:"delay_ms"`
@@ -364,5 +515,140 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	liveSess.mu.Unlock()
 	if len(tasksAfter) != 0 {
 		t.Errorf("expected registry to be empty after cancellation, got: %v", tasksAfter)
+	}
+}
+
+// argsCapturingStreamTool sends the args RunStream is called with to gotArgs.
+type argsCapturingStreamTool struct {
+	gotArgs chan any
+}
+
+func (t *argsCapturingStreamTool) Name() string        { return "capture_stream" }
+func (t *argsCapturingStreamTool) Description() string { return "captures its args" }
+func (t *argsCapturingStreamTool) IsLongRunning() bool { return false }
+
+func (t *argsCapturingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (t *argsCapturingStreamTool) RunStream(_ agent.Context, args any) iter.Seq2[string, error] {
+	t.gotArgs <- args
+	return func(yield func(string, error) bool) {}
+}
+
+// A live-mode call without args reaches the streaming tool as an empty map.
+func TestHandleFunctionCalls_NoArgsReachLiveStreamingToolAsEmptyMap(t *testing.T) {
+	st := &argsCapturingStreamTool{gotArgs: make(chan any, 1)}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: st.Name()}}},
+	}}
+
+	_, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{st.Name(): st}, resp, nil, &mockLiveSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-st.gotArgs:
+		if diff := cmp.Diff(any(map[string]any{}), got); diff != "" {
+			t.Errorf("live streaming tool args mismatch (-want +got):\n%s", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming tool was not run")
+	}
+}
+
+// argEditingStreamTool sets input_str in the args RunStream is called with and
+// streams the new value.
+type argEditingStreamTool struct{}
+
+func (argEditingStreamTool) Name() string        { return "edit_stream" }
+func (argEditingStreamTool) Description() string { return "edits its args" }
+func (argEditingStreamTool) IsLongRunning() bool { return false }
+
+func (t argEditingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (argEditingStreamTool) RunStream(_ agent.Context, args any) iter.Seq2[string, error] {
+	args.(map[string]any)["input_str"] = "modified_input"
+	return func(yield func(string, error) bool) { yield("modified_input", nil) }
+}
+
+// A live streaming tool's edits to its args do not reach the function call
+// event.
+func TestHandleFunctionCalls_LiveStreamingToolArgEditsDoNotReachTheCallEvent(t *testing.T) {
+	sent := make(chan struct{}, 1)
+	liveSess := &mockLiveSession{sendFunc: func(agent.LiveRequest) error {
+		sent <- struct{}{}
+		return nil
+	}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	st := argEditingStreamTool{}
+	call := &genai.FunctionCall{ID: "call_1", Name: st.Name(), Args: map[string]any{"input_str": "original"}}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
+
+	_, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{st.Name(): st}, resp, nil, liveSess)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming tool sent no result")
+	}
+	if diff := cmp.Diff(map[string]any{"input_str": "original"}, call.Args); diff != "" {
+		t.Errorf("function call args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// noRunTool is a tool that is neither a function tool nor a streaming one.
+type noRunTool struct{}
+
+func (noRunTool) Name() string        { return "no_run" }
+func (noRunTool) Description() string { return "has no Run method" }
+func (noRunTool) IsLongRunning() bool { return false }
+
+// A call without args to a tool that cannot be run reaches the on-tool-error
+// callback as an empty map.
+func TestHandleFunctionCalls_NoArgsReachOnToolErrorForNonFunctionTool(t *testing.T) {
+	var gotArgs map[string]any
+	called := false
+	flow := &Flow{
+		OnToolErrorCallbacks: []OnToolErrorCallback{
+			func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+				called, gotArgs = true, args
+				return map[string]any{"handled": true}, nil
+			},
+		},
+	}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "no_run"}}},
+	}}
+
+	_, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"no_run": noRunTool{}}, resp, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !called {
+		t.Fatal("on-tool-error callback not called")
+	}
+	if diff := cmp.Diff(map[string]any{}, gotArgs); diff != "" {
+		t.Errorf("on-tool-error args mismatch (-want +got):\n%s", diff)
 	}
 }

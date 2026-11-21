@@ -16,14 +16,22 @@
 package mcptoolset
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os/exec"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/credredirect"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -105,6 +113,9 @@ func New(cfg Config) (tool.Toolset, error) {
 // streamable HTTP or SSE transport is copied, and the copy's HTTP client sends
 // the ADK tracking headers. When Config.Auth is set, the client also applies a
 // per-request auth RoundTripper, which requires a streamable HTTP transport.
+// A *mcp.CommandTransport with a non-nil Command is wrapped so it can connect
+// more than once (see Config.Transport). Other transports are returned as
+// given.
 func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
@@ -132,8 +143,72 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 		sseCopy := *t
 		sseCopy.HTTPClient = httpClient(t.HTTPClient, nil)
 		return &sseCopy, nil
+	case *mcp.CommandTransport:
+		// A nil Command is passed through, so it behaves as before.
+		if t != nil && t.Command != nil {
+			return newCommandTransport(t), nil
+		}
 	}
 	return transport, nil
+}
+
+// commandTransport lets a CommandTransport connect more than once. An
+// *exec.Cmd can be started only once, so the first Connect uses the caller's
+// command as is, and every later Connect runs a copy. Without this, a reconnect
+// fails with "exec: Stdout already set".
+type commandTransport struct {
+	first mcp.CommandTransport // the caller's transport, used for the first Connect
+	// spec copies the caller's command settings before the first Connect, as
+	// the SDK sets Stdin and Stdout on the command it starts.
+	spec exec.Cmd
+
+	mu   sync.Mutex
+	used bool // the caller's command has been handed to a Connect
+}
+
+func newCommandTransport(t *mcp.CommandTransport) *commandTransport {
+	src := t.Command
+	// Only the fields that configure a process are copied. The copy has no
+	// exec.CommandContext context, because os/exec does not expose it. Cancel
+	// is left out too: Start rejects a Cancel without a context, and the
+	// default Cancel of CommandContext would kill the caller's process, not
+	// the copy.
+	return &commandTransport{first: *t, spec: exec.Cmd{
+		Path:        src.Path,
+		Args:        slices.Clone(src.Args),
+		Env:         slices.Clone(src.Env),
+		Dir:         src.Dir,
+		Stdin:       src.Stdin,
+		Stderr:      src.Stderr,
+		ExtraFiles:  slices.Clone(src.ExtraFiles),
+		SysProcAttr: src.SysProcAttr,
+		WaitDelay:   src.WaitDelay,
+		Err:         src.Err,
+	}}
+}
+
+// Connect implements mcp.Transport.
+func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.mu.Lock()
+	first := !t.used
+	t.used = true
+	t.mu.Unlock()
+
+	if first {
+		return t.first.Connect(ctx)
+	}
+	return t.reconnectTransport().Connect(ctx)
+}
+
+// reconnectTransport returns the transport for every Connect after the first.
+// It copies the whole transport, so every setting on it (such as
+// TerminateDuration) carries over, including ones added in later SDK
+// versions. Only Command is replaced, with a fresh copy of spec.
+func (t *commandTransport) reconnectTransport() *mcp.CommandTransport {
+	cmd := t.spec
+	tr := t.first
+	tr.Command = &cmd
+	return &tr
 }
 
 // httpClient returns a shallow copy of base whose Transport adds the ADK
@@ -151,9 +226,132 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 	c.Transport = &trackingTransport{base: c.Transport}
 	if provider != nil {
 		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+		c.CheckRedirect = authCheckRedirect(c.CheckRedirect)
 	}
 	return &c
 }
+
+// authCheckRedirect wraps next, the caller's redirect policy, which may be nil.
+// auth.Transport applies the credential again on every hop, so only this check
+// bounds where it travels, and next may refuse more but never allow more.
+func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		method := via[0].Method
+		if err := credredirect.Check(req, via); err != nil {
+			return refuseRedirect(method, err)
+		}
+		if next == nil {
+			if len(via) >= credredirect.MaxRedirects {
+				return fmt.Errorf("mcptoolset: stopped after %d redirects", credredirect.MaxRedirects)
+			}
+			return nil
+		}
+		// net/http sends req as next leaves it, and next can edit via too, so
+		// judge the hop again against copies taken before next ran, and
+		// report it by the method the chain started with. Check also holds
+		// the Host header, path and opaque URL to the URL's host, which a
+		// forward proxy or a front end would otherwise route by.
+		orig, prev := *via[0].URL, *via[len(via)-1].URL
+		if err := next(req, via); err != nil {
+			return err
+		}
+		if err := credredirect.Check(req, []*http.Request{{URL: &orig}, {URL: &prev}}); err != nil {
+			return refuseRedirect(method, err)
+		}
+		return nil
+	}
+}
+
+// refuseRedirect reports a hop the policy refused. On a GET chain it hands
+// net/http the 3xx unfollowed instead of an error. The SDK sends a GET for
+// its optional server-to-client stream, on protocol versions before
+// 2026-07-28, and to resume a call's event stream with Last-Event-ID. An
+// error from client.Do on the stream GET is retried with growing delays and
+// then fails the session, while a 3xx that is not labeled text/event-stream
+// on the first stream request reads as a server without a stream and the
+// session goes on. A 3xx labeled text/event-stream, one on a stream
+// reconnect, or one on a resume fails the session or the call with the
+// status text as the reason. The JSON-RPC traffic is POST, where the error is
+// the clearer failure. Either way the next hop is not sent.
+func refuseRedirect(method string, err error) error {
+	if method == http.MethodGet {
+		return http.ErrUseLastResponse
+	}
+	return &redirectRefusedError{err: err}
+}
+
+// redirectRefusedError marks a refusal from authCheckRedirect so that
+// redactRedirectTarget can find it under the layers the SDK and net/http add.
+type redirectRefusedError struct{ err error }
+
+func (e *redirectRefusedError) Error() string {
+	return "mcptoolset: " + e.err.Error() + ": Config.Auth is set and the credential would follow"
+}
+
+func (e *redirectRefusedError) Unwrap() error { return e.err }
+
+// redactRedirectTarget strips the redirect target out of a refused redirect's
+// error. net/http wraps a CheckRedirect error in a *url.Error whose URL is the
+// server's Location header as sent, query string and all, and a cross-host
+// Location is often an SSO bounce carrying a code or a token. The refusal
+// itself already names both origins, so the *url.Error is replaced by it.
+func redactRedirectTarget(err error) error {
+	var refused *redirectRefusedError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || urlErr.Err != refused {
+		return err
+	}
+	return replaceLeaf(err, urlErr, refused)
+}
+
+// replaceLeaf returns err with the wrapped error old replaced by new, keeping
+// the message of every layer above it and every other error those layers
+// wrap. It follows fmt.Errorf's %w chains, including one wrapping two errors,
+// which the SDK uses between a request and its transport error.
+func replaceLeaf(err, old, new error) error {
+	if err == old {
+		return new
+	}
+	var inner []error
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		inner = u.Unwrap()
+	case interface{ Unwrap() error }:
+		if e := u.Unwrap(); e != nil {
+			inner = []error{e}
+		}
+	}
+	msg := err.Error()
+	for i, e := range inner {
+		replaced := replaceLeaf(e, old, new)
+		if replaced == e {
+			continue
+		}
+		// Rebuild the layer around the replaced error when its message
+		// carries the old one; otherwise the layer added nothing worth
+		// keeping over the redacted error.
+		before, after, ok := strings.Cut(msg, e.Error())
+		if !ok {
+			return replaced
+		}
+		errs := append(append(append([]error{}, inner[:i]...), replaced), inner[i+1:]...)
+		return &wrappedErrors{msg: before + replaced.Error() + after, errs: errs}
+	}
+	return err
+}
+
+// wrappedErrors is a rebuilt error layer: the layer's message with the
+// redacted error's text in place of the old, over the same wrapped errors.
+type wrappedErrors struct {
+	msg  string
+	errs []error
+}
+
+func (e *wrappedErrors) Error() string   { return e.msg }
+func (e *wrappedErrors) Unwrap() []error { return e.errs }
 
 // Config provides initial configuration for the MCP ToolSet.
 type Config struct {
@@ -170,8 +368,26 @@ type Config struct {
 	// HTTPClient's own Transport runs after that. A User-Agent it
 	// sets with Header.Set replaces the labels, and one it adds with
 	// Header.Add is not sent, because net/http sends only the first value.
-	// Other transport types, including a wrapper such as *mcp.LoggingTransport,
-	// are used as given.
+	//
+	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
+	// called, so the server can be started again after the connection is
+	// lost (an *exec.Cmd can be started only once). The first connect runs
+	// the caller's command, and every later connect runs a copy of the
+	// command and transport taken at New. Callers can notice this in three
+	// ways:
+	//   - The transport is copied at New, so changing it afterwards (for
+	//     example TerminateDuration) has no effect, even on the first
+	//     connect. Changes to the command after New only reach the first
+	//     connect.
+	//   - The copy can't carry an exec.CommandContext context, so a server
+	//     built with CommandContext is started again after that context is
+	//     canceled, and the new process ignores it. In the same way, a
+	//     server stopped by killing cmd.Process comes back on the next tool
+	//     call.
+	//   - A CommandTransport inside a wrapper such as *mcp.LoggingTransport
+	//     is used as given, so it still can't reconnect.
+	//
+	// Other transport types are used as given.
 	Transport mcp.Transport
 
 	// Endpoint, when set and Transport is nil, builds a streamable HTTP
@@ -196,6 +412,24 @@ type Config struct {
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
 	// user's requests are not kept in its Jar. Requests are sent by
 	// http.DefaultTransport.
+	//
+	// With Auth, a redirect is followed only when it stays on the endpoint's
+	// host and port and either keeps the scheme or upgrades http to https,
+	// each scheme's default port counting as the same port, because the
+	// credential is applied again on every hop. The bound covers the
+	// redirects the http.Client follows: a Transport supplied through the
+	// HTTPClient sits below the credential and is outside it. A
+	// CheckRedirect on the HTTPClient runs after that check, not instead of
+	// it, and may not point the request at another host through its Host
+	// header, path or opaque URL either. A refused redirect fails the call,
+	// except on a GET, where the unfollowed 3xx goes back to the SDK. The SDK
+	// sends a GET for its optional server-to-client stream, on protocol
+	// versions before 2026-07-28, and to resume a call's event stream. With
+	// the SDK release in go.mod, a 3xx not labeled text/event-stream on the
+	// first stream request means no stream and the session goes on, while
+	// one labeled text/event-stream, one on a stream reconnect, or one on a
+	// resume fails the session or the call with the status text as the
+	// reason.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two

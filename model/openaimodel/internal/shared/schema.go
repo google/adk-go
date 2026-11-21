@@ -18,8 +18,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -127,12 +128,11 @@ func EnforceStrictOpenAISchema(val any) {
 			schema["properties"] = propsMap
 		}
 		schema["additionalProperties"] = false
-		req := make([]string, 0, len(propsMap))
-		for k := range propsMap {
-			req = append(req, k)
-		}
-		sort.Strings(req)
-		schema["required"] = req
+		// Strict mode rejects "required": null, so an empty propsMap must
+		// still yield a non-nil slice.
+		required := slices.AppendSeq(make([]string, 0, len(propsMap)), maps.Keys(propsMap))
+		slices.Sort(required)
+		schema["required"] = required
 	}
 
 	if defsVal, ok := schema["$defs"]; ok {

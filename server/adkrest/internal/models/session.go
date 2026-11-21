@@ -15,6 +15,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 
@@ -25,12 +26,12 @@ import (
 
 // Session represents an agent's session.
 type Session struct {
-	ID        string         `json:"id"`
-	AppName   string         `json:"appName"`
-	UserID    string         `json:"userId"`
-	UpdatedAt int64          `json:"lastUpdateTime"`
-	Events    []Event        `json:"events"`
-	State     map[string]any `json:"state"`
+	ID        string      `json:"id"`
+	AppName   string      `json:"appName"`
+	UserID    string      `json:"userId"`
+	UpdatedAt int64       `json:"lastUpdateTime"`
+	Events    []Event     `json:"events"`
+	State     stateValues `json:"state"`
 }
 
 type CreateSessionRequest struct {
@@ -75,7 +76,7 @@ func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
 }
 
 func FromSession(session session.Session) (Session, error) {
-	state := map[string]any{}
+	state := stateValues{}
 	maps.Insert(state, session.State().All())
 	events := []Event{}
 	for event := range session.Events().All() {
@@ -115,4 +116,24 @@ func (s Session) Validate() error {
 		return fmt.Errorf("events is nil")
 	}
 	return nil
+}
+
+// RedactedState encodes stored with the credential redaction [Session] applies
+// to State, returning one raw JSON value per key, or nil if stored is nil or
+// cannot be encoded.
+func RedactedState(stored session.ReadonlyState) map[string]json.RawMessage {
+	if stored == nil {
+		return nil
+	}
+	state := stateValues{}
+	maps.Insert(state, stored.All())
+	b, err := json.Marshal(state)
+	if err != nil {
+		return nil
+	}
+	var redacted map[string]json.RawMessage
+	if err := json.Unmarshal(b, &redacted); err != nil {
+		return nil
+	}
+	return redacted
 }

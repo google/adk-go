@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -62,6 +63,14 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     scheduled again with the response delivered via
 //     ctx.ResumedInput. Successful completion clears the consumed
 //     responses; reconstructed history retains the completed result.
+//     The completion is recorded in history, so a later visit of the
+//     node (via loop-back routing) does not get the responses again,
+//     and a repeated answer to them yields ErrNothingToResume, unless
+//     the node has since raised the same interrupt ID again. Then the
+//     answer counts for the new pause. The record is written only if
+//     the caller reads the run's events past the node's completion.
+//     Until the node completes, a rerun after a further pause or a
+//     failure still gets the responses.
 //     - A handoff node is set to NodeCompleted and its response is
 //     routed to its successors without re-running the asker; a
 //     duplicate Resume then matches no waiting node and yields
@@ -186,9 +195,7 @@ func (w *Workflow) Resume(
 				if ns.ResumedInputs == nil {
 					ns.ResumedInputs = map[string]any{}
 				}
-				for id, resp := range freshMatched {
-					ns.ResumedInputs[id] = resp
-				}
+				maps.Copy(ns.ResumedInputs, freshMatched)
 				ns.Status = NodePending
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
 				scheduled++

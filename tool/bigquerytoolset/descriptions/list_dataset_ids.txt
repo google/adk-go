@@ -1,0 +1,20 @@
+List BigQuery dataset ids in a Google Cloud project.
+
+Args:
+    project_id (str): The Google Cloud project id.
+
+Returns:
+    list[str]: List of the BigQuery dataset ids present in the project.
+
+Examples:
+    >>> list_dataset_ids("bigquery-public-data")
+    ['america_health_rankings',
+     'american_community_survey',
+     'aml_ai_input_dataset',
+     'austin_311',
+     'austin_bikeshare',
+     'austin_crime',
+     'austin_incidents',
+     'austin_waste',
+     'baseball',
+     'bbc_news']

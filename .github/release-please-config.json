@@ -1,9 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-commit-authors": true,
   "separate-pull-requests": true,
   "packages": {
     ".": {
       "release-type": "go",
+      "versioning": "always-bump-minor",
       "package-name": "adk-go",
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",

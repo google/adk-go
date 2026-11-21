@@ -25,5 +25,6 @@ type TriggerConfig struct {
 	// MaxDelay is the maximum delay between retries.
 	MaxDelay time.Duration
 	// MaxConcurrentRuns is the maximum number of concurrent runs.
+	// Zero or a negative value means no limit.
 	MaxConcurrentRuns int
 }

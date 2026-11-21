@@ -34,12 +34,16 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestSessionSpansHandler(t *testing.T) {
@@ -778,5 +782,96 @@ func TestEventGraphHandlerRejectsANilAgent(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d (body %q)", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+// TestEventGraphHandlerToleratesNilParts: a nil entry in an event's
+// Content.Parts (a null part stored from a request body) must not panic the
+// event-graph endpoint's function-call/response scans — and must not stop
+// them from finding the calls and responses that come after it. The agent
+// carries a tool named "lookup", so the dot output highlights (fills) the
+// lookup node only when the scan actually found the call or response; a scan
+// that returns nothing falls back to the author pair and leaves the tool
+// node unhighlighted.
+func TestEventGraphHandlerToleratesNilParts(t *testing.T) {
+	const (
+		appName   = "test-app"
+		userID    = "test-user"
+		sessionID = "test-session"
+		eventID   = "test-event"
+	)
+
+	lookupTool, err := functiontool.New(functiontool.Config{
+		Name:        "lookup",
+		Description: "a lookup tool",
+	}, func(ctx agent.Context, in struct{}) (struct{}, error) {
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatalf("create tool: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+	}{
+		{"call after a nil part", []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{Name: "lookup"}}}},
+		{"response after a nil part", []*genai.Part{nil, {FunctionResponse: &genai.FunctionResponse{Name: "lookup"}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rootAgent, err := llmagent.New(llmagent.Config{
+				Name:        appName,
+				Description: "graph test agent",
+				Tools:       []tool.Tool{lookupTool},
+			})
+			if err != nil {
+				t.Fatalf("create agent: %v", err)
+			}
+			event := &session.Event{ID: eventID, Author: appName}
+			event.LLMResponse.Content = &genai.Content{Parts: tc.parts}
+			key := fakes.SessionKey{AppName: appName, UserID: userID, SessionID: sessionID}
+			sessionService := &fakes.FakeSessionService{
+				Sessions: map[fakes.SessionKey]fakes.TestSession{
+					key: {
+						Id:            key,
+						SessionState:  fakes.TestState{},
+						SessionEvents: fakes.TestEvents{event},
+						UpdatedAt:     time.Now(),
+					},
+				},
+			}
+
+			apiController := controllers.NewDebugAPIController(sessionService, agent.NewSingleLoader(rootAgent), nil)
+			req := httptest.NewRequest(http.MethodGet, "/events/"+eventID+"/graph", nil)
+			req = mux.SetURLVars(req, map[string]string{
+				"app_name":   appName,
+				"user_id":    userID,
+				"session_id": sessionID,
+				"event_id":   eventID,
+			})
+			rr := httptest.NewRecorder()
+
+			apiController.EventGraphHandler(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d (body %q)", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			var resp struct {
+				DotSrc string `json:"dotSrc"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			lookupHighlighted := false
+			for line := range strings.Lines(resp.DotSrc) {
+				if strings.Contains(line, "lookup") && strings.Contains(line, "filled") {
+					lookupHighlighted = true
+				}
+			}
+			if !lookupHighlighted {
+				t.Errorf("lookup node not highlighted: the scan did not find the %s past the nil part.\ndot: %s", tc.name, resp.DotSrc)
+			}
+		})
 	}
 }

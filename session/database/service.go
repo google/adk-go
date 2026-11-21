@@ -23,10 +23,12 @@
 package database
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -331,14 +333,24 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 		}
 	}
 
+	// Sort here rather than with ORDER BY. SQLite stores update_time as RFC 3339
+	// text with the value's own offset, so it would compare text, not instants,
+	// for rows written in different zones.
+	slices.SortStableFunc(foundSessions, func(a, b storageSession) int {
+		return cmp.Or(
+			a.UpdateTime.Compare(b.UpdateTime),
+			strings.Compare(a.UserID, b.UserID),
+			strings.Compare(a.ID, b.ID),
+		)
+	})
+
 	// Create response sessions, transform the storageSessions into
 	responseSessions := make([]session.Session, 0, len(foundSessions))
 	for _, storage := range foundSessions {
-		s := storage
-		sess, err := createSessionFromStorageSession(&s)
+		sess, err := createSessionFromStorageSession(&storage)
 		if err != nil {
 			// If we encounter a single mapping error, we fail the whole request.
-			return nil, fmt.Errorf("failed to map storage object for session %s: %w", s.ID, err)
+			return nil, fmt.Errorf("failed to map storage object for session %s: %w", storage.ID, err)
 		}
 
 		userState, ok := userStates[sess.UserID()]
@@ -421,22 +433,33 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
-	// append it to session
-	if err := sess.appendEvent(event); err != nil {
-		return err
+	// Like adk-python, keep temporary state local even if persistence fails.
+	sess.mu.Lock()
+	if sess.appendGate == nil {
+		sess.appendGate = make(chan struct{}, 1)
+	}
+	appendGate := sess.appendGate
+	for key, value := range event.Actions.StateDelta {
+		if strings.HasPrefix(key, session.KeyPrefixTemp) {
+			sess.state[key] = value
+		}
+	}
+	sess.mu.Unlock()
+
+	select {
+	case appendGate <- struct{}{}:
+		defer func() { <-appendGate }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
-	// Trim temp state before persisting
 	event = trimTempDeltaState(event)
-	// applyChanges and persist them
-	err := s.applyEvent(ctx, sess, event)
-	if err != nil {
+	// Publish persistent state, history and update time only after Commit succeeds.
+	if err := s.applyEvent(ctx, sess, event); err != nil {
 		return err
 	}
 
-	// update local session last update time
-	sess.updatedAt = event.Timestamp
-	return nil
+	return sess.appendEvent(event)
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -458,7 +481,7 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.updatedAt.UnixMicro()
+		sessionUpdateTime := sess.LastUpdateTime().UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",
@@ -538,8 +561,6 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		if err := tx.Save(&storageSess).Error; err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
-
-		sess.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})

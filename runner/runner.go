@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
@@ -62,7 +63,11 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	// optional
+	// optional. When true, Run and RunLive create the session if it does not
+	// exist. The session is created when the session ID is empty, so the
+	// service generates one, or when the session service's Get reports
+	// [session.ErrNotFound]. Any other Get error is returned as is, so a
+	// transient storage failure never replaces an existing session.
 	AutoCreateSession bool
 
 	// Compaction enables context compaction for the sessions this
@@ -81,6 +86,22 @@ type Config struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// ContextCache enables explicit context caching for the model requests of
+	// every LLM agent this runner drives, so the system instruction, tools and
+	// stable conversation prefix are not resent in full on every turn. Nil, the
+	// default, disables it. It does not apply to [Runner.RunLive].
+	//
+	// When an invocation ends, the runner deletes the caches its model calls
+	// created or stopped using, except those the latest stored record of an
+	// agent still names. It reads the stored session to tell, so an invocation
+	// that only reused a cache reads nothing extra.
+	//
+	// See [model.ContextCacheConfig] for when a cache is created and reused,
+	// and which models and session services support it.
+	//
+	// optional
+	ContextCache *model.ContextCacheConfig
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -142,6 +163,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 
+	if err := cfg.ContextCache.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid ContextCache: %w", err)
+	}
+	// A copy of the caller's config, its HTTP options included, so that a
+	// later change to the caller's headers, timeout or the maps in its extra
+	// body neither reaches running invocations nor races with them.
+	contextCache := llminternal.CloneContextCacheConfig(cfg.ContextCache)
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -152,6 +181,7 @@ func New(cfg Config) (*Runner, error) {
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
+		contextCache:      contextCache,
 	}, nil
 }
 
@@ -242,6 +272,10 @@ type Runner struct {
 	// validated copy of Config.Compaction with the summarizer
 	// resolved.
 	compactionConfig *compaction.Config
+
+	// contextCache is nil when context caching is disabled. Otherwise it is
+	// a validated copy of Config.ContextCache.
+	contextCache *model.ContextCacheConfig
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -468,6 +502,15 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 // carry none and a summary carries the real one. Both cases are then the same
 // rule: whatever the framework decided, not whatever came back.
 //
+// A replacement also keeps the identity of the event it replaces: its ID,
+// invocation ID and timestamp, and its author when the replacement names none,
+// as adk-python's Runner._get_output_event does. adk-python keeps every other
+// field the replacement did not set too; a Go struct cannot tell an unset field
+// from a zero one, so here the replacement's other fields win as given.
+//
+// The replacement itself is not written to: the result is a copy, so a plugin
+// that returns one shared event for several originals leaves it as it built it.
+//
 // The post-invocation summary path does not use this. A plugin is invited to
 // rewrite a summary there, and SanitizeSummary re-checks the result.
 func fromPlugin(original, modified *session.Event, record *session.EventCompaction) *session.Event {
@@ -484,13 +527,22 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 		original.Actions.Compaction = record
 		return original
 	}
-	modified.Actions.Compaction = record
-	return modified
+	out := *modified
+	out.Actions.Compaction = record
+	out.ID = original.ID
+	out.InvocationID = original.InvocationID
+	out.Timestamp = original.Timestamp
+	if out.Author == "" {
+		out.Author = original.Author
+	}
+	return &out
 }
 
-// stampTimestamp gives an event that an agent yielded, or a plugin returned in
-// its place, without a timestamp the time the runner received it, as
-// adk-python's Event does on construction.
+// stampTimestamp gives an event without a timestamp the time the runner
+// received it, as adk-python's Event does on construction. That is an event an
+// agent yielded without one, or one a plugin rewrote in place and left without
+// one. A replacement a plugin returns has already inherited the original's
+// timestamp through fromPlugin.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
@@ -510,8 +562,56 @@ func (r *Runner) compactionRuntime() *compactionctx.Runtime {
 	return compactionctx.New(r.compactionConfig, r.sessionService)
 }
 
-// reloadSession re-fetches a session so compaction works against current state
-// rather than the snapshot the invocation began with.
+// withContextCache returns ctx carrying this runner's context cache config and
+// a ledger of its own for the invocation. Both are set even when caching is
+// off, so an invocation never sees the config or ledger of a run it is nested
+// in, such as an agent tool's caller.
+func (r *Runner) withContextCache(ctx context.Context) context.Context {
+	ctx = llminternal.WithContextCacheConfig(ctx, r.contextCache)
+	var ledger *llminternal.ContextCacheLedger
+	if r.contextCache != nil {
+		ledger = llminternal.NewContextCacheLedger()
+	}
+	return llminternal.WithContextCacheLedger(ctx, ledger)
+}
+
+// contextCacheSettleTimeout bounds reading the stored session once an
+// invocation has ended, which a hung store would otherwise hold open. A var so
+// a test can shorten it rather than waiting for the bound to pass.
+var contextCacheSettleTimeout = 30 * time.Second
+
+// settleContextCaches deletes the context caches the invocation's model calls
+// created or stopped using, except those the latest stored record of an agent
+// names. It runs once the invocation has ended, however it ended. A canceled
+// invocation still settles, or its caches would stay on the provider until
+// their TTL runs out.
+//
+// It judges against the session as the session service holds it, not against
+// the invocation's own handle. A service may add an event to the handle before
+// it writes the event, and leave it there when the write fails, as the
+// database service does, so the handle can name a cache the store never
+// recorded. Compaction re-reads the session for the same reason. The read
+// happens only when a cache was created or stopped being used, so most
+// invocations make none.
+func (r *Runner) settleContextCaches(ctx context.Context, sess session.Session) {
+	ledger := llminternal.ContextCacheLedgerFromContext(ctx)
+	if ledger == nil || sess == nil {
+		return
+	}
+	ledger.Settle(context.WithoutCancel(ctx), func(ctx context.Context) (session.Events, error) {
+		ctx, cancel := context.WithTimeout(ctx, contextCacheSettleTimeout)
+		defer cancel()
+		stored, err := r.reloadSession(ctx, sess)
+		if err != nil {
+			return nil, err
+		}
+		return stored.Events(), nil
+	})
+}
+
+// reloadSession re-fetches a session so that compaction and context cache
+// cleanup work against current state rather than the snapshot the invocation
+// began with.
 func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.Session, error) {
 	resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   s.AppName(),
@@ -522,7 +622,7 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 		return nil, fmt.Errorf("failed to re-read the session: %w", err)
 	}
 	if resp == nil || resp.Session == nil {
-		return nil, fmt.Errorf("session %q disappeared while compacting", s.ID())
+		return nil, fmt.Errorf("session %q disappeared before it could be re-read", s.ID())
 	}
 	return resp.Session, nil
 }
@@ -536,7 +636,9 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 	if err == nil {
 		return getResp.Session, nil
 	}
-	if !r.autoCreateSession {
+	// Services reject an empty ID in Get with a validation error, not
+	// ErrNotFound. Create generates an ID for it.
+	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
 		return nil, err
 	}
 	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
@@ -593,6 +695,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
+		telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
@@ -669,6 +772,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+		ctx = r.withContextCache(ctx)
+		defer r.settleContextCaches(ctx, storedSession)
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
@@ -706,7 +811,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		var memoryImpl agent.Memory = nil
+		var memoryImpl agent.Memory
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
@@ -716,14 +821,50 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		// A function response goes back to the agent that made the call, on
+		// the branch it ran on (adk-python find_agent_to_run and
+		// restore_branch_from_history). Re-running the root would run agents
+		// that never saw the call, and they fail on the unmatched response.
+		// A call made inside a graph workflow is the exception: the root runs,
+		// and sequential, parallel and loop agents on the way narrow to the
+		// sub-agents holding the callers (utils.GraphResumeIndexes), provided
+		// the workflow's node agents are listed in its SubAgents. Sub-agents
+		// after it in a sequence still run, and an LLM agent among them sees
+		// the user's answer as context, unless the node's call is on a branch
+		// it cannot see, as when the workflow fans out inside a parallel agent
+		// (#2204). The workflow resumes the interrupted node only for an
+		// adk_request_input response; any other response restarts the graph.
+		// The first response in the message decides the route.
+		agentToRun, branch := r.rootAgent, ""
+		routedToCaller := false
+		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
+			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
+				agentToRun, branch = sub, ev.Branch
+				routedToCaller = true
+			}
+		}
+		// Answers to calls from several invocations start a new invocation
+		// when they go back to the calling agent, as adk-python does for a
+		// BaseAgent root of an app that is not resumable. A graph workflow
+		// resumes a paused run from its invocation's events, so it keeps the
+		// first call's invocation; adk-python raises for a Workflow root. So
+		// does an answer whose caller is not in the agent tree, since that
+		// caller can be a workflow node agent missing from the workflow's
+		// sub-agents; adk-python starts a new invocation there.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if spansInvocations && routedToCaller {
+			invocationID = ""
+		}
+
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:    artifacts,
 			Memory:       memoryImpl,
 			Session:      storedSession,
-			Agent:        r.rootAgent,
+			Branch:       branch,
+			Agent:        agentToRun,
 			UserContent:  msg,
 			RunConfig:    &cfg,
-			InvocationID: resolveInvocationID(storedSession, msg),
+			InvocationID: invocationID,
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
@@ -745,7 +886,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range r.rootAgent.Run(ctx) {
+		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
 				// The model-call budget is spent for the whole invocation, so
 				// nothing that runs after this can reach a model. Ending here
@@ -759,7 +900,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
 				return
@@ -788,7 +929,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(ctx, event) // a replacement may be a struct literal too
+				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 			}
 
 			// only commit non-partial event to a session service
@@ -843,7 +984,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
-	stampTimestamp(ctx, event) // a replacement may be a struct literal
+	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -851,6 +992,11 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 	return event, nil
 }
+
+// errUserFunctionCall rejects a user message that carries a function call.
+// Only a model makes function calls, so storing one would put a call no model
+// produced into the history.
+var errUserFunctionCall = errors.New("user message cannot contain function calls")
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -873,6 +1019,9 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 			return p == nil
 		})
 		req.Content = &content
+	}
+	if len(utils.FunctionCalls(req.Content)) > 0 {
+		return errUserFunctionCall
 	}
 	err := s.sess.Send(req)
 	if err != nil {
@@ -921,7 +1070,21 @@ func (s *closedLiveSession) Close() error {
 
 // RunLive starts a live, bidirectional agent session, returning the session
 // and a stream of events from the agents.
-func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+// Consume the event stream to finish the invocation and its plugin callbacks,
+// including after closing the live session.
+// Closing the session alone does not end or export the invocation span.
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (_ agent.LiveSession, _ iter.Seq2[*session.Event, error], err error) {
+	// Unlike Python's live generator, Go starts callbacks before returning
+	// the session and iterator, so the span must start here too.
+	ctx, span := telemetry.StartInvocationSpan(ctx, r.rootAgent, sessionID)
+	ownedByIterator := false
+	defer func() {
+		if !ownedByIterator {
+			telemetry.RecordError(span, err)
+			span.End()
+		}
+	}()
+
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -931,6 +1094,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if err != nil {
 		return nil, nil, err
 	}
+	telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 	// msg is nil for Live run as it's streaming
 	agentToRun, err := r.findAgentToRun(storedSession, nil)
@@ -965,7 +1129,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
-	var memoryImpl agent.Memory = nil
+	var memoryImpl agent.Memory
 	if r.memoryService != nil {
 		memoryImpl = &imemory.Memory{
 			Service:   r.memoryService,
@@ -993,9 +1157,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer span.End()
 				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
+			ownedByIterator = true
 			return &closedLiveSession{}, earlyExitIter, nil
 		}
 	}
@@ -1006,6 +1172,21 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		// Close can precede iteration; keep the span open through the
+		// remaining events and AfterRunCallback.
+		var firstErr error
+		defer func() {
+			telemetry.RecordError(span, firstErr)
+			span.End()
+		}()
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			return emit(ev, err)
+		}
+
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
@@ -1057,7 +1238,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(iCtx, event) // a replacement may be a struct literal too
+				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -1069,7 +1250,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			isToolCallOrResp := false
 			if event.LLMResponse.Content != nil {
 				for _, part := range event.LLMResponse.Content.Parts {
-					if part.FunctionCall != nil || part.FunctionResponse != nil {
+					if part != nil && (part.FunctionCall != nil || part.FunctionResponse != nil) {
 						isToolCallOrResp = true
 						break
 					}
@@ -1145,6 +1326,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
+	ownedByIterator = true
 	return &runnerLiveSession{
 		sess:          agentSess,
 		r:             r,
@@ -1176,10 +1358,16 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
+	if len(utils.FunctionCalls(msg)) > 0 {
+		return ctx, nil, errUserFunctionCall
+	}
+
 	artifactsService := ctx.Artifacts()
 	if artifactsService != nil && saveInputBlobsAsArtifacts {
 		for i, part := range msg.Parts {
-			if part.InlineData == nil {
+			// A nil part carries no content, so it is skipped; adk-python rejects
+			// the request instead.
+			if part == nil || part.InlineData == nil {
 				continue
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
@@ -1265,7 +1453,7 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
 func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
-	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
+	if event := utils.FunctionCallEvent(session.Events(), msg); event != nil {
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
 			return subAgent, nil
@@ -1297,31 +1485,15 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 	return r.rootAgent, nil
 }
 
-// handleUserFunctionCallResponse finds the function call event that matches the function response id
-// delivered by the user in the latest event.
-func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *session.Event {
-	if events.Len() == 0 {
-		return nil
-	}
-
-	functionResponses := utils.FunctionResponses(msg)
-	if len(functionResponses) == 0 {
-		return nil
-	}
-
-	// This assumes that even if user provides multiple function responses, all the function calls
-	// were made by the same agent. Otherwise it would be impossible to rearrange session events
-	// such that every function response has a corresponding call filtering by author.
-	callID := functionResponses[0].ID
-	for i := events.Len() - 1; i >= 0; i-- {
-		event := events.At(i)
-		for _, part := range utils.FunctionCalls(event.Content) {
-			if part.ID == callID {
-				return event
-			}
+// isInGraphWorkflow reports whether a or one of its ancestors is a graph
+// workflow agent built by workflowagent.New.
+func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
+	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
+		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
@@ -1345,7 +1517,7 @@ func hasInlineData(event *session.Event) bool {
 		return false
 	}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.InlineData != nil {
+		if part != nil && part.InlineData != nil {
 			return true
 		}
 	}

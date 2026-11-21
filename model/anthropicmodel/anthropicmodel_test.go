@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -707,7 +708,6 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 	})
 
 	t.Run("invalid_client_configs", func(t *testing.T) {
-		negOne := -1
 		cases := []struct {
 			name      string
 			modelName string
@@ -741,7 +741,7 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 			{
 				name:      "negative_max_retries",
 				modelName: "claude-sonnet-4-5-20250929",
-				cfg:       anthropicmodel.ClientConfig{APIKey: "k", MaxRetries: &negOne},
+				cfg:       anthropicmodel.ClientConfig{APIKey: "k", MaxRetries: new(-1)},
 			},
 			{
 				name:      "invalid_effort",
@@ -855,7 +855,7 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 			if hcVal.IsNil() {
 				t.Fatal("RequestConfig.HTTPClient is nil after applying client options")
 			}
-			hc, ok := hcVal.Interface().(*http.Client)
+			hc, ok := reflect.TypeAssert[*http.Client](hcVal)
 			if !ok || hc == nil {
 				t.Fatalf("RequestConfig.HTTPClient = %T, want non-nil *http.Client", hcVal.Interface())
 			}
@@ -1448,8 +1448,6 @@ func TestToolsAndToolConfig(t *testing.T) {
 	})
 
 	t.Run("rejected_tools_and_tool_configs", func(t *testing.T) {
-		streamArgs := true
-		budget := int32(1024)
 		cases := []struct {
 			name    string
 			cfg     *genai.GenerateContentConfig
@@ -1534,7 +1532,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 				cfg: &genai.GenerateContentConfig{
 					Tools: weatherTools,
 					ToolConfig: &genai.ToolConfig{
-						IncludeServerSideToolInvocations: &streamArgs,
+						IncludeServerSideToolInvocations: new(true),
 					},
 				},
 				wantSub: "IncludeServerSideToolInvocations",
@@ -1575,7 +1573,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 				name: "any_with_thinking_enabled",
 				cfg: &genai.GenerateContentConfig{
 					Tools:          weatherTools,
-					ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &budget},
+					ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: new(int32(1024))},
 					ToolConfig: &genai.ToolConfig{
 						FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny},
 					},
@@ -1601,7 +1599,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 					Tools: weatherTools,
 					ToolConfig: &genai.ToolConfig{
 						FunctionCallingConfig: &genai.FunctionCallingConfig{
-							StreamFunctionCallArguments: &streamArgs,
+							StreamFunctionCallArguments: new(true),
 						},
 					},
 				},
@@ -2276,6 +2274,93 @@ func TestFinishReasonAndErrorClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("content_less_turn_error_code", func(t *testing.T) {
+		const (
+			thinking = `{"type":"thinking","thinking":"I should not answer this.","signature":"sig"}`
+			toolUse  = `{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{}}`
+		)
+		cases := []struct {
+			name       string
+			stopReason string // "" is sent as null
+			blocks     []string
+			wantCode   string
+		}{
+			{name: "refusal_without_content", stopReason: "refusal", wantCode: "SAFETY"},
+			{name: "max_tokens_without_content", stopReason: "max_tokens", wantCode: "MAX_TOKENS"},
+			{name: "context_window_without_content", stopReason: "model_context_window_exceeded", wantCode: "MAX_TOKENS"},
+			{name: "unknown_reason_without_content", stopReason: "future_unknown_reason", wantCode: "OTHER"},
+			{name: "refusal_with_only_thinking", stopReason: "refusal", blocks: []string{thinking}, wantCode: "SAFETY"},
+			{name: "refusal_with_only_empty_text", stopReason: "refusal", blocks: []string{`{"type":"text","text":""}`}, wantCode: "SAFETY"},
+			{name: "max_tokens_with_only_truncated_tool_use", stopReason: "max_tokens", blocks: []string{toolUse}, wantCode: "MAX_TOKENS"},
+			{name: "refusal_with_text", stopReason: "refusal", blocks: []string{thinking, `{"type":"text","text":"I can't help with that."}`}},
+			{name: "unknown_reason_with_tool_use", stopReason: "future_unknown_reason", blocks: []string{toolUse}},
+			{name: "end_turn_without_content", stopReason: "end_turn"},
+			{name: "pause_turn_without_content", stopReason: "pause_turn"},
+			{name: "no_stop_reason_without_content", stopReason: ""},
+		}
+
+		for _, tc := range cases {
+			for _, stream := range []bool{false, true} {
+				name := tc.name
+				if stream {
+					name += "/stream"
+				}
+				t.Run(name, func(t *testing.T) {
+					stopReason := "null"
+					if tc.stopReason != "" {
+						stopReason = strconv.Quote(tc.stopReason)
+					}
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if !stream {
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":%s,"content":[%s],"usage":{"input_tokens":5,"output_tokens":2}}`, stopReason, strings.Join(tc.blocks, ","))
+							return
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5-20250929\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n")
+						for i, block := range tc.blocks {
+							_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", i, block)
+							_, _ = fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", i)
+						}
+						_, _ = fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":%s},\"usage\":{\"output_tokens\":2}}\n\n", stopReason)
+						_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+					}))
+					defer srv.Close()
+
+					m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+						APIKey:  "test-key",
+						BaseURL: srv.URL,
+					})
+					if err != nil {
+						t.Fatalf("NewModel() error = %v", err)
+					}
+					var got *model.LLMResponse
+					for resp, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hi")}, stream) {
+						if err != nil {
+							t.Fatalf("GenerateContent() error = %v", err)
+						}
+						got = resp
+					}
+					if got.Partial {
+						t.Fatal("last response is partial, want the final aggregated response")
+					}
+					if got.ErrorCode != tc.wantCode {
+						t.Errorf("ErrorCode = %q, want %q", got.ErrorCode, tc.wantCode)
+					}
+					if tc.wantCode == "" {
+						if got.ErrorMessage != "" {
+							t.Errorf("ErrorMessage = %q, want empty", got.ErrorMessage)
+						}
+						return
+					}
+					if !strings.Contains(got.ErrorMessage, strconv.Quote(tc.stopReason)) {
+						t.Errorf("ErrorMessage = %q, want it to name stop_reason %q", got.ErrorMessage, tc.stopReason)
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("http_status_and_midstream_sse_errors", func(t *testing.T) {
 		zeroRetries := 0
 		errorCases := []struct {
@@ -2628,6 +2713,16 @@ func TestGenerateContentConfigValidation(t *testing.T) {
 			cfg:       &genai.GenerateContentConfig{ContinuationToken: []byte("tok")},
 			wantField: "ContinuationToken",
 		},
+		{
+			name:      "generation_output_config",
+			cfg:       &genai.GenerateContentConfig{GenerationOutputConfig: &genai.GenerationOutputConfig{}},
+			wantField: "GenerationOutputConfig",
+		},
+		{
+			name:      "store",
+			cfg:       &genai.GenerateContentConfig{Store: &boolTrue},
+			wantField: "Store",
+		},
 	}
 
 	for _, tc := range rejectedCases {
@@ -2680,7 +2775,6 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 
-	temp := float32(0.2)
 	sharedReq := &model.LLMRequest{
 		Model: "claude-sonnet-4-5-20250929",
 		Contents: []*genai.Content{
@@ -2700,7 +2794,7 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 		},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: genai.NewContentFromText("Be helpful.", genai.RoleUser),
-			Temperature:       &temp,
+			Temperature:       new(float32(0.2)),
 			StopSequences:     []string{"STOP"},
 			Tools: []*genai.Tool{
 				{
@@ -2729,15 +2823,13 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for i := range workers {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for _, err := range m.GenerateContent(t.Context(), sharedReq, false) {
 				if err != nil {
-					errs <- fmt.Errorf("worker %d: %w", idx, err)
+					errs <- fmt.Errorf("worker %d: %w", i, err)
 				}
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -3766,16 +3858,14 @@ func TestExecutableCodeAndURISchemePrivacy(t *testing.T) {
 
 func TestMaxRetriesAndInFlightNonStreamingCancellation(t *testing.T) {
 	t.Run("max_retries_honored", func(t *testing.T) {
-		zero := 0
-		one := 1
 		cases := []struct {
 			name       string
 			maxRetries *int
 			wantCalls  int
 		}{
 			{name: "nil_default_2_retries", maxRetries: nil, wantCalls: 3},
-			{name: "zero_retries", maxRetries: &zero, wantCalls: 1},
-			{name: "one_retry", maxRetries: &one, wantCalls: 2},
+			{name: "zero_retries", maxRetries: new(0), wantCalls: 1},
+			{name: "one_retry", maxRetries: new(1), wantCalls: 2},
 		}
 
 		for _, tc := range cases {
@@ -3849,8 +3939,7 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 	assertFieldsMatch := func(t *testing.T, typ reflect.Type, known map[string]bool) {
 		t.Helper()
 		exported := make(map[string]bool, typ.NumField())
-		for i := range typ.NumField() {
-			f := typ.Field(i)
+		for f := range typ.Fields() {
 			if !f.IsExported() {
 				continue
 			}
@@ -3902,6 +3991,8 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"AudioTranscriptionConfig":   true,
 		"AutomaticContinuation":      true,
 		"ContinuationToken":          true,
+		"GenerationOutputConfig":     true,
+		"Store":                      true,
 	})
 
 	assertFieldsMatch(t, reflect.TypeFor[genai.HTTPOptions](), map[string]bool{

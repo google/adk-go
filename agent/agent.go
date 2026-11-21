@@ -17,6 +17,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -119,7 +120,9 @@ type Artifacts interface {
 	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
 	List(context.Context) (*artifact.ListResponse, error)
 	Load(ctx context.Context, name string) (*artifact.LoadResponse, error)
-	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
+	// LoadVersion loads the specified version of name, or the latest version
+	// when version is nil.
+	LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error)
 }
 
 // Memory interface provides methods to access agent memory across the
@@ -193,6 +196,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			a.OnBeforeAgentCallbackEvent(event)
 		}
 		if event != nil || err != nil {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if !yield(event, err) {
 				return
 			}
@@ -205,11 +211,16 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		// Matches adk-python, where an agent without a run implementation is
 		// constructed fine and fails when run.
 		if a.run == nil {
-			yield(nil, fmt.Errorf("agent %q has no Run function", a.name))
+			err := fmt.Errorf("agent %q has no Run function", a.name)
+			runOnAgentErrorCallbacks(nodeCtx, err)
+			yield(nil, err)
 			return
 		}
 
 		for event, err := range a.run(nodeCtx) {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if event != nil && event.Author == "" {
 				event.Author = getAuthorForEvent(nodeCtx, event)
 			}
@@ -223,6 +234,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		event, err = runAfterAgentCallbacks(nodeCtx)
+		if err != nil {
+			runOnAgentErrorCallbacks(nodeCtx, err)
+		}
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -327,6 +341,30 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	return nil, nil
+}
+
+// runOnAgentErrorCallbacks notifies plugins that an error escaped the agent's
+// run. Notification only: the caller still yields err, so a callback cannot
+// recover from or replace the failure. An error is compared against the
+// failing agent's own context: when that context is done, a cancellation or
+// deadline error is not reported — including a deadline a parent agent or a
+// workflow node imposed on it, since that deadline lives on the agent's own
+// context.
+//
+// The context's cancellation cause, or any error wrapping it, is suppressed
+// too, because errors.Is cannot tell an echo of the cancellation from an
+// unrelated failure that wraps it; a caller that cancels with a cause should
+// use an error value it owns. Errors that escape while the agent's context is
+// still live are reported.
+func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx))) {
+		return
+	}
+	pluginManager := pluginManagerFromContext(ctx)
+	if pluginManager == nil {
+		return
+	}
+	pluginManager.RunOnAgentErrorCallback(NewCallbackContext(ctx, nil), ctx.Agent(), err)
 }
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content or a state modification
@@ -519,6 +557,7 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 type pluginManager interface {
 	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
 	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
+	RunOnAgentErrorCallback(cctx Context, a Agent, err error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)

@@ -490,7 +490,7 @@ func TestToolCallbacksAgent(t *testing.T) {
 		GenerateContentFunc: func(ctx context.Context, req *model.LLMRequest, stream bool) (model.LLMResponse, error) {
 			var userText string
 			if len(req.Contents) == 1 && len(req.Contents[0].Parts) > 0 {
-				userText = string(req.Contents[0].Parts[0].Text)
+				userText = req.Contents[0].Parts[0].Text
 			} else if len(req.Contents) > 1 {
 				userText = "after func"
 			}

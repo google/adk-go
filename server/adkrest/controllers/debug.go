@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 
@@ -96,9 +97,7 @@ func convertEventSpan(span services.DebugSpan) map[string]any {
 		"parent_span_id": span.ParentSpanID,
 		"logs":           logs,
 	}
-	for k, v := range span.Attributes {
-		flattened[string(k)] = v
-	}
+	maps.Copy(flattened, span.Attributes)
 	return flattened
 }
 
@@ -208,7 +207,7 @@ func functionalCalls(event *session.Event) []*genai.FunctionCall {
 	}
 	fc := []*genai.FunctionCall{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			fc = append(fc, part.FunctionCall)
 		}
 	}
@@ -221,7 +220,7 @@ func functionalResponses(event *session.Event) []*genai.FunctionResponse {
 	}
 	fr := []*genai.FunctionResponse{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			fr = append(fr, part.FunctionResponse)
 		}
 	}

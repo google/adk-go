@@ -151,7 +151,7 @@ func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][
 }
 
 func nodeCaption(instance any) string {
-	caption := ""
+	var caption string
 	switch i := instance.(type) {
 	case agent.Agent:
 		caption = "🤖 " + i.Name()
@@ -205,10 +205,6 @@ func highlighted(nodeName string, higlightedPairs [][]string) bool {
 	return false
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // Function returns whether the edge should be highlighted.
 // The graph could have the pairs highlighted in different directions.
 // If nil is returned, means the nodes aren't highlithed.
@@ -222,10 +218,10 @@ func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	for _, pair := range higlightedPairs {
 		if len(pair) == 2 {
 			if pair[0] == from && pair[1] == to {
-				return boolPtr(true)
+				return new(true)
 			}
 			if pair[0] == to && pair[1] == from {
-				return boolPtr(false)
+				return new(false)
 			}
 		}
 	}
