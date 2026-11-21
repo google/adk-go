@@ -61,7 +61,7 @@ func TestStreamedOutputUsesMarshalers(t *testing.T) {
 	}
 	var got map[string]any
 	if err := json.Unmarshal(rw.Body.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+		t.Fatalf("json.Unmarshal(%d-byte body) failed: %v", rw.Body.Len(), err)
 	}
 
 	wantOutput := map[string]any{
@@ -73,16 +73,16 @@ func TestStreamedOutputUsesMarshalers(t *testing.T) {
 		"ids":      []any{id.String()},
 	}
 	if diff := cmp.Diff(wantOutput, got["output"]); diff != "" {
-		t.Errorf("output mismatch (-want +got):\n%s\nbody: %s", diff, rw.Body.String())
+		t.Errorf("output mismatch (-want +got):\n%s", diff)
 	}
 	actions, ok := got["actions"].(map[string]any)
 	if !ok {
-		t.Fatalf("actions is not an object: %s", rw.Body.String())
+		t.Fatalf("actions is %T, want map[string]any", got["actions"])
 	}
 	// EventActions defines MarshalJSON but has exported fields, so it is still
 	// walked and keeps snake_case keys.
 	if diff := cmp.Diff(map[string]any{"last_order": id.String()}, actions["state_delta"]); diff != "" {
-		t.Errorf("actions.state_delta mismatch (-want +got):\n%s\nbody: %s", diff, rw.Body.String())
+		t.Errorf("actions.state_delta mismatch (-want +got):\n%s", diff)
 	}
 }
 
