@@ -79,7 +79,7 @@ func TestRunNode_PartialEventIsCopiedForConsumer(t *testing.T) {
 	}
 
 	if gotPartial == nil || gotFinal == nil {
-		t.Fatalf("got partial %v, final %v; want both", gotPartial, gotFinal)
+		t.Fatalf("got partial %t, final %t; want both", gotPartial != nil, gotFinal != nil)
 	}
 	if gotPartial == node.partial {
 		t.Errorf("received partial is the pointer the node yielded; want a copy")
