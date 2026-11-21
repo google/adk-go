@@ -264,6 +264,7 @@ func Promote(parent InvocationContext) Context {
 	return &commonContext{
 		Context:           parent,
 		invocationContext: parent,
+		runToken:          runTokenOf(parent),
 	}
 }
 
@@ -409,6 +410,7 @@ func prepareEventActions(actions *session.EventActions) *session.EventActions {
 type commonContext struct {
 	context.Context
 	adkcontext.Marker
+	adkcontext.StepMarker
 	invocationContext InvocationContext
 	artifacts         Artifacts
 	actions           *session.EventActions
@@ -746,6 +748,11 @@ var (
 	_ adkcontext.Source = (*invocationContext)(nil)
 	_ adkcontext.Source = (*toolContextWrapper)(nil)
 	_ adkcontext.Source = (*callbackContextWrapper)(nil)
+
+	_ adkcontext.StepSource = (*commonContext)(nil)
+	_ adkcontext.StepSource = (*invocationContext)(nil)
+	_ adkcontext.StepSource = (*toolContextWrapper)(nil)
+	_ adkcontext.StepSource = (*callbackContextWrapper)(nil)
 )
 
 // --- Tool-context extensions ----------------------------------------------

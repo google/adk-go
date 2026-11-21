@@ -1654,7 +1654,7 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 		p.traces.noteTaskStart(ctx, id, callID)
 	}
 	p.logEvent(ctx, id, EventToolStarting, func() rowSpan {
-		return p.traces.pushToolSpan(ctx, id, toolKey(id, callID, name))
+		return p.traces.pushToolSpanWithCallID(ctx, id, toolKey(id, callID, name), callID != "")
 	}, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
 		d.content = toolContent(name, "args", args, origin)
@@ -1725,7 +1725,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	span, purged, closedByError := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), false)
+	span, purged, closedByError := p.traces.popToolSpanWithCallID(ctx, id, toolKey(id, callID, name), false, callID != "")
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
 	// A tool that waits for or is rejected by the user's confirmation fails
@@ -1813,7 +1813,7 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 	if name == finishTaskToolName {
 		p.traces.noteTaskStart(ctx, id, callID)
 	}
-	span, purged, _ := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), true)
+	span, purged, _ := p.traces.popToolSpanWithCallID(ctx, id, toolKey(id, callID, name), true, callID != "")
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
 	p.logToolError(ctx, id, t, func() rowSpan {
@@ -2453,9 +2453,22 @@ func agentHasAfterAgentCallbacks(a agent.Agent) (res bool) {
 			}
 			seenPtrs[key] = true
 		}
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		for derefs := 0; v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface; derefs++ {
+			if derefs >= 16 {
+				return true
+			}
 			if v.IsNil() {
 				return hop > 0
+			}
+			if derefs > 0 && v.Kind() == reflect.Pointer {
+				key := visitedContextStruct{ptr: v.Pointer(), typ: v.Type()}
+				if seenPtrs == nil {
+					seenPtrs = make(map[visitedContextStruct]bool, 4)
+				}
+				if seenPtrs[key] {
+					return true
+				}
+				seenPtrs[key] = true
 			}
 			v = v.Elem()
 		}
@@ -2942,11 +2955,23 @@ func inspectPromotedPath(ctx context.Context) (deferToADK, canCall bool) {
 			return false, true
 		case promotedPathDynamicInterface:
 			cur := v
+			var seenPtrs map[visitedContextStruct]bool
 			for _, idx := range info.ifaceField {
-				for cur.Kind() == reflect.Pointer {
+				for derefs := 0; cur.Kind() == reflect.Pointer; derefs++ {
 					if cur.IsNil() {
 						return true, false
 					}
+					if derefs >= 16 {
+						return false, false
+					}
+					key := visitedContextStruct{ptr: cur.Pointer(), typ: cur.Type()}
+					if seenPtrs == nil {
+						seenPtrs = make(map[visitedContextStruct]bool, 4)
+					}
+					if seenPtrs[key] {
+						return false, false
+					}
+					seenPtrs[key] = true
 					cur = cur.Elem()
 				}
 				if cur.Kind() != reflect.Struct {
@@ -3007,14 +3032,15 @@ func safeCallPath(fn func() string) (s string, ok bool) {
 // when it embeds a Path()-bearing interface without declaring its own Path()
 // (such as struct{ agent.Context }), inspectPromotedPath reads that embedded
 // interface field (skipping wrappers with visible struct-local sync
-// primitives) to distinguish concrete ADK contexts from custom overrides.
-// ADKContextPath then calls Value directly and trailing BFS walks only
-// allowlisted ADK and Go stdlib structs, so ADK-mediated hops terminate under
-// their 64-hop PathStep budget while inner pure-external Value cycles reached
-// through ADKContextPath still recurse without bound (matching Go's
-// context.Context Value delegation contract). Nil, cyclic, or sync-bearing
-// promoted-interface delegates avoid unsafe Path() calls in both the early
-// check and the trailing fallback.
+// primitives) to distinguish concrete ADK contexts from custom overrides. On
+// cores > v2.8.0, ADK's private-key reader delegates across ADK contexts,
+// Unwrap() context.Context wrappers, and stdlib context nodes with pointer
+// cycle checks and stops before unrecognized external Value wrappers without
+// invoking Value(). When the reader returns empty (or on cores <= v2.8.0), the
+// trailing BFS traverses allowlisted stdlib and ADK context structs, Unwrap(),
+// and qualified lock-free single-parent external wrappers. Nil, cyclic, or
+// sync-bearing promoted-interface delegates avoid unsafe Path() calls in both
+// the early check and the trailing fallback.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -3081,7 +3107,7 @@ func contextPath(ctx context.Context) (path string) {
 				}
 			}
 		}
-		c1, c2 := adkContextChildren(v)
+		c1, c2 := adkContextOrSafeChildren(item, v)
 		q.push(c1)
 		q.push(c2)
 	}

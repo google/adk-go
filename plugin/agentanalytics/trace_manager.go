@@ -418,12 +418,15 @@ type spanRecord struct {
 	// cancelState caches cancellation state sampled from ctx.Done/Err/Cause
 	// outside inv.mu so context methods never run while inv.mu is held.
 	cancelState *cancelProbe
-	// baseCallKey, icCallKey, and callHasRunToken support Layer 2 call-span
-	// disambiguation when a wrapper filters private RunTokenKey on some
-	// callbacks while preserving WithICDelta.
+	// baseCallKey, icCallKey, callRunToken, callIDKeyed, and callAmbiguousIC
+	// support Layer 0 call-ID matching and Layer 2 disambiguation when a
+	// wrapper filters private RunTokenKey on some callbacks while preserving
+	// WithICDelta, or when multiple concurrent workers share an icAct.
 	baseCallKey     string
 	icCallKey       string
-	callHasRunToken bool
+	callRunToken    any
+	callIDKeyed     bool
+	callAmbiguousIC bool
 }
 
 // popRetirement carries per-retirement metadata into
@@ -3697,7 +3700,9 @@ type recordedError struct {
 	seq             uint64
 	canceled        bool
 	collateral      bool
-	callHasRunToken bool
+	callRunToken    any
+	callAmbiguousIC bool
+	spanQualified   bool
 }
 
 func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
@@ -4732,12 +4737,12 @@ func isADKContextStruct(cur any) bool {
 	return v.Kind() == reflect.Struct && isADKStructPkg(v.Type().PkgPath())
 }
 
-// peelToADKContext steps only through allowlisted Go stdlib "context" wrappers
-// (with allowLockFreeExternal=false), explicit Unwrap() context.Context chains,
-// and WithICDelta(nil) InvocationContext promotions up to maxLineageEntryPeel
-// hops with pointer cycle tracking, stopping as soon as it reaches a concrete
-// ADK context struct. Pure-external Value cycles and unrecognized external
-// decorators stop cleanly without invoking Value().
+// peelToADKContext steps through allowlisted Go stdlib "context" wrappers,
+// explicit Unwrap() context.Context chains, WithICDelta(nil) promotions, and
+// lock-free single-anonymous-promoted context.Context wrappers up to
+// maxLineageEntryPeel hops with pointer cycle tracking, stopping as soon as it
+// reaches a concrete ADK context struct. Pure-external Value cycles and
+// unrecognized external decorators stop cleanly without invoking Value().
 func peelToADKContext(ctx context.Context) context.Context {
 	var seenPtrs map[visitedContextStruct]bool
 	cur := any(ctx)
@@ -4774,7 +4779,7 @@ func peelToADKContext(ctx context.Context) context.Context {
 			cur = next
 			continue
 		}
-		next, ok := stepContext(cur, false)
+		next, ok := stepContext(cur, true)
 		if !ok || sameComparableValue(next, cur) {
 			return nil
 		}
@@ -4797,9 +4802,14 @@ type launchLineage struct {
 // observeLaunchLineage collects the ADK context lineage of ctx through ADK's
 // private lineage key before inv.mu is acquired so wrapper synchronization is
 // respected, concurrent multi-parent Value lookups share no mutable observer,
-// and no user code runs under inv.mu. On older ADK cores without ADKWalkLineage,
-// it pre-collects comparable contexts via optional Unwrap() context.Context
-// methods and lock-free single-parent stepping outside inv.mu.
+// and no user code runs under inv.mu. Because ADK private-key readers stop
+// before external wrappers lacking Unwrap(), when walk stops across a lock-free
+// single-anonymous-promoted external wrapper embedded inside an ADK context it
+// safely continues stepping via legacyPlanFor / Unwrap / allowlisted ADK and
+// stdlib children and calls walk on any inner ADK contexts reached. On older
+// ADK cores without ADKWalkLineage, it pre-collects comparable contexts via
+// optional Unwrap() context.Context methods and lock-free single-parent
+// stepping outside inv.mu.
 func observeLaunchLineage(ctx context.Context, act any, selfTokens [4]any) *launchLineage {
 	if ctx == nil && act == nil {
 		return nil
@@ -4809,20 +4819,81 @@ func observeLaunchLineage(ctx context.Context, act any, selfTokens [4]any) *laun
 	var observed bool
 	if ctx != nil {
 		if walk := lineageWalkerOnce(); walk != nil {
+			var seenToks map[any]bool
+			appendTokens := func(raw []any) {
+				for _, tok := range raw {
+					if len(tokens) >= maxLaunchLineage {
+						break
+					}
+					if !isComparableToken(tok) {
+						continue
+					}
+					if seenToks == nil {
+						seenToks = make(map[any]bool, min(len(raw), maxLaunchLineage))
+					}
+					if seenToks[tok] {
+						continue
+					}
+					seenToks[tok] = true
+					tokens = append(tokens, tok)
+				}
+			}
 			if entry := peelToADKContext(ctx); entry != nil {
 				raw := orZero(func() []any { return walk(entry) })
 				if len(raw) > 0 {
 					observed = true
 					tokens = make([]any, 0, min(len(raw), maxLaunchLineage))
-					for _, tok := range raw {
-						if !isComparableToken(tok) {
-							continue
+					appendTokens(raw)
+				}
+				// Also traverse across lock-free single-anonymous-promoted external
+				// wrappers embedded inside ADK contexts (e.g. rootCtx.WithContext(&lockFreeWrap{w2})),
+				// where adkcontext stops before external structs without calling Value().
+				var seenPtrs map[visitedContextStruct]bool
+				cur := any(entry)
+				crossedLockFreeExternal := false
+				for step := 0; cur != nil && step < maxLegacyContextLineage && len(tokens) < maxLaunchLineage; step++ {
+					if rv := reflect.ValueOf(cur); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+						key := visitedContextStruct{ptr: rv.Pointer(), typ: rv.Type()}
+						if seenPtrs == nil {
+							seenPtrs = make(map[visitedContextStruct]bool, 8)
 						}
-						tokens = append(tokens, tok)
-						if len(tokens) >= maxLaunchLineage {
+						if seenPtrs[key] {
 							break
 						}
+						seenPtrs[key] = true
 					}
+					if step > 0 && crossedLockFreeExternal && isADKContextStruct(cur) {
+						if adkC, ok := cur.(context.Context); ok {
+							if innerRaw := orZero(func() []any { return walk(adkC) }); len(innerRaw) > 0 {
+								observed = true
+								appendTokens(innerRaw)
+							}
+							crossedLockFreeExternal = false
+						}
+					}
+					if u, ok := cur.(contextUnwrapper); ok {
+						next := orZero(u.Unwrap)
+						if next == nil || sameComparableValue(next, cur) {
+							break
+						}
+						cur = next
+						continue
+					}
+					next, ok := stepContext(cur, true)
+					if !ok || sameComparableValue(next, cur) {
+						break
+					}
+					rt := reflect.TypeOf(cur)
+					for range 8 {
+						if rt.Kind() != reflect.Pointer {
+							break
+						}
+						rt = rt.Elem()
+					}
+					if !isImmutableContextOrAgentPkg(rt.PkgPath()) {
+						crossedLockFreeExternal = true
+					}
+					cur = next
 				}
 			}
 		} else {
@@ -4880,44 +4951,97 @@ func isImmutableContextOrAgentPkg(pkg string) bool {
 	return pkg == "context" || isADKStructPkg(pkg)
 }
 
+type derefTypeStatus uint8
+
+const (
+	derefTypeOK derefTypeStatus = iota
+	derefTypeCycle
+	derefTypeBudgetExhausted
+)
+
+func derefType(t reflect.Type, budget *int, seen map[reflect.Type]bool) (reflect.Type, derefTypeStatus) {
+	for t != nil && t.Kind() == reflect.Pointer {
+		if seen[t] {
+			return nil, derefTypeCycle
+		}
+		if *budget <= 0 {
+			return nil, derefTypeBudgetExhausted
+		}
+		*budget--
+		if seen == nil {
+			seen = make(map[reflect.Type]bool, 4)
+		}
+		seen[t] = true
+		elem := t.Elem()
+		if elem == t {
+			return nil, derefTypeCycle
+		}
+		t = elem
+	}
+	if t == nil {
+		return nil, derefTypeCycle
+	}
+	return t, derefTypeOK
+}
+
 // hasVisibleSyncPrimitive reports whether t (or any embedded, nested, or
 // container-referenced type reachable within t) exposes a mutex, atomic,
 // channel, or sync.Locker, indicating mutable state guarded by struct-local or
 // channel-based synchronization.
 func hasVisibleSyncPrimitive(t reflect.Type, depth int, seen map[reflect.Type]bool) bool {
+	if t == nil {
+		return true
+	}
+	budget := 256
+	return hasVisibleSyncPrimitiveBounded(t, depth, &budget, seen)
+}
+
+func hasVisibleSyncPrimitiveBounded(t reflect.Type, depth int, budget *int, inStack map[reflect.Type]bool) bool {
 	if depth >= 8 || t == nil {
 		return true
 	}
-	pkg := t.PkgPath()
+	base, status := derefType(t, budget, nil)
+	if status == derefTypeCycle {
+		return false
+	}
+	if status == derefTypeBudgetExhausted {
+		return true
+	}
+	pkg := base.PkgPath()
 	if isImmutableContextOrAgentPkg(pkg) {
 		return false
 	}
 	if pkg == "sync" || pkg == "sync/atomic" {
 		return true
 	}
-	if t.Implements(syncLockerType) {
+	if base.Implements(syncLockerType) {
 		return true
 	}
-	if t.Kind() != reflect.Pointer && reflect.PointerTo(t).Implements(syncLockerType) {
+	if base.Kind() != reflect.Pointer && reflect.PointerTo(base).Implements(syncLockerType) {
 		return true
 	}
-	if seen[t] {
-		return false
-	}
-	if seen == nil {
-		seen = make(map[reflect.Type]bool, 8)
-	}
-	seen[t] = true
-	switch t.Kind() {
-	case reflect.Pointer, reflect.Slice, reflect.Array:
-		return hasVisibleSyncPrimitive(t.Elem(), depth+1, seen)
+	switch base.Kind() {
+	case reflect.Slice, reflect.Array:
+		return hasVisibleSyncPrimitiveBounded(base.Elem(), depth+1, budget, inStack)
 	case reflect.Chan:
 		return true
 	case reflect.Map:
-		return hasVisibleSyncPrimitive(t.Key(), depth+1, seen) || hasVisibleSyncPrimitive(t.Elem(), depth+1, seen)
+		return hasVisibleSyncPrimitiveBounded(base.Key(), depth+1, budget, inStack) ||
+			hasVisibleSyncPrimitiveBounded(base.Elem(), depth+1, budget, inStack)
 	case reflect.Struct:
-		for f := range t.Fields() {
-			if hasVisibleSyncPrimitive(f.Type, depth+1, seen) {
+		if inStack[base] {
+			return false
+		}
+		if *budget <= 0 {
+			return true
+		}
+		*budget--
+		if inStack == nil {
+			inStack = make(map[reflect.Type]bool, 8)
+		}
+		inStack[base] = true
+		for f := range base.Fields() {
+			if hasVisibleSyncPrimitiveBounded(f.Type, depth+1, budget, inStack) {
 				return true
 			}
 		}
@@ -4940,7 +5064,7 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int, allowLockFreeExternal
 		return nil, false
 	}
 	t := v.Type()
-	if !canStepStructType(t, allowLockFreeExternal) {
+	if !isImmutableContextOrAgentPkg(t.PkgPath()) {
 		return nil, false
 	}
 	n := t.NumField()
@@ -5010,10 +5134,9 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int, allowLockFreeExternal
 			}
 			continue
 		}
-		external := !isImmutableContextOrAgentPkg(t.PkgPath())
 		isNamedImmutableCtx := (t.PkgPath() == "context" && sf.Name == "c") ||
 			(t.PkgPath() == agentPkgPath && (t.Name() == "callbackContextWrapper" || t.Name() == "toolContextWrapper") && sf.Name == "context")
-		if (external || isNamedImmutableCtx || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
+		if (isNamedImmutableCtx || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
 			if !isNilContextField(fv) {
 				c, ok := extractCtx(fv)
 				if !ok || recordLive(c) {
@@ -5021,29 +5144,6 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int, allowLockFreeExternal
 				}
 			}
 			continue
-		}
-		if external && allowLockFreeExternal && typeHasContextField(sf.Type, 0) {
-			switch sf.Type.Kind() {
-			case reflect.Struct:
-				if !canStepStructType(sf.Type, allowLockFreeExternal) {
-					return nil, true
-				}
-				if c, ambig := stepEmbeddedContextStrict(fv, depth+1, allowLockFreeExternal); ambig || (c != nil && recordLive(c)) {
-					return nil, true
-				}
-			case reflect.Pointer:
-				if sf.Type.Elem().Kind() != reflect.Struct {
-					continue
-				}
-				if !canStepStructType(sf.Type.Elem(), allowLockFreeExternal) {
-					return nil, true
-				}
-				if !fv.IsNil() {
-					if c, ambig := stepEmbeddedContextStrict(fv.Elem(), depth+1, allowLockFreeExternal); ambig || (c != nil && recordLive(c)) {
-						return nil, true
-					}
-				}
-			}
 		}
 	}
 	return candidate, false
@@ -5053,25 +5153,55 @@ func typeHasContextField(t reflect.Type, depth int) bool {
 	if t == nil || depth >= 8 {
 		return false
 	}
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
+	budget := 128
+	return typeHasContextFieldBounded(t, depth, &budget, nil)
+}
+
+func typeHasContextFieldBounded(t reflect.Type, depth int, budget *int, inStack map[reflect.Type]bool) bool {
+	if t == nil || depth >= 8 {
+		return true
 	}
-	if t.Kind() != reflect.Struct {
+	base, status := derefType(t, budget, nil)
+	if status == derefTypeCycle {
+		return t.Implements(contextInterfaceType)
+	}
+	if status == derefTypeBudgetExhausted {
+		return true
+	}
+	switch base.Kind() {
+	case reflect.Interface:
+		return base.Implements(contextInterfaceType)
+	case reflect.Array, reflect.Slice:
+		return typeHasContextFieldBounded(base.Elem(), depth+1, budget, inStack)
+	case reflect.Map:
+		return typeHasContextFieldBounded(base.Key(), depth+1, budget, inStack) ||
+			typeHasContextFieldBounded(base.Elem(), depth+1, budget, inStack)
+	case reflect.Struct:
+		if base.Implements(contextInterfaceType) || reflect.PointerTo(base).Implements(contextInterfaceType) {
+			return true
+		}
+		if inStack[base] {
+			return false
+		}
+		if *budget <= 0 {
+			return true
+		}
+		*budget--
+		if inStack == nil {
+			inStack = make(map[reflect.Type]bool, 8)
+		}
+		inStack[base] = true
+		for sf := range base.Fields() {
+			if typeHasContextFieldBounded(sf.Type, depth+1, budget, inStack) {
+				delete(inStack, base)
+				return true
+			}
+		}
+		delete(inStack, base)
 		return false
+	default:
+		return base.Implements(contextInterfaceType) || reflect.PointerTo(base).Implements(contextInterfaceType)
 	}
-	for sf := range t.Fields() {
-		if sf.Type.Implements(contextInterfaceType) {
-			return true
-		}
-		st := sf.Type
-		for st.Kind() == reflect.Pointer {
-			st = st.Elem()
-		}
-		if st.Kind() == reflect.Struct && typeHasContextField(st, depth+1) {
-			return true
-		}
-	}
-	return false
 }
 
 // stepEmbeddedContextValue is a test-only helper (no production callers;
@@ -5207,31 +5337,107 @@ func computePromotedExternalValueInfo(origVT reflect.Type) promotedValueInfo {
 	return promotedValueInfo{kind: promotedValueCustom}
 }
 
-func promotedValueFieldLive(structVal reflect.Value, ifaceField []int) bool {
-	if len(ifaceField) == 0 {
-		return false
+type legacyStepPlan struct {
+	ok   bool
+	path []int
+}
+
+var legacyStepPlanCache sync.Map // map[reflect.Type]legacyStepPlan
+
+func legacyPlanFor(origType reflect.Type) legacyStepPlan {
+	if origType == nil {
+		return legacyStepPlan{}
+	}
+	if cached, ok := legacyStepPlanCache.Load(origType); ok {
+		return cached.(legacyStepPlan)
+	}
+	plan := computeLegacyStepPlan(origType)
+	actual, _ := legacyStepPlanCache.LoadOrStore(origType, plan)
+	return actual.(legacyStepPlan)
+}
+
+func computeLegacyStepPlan(origType reflect.Type) legacyStepPlan {
+	info := classifyPromotedExternalValue(origType)
+	if info.kind != promotedValueDynamicCtx || len(info.ifaceField) == 0 {
+		return legacyStepPlan{}
+	}
+	vt := origType
+	if vt.Kind() == reflect.Pointer {
+		vt = vt.Elem()
+	}
+	if vt.Kind() != reflect.Struct || hasVisibleSyncPrimitive(vt, 0, nil) {
+		return legacyStepPlan{}
+	}
+	budget := 256
+	curT := vt
+	for hop, idx := range info.ifaceField {
+		var status derefTypeStatus
+		curT, status = derefType(curT, &budget, nil)
+		if status != derefTypeOK || curT.Kind() != reflect.Struct || idx < 0 || idx >= curT.NumField() {
+			return legacyStepPlan{}
+		}
+		sf := curT.Field(idx)
+		if !sf.IsExported() {
+			return legacyStepPlan{}
+		}
+		for fi := range curT.NumField() {
+			if fi == idx {
+				continue
+			}
+			if typeHasContextFieldBounded(curT.Field(fi).Type, 0, &budget, nil) {
+				return legacyStepPlan{}
+			}
+		}
+		if hop < len(info.ifaceField)-1 {
+			curT = sf.Type
+		}
+	}
+	return legacyStepPlan{ok: true, path: info.ifaceField}
+}
+
+func readLegacyPromotedField(structVal reflect.Value, path []int) (context.Context, bool) {
+	if len(path) == 0 {
+		return nil, false
 	}
 	cur := structVal
-	for hop, idx := range ifaceField {
+	var seen map[visitedContextStruct]bool
+	for hop, idx := range path {
+		derefs := 0
 		for cur.Kind() == reflect.Pointer {
-			if cur.IsNil() {
-				return false
+			if derefs >= 16 || cur.IsNil() {
+				return nil, false
 			}
+			key := visitedContextStruct{ptr: cur.Pointer(), typ: cur.Type()}
+			if seen != nil && seen[key] {
+				return nil, false
+			}
+			if seen == nil {
+				seen = make(map[visitedContextStruct]bool, 4)
+			}
+			seen[key] = true
 			cur = cur.Elem()
+			derefs++
 		}
 		if cur.Kind() != reflect.Struct || idx < 0 || idx >= cur.NumField() {
-			return false
+			return nil, false
 		}
 		fv := cur.Field(idx)
 		if !fv.CanInterface() {
-			return false
+			return nil, false
 		}
-		if hop == len(ifaceField)-1 {
-			return !isNilContextField(fv)
+		if fv.Type().Implements(contextInterfaceType) {
+			if isNilContextField(fv) {
+				return nil, false
+			}
+			c, ok := reflect.TypeAssert[context.Context](fv)
+			return c, ok && c != nil
+		}
+		if hop == len(path)-1 {
+			return nil, false
 		}
 		cur = fv
 	}
-	return false
+	return nil, false
 }
 
 func stepContext(cur any, allowLockFreeExternal bool) (context.Context, bool) {
@@ -5242,30 +5448,46 @@ func stepContext(cur any, allowLockFreeExternal bool) (context.Context, bool) {
 		v := reflect.ValueOf(cur)
 		origType := v.Type()
 		var derefs int
+		var seen map[visitedContextStruct]bool
 		for ; derefs < 16 && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
 			if v.IsNil() {
 				return nil
 			}
+			if v.Kind() == reflect.Pointer {
+				key := visitedContextStruct{ptr: v.Pointer(), typ: v.Type()}
+				if seen != nil && seen[key] {
+					return nil
+				}
+				if seen == nil {
+					seen = make(map[visitedContextStruct]bool, 4)
+				}
+				seen[key] = true
+			}
 			v = v.Elem()
 		}
-		if v.Kind() != reflect.Struct || !canStepStructType(v.Type(), allowLockFreeExternal) {
+		if v.Kind() != reflect.Struct {
 			return nil
 		}
-		if allowLockFreeExternal && !isImmutableContextOrAgentPkg(v.Type().PkgPath()) {
-			if derefs > 1 {
+		if !isImmutableContextOrAgentPkg(v.Type().PkgPath()) {
+			if !allowLockFreeExternal || derefs > 1 {
 				return nil
 			}
-			info := classifyPromotedExternalValue(origType)
-			if info.kind != promotedValueDynamicCtx || !promotedValueFieldLive(v, info.ifaceField) {
+			plan := legacyPlanFor(origType)
+			if !plan.ok {
 				return nil
 			}
+			c, ok := readLegacyPromotedField(v, plan.path)
+			if !ok {
+				return nil
+			}
+			return c
 		}
 		if !v.CanAddr() {
 			cp := reflect.New(v.Type()).Elem()
 			cp.Set(v)
 			v = cp
 		}
-		c, ambig := stepEmbeddedContextStrict(v, 0, allowLockFreeExternal)
+		c, ambig := stepEmbeddedContextStrict(v, 0, false)
 		if ambig {
 			return nil
 		}
@@ -7831,10 +8053,7 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 					inv.retireAgentLocked(curIdx, false, since)
 					res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 					res.timestamp = now
-					inv.sampleSettledProbesLocked(true, false, &endedSampled)
-					if !inv.finished {
-						inv.retireLateSettledLocked()
-					}
+					inv.sampleAndRetireLateSettledLocked(&endedSampled)
 					return res, true, false
 				}
 			}
@@ -8149,6 +8368,15 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		children:               children.names,
 		seq:                    inv.nextSeqLocked(),
 	}
+	if rec.icActivation != nil {
+		for _, other := range inv.agentStack[1:] {
+			if other.kind == spanKindAgent && other.icActivation == rec.icActivation &&
+				other.name == rec.name && other.branch == rec.branch && other.path == rec.path {
+				inv.markAmbiguousUntokenedCallsLocked(rec.icActivation)
+				break
+			}
+		}
+	}
 	inv.pushAgentLocked(rec)
 	if rec.isNodeAgentOf(parent) {
 		if parent.nodeRuns == nil {
@@ -8231,10 +8459,7 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 			if i < 0 {
 				res := inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
 				res.timestamp = now
-				inv.sampleSettledProbesLocked(true, false, &endedSampled)
-				if !inv.finished {
-					inv.retireLateSettledLocked()
-				}
+				inv.sampleAndRetireLateSettledLocked(&endedSampled)
 				return res, false
 			}
 			rec := inv.agentStack[i]
@@ -8258,10 +8483,7 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 			inv.retireAgentLocked(curIdx, true, rec.seq)
 			res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 			res.timestamp = now
-			inv.sampleSettledProbesLocked(true, false, &endedSampled)
-			if !inv.finished {
-				inv.retireLateSettledLocked()
-			}
+			inv.sampleAndRetireLateSettledLocked(&endedSampled)
 			return res, false
 		}()
 		if !retry {
@@ -8745,10 +8967,7 @@ func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identit
 			inv.retireAgentLocked(curIdx, false, noFrame)
 			res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 			res.timestamp = now
-			inv.sampleSettledProbesLocked(true, false, &endedSampled)
-			if !inv.finished {
-				inv.retireLateSettledLocked()
-			}
+			inv.sampleAndRetireLateSettledLocked(&endedSampled)
 			return res, true, false
 		}()
 		if !retry {
@@ -10118,7 +10337,7 @@ func (tm *traceManager) completeResponseWithActions(ctx context.Context, id iden
 					// launcher open for an activation whose run is over (see
 					// launcherOpenLocked); sample ready probes before retiring late state.
 					inv.sampleSettledProbesLocked(true, false, &endedSampled)
-					if !inv.finished {
+					if inv.canRetireLateLocked() {
 						inv.retireLateSettledLocked()
 					}
 				}
@@ -10423,6 +10642,10 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 			resolvedKey, prev, hasPrev := inv.resolveErrorKeyLocked(bareKey, canon, ambiguousIC)
 			storeKey := callKeyFromAct(canon.primary(), bareKey)
 			icKey := callKeyFromAct(canon.icAct, bareKey)
+			callAmbiguousIC := canon.runToken == nil && ambiguousIC
+			if callAmbiguousIC {
+				storeKey = storeKey + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+			}
 			var spanID string
 			if i := inv.findAgentForActivation(canon, id.path, id.agentName, id.branch); i > 0 {
 				spanID = inv.agentStack[i].spanID
@@ -10434,11 +10657,18 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 					delete(inv.unrecoveredErrors, resolvedKey)
 				}
 			} else if hasPrev && prev.spanID != "" && prev.spanID != spanID {
-				inv.unrecoveredErrors[prev.spanID+"\x00"+resolvedKey] = prev
+				archived := prev
+				archived.spanQualified = true
+				inv.unrecoveredErrors[prev.spanID+"\x00"+resolvedKey] = archived
+				if resolvedKey != storeKey {
+					delete(inv.unrecoveredErrors, resolvedKey)
+				}
 			} else if directPrev, exists := inv.unrecoveredErrors[storeKey]; exists && (directPrev.spanID == "" || directPrev.spanID == spanID) {
 				seq = directPrev.seq
 			} else if directPrev, exists := inv.unrecoveredErrors[storeKey]; exists && directPrev.spanID != "" && directPrev.spanID != spanID {
-				inv.unrecoveredErrors[directPrev.spanID+"\x00"+storeKey] = directPrev
+				archived := directPrev
+				archived.spanQualified = true
+				inv.unrecoveredErrors[directPrev.spanID+"\x00"+storeKey] = archived
 			}
 			// The error is checked like a call that ctx starts under the agent.
 			owner := inv.ownerOfActivation(canon, id)
@@ -10468,7 +10698,8 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 				seq:             seq,
 				canceled:        call.canceledByStop(),
 				collateral:      collateral,
-				callHasRunToken: canon.runToken != nil,
+				callRunToken:    canon.runToken,
+				callAmbiguousIC: callAmbiguousIC,
 			}
 			return false
 		}()
@@ -10491,7 +10722,7 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 	}
 	defer inv.mu.Unlock()
 	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
-	if _, compRec, hasComp := inv.resolveCallSpanLocked(inv.completedModels, bareKey, canon, ambiguousIC); hasComp && compRec != nil {
+	if _, compRec, hasComp := inv.resolveCallSpanLocked(inv.completedModels, bareKey, canon, ambiguousIC, false); hasComp && compRec != nil {
 		if errKey, _, hasErr := inv.resolveErrorKeyLocked(bareKey, canon, ambiguousIC); hasErr {
 			delete(inv.unrecoveredErrors, errKey)
 		}
@@ -10962,9 +11193,50 @@ func (inv *invocationTrace) sampleSettledProbesLocked(includeEnded, requireLive 
 	}
 	for {
 		var probes []*cancelProbe
+		var root *spanRecord
+		if len(inv.agentStack) > 0 {
+			root = inv.agentStack[0]
+			if root.cancelState != nil && root.cancelState.readyToSample() {
+				probes = append(probes, root.cancelState)
+			}
+		}
 		var seen map[*spanRecord]bool
-		addChain := func(r *spanRecord) {
+		var seenProbes map[*cancelProbe]struct{}
+		recordProbe := func(cs *cancelProbe) {
+			if cs == nil || !cs.readyToSample() {
+				return
+			}
+			if len(probes) == 0 {
+				probes = append(probes, cs)
+				return
+			}
+			if len(probes) == 1 && seenProbes == nil {
+				if probes[0] == cs {
+					return
+				}
+				seenProbes = make(map[*cancelProbe]struct{}, 8)
+				seenProbes[probes[0]] = struct{}{}
+				seenProbes[cs] = struct{}{}
+				probes = append(probes, cs)
+				return
+			}
+			if seenProbes != nil {
+				if _, dup := seenProbes[cs]; dup {
+					return
+				}
+				seenProbes[cs] = struct{}{}
+				probes = append(probes, cs)
+			}
+		}
+		addChain := func(r *spanRecord, skipRoot bool) {
 			for s := r; s != nil; s = s.parent {
+				if skipRoot && s == root {
+					break
+				}
+				if s.parent == root && seen == nil {
+					recordProbe(s.cancelState)
+					break
+				}
 				if seen != nil && seen[s] {
 					break
 				}
@@ -10972,26 +11244,31 @@ func (inv *invocationTrace) sampleSettledProbesLocked(includeEnded, requireLive 
 					seen = make(map[*spanRecord]bool, 8)
 				}
 				seen[s] = true
-				if s.cancelState != nil && s.cancelState.readyToSample() {
-					probes = append(probes, s.cancelState)
-				}
+				recordProbe(s.cancelState)
 			}
 		}
-		for _, rec := range inv.agentStack {
-			addChain(rec)
+		for _, rec := range inv.agentStack[min(1, len(inv.agentStack)):] {
+			if rec.parent == root {
+				recordProbe(rec.cancelState)
+				continue
+			}
+			addChain(rec, true)
 		}
 		for _, rec := range inv.llmSpans {
-			addChain(rec)
+			addChain(rec, root != nil)
 		}
 		for _, rec := range inv.toolSpans {
-			addChain(rec)
+			addChain(rec, root != nil)
 		}
 
 		var endedRecs []*spanRecord
 		var endedFns []func() bool
-		if includeEnded {
+		if includeEnded && len(inv.agentStack) > 1 {
 			for _, rec := range inv.agentStack[1:] {
-				if !rec.contextEnded && rec.ended != nil && rec.runDone && (rec.endedSelfSynced || !inv.launcherOpenLocked(rec)) {
+				if !rec.runDone || rec.contextEnded || rec.ended == nil {
+					continue
+				}
+				if rec.endedSelfSynced || !inv.launcherOpenLocked(rec) {
 					if *endedSampled != nil && (*endedSampled)[rec] {
 						continue
 					}
@@ -11155,8 +11432,20 @@ func (p *spanRecord) joins(c *spanRecord, reported bool) bool {
 // agent, of a tool call or of a model call, and a response event, see
 // completeResponse) call it last, once they no longer hold an index into
 // agentStack and have reported the failures that they found.
+func (inv *invocationTrace) canRetireLateLocked() bool {
+	return inv.isLate && !inv.finished && len(inv.agentStack) > 1
+}
+
+func (inv *invocationTrace) sampleAndRetireLateSettledLocked(endedSampled *map[*spanRecord]bool) {
+	if !inv.canRetireLateLocked() {
+		return
+	}
+	inv.sampleSettledProbesLocked(true, false, endedSampled)
+	inv.retireLateSettledLocked()
+}
+
 func (inv *invocationTrace) retireLateSettledLocked() {
-	if !inv.isLate || inv.finished || len(inv.agentStack) <= 1 {
+	if !inv.canRetireLateLocked() {
 		return
 	}
 	hasSettled := func() bool {
@@ -11536,28 +11825,104 @@ func (inv *invocationTrace) canonicalActivationLocked(act contextActivation, id 
 	return canon, false
 }
 
+func callActPrefix(act any) string {
+	if act == nil {
+		return ""
+	}
+	return fmt.Sprintf("%p\x00", act)
+}
+
 func callKeyFromAct(act any, baseKey string) string {
-	if act != nil {
-		return fmt.Sprintf("%p\x00%s", act, baseKey)
+	if prefix := callActPrefix(act); prefix != "" {
+		return prefix + baseKey
 	}
 	return baseKey
 }
 
+func (inv *invocationTrace) markAmbiguousUntokenedCallsLocked(icAct any) {
+	icPrefix := callActPrefix(icAct)
+	if icPrefix == "" {
+		return
+	}
+	for _, rec := range inv.llmSpans {
+		if rec != nil && rec.callRunToken == nil && strings.HasPrefix(rec.icCallKey, icPrefix) {
+			rec.callAmbiguousIC = true
+		}
+	}
+	for _, rec := range inv.completedModels {
+		if rec != nil && rec.callRunToken == nil && strings.HasPrefix(rec.icCallKey, icPrefix) {
+			rec.callAmbiguousIC = true
+		}
+	}
+	for _, rec := range inv.toolSpans {
+		if rec != nil && !rec.callIDKeyed && rec.callRunToken == nil && strings.HasPrefix(rec.icCallKey, icPrefix) {
+			rec.callAmbiguousIC = true
+		}
+	}
+	for _, rec := range inv.completedTools {
+		if rec != nil && !rec.callIDKeyed && rec.callRunToken == nil && strings.HasPrefix(rec.icCallKey, icPrefix) {
+			rec.callAmbiguousIC = true
+		}
+	}
+	for k, e := range inv.unrecoveredErrors {
+		if e.callRunToken == nil && strings.HasPrefix(e.icCallKey, icPrefix) {
+			e.callAmbiguousIC = true
+			inv.unrecoveredErrors[k] = e
+		}
+	}
+}
+
 // resolveCallSpanLocked resolves an in-flight or completed call span across
-// canonical primary key lookup and unambiguous icCallKey Layer 2 matching,
-// rejecting cross-pairing when concurrent open activations share icAct or
-// when two distinct runTokens collide. inv.mu must be held.
-func (inv *invocationTrace) resolveCallSpanLocked(m map[string]*spanRecord, baseKey string, canon contextActivation, ambiguousIC bool) (key string, rec *spanRecord, ok bool) {
+// Layer 0 (unique call-ID match across compatible activations, even when
+// ambiguousIC is true), Layer 1 (canonical primary key), and Layer 2
+// (unambiguous icCallKey matching), rejecting cross-pairing on ambiguous or
+// conflicting-runToken entries. inv.mu must be held.
+func (inv *invocationTrace) resolveCallSpanLocked(m map[string]*spanRecord, baseKey string, canon contextActivation, ambiguousIC, callID bool) (key string, rec *spanRecord, ok bool) {
 	pref := callKeyFromAct(canon.primary(), baseKey)
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	if callID {
+		var foundKey string
+		var foundRec *spanRecord
+		matches := 0
+		for k, candidate := range m {
+			if candidate == nil || !candidate.callIDKeyed || candidate.baseCallKey != baseKey {
+				continue
+			}
+			if canon.runToken != nil && candidate.callRunToken != nil && candidate.callRunToken != canon.runToken {
+				continue
+			}
+			if canon.icAct != nil {
+				if candidate.icCallKey != icKey && k != pref {
+					continue
+				}
+			} else if k != pref {
+				continue
+			}
+			matches++
+			if matches > 1 {
+				foundKey = ""
+				foundRec = nil
+				break
+			}
+			foundKey = k
+			foundRec = candidate
+		}
+		if matches == 1 {
+			return foundKey, foundRec, true
+		}
+		if ambiguousIC {
+			return pref, nil, false
+		}
+	}
 	if !ambiguousIC {
-		if rec = m[pref]; rec != nil {
+		if rec = m[pref]; rec != nil && (callID || !rec.callAmbiguousIC) &&
+			(canon.runToken == nil || rec.callRunToken == nil || rec.callRunToken == canon.runToken) {
 			return pref, rec, true
 		}
 	}
 	if ambiguousIC || canon.icAct == nil {
 		return pref, nil, false
 	}
-	icKey := callKeyFromAct(canon.icAct, baseKey)
 	var foundKey string
 	var foundRec *spanRecord
 	matches := 0
@@ -11565,7 +11930,10 @@ func (inv *invocationTrace) resolveCallSpanLocked(m map[string]*spanRecord, base
 		if candidate == nil || candidate.baseCallKey != baseKey || candidate.icCallKey != icKey {
 			continue
 		}
-		if canon.runToken != nil && candidate.callHasRunToken {
+		if !callID && candidate.callAmbiguousIC {
+			continue
+		}
+		if canon.runToken != nil && candidate.callRunToken != nil {
 			continue
 		}
 		matches++
@@ -11584,7 +11952,8 @@ func (inv *invocationTrace) resolveCallSpanLocked(m map[string]*spanRecord, base
 func (inv *invocationTrace) resolveErrorKeyLocked(baseKey string, canon contextActivation, ambiguousIC bool) (key string, rec recordedError, ok bool) {
 	pref := callKeyFromAct(canon.primary(), baseKey)
 	if !ambiguousIC {
-		if rec, ok = inv.unrecoveredErrors[pref]; ok {
+		if rec, ok = inv.unrecoveredErrors[pref]; ok && !rec.spanQualified && !rec.callAmbiguousIC &&
+			(canon.runToken == nil || rec.callRunToken == nil || rec.callRunToken == canon.runToken) {
 			return pref, rec, true
 		}
 	}
@@ -11596,10 +11965,10 @@ func (inv *invocationTrace) resolveErrorKeyLocked(baseKey string, canon contextA
 	var foundRec recordedError
 	matches := 0
 	for k, candidate := range inv.unrecoveredErrors {
-		if candidate.bareKey != baseKey || candidate.icCallKey != icKey {
+		if candidate.spanQualified || candidate.callAmbiguousIC || candidate.bareKey != baseKey || candidate.icCallKey != icKey {
 			continue
 		}
-		if canon.runToken != nil && candidate.callHasRunToken {
+		if canon.runToken != nil && candidate.callRunToken != nil {
 			continue
 		}
 		matches++
@@ -12130,12 +12499,17 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	rec.ownActivation = owner.isActivation(canon)
 	rec.baseCallKey = baseKey
 	rec.icCallKey = icKey
-	rec.callHasRunToken = canon.runToken != nil
+	rec.callRunToken = canon.runToken
+	ambiguousStorage := canon.runToken == nil && ambiguousIC
+	if ambiguousStorage {
+		key = key + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+		rec.callAmbiguousIC = true
+	}
 	inv.llmSpans[key] = rec
 	inv.syncOpenCallsLocked()
-	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC); ok {
+	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC, false); ok {
 		delete(inv.completedModels, oldKey)
-	} else {
+	} else if !ambiguousStorage {
 		delete(inv.completedModels, key)
 	}
 	span := inv.rowSpan(rec, nil, ambient)
@@ -12157,7 +12531,7 @@ func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 	}
 	defer inv.mu.Unlock()
 	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
-	if _, rec, ok := inv.resolveCallSpanLocked(inv.llmSpans, llmKey(id), canon, ambiguousIC); ok && rec.firstToken.IsZero() {
+	if _, rec, ok := inv.resolveCallSpanLocked(inv.llmSpans, llmKey(id), canon, ambiguousIC, false); ok && rec.firstToken.IsZero() {
 		rec.firstToken = now
 		if owner := inv.ownerOfActivation(canon, id); owner.kind == spanKindAgent {
 			inv.touchAgentActivityLocked(owner, now)
@@ -12237,21 +12611,18 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
 	baseKey := llmKey(id)
 	icKey := callKeyFromAct(canon.icAct, baseKey)
-	key, rec, _ := inv.resolveCallSpanLocked(inv.llmSpans, baseKey, canon, ambiguousIC)
+	key, rec, _ := inv.resolveCallSpanLocked(inv.llmSpans, baseKey, canon, ambiguousIC, false)
 	owner := inv.ownerOfActivation(canon, id)
 	finishPop := func(span rowSpan) rowSpan {
 		// The ended call, including a recovered call completed from
 		// completedModels, no longer keeps its agent or the agents above it
 		// from retiring in the late state (see retireLateSettledLocked).
-		inv.sampleSettledProbesLocked(true, false, nil)
-		if !inv.finished {
-			inv.retireLateSettledLocked()
-		}
+		inv.sampleAndRetireLateSettledLocked(nil)
 		return span
 	}
 	if rec == nil {
 		if responded {
-			if compKey, prev, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC); ok && prev != nil {
+			if compKey, prev, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC, false); ok && prev != nil {
 				delete(inv.completedModels, compKey)
 				if owner.kind == spanKindAgent {
 					owner.hasResponse = true
@@ -12278,9 +12649,15 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 		// credit: clear stale credits so a peer's response cannot claim
 		// this activation's events (see selectResponseOwnerLocked).
 		storeKey := key
-		if !rec.callHasRunToken && canon.runToken != nil {
+		if rec.callRunToken == nil && canon.runToken != nil {
 			storeKey = callKeyFromAct(canon.primary(), baseKey)
-			rec.callHasRunToken = true
+			rec.callRunToken = canon.runToken
+			rec.callAmbiguousIC = false
+		} else if canon.runToken == nil && ambiguousIC {
+			rec.callAmbiguousIC = true
+			if prev := inv.completedModels[storeKey]; prev != nil {
+				storeKey = callKeyFromAct(canon.primary(), baseKey) + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+			}
 		}
 		rec.baseCallKey = baseKey
 		rec.icCallKey = icKey
@@ -12306,6 +12683,10 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
+	return tm.pushToolSpanWithCallID(ctx, id, key, false)
+}
+
+func (tm *traceManager) pushToolSpanWithCallID(ctx context.Context, id identity, key string, hasCallID bool) rowSpan {
 	inv := tm.lookupInvocation(ctx, id, false, true)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
@@ -12315,7 +12696,7 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	act := resolveContextActivation(ctx)
 	cancelState, cancelFn := newCancelProbe(ctx)
 	if !inv.lockLive() {
-		return tm.pushToolSpan(ctx, id, key)
+		return tm.pushToolSpanWithCallID(ctx, id, key, hasCallID)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
@@ -12344,12 +12725,18 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	rec.ownActivation = owner.isActivation(canon)
 	rec.baseCallKey = baseKey
 	rec.icCallKey = icKey
-	rec.callHasRunToken = canon.runToken != nil
+	rec.callRunToken = canon.runToken
+	rec.callIDKeyed = hasCallID
+	ambiguousStorage := canon.runToken == nil && ambiguousIC
+	if ambiguousStorage && (!hasCallID || inv.toolSpans[key] != nil) {
+		key = key + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+		rec.callAmbiguousIC = true
+	}
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
-	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC); ok {
+	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC, hasCallID); ok {
 		delete(inv.completedTools, oldKey)
-	} else {
+	} else if !ambiguousStorage {
 		delete(inv.completedTools, key)
 	}
 	span := inv.rowSpan(rec, nil, ambient)
@@ -12370,6 +12757,10 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // that never ended are ended—purged if they failed, or retired quietly
 // otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithCallID(ctx, id, key, fromError, false)
+}
+
+func (tm *traceManager) popToolSpanWithCallID(ctx context.Context, id identity, key string, fromError, hasCallID bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	actions := toolActionsOf(ctx)
@@ -12396,12 +12787,16 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 			inv.noteRootAgentLocked(id, rootIn, true)
 			canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
 			icKey := callKeyFromAct(canon.icAct, baseKey)
-			resolvedKey, open, found := inv.resolveCallSpanLocked(inv.toolSpans, baseKey, canon, ambiguousIC)
+			resolvedKey, open, found := inv.resolveCallSpanLocked(inv.toolSpans, baseKey, canon, ambiguousIC, hasCallID)
 			if found {
 				delete(inv.toolSpans, resolvedKey)
 			}
 			inv.syncOpenCallsLocked()
 			if open != nil {
+				if canon.runToken == nil && open.callRunToken != nil {
+					canon.runToken = open.callRunToken
+					ambiguousIC = false
+				}
 				inv.markToolRunsDoneLocked(open)
 			}
 			if !fromError {
@@ -12424,9 +12819,17 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 				open.dropContexts()
 				if fromError {
 					storeKey := resolvedKey
-					if !open.callHasRunToken && canon.runToken != nil {
+					if open.callRunToken == nil && canon.runToken != nil {
 						storeKey = callKeyFromAct(canon.primary(), baseKey)
-						open.callHasRunToken = true
+						open.callRunToken = canon.runToken
+						open.callAmbiguousIC = false
+					} else if canon.runToken == nil && ambiguousIC && (!hasCallID || inv.completedTools[storeKey] != nil) {
+						if !hasCallID {
+							open.callAmbiguousIC = true
+						}
+						if inv.completedTools[storeKey] != nil {
+							storeKey = callKeyFromAct(canon.primary(), baseKey) + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+						}
 					}
 					open.baseCallKey = baseKey
 					open.icCallKey = icKey
@@ -12447,23 +12850,22 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 			resPurged := inv.endToolRunsForActivationLocked(canon, id, inv.lastSessionEventPartial, now, ambient, since)
 			if open != nil {
 				// The ended tool call may have run open activations under other spans.
-				inv.sampleSettledProbesLocked(true, false, &endedSampled)
-				if !inv.finished {
-					inv.retireLateSettledLocked()
-				}
+				inv.sampleAndRetireLateSettledLocked(&endedSampled)
 				return openSpan, resPurged, false, false
 			}
 			// Sample newly unblocked probes and retire settled late activations before
 			// choosing ownerOfActivation for a synthesized fallback span.
-			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
-				locked = false
-				return rowSpan{}, nil, false, true
+			if inv.canRetireLateLocked() {
+				if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+					locked = false
+					return rowSpan{}, nil, false, true
+				}
+				inv.retireLateSettledLocked()
 			}
-			inv.retireLateSettledLocked()
 			var resSpan rowSpan
 			var resClosed bool
 			if !fromError {
-				if compKey, rec, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC); ok && rec != nil && rec.errorAttempt == attemptOf(actions) {
+				if compKey, rec, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC, hasCallID); ok && rec != nil && rec.errorAttempt == attemptOf(actions) {
 					delete(inv.completedTools, compKey)
 					resSpan = inv.rowSpan(rec, nil, ambient)
 					resSpan.timestamp = now
@@ -12478,9 +12880,15 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 				rec.dropContexts()
 				rec.baseCallKey = baseKey
 				rec.icCallKey = icKey
-				rec.callHasRunToken = canon.runToken != nil
+				rec.callRunToken = canon.runToken
+				rec.callIDKeyed = hasCallID
+				storeKey := callKeyFromAct(canon.primary(), baseKey)
+				if canon.runToken == nil && ambiguousIC && (!hasCallID || inv.completedTools[storeKey] != nil) {
+					storeKey = storeKey + "\x00#" + strconv.FormatUint(inv.nextSeqLocked(), 10)
+					rec.callAmbiguousIC = true
+				}
 				rec.errorAttempt = attemptOf(actions)
-				inv.completedTools[callKeyFromAct(canon.primary(), baseKey)] = rec
+				inv.completedTools[storeKey] = rec
 				resSpan = inv.rowSpan(rec, nil, ambient)
 				resSpan.timestamp = now
 			}
@@ -13015,19 +13423,36 @@ func sameContextChild(a, b reflect.Value) bool {
 	return a.Kind() == reflect.Pointer && b.Kind() == reflect.Pointer && a.Pointer() == b.Pointer() && a.Type() == b.Type()
 }
 
+func exportAllowlistedChild(v reflect.Value, name string) reflect.Value {
+	f := directStructField(v, name)
+	if !f.IsValid() || f.CanInterface() {
+		return f
+	}
+	if !f.CanAddr() && v.Type().PkgPath() == "context" && v.Type().Name() == "withoutCancelCtx" {
+		cp := reflect.New(v.Type()).Elem()
+		cp.Set(v)
+		f = directStructField(cp, name)
+	}
+	if !f.IsValid() || !f.CanAddr() {
+		return f
+	}
+	//nolint:gosec // Clears reflect RO bit on allowlisted stdlib/ADK internal field so downstream exported external wrappers keep CanInterface().
+	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+}
+
 // adkContextChildren returns up to two inner context fields from allowlisted
 // Go stdlib and ADK context wrapper structs, ignoring application-owned types.
 func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 	vt := v.Type()
 	switch vt.PkgPath() {
 	case "context":
-		if f := directStructField(v, "Context"); f.IsValid() {
+		if f := exportAllowlistedChild(v, "Context"); f.IsValid() {
 			return f, reflect.Value{}
 		}
-		if f := directStructField(v, "cancelCtx"); f.IsValid() {
+		if f := exportAllowlistedChild(v, "cancelCtx"); f.IsValid() {
 			return f, reflect.Value{}
 		}
-		return directStructField(v, "c"), reflect.Value{}
+		return exportAllowlistedChild(v, "c"), reflect.Value{}
 	case agentPkgPath:
 		switch vt.Name() {
 		case "commonContext":
@@ -13039,7 +13464,9 @@ func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 		case "invocationContext":
 			return directStructField(v, "Context"), reflect.Value{}
 		case "callbackContextWrapper", "toolContextWrapper":
-			return directStructField(v, "context"), reflect.Value{}
+			return exportAllowlistedChild(v, "context"), reflect.Value{}
+		case "StrictContextMock":
+			return directStructField(v, "Ctx"), reflect.Value{}
 		}
 	case internalContextPkgPath:
 		switch vt.Name() {
@@ -13145,6 +13572,42 @@ func discoverParentMapCtxKey(ctx context.Context) any {
 	return parentMapCtxKey
 }
 
+// adkContextOrSafeChildren returns inner context candidates for allowlisted
+// Go stdlib / ADK structs, Unwrap() context.Context wrappers, or lock-free
+// single-anonymous-promoted context.Context structs (without invoking Value()
+// on unrecognized wrappers or reading side fields of sync-bearing structs).
+func adkContextOrSafeChildren(item, v reflect.Value) (reflect.Value, reflect.Value) {
+	if c1, c2 := adkContextChildren(v); c1.IsValid() || c2.IsValid() {
+		return c1, c2
+	}
+	vt := v.Type()
+	if isImmutableContextOrAgentPkg(vt.PkgPath()) {
+		return reflect.Value{}, reflect.Value{}
+	}
+	var candidate any
+	if item.IsValid() && item.CanInterface() {
+		candidate = item.Interface()
+	} else if v.CanAddr() && v.Addr().CanInterface() {
+		candidate = v.Addr().Interface()
+	} else if v.CanInterface() {
+		candidate = v.Interface()
+	}
+	if candidate == nil {
+		return reflect.Value{}, reflect.Value{}
+	}
+	if u, ok := candidate.(contextUnwrapper); ok {
+		next := orZero(u.Unwrap)
+		if next != nil && !sameComparableValue(next, candidate) {
+			return reflect.ValueOf(next), reflect.Value{}
+		}
+		return reflect.Value{}, reflect.Value{}
+	}
+	if next, ok := stepContext(candidate, true); ok && next != nil && !sameComparableValue(next, candidate) {
+		return reflect.ValueOf(next), reflect.Value{}
+	}
+	return reflect.Value{}, reflect.Value{}
+}
+
 // probeParentMapCtxKey reads ADK's unexported parentmap context key from an
 // existing callback context. Starting a runner for discovery would emit an
 // invocation span, even if its agent returned immediately.
@@ -13187,7 +13650,7 @@ func probeParentMapCtxKey(ctx context.Context) (key any) {
 				}
 			}
 		}
-		c1, c2 := adkContextChildren(v)
+		c1, c2 := adkContextOrSafeChildren(item, v)
 		q.push(c1)
 		q.push(c2)
 	}
@@ -13198,17 +13661,14 @@ func probeParentMapCtxKey(ctx context.Context) (key any) {
 // that ADK's runner attaches to ctx, or nil if ctx does not carry one. In
 // production it is invoked only via prepareRootAgentInput outside tm.mu and
 // inv.mu. When ADK core exposes ADKParentMap (parentMapReaderOnce() != nil), it
-// relies exclusively on that reader (calling Value directly rather than peeling
-// external wrappers so lock-guarded wrappers without Unwrap() stay race-free;
-// only ADK-mediated hops terminate under their 64-hop ParentMapStep budget,
-// while inner pure-external Value cycles reached through ADKParentMap still
-// recurse without bound, matching Go's context.Context Value delegation
-// contract) and returns nil immediately without calling discoverParentMapCtxKey
-// or walking structs when read(ctx) has no map. On earlier cores
-// (parentMapReaderOnce() == nil), it lazily probes ctx via
-// discoverParentMapCtxKey(ctx) and matches only that runner key via ctx.Value
-// and allowlisted Go stdlib / ADK context wrappers so application maps of the
-// same type are never mistaken for runner lineage.
+// first queries read(ctx); ADK's private-key reader traverses ADK contexts,
+// Unwrap() context.Context wrappers, and stdlib context nodes safely and stops
+// before unrecognized external wrappers without calling Value(). When read(ctx)
+// returns nil (for example across a lock-free single-anonymous-promoted external
+// wrapper) or on earlier cores (read == nil, discovering the runner key via
+// discover(ctx) when nil), it falls back to the allowlisted BFS over stdlib,
+// ADK, Unwrap(), and lock-free single-parent wrappers without calling raw
+// ctx.Value on outer external cycles.
 func contextParentMap(ctx context.Context) map[string]agent.Agent {
 	return contextParentMapWith(ctx, parentMapReaderOnce(), discoverParentMapCtxKey)
 }
@@ -13222,34 +13682,63 @@ func contextParentMapWith(ctx context.Context, read, discover func(context.Conte
 	if ctx == nil {
 		return nil
 	}
+	var runnerKey any
 	if read != nil {
 		if out, ok := convertAgentParentMap(read(ctx)); ok {
 			return out
 		}
-		return nil
-	}
-	runnerKey := discover(ctx)
-	if runnerKey == nil {
-		return nil
-	}
-	if raw := orZero(func() any { return ctx.Value(runnerKey) }); raw != nil {
-		if out, ok := convertAgentParentMap(raw); ok {
-			return out
+	} else {
+		runnerKey = discover(ctx)
+		if runnerKey == nil {
+			return nil
 		}
 	}
-	var q contextStructQueue
-	q.push(reflect.ValueOf(ctx))
+	type pmQueueNode struct {
+		val        reflect.Value
+		safeStdlib context.Context
+	}
+	var queue []pmQueueNode
+	queue = append(queue, pmQueueNode{val: reflect.ValueOf(ctx)})
 	var seen map[visitedContextStruct]bool
-	for steps := range 512 {
-		item, ok := q.pop()
-		if !ok {
-			break
+	for steps := 0; steps < 512 && len(queue) > 0; steps++ {
+		node := queue[0]
+		queue[0] = pmQueueNode{}
+		queue = queue[1:]
+		item := node.val
+		if !item.IsValid() || ((item.Kind() == reflect.Interface || item.Kind() == reflect.Pointer) && item.IsNil()) {
+			continue
 		}
 		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
 		if !ok {
 			continue
 		}
-		if v.Type().PkgPath() == "context" {
+		pkg := v.Type().PkgPath()
+		nextSafeStdlib := node.safeStdlib
+		if pkg == "context" {
+			if nextSafeStdlib == nil && item.CanInterface() {
+				if c, ok := reflect.TypeAssert[context.Context](item); ok && c != nil {
+					nextSafeStdlib = c
+				}
+			}
+		} else {
+			nextSafeStdlib = nil
+		}
+		if read != nil {
+			if item.CanInterface() && (pkg == "context" || isADKStructPkg(pkg)) {
+				if c, ok := reflect.TypeAssert[context.Context](item); ok && c != nil {
+					if out, ok := convertAgentParentMap(read(c)); ok {
+						return out
+					}
+				}
+			}
+			if isADKStructPkg(pkg) && v.CanAddr() && v.Addr().CanInterface() {
+				if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
+					if out, ok := convertAgentParentMap(read(c)); ok {
+						return out
+					}
+				}
+			}
+		} else if pkg == "context" {
 			if key, val := directStructField(v, "key"), directStructField(v, "val"); key.IsValid() && val.IsValid() {
 				if val.Kind() == reflect.Interface && !val.IsNil() {
 					val = val.Elem()
@@ -13258,24 +13747,30 @@ func contextParentMapWith(ctx context.Context, read, discover func(context.Conte
 					val.Type().Key().Kind() == reflect.String &&
 					val.Type().Elem() == agentInterfaceType {
 					if keyVal, ok := exportContextKey(key); ok && sameComparableValue(keyVal, runnerKey) {
-						lookupCtx := ctx
+						var lookupCtx context.Context
 						if v.CanAddr() && v.Addr().CanInterface() {
-							if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
-								lookupCtx = c
-							}
+							lookupCtx, _ = reflect.TypeAssert[context.Context](v.Addr())
+						} else if nextSafeStdlib != nil {
+							lookupCtx = nextSafeStdlib
 						}
-						if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
-							if out, ok := convertAgentParentMap(raw); ok {
-								return out
+						if lookupCtx != nil {
+							if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
+								if out, ok := convertAgentParentMap(raw); ok {
+									return out
+								}
 							}
 						}
 					}
 				}
 			}
 		}
-		c1, c2 := adkContextChildren(v)
-		q.push(c1)
-		q.push(c2)
+		c1, c2 := adkContextOrSafeChildren(item, v)
+		if c1.IsValid() {
+			queue = append(queue, pmQueueNode{val: c1, safeStdlib: nextSafeStdlib})
+		}
+		if c2.IsValid() {
+			queue = append(queue, pmQueueNode{val: c2, safeStdlib: nextSafeStdlib})
+		}
 	}
 	return nil
 }

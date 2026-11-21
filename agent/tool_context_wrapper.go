@@ -31,6 +31,7 @@ import (
 // related to node-context methods when an agent.Context is used as a tool context.
 type toolContextWrapper struct {
 	adkcontext.Marker
+	adkcontext.StepMarker
 	context Context
 }
 
@@ -255,6 +256,18 @@ func (c *toolContextWrapper) Value(key any) any {
 	// recover, and a hand-built wrapper can hold neither.
 	if c == nil || c.context == nil {
 		return nil
+	}
+	if v, ok := adkcontext.ForwardLineage(key, c.context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.context); ok {
+		return v
 	}
 	return c.context.Value(key)
 }

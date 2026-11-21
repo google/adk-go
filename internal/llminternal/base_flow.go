@@ -1458,6 +1458,7 @@ type cancelledToolContext struct {
 	// is nil by design, and a streaming tool that re-derives its context would
 	// lose the acting user.
 	adkcontext.Marker
+	adkcontext.StepMarker
 	cancelCtx context.Context
 }
 
@@ -1479,6 +1480,18 @@ func (c *cancelledToolContext) Value(key any) any {
 	// from inside http.RoundTripper where net/http does not recover.
 	if c == nil || c.cancelCtx == nil {
 		return nil
+	}
+	if v, ok := adkcontext.ForwardLineage(key, c.cancelCtx); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.cancelCtx); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.cancelCtx); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.cancelCtx); ok {
+		return v
 	}
 	return c.cancelCtx.Value(key)
 }
@@ -2095,4 +2108,7 @@ type pluginManager interface {
 // Asserted rather than left to the [adkcontext.Marker] embed: dropping the embed
 // would also drop the import, breaking the build for an unrelated reason. This
 // fails on the type.
-var _ adkcontext.Source = (*cancelledToolContext)(nil)
+var (
+	_ adkcontext.Source     = (*cancelledToolContext)(nil)
+	_ adkcontext.StepSource = (*cancelledToolContext)(nil)
+)

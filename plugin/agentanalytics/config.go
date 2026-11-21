@@ -372,63 +372,51 @@ type GCSContentOffloader interface {
 // them are placed under that activation's span (parent_span_id). On adk/v2
 // cores that provide Value-based lookups (added after v2.8.0 and probed at run
 // time), each agent.Run mints a stable per-run token preserved across
-// WithICDelta and WithContext copies (while outside agent.Run or on earlier
-// core versions, correlation falls back to the InvocationContext pointer).
-// Inside ADK callbacks (where ADK supplies the outer invocation or callback
-// context), cross-goroutine lineage, workflow node path, per-run
-// activation, and telemetry parent-map lookups through custom
-// context.Context wrappers rely on Value delegation on cores > v2.8.0:
-// ADK-mediated forwarding hops for those lookups use 64-hop budgets (while
-// ADK's runner-internal parent-map lookup remains unbounded like
-// context.Value), whereas an inner pure-external Value cycle reached inside
-// a callback follows Go's context.Context Value delegation contract and can
-// still recurse without bound. Outside ADK callbacks, when an arbitrary outer
-// wrapper is passed directly for lineage or activation correlation, entry
-// peeling steps at most 64 hops across allowlisted stdlib "context"
-// wrappers, explicit Unwrap() context.Context methods, and WithICDelta(nil)
-// promotions before invoking Value, stopping cleanly before unrecognized
-// external decorators or outer external cycles. Parent-map lookups delegate
-// via Value without reflecting external struct fields; node path lookups
-// likewise delegate via Value, except that for non-ADK wrappers promoting
-// Path() through an embedded interface without declaring their own Path()
-// (such as struct{ agent.Context }), the plugin first inspects the embedded
-// interface field (skipping wrappers with visible struct-local
-// synchronization primitives) to preserve custom Path() overrides, while the
-// fallback walk traverses only allowlisted stdlib and ADK context
-// structs. Against earlier core versions, parent-map lookup lazily discovers
-// ADK's private parent-map key from an existing callback context on first use
-// without starting a runner or emitting spans, and launch lineage traverses up
-// to 256 wrapper hops total across context.WithoutCancel, standard-library
-// wrappers (WithCancel, WithTimeout, WithValue), ADK wrappers, lock-free
-// external wrappers whose promoted Value comes from a single live anonymous
-// context.Context interface without custom Value overrides or visible
-// struct-local synchronization primitives, and synchronized wrappers
-// implementing Unwrap() context.Context; wrappers declaring a custom Value
-// method, promoting Value from a non-context.Context source, carrying visible
-// struct-local synchronization primitives without Unwrap() context.Context,
-// multiple live or any non-nil unexported external context.Context fields
-// (ambiguity falls back cleanly rather than guessing a cancellation parent),
-// wrapper chains deeper than 256 hops, or blocked Value delegation on newer
-// cores fall back to goroutine correlation: a child agent that runs on an
-// activation's goroutine, or on one the activation starts directly, is placed
-// under that activation, and one launched across an intermediate goroutine
-// that runs no ADK callback is placed under the nearest open span enclosing the
-// concurrent activations that directly hold an open span its branch and node
-// path fit (or the invocation span if none encloses them). Because reflection
-// cannot detect locks stored outside a wrapper's own type graph (such as a
-// package-level mutex), any wrapper whose sole live anonymous context.Context
-// field is mutated concurrently under an external lock on core <= v2.8.0 must
-// implement Unwrap() context.Context or run against ADK core > v2.8.0, and any
-// forwarding wrapper on any core version whose embedded Path()-bearing
-// interface field (such as struct{ agent.Context }) is mutated concurrently
-// under an external lock must declare its own synchronized Path() method so
-// Path() inspection does not read the embedded interface field. User-defined
-// agent decorators omit embedded ADK delegate Config and AgentType metadata
-// unless they implement Unwrap() agent.Agent; while after-agent callback
-// detection skips visible struct-local synchronization primitives and
-// non-anonymous Agent fields, an anonymous struct{ agent.Agent } decorator
-// whose embedded Agent field is mutated under an external lock must likewise
-// implement Unwrap() agent.Agent.
+// WithICDelta, WithContext, and Promote copies (while outside agent.Run or on
+// earlier core versions, correlation falls back to the InvocationContext
+// pointer, and tool callbacks with a function call ID also disambiguate
+// concurrent workers sharing an InvocationContext). Across custom
+// context.Context wrappers, ADK's private-key readers forward through ADK
+// contexts, explicit Unwrap() context.Context methods, and allowlisted stdlib
+// wrappers (bounded by 64 ADK hops, 512 stdlib hops, and pointer-cycle checks)
+// and stop cleanly before unrecognized external Value wrappers without calling
+// their Value method, so both outer and inner external Value cycles fail safe
+// instead of overflowing the stack. Whenever a Value-based lookup stops or is
+// unavailable, parent-map, node-path, and launch-lineage lookups fall back to
+// an allowlisted walk across stdlib "context" wrappers, ADK structs, explicit
+// Unwrap() context.Context methods, and lock-free single-parent external
+// wrappers, and otherwise fall back to goroutine correlation. A non-ADK wrapper
+// qualifies for lock-free field stepping purely by type: it must declare no
+// custom Value method, carry no visible struct-local synchronization
+// primitives anywhere in its type graph (with cycle-safe pointer bounds),
+// promote an exported anonymous context.Context-implementing interface leaf
+// field (the fallback walker also requires exported intermediate hops), and
+// contain no other context-capable fields anywhere in its type graph. Wrappers
+// with
+// multiple or non-embedded context-capable fields (even when nil or
+// unexported), custom Value methods, visible synchronization primitives without
+// Unwrap() context.Context, or chains over 256 hops do not have their fields
+// read; instead they require Unwrap() context.Context or fall back to
+// goroutine correlation (a child launched on an activation's goroutine or
+// directly from it joins that activation, while indirect cross-goroutine
+// launches use the nearest enclosing open span matching branch and node path,
+// or the invocation span). Parent-map lookups never invoke external Value
+// methods directly and never inspect external struct fields other than Unwrap()
+// or qualified lock-free single-parent wrappers. Node-path lookups likewise
+// preserve custom Path() overrides on non-ADK wrappers only after bounded,
+// cycle-safe, lock-free inspection of embedded promoted interfaces, while
+// skipping sync-bearing or cyclic delegates. Because type inspection cannot
+// detect locks stored outside a wrapper's own type graph (such as a
+// package-level mutex), any wrapper whose sole anonymous context.Context field
+// is mutated concurrently under an external lock must implement Unwrap()
+// context.Context (and any Path()-forwarding wrapper whose embedded interface
+// is mutated under an external lock must declare its own synchronized Path()
+// method). User-defined agent decorators omit embedded ADK delegate Config and
+// AgentType metadata unless they implement Unwrap() agent.Agent; while
+// after-agent callback detection uses bounded cycle-safe dereferencing and
+// skips visible struct-local synchronization primitives and non-anonymous Agent
+// fields, an anonymous struct{ agent.Agent } decorator whose embedded Agent
+// field is mutated under an external lock must implement Unwrap() agent.Agent.
 type Config struct {
 	// _ prevents unkeyed literals, which adding a field would break.
 	_ struct{} `json:"-"`

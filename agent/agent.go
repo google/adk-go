@@ -432,6 +432,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 type invocationContext struct {
 	context.Context
 	adkcontext.Marker
+	adkcontext.StepMarker
 
 	agent     Agent
 	artifacts Artifacts

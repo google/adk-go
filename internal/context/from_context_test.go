@@ -17,6 +17,7 @@ package context_test
 import (
 	"context"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -564,4 +565,70 @@ func TestLineageWalksBaseInvocationContextWithoutInterceptingAppKeys(t *testing.
 	if got := adkcontext.ReadRunToken(roCycleA); got != nil {
 		t.Fatalf("ReadRunToken(cyclic ReadonlyContext) = %#v, want nil", got)
 	}
+
+	var extCalls atomic.Int64
+	extA := &externalValueCycleContext{valueCalls: &extCalls}
+	extB := &externalValueCycleContext{Context: extA, valueCalls: &extCalls}
+	extA.Context = extB
+	roExtCycle := &icontext.ReadonlyContext{Context: extA}
+	if got := adkcontext.WalkLineage(roExtCycle); got != nil {
+		t.Fatalf("WalkLineage(ReadonlyContext -> external Value cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadPath(roExtCycle); got != "" {
+		t.Fatalf("ReadPath(ReadonlyContext -> external Value cycle) = %q, want empty", got)
+	}
+	if got := adkcontext.ReadParentMap(roExtCycle); got != nil {
+		t.Fatalf("ReadParentMap(ReadonlyContext -> external Value cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadRunToken(roExtCycle); got != nil {
+		t.Fatalf("ReadRunToken(ReadonlyContext -> external Value cycle) = %#v, want nil", got)
+	}
+	if n := extCalls.Load(); n != 0 {
+		t.Fatalf("external Value cycle called Value %d times, want 0", n)
+	}
+
+	var unwrapCalls atomic.Int64
+	roUnwrapCycle := &icontext.ReadonlyContext{}
+	u2 := &externalUnwrapCycleContext{Context: roUnwrapCycle, valueCalls: &unwrapCalls}
+	u1 := &externalUnwrapCycleContext{Context: u2, valueCalls: &unwrapCalls}
+	roUnwrapCycle.Context = u1
+	if got := adkcontext.WalkLineage(roUnwrapCycle); got != nil {
+		t.Fatalf("WalkLineage(ReadonlyContext -> Unwrap cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadPath(roUnwrapCycle); got != "" {
+		t.Fatalf("ReadPath(ReadonlyContext -> Unwrap cycle) = %q, want empty", got)
+	}
+	if got := adkcontext.ReadParentMap(roUnwrapCycle); got != nil {
+		t.Fatalf("ReadParentMap(ReadonlyContext -> Unwrap cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadRunToken(roUnwrapCycle); got != nil {
+		t.Fatalf("ReadRunToken(ReadonlyContext -> Unwrap cycle) = %#v, want nil", got)
+	}
+	if n := unwrapCalls.Load(); n != 0 {
+		t.Fatalf("Unwrap cycle called Value %d times, want 0", n)
+	}
+}
+
+type externalValueCycleContext struct {
+	context.Context
+	valueCalls *atomic.Int64
+}
+
+func (e *externalValueCycleContext) Value(key any) any {
+	e.valueCalls.Add(1)
+	return e.Context.Value(key)
+}
+
+type externalUnwrapCycleContext struct {
+	context.Context
+	valueCalls *atomic.Int64
+}
+
+func (e *externalUnwrapCycleContext) Value(key any) any {
+	e.valueCalls.Add(1)
+	return e.Context.Value(key)
+}
+
+func (e *externalUnwrapCycleContext) Unwrap() context.Context {
+	return e.Context
 }

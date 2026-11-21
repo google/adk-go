@@ -171,6 +171,19 @@ func TestLineageKeyTypeIsUnnameable(t *testing.T) {
 	}
 }
 
+func TestStepSourceMethodIsUnexported(t *testing.T) {
+	src := reflect.TypeFor[adkcontext.StepSource]()
+	if got := src.NumMethod(); got != 1 {
+		t.Fatalf("StepSource has %d methods, want exactly 1", got)
+	}
+	if m := src.Method(0); !slices.Contains(strings.Split(m.PkgPath, "/"), "internal") {
+		t.Errorf("StepSource.%s is declared in %q, must remain under internal/", m.Name, m.PkgPath)
+	}
+	if m := src.Method(0); m.PkgPath == "" {
+		t.Errorf("StepSource.%s is exported; must remain unexported", m.Name)
+	}
+}
+
 type appObserverKey struct{}
 
 func (appObserverKey) ObserveADKContext(any) bool {
@@ -178,12 +191,22 @@ func (appObserverKey) ObserveADKContext(any) bool {
 }
 
 type sampleStepCtx struct {
+	adkcontext.StepMarker
 	context.Context
 	id int
 }
 
 func (c *sampleStepCtx) Value(key any) any {
 	if v, ok := adkcontext.LineageStep(key, c, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.Context); ok {
 		return v
 	}
 	if c.Context == nil {
@@ -200,6 +223,16 @@ type cyclicStepBridge struct {
 func (c *cyclicStepBridge) Value(key any) any {
 	return c.loop.Value(key)
 }
+
+type cyclicUnwrapBridge struct {
+	loop context.Context
+}
+
+func (*cyclicUnwrapBridge) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*cyclicUnwrapBridge) Done() <-chan struct{}       { return nil }
+func (*cyclicUnwrapBridge) Err() error                  { return nil }
+func (c *cyclicUnwrapBridge) Value(key any) any         { return c.loop.Value(key) }
+func (c *cyclicUnwrapBridge) Unwrap() context.Context   { return c.loop }
 
 func TestLineageStepTokenIsOpaqueImmutableAndBounded(t *testing.T) {
 	if got := adkcontext.Token((*sampleStepCtx)(nil)); got != nil {
@@ -256,13 +289,29 @@ func TestLineageStepTokenIsOpaqueImmutableAndBounded(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Cyclic Value chain through ADK step terminates cleanly at LineageKey+1 hops.
-	bridge := &cyclicStepBridge{Context: context.Background()}
-	cyc := &sampleStepCtx{Context: bridge, id: 9}
-	bridge.loop = cyc
-	bounded := adkcontext.WalkLineage(cyc)
+	// Cyclic ADK step chain terminates cleanly at LineageKey+1 hops.
+	cycA := &sampleStepCtx{id: 9}
+	cycB := &sampleStepCtx{Context: cycA, id: 10}
+	cycA.Context = cycB
+	bounded := adkcontext.WalkLineage(cycA)
 	if len(bounded) != int(adkcontext.LineageKey)+1 {
-		t.Fatalf("len(WalkLineage(cyclic)) = %d, want %d", len(bounded), int(adkcontext.LineageKey)+1)
+		t.Fatalf("len(WalkLineage(ADK cycle)) = %d, want %d", len(bounded), int(adkcontext.LineageKey)+1)
+	}
+	// Cyclic Unwrap() bridge terminates cleanly within the hop budget.
+	ubridge := &cyclicUnwrapBridge{}
+	ucyc := &sampleStepCtx{Context: ubridge, id: 11}
+	ubridge.loop = ucyc
+	ubounded := adkcontext.WalkLineage(ucyc)
+	if len(ubounded) == 0 || len(ubounded) > int(adkcontext.LineageKey)+1 {
+		t.Fatalf("len(WalkLineage(Unwrap cycle)) = %d, want 1..%d", len(ubounded), int(adkcontext.LineageKey)+1)
+	}
+	// Opaque external bridge without Unwrap() stops without delegating LineageKey.
+	bridge := &cyclicStepBridge{Context: context.Background()}
+	cyc := &sampleStepCtx{Context: bridge, id: 12}
+	bridge.loop = cyc
+	opaqueWalk := adkcontext.WalkLineage(cyc)
+	if len(opaqueWalk) != 1 || opaqueWalk[0] != adkcontext.Token(cyc) {
+		t.Fatalf("WalkLineage(opaque bridge) = %#v, want [%#v]", opaqueWalk, adkcontext.Token(cyc))
 	}
 }
 
@@ -375,12 +424,22 @@ func BenchmarkWalkLineage_64Layers(b *testing.B) {
 }
 
 type samplePathStepCtx struct {
+	adkcontext.StepMarker
 	context.Context
 	path string
 }
 
 func (c *samplePathStepCtx) Value(key any) any {
 	if v, ok := adkcontext.PathStep(key, c.path, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ForwardLineage(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.Context); ok {
 		return v
 	}
 	if c.Context == nil {
@@ -444,11 +503,21 @@ func TestReadPathAndParentMap(t *testing.T) {
 }
 
 type sampleParentMapStepCtx struct {
+	adkcontext.StepMarker
 	context.Context
 }
 
 func (c *sampleParentMapStepCtx) Value(key any) any {
 	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ForwardLineage(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.Context); ok {
 		return v
 	}
 	if c.Context == nil {
@@ -458,6 +527,7 @@ func (c *sampleParentMapStepCtx) Value(key any) any {
 }
 
 type sampleRunTokenStepCtx struct {
+	adkcontext.StepMarker
 	context.Context
 	tok any
 }
@@ -467,6 +537,12 @@ func (c *sampleRunTokenStepCtx) Value(key any) any {
 		return v
 	}
 	if v, ok := adkcontext.RunTokenStep(key, c.tok, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
 		return v
 	}
 	if c.Context == nil {
@@ -543,6 +619,7 @@ func TestReadParentMap_DropsTypedNil(t *testing.T) {
 }
 
 type sampleForwardCtx struct {
+	adkcontext.StepMarker
 	context.Context
 }
 
@@ -681,6 +758,21 @@ func (c *uint8BlockingCtx) Value(key any) any {
 	return c.Context.Value(key)
 }
 
+type uint8BlockingUnwrapCtx struct {
+	context.Context
+}
+
+func (c *uint8BlockingUnwrapCtx) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func (c *uint8BlockingUnwrapCtx) Unwrap() context.Context {
+	return c.Context
+}
+
 func TestPathAndParentMapSurviveUint8BlockingWrapperAfterADKStep(t *testing.T) {
 	base := adkcontext.WithParentMap(context.Background(), map[string]string{"leaf": "worker"})
 	innerTok := adkcontext.NewRunToken()
@@ -688,28 +780,247 @@ func TestPathAndParentMapSurviveUint8BlockingWrapperAfterADKStep(t *testing.T) {
 		Context: &samplePathStepCtx{Context: base, path: "wf/left/leaf@1"},
 		tok:     innerTok,
 	}
-	filtered := &uint8BlockingCtx{Context: innerLineage}
-	outerTok := adkcontext.NewRunToken()
-	outerADK := &sampleRunTokenStepCtx{
-		Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
-		tok:     outerTok,
+
+	t.Run("with_unwrap", func(t *testing.T) {
+		filtered := &uint8BlockingUnwrapCtx{Context: innerLineage}
+		outerTok := adkcontext.NewRunToken()
+		outerADK := &sampleRunTokenStepCtx{
+			Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+			tok:     outerTok,
+		}
+		outerEmptyTok := &sampleRunTokenStepCtx{
+			Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+		}
+
+		if got := adkcontext.ReadPath(outerADK); got != "wf/left/leaf@1" {
+			t.Fatalf("ReadPath across ADK step + uint8BlockingUnwrapCtx = %q, want wf/left/leaf@1", got)
+		}
+		if m, ok := adkcontext.ReadParentMap(outerADK).(map[string]string); !ok || m["leaf"] != "worker" {
+			t.Fatalf("ReadParentMap across ADK step + uint8BlockingUnwrapCtx = %#v, want leaf->worker", adkcontext.ReadParentMap(outerADK))
+		}
+		if lineage := adkcontext.WalkLineage(outerADK); !slices.Contains(lineage, adkcontext.Token(outerADK)) || !slices.Contains(lineage, adkcontext.Token(innerLineage)) {
+			t.Fatalf("WalkLineage(outerADK) missing expected tokens across Unwrap: %#v", lineage)
+		}
+		if got := adkcontext.ReadRunToken(outerEmptyTok); got != innerTok {
+			t.Fatalf("ReadRunToken across Unwrap = %#v, want %#v", got, innerTok)
+		}
+	})
+
+	t.Run("without_unwrap_opaque", func(t *testing.T) {
+		filtered := &uint8BlockingCtx{Context: innerLineage}
+		outerTok := adkcontext.NewRunToken()
+		outerADK := &sampleRunTokenStepCtx{
+			Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+			tok:     outerTok,
+		}
+		outerEmptyTok := &sampleRunTokenStepCtx{
+			Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+		}
+
+		if got := adkcontext.ReadPath(outerADK); got != "" {
+			t.Fatalf("ReadPath across opaque uint8BlockingCtx = %q, want empty", got)
+		}
+		if got := adkcontext.ReadParentMap(outerADK); got != nil {
+			t.Fatalf("ReadParentMap across opaque uint8BlockingCtx = %#v, want nil", got)
+		}
+		if lineage := adkcontext.WalkLineage(outerADK); len(lineage) == 0 || !slices.Contains(lineage, adkcontext.Token(outerADK)) {
+			t.Fatalf("WalkLineage(outerADK) missing outer token: %#v", lineage)
+		} else if slices.Contains(lineage, adkcontext.Token(innerLineage)) {
+			t.Fatalf("WalkLineage penetrated opaque uint8BlockingCtx: %#v", lineage)
+		}
+		if got := adkcontext.ReadRunToken(outerEmptyTok); got != nil {
+			t.Fatalf("ReadRunToken penetrated opaque uint8BlockingCtx: %#v, want nil", got)
+		}
+	})
+}
+
+type r10CycleNodeA struct {
+	peer *r10CycleNodeB
+}
+
+func (*r10CycleNodeA) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeA) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeA) Err() error                  { return nil }
+func (a *r10CycleNodeA) Value(key any) any {
+	if a.peer != nil {
+		return a.peer.Value(key)
 	}
-	outerEmptyTok := &sampleRunTokenStepCtx{
-		Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+	return nil
+}
+
+type r10CycleNodeB struct {
+	peer *r10CycleNodeA
+}
+
+func (*r10CycleNodeB) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeB) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeB) Err() error                  { return nil }
+func (b *r10CycleNodeB) Value(key any) any {
+	if b.peer != nil {
+		return b.peer.Value(key)
+	}
+	return nil
+}
+
+type r10OpaqueCounterCtx struct {
+	context.Context
+	valueCalls *int
+}
+
+func (c *r10OpaqueCounterCtx) Value(key any) any {
+	*c.valueCalls++
+	return c.Context.Value(key)
+}
+
+func TestPrivateKeyReaders_ExternalValueCycle_DoesNotCallValue(t *testing.T) {
+	if os.Getenv("ADK_R10_SUBPROCESS") == "1" {
+		a := &r10CycleNodeA{}
+		b := &r10CycleNodeB{peer: a}
+		a.peer = b
+
+		adkPathCtx := &samplePathStepCtx{Context: a}
+		adkPMCtx := &sampleParentMapStepCtx{Context: a}
+		adkRunTokCtx := &sampleRunTokenStepCtx{Context: a}
+		adkFwdCtx := &sampleForwardCtx{Context: a}
+		withPM := adkcontext.WithParentMap(a, map[string]string{"c": "p"})
+
+		for _, c := range []context.Context{a, adkPathCtx, adkPMCtx, adkRunTokCtx, adkFwdCtx, withPM} {
+			if got := adkcontext.ReadPath(c); got != "" {
+				t.Fatalf("ReadPath(%T) = %q, want empty", c, got)
+			}
+			if got := adkcontext.ReadRunToken(c); got != nil {
+				t.Fatalf("ReadRunToken(%T) = %#v, want nil", c, got)
+			}
+		}
+		for _, c := range []context.Context{a, adkPMCtx, adkFwdCtx} {
+			if got := adkcontext.ReadParentMap(c); got != nil {
+				t.Fatalf("ReadParentMap(%T) = %#v, want nil", c, got)
+			}
+		}
+		if got := adkcontext.ReadParentMap(withPM); got == nil {
+			t.Fatalf("ReadParentMap(withPM) = nil, want map")
+		}
+		wcCycle := context.WithoutCancel(a)
+		if got := adkcontext.ReadPath(wcCycle); got != "" {
+			t.Fatalf("ReadPath(WithoutCancel(cycleA)) = %q, want empty", got)
+		}
+		if got := adkcontext.ReadRunToken(wcCycle); got != nil {
+			t.Fatalf("ReadRunToken(WithoutCancel(cycleA)) = %#v, want nil", got)
+		}
+		_ = adkcontext.WalkLineage(a)
+		_ = adkcontext.WalkLineage(adkFwdCtx)
+		_ = adkcontext.WalkLineage(withPM)
+		_ = adkcontext.WalkLineage(wcCycle)
+		return
 	}
 
-	if got := adkcontext.ReadPath(outerADK); got != "wf/left/leaf@1" {
-		t.Fatalf("ReadPath across ADK step + uint8BlockingCtx = %q, want wf/left/leaf@1", got)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPrivateKeyReaders_ExternalValueCycle_DoesNotCallValue$", "-test.v")
+	cmd.Env = append(os.Environ(), "ADK_R10_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed on external Value cycle: %v\n%s", err, out)
 	}
-	if m, ok := adkcontext.ReadParentMap(outerADK).(map[string]string); !ok || m["leaf"] != "worker" {
-		t.Fatalf("ReadParentMap across ADK step + uint8BlockingCtx = %#v, want leaf->worker", adkcontext.ReadParentMap(outerADK))
+
+	// Non-cyclic opaque wrapper with declared Value and no Unwrap() must never have Value called.
+	calls := 0
+	tok := adkcontext.NewRunToken()
+	inner := &samplePathStepCtx{
+		Context: adkcontext.WithParentMap(
+			&sampleRunTokenStepCtx{Context: context.Background(), tok: tok},
+			map[string]string{"c": "p"},
+		),
+		path: "wf/a",
 	}
-	if lineage := adkcontext.WalkLineage(outerADK); len(lineage) == 0 || !slices.Contains(lineage, adkcontext.Token(outerADK)) {
-		t.Fatalf("WalkLineage(outerADK) missing outer token: %#v", lineage)
-	} else if slices.Contains(lineage, adkcontext.Token(innerLineage)) {
-		t.Fatalf("WalkLineage penetrated uint8BlockingCtx: %#v", lineage)
+	opaque := &r10OpaqueCounterCtx{Context: inner, valueCalls: &calls}
+	outerADK := &sampleForwardCtx{Context: opaque}
+	for _, c := range []context.Context{opaque, outerADK} {
+		if got := adkcontext.ReadPath(c); got != "" {
+			t.Fatalf("ReadPath(opaque) = %q, want empty", got)
+		}
+		if got := adkcontext.ReadParentMap(c); got != nil {
+			t.Fatalf("ReadParentMap(opaque) = %#v, want nil", got)
+		}
+		if got := adkcontext.ReadRunToken(c); got != nil {
+			t.Fatalf("ReadRunToken(opaque) = %#v, want nil", got)
+		}
 	}
-	if got := adkcontext.ReadRunToken(outerEmptyTok); got != nil {
-		t.Fatalf("ReadRunToken penetrated uint8BlockingCtx: %#v, want nil", got)
+	if calls != 0 {
+		t.Fatalf("opaque wrapper Value called %d times by private key readers, want 0", calls)
+	}
+
+	// Verify 80+ WithValue layers + WithoutCancel preserve all private keys, while
+	// non-Unwrap external wrappers stop cleanly without reading side fields or calling Value.
+	type deepValKey int
+	deep := context.Context(inner)
+	for i := range 80 {
+		deep = context.WithValue(deep, deepValKey(i), i)
+	}
+	deep = context.WithoutCancel(deep)
+	if got := adkcontext.ReadPath(deep); got != "wf/a" {
+		t.Fatalf("ReadPath(WithoutCancel -> 80 WithValue) = %q, want wf/a", got)
+	}
+	if got := adkcontext.ReadRunToken(deep); got != tok {
+		t.Fatalf("ReadRunToken(WithoutCancel -> 80 WithValue) = %#v, want %#v", got, tok)
+	}
+	if pm, ok := adkcontext.ReadParentMap(deep).(map[string]string); !ok || pm["c"] != "p" {
+		t.Fatalf("ReadParentMap(WithoutCancel -> 80 WithValue) = %#v, want c->p", adkcontext.ReadParentMap(deep))
+	}
+	if lin := adkcontext.WalkLineage(deep); !slices.Contains(lin, tok) {
+		t.Fatalf("WalkLineage(WithoutCancel -> 80 WithValue) missing tok: %#v", lin)
+	}
+
+	// Verify Unwrap()-equipped wrapper preserves private keys over WithoutCancel -> 80 WithValue.
+	ub := &uint8BlockingUnwrapCtx{Context: deep}
+	if got := adkcontext.ReadPath(ub); got != "wf/a" {
+		t.Fatalf("ReadPath(uint8BlockingUnwrapCtx -> WithoutCancel -> 80 WithValue) = %q, want wf/a", got)
+	}
+	if got := adkcontext.ReadRunToken(ub); got != tok {
+		t.Fatalf("ReadRunToken(uint8BlockingUnwrapCtx -> WithoutCancel -> 80 WithValue) = %#v, want %#v", got, tok)
+	}
+
+	// Lock-free wrapper with a second context side field (e.g. lastSeen) must stop without reading it.
+	type lockFreeSideCtx struct {
+		context.Context
+		lastSeen context.Context
+	}
+	var lastSeenMu sync.Mutex
+	sideW := &lockFreeSideCtx{Context: inner, lastSeen: inner}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				lastSeenMu.Lock()
+				if i%2 == 0 {
+					sideW.lastSeen = context.Background()
+				} else {
+					sideW.lastSeen = inner
+				}
+				lastSeenMu.Unlock()
+				runtime.Gosched()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	for range 100 {
+		if got := adkcontext.ReadPath(sideW); got != "" {
+			t.Fatalf("ReadPath(lockFreeSideCtx) = %q, want empty", got)
+		}
+		if got := adkcontext.ReadRunToken(sideW); got != nil {
+			t.Fatalf("ReadRunToken(lockFreeSideCtx) = %#v, want nil", got)
+		}
+		if got := adkcontext.ReadParentMap(sideW); got != nil {
+			t.Fatalf("ReadParentMap(lockFreeSideCtx) = %#v, want nil", got)
+		}
+		_ = adkcontext.WalkLineage(sideW)
 	}
 }

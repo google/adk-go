@@ -3946,9 +3946,9 @@ func TestRetiredActivationLedger_DetachedChildGoroutineNotStampedByCustomParentR
 		inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), at(10), detachedEarly)
 
 		// detachedPopped popped its own AfterAgentCallback on goroutine 97
-		// (setting both completed and runDone via settleEndedInSubtreeLocked)
-		// while a later plugin's AfterAgentCallback is still running on
-		// goroutine 97.
+		// (setting both completed via markSettledSubtreeLocked and runDone
+		// via sampleSettledProbesLocked) while a later plugin's
+		// AfterAgentCallback is still running on goroutine 97.
 		detachedPopped := &spanRecord{
 			spanID:                 "det-popped",
 			kind:                   spanKindAgent,

@@ -194,6 +194,7 @@ func (m *mockInvocationContext) Deadline() (deadline time.Time, ok bool) { retur
 func (m *mockInvocationContext) Done() <-chan struct{}                   { return m.ctx.Done() }
 func (m *mockInvocationContext) Err() error                              { return m.ctx.Err() }
 func (m *mockInvocationContext) Value(key any) any                       { return m.ctx.Value(key) }
+func (m *mockInvocationContext) Unwrap() context.Context                 { return m.ctx }
 
 func (m *mockInvocationContext) AgentName() string    { return m.agentName }
 func (m *mockInvocationContext) SessionID() string    { return m.sessionID }

@@ -19,6 +19,8 @@ import (
 	"context"
 	"iter"
 	"log"
+	"os"
+	"os/exec"
 	"reflect"
 	"slices"
 	"strings"
@@ -725,5 +727,207 @@ func TestRunToken_StableWithinRun_FreshPerChild(t *testing.T) {
 	}
 	if rtReader.ADKRunToken(outer) != nil {
 		t.Fatal("parent outer invocationContext mutated by child run")
+	}
+}
+
+type r10CycleNodeA struct {
+	peer *r10CycleNodeB
+}
+
+func (*r10CycleNodeA) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeA) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeA) Err() error                  { return nil }
+func (a *r10CycleNodeA) Value(key any) any {
+	if a.peer != nil {
+		return a.peer.Value(key)
+	}
+	return nil
+}
+
+type r10CycleNodeB struct {
+	peer *r10CycleNodeA
+}
+
+func (*r10CycleNodeB) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeB) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeB) Err() error                  { return nil }
+func (b *r10CycleNodeB) Value(key any) any {
+	if b.peer != nil {
+		return b.peer.Value(key)
+	}
+	return nil
+}
+
+type r10CycleIC struct {
+	InvocationContext
+	ctx context.Context
+}
+
+func (c *r10CycleIC) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c *r10CycleIC) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c *r10CycleIC) Err() error                  { return c.ctx.Err() }
+func (c *r10CycleIC) Value(key any) any           { return c.ctx.Value(key) }
+
+func TestPromote_ExternalValueCycle_DoesNotOverflowStack(t *testing.T) {
+	if os.Getenv("ADK_R10_SUBPROCESS") == "1" {
+		a := &r10CycleNodeA{}
+		b := &r10CycleNodeB{peer: a}
+		a.peer = b
+
+		outer := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+		promoted := Promote(&r10CycleIC{InvocationContext: outer, ctx: a})
+
+		reader := any(Promote(nil)).(interface {
+			ADKContextPath(context.Context) string
+			ADKParentMap(context.Context) any
+			ADKRunToken(context.Context) any
+			ADKWalkLineage(context.Context) []any
+		})
+		if got := reader.ADKContextPath(promoted); got != "" {
+			t.Fatalf("ADKContextPath(Promote(cycleIC)) = %q, want empty", got)
+		}
+		if got := reader.ADKParentMap(promoted); got != nil {
+			t.Fatalf("ADKParentMap(Promote(cycleIC)) = %v, want nil", got)
+		}
+		if got := reader.ADKRunToken(promoted); got != nil {
+			t.Fatalf("ADKRunToken(Promote(cycleIC)) = %v, want nil", got)
+		}
+		_ = reader.ADKWalkLineage(promoted)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPromote_ExternalValueCycle_DoesNotOverflowStack$", "-test.v")
+	cmd.Env = append(os.Environ(), "ADK_R10_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed on Promote(external Value cycle): %v\n%s", err, out)
+	}
+}
+
+func TestPromoteWithDelta_KeepsCallbackRunToken(t *testing.T) {
+	rtReader := any(Promote(nil)).(interface {
+		ADKRunToken(context.Context) any
+	})
+	outer := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+
+	var runTok, cbTok, cbDeltaTok, toolDeltaTok any
+	bot, err := New(Config{
+		Name: "bot",
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				bg := context.Background()
+				delta := &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Context: &bg}}
+				runTok = rtReader.ADKRunToken(ctx)
+				cb := NewCallbackContext(ctx, nil)
+				cbTok = rtReader.ADKRunToken(cb)
+				cbDeltaTok = rtReader.ADKRunToken(PromoteWithDelta(cb, delta))
+				tc := NewToolContext(ctx, "call-1", nil, nil)
+				toolDeltaTok = rtReader.ADKRunToken(PromoteWithDelta(tc, delta))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(bot): %v", err)
+	}
+	for _, runErr := range bot.Run(outer) {
+		if runErr != nil {
+			t.Fatalf("bot.Run error: %v", runErr)
+		}
+	}
+	if runTok == nil {
+		t.Fatal("runTok = nil, want non-nil")
+	}
+	if cbTok != runTok || cbDeltaTok != runTok || toolDeltaTok != runTok {
+		t.Fatalf("tokens mismatch: run=%#v cb=%#v cbPromoteDelta=%#v toolPromoteDelta=%#v", runTok, cbTok, cbDeltaTok, toolDeltaTok)
+	}
+}
+
+type extCopyingICForTest struct {
+	InvocationContext
+}
+
+func (c *extCopyingICForTest) WithContext(ctx context.Context) InvocationContext {
+	return &extCopyingICForTest{InvocationContext: c.InvocationContext.WithContext(ctx)}
+}
+
+func TestStrictContextMockAndExternalLockFreeWithAgentContext(t *testing.T) {
+	reader := any(Promote(nil)).(interface {
+		ADKContextPath(context.Context) string
+		ADKParentMap(context.Context) any
+		ADKRunToken(context.Context) any
+		ADKWalkLineage(context.Context) []any
+	})
+
+	leafAg, err := New(Config{Name: "leaf"})
+	if err != nil {
+		t.Fatalf("New(leaf): %v", err)
+	}
+	nodePath := "wf/node@1"
+	pm := map[string]Agent{"leaf": leafAg}
+	basePM := adkcontext.WithParentMap(t.Context(), pm)
+	outer := &invocationContext{Context: basePM, session: &identityTestSession{}}
+
+	var carried Context
+	var runTok any
+	var rebound Context
+	bot, err := New(Config{
+		Name: "bot",
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				runTok = reader.ADKRunToken(ctx)
+				carried = Promote(ctx).WithDelta(&CommonContextDelta{Path: &nodePath}).WithAgentContext(ctx)
+				rebound = NewContext(outer).WithAgentContext(&extCopyingICForTest{InvocationContext: ctx})
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(bot): %v", err)
+	}
+	for _, runErr := range bot.Run(outer) {
+		if runErr != nil {
+			t.Fatalf("bot.Run error: %v", runErr)
+		}
+	}
+
+	type k struct{}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "StrictContextMock", ctx: &StrictContextMock{Ctx: carried}},
+		{name: "WithValue(StrictContextMock)", ctx: context.WithValue(&StrictContextMock{Ctx: carried}, k{}, 1)},
+	} {
+		if got := reader.ADKContextPath(tc.ctx); got != nodePath {
+			t.Fatalf("%s: ADKContextPath = %q, want %q", tc.name, got, nodePath)
+		}
+		if got, ok := reader.ADKParentMap(tc.ctx).(map[string]Agent); !ok || len(got) != 1 {
+			t.Fatalf("%s: ADKParentMap = %#v, want 1-entry map", tc.name, reader.ADKParentMap(tc.ctx))
+		}
+		if got := reader.ADKRunToken(tc.ctx); got != runTok {
+			t.Fatalf("%s: ADKRunToken = %#v, want %#v", tc.name, got, runTok)
+		}
+		if lin := reader.ADKWalkLineage(tc.ctx); !slices.Contains(lin, carried.(interface{ ADKContextToken() any }).ADKContextToken()) {
+			t.Fatalf("%s: ADKWalkLineage = %#v, want token for carried", tc.name, lin)
+		}
+	}
+
+	nilMock := &StrictContextMock{}
+	if got := reader.ADKContextPath(nilMock); got != "" {
+		t.Fatalf("ADKContextPath(nil StrictContextMock) = %q, want empty", got)
+	}
+	if got := reader.ADKWalkLineage(nilMock); got != nil {
+		t.Fatalf("ADKWalkLineage(nil StrictContextMock) = %#v, want nil", got)
+	}
+
+	cycMock := &StrictContextMock{}
+	cycMock.Ctx = cycMock
+	if got := reader.ADKContextPath(cycMock); got != "" {
+		t.Fatalf("ADKContextPath(cyclic StrictContextMock) = %q, want empty", got)
+	}
+
+	if got := reader.ADKRunToken(rebound); got != runTok {
+		t.Fatalf("ADKRunToken(WithAgentContext(&extCopyingICForTest)) = %#v, want %#v", got, runTok)
 	}
 }

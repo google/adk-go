@@ -57,6 +57,7 @@ func NewInvocationContext(ctx context.Context, params InvocationContextParams) a
 type InvocationContext struct {
 	context.Context
 	adkcontext.Marker
+	adkcontext.StepMarker
 
 	params InvocationContextParams
 }
@@ -225,4 +226,7 @@ func (c *InvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.I
 // other use of the package is that embed loses the import along with it, so the
 // build breaks for an unrelated reason and reads like a guard while guarding
 // nothing. This fails on the type, which is what was meant.
-var _ adkcontext.Source = (*InvocationContext)(nil)
+var (
+	_ adkcontext.Source     = (*InvocationContext)(nil)
+	_ adkcontext.StepSource = (*InvocationContext)(nil)
+)

@@ -17123,7 +17123,7 @@ func TestTraceManager_RecordNodeCompletionAttributesOnlyUnambiguousRuns(t *testi
 }
 
 // TestTraceManager_RunsOnThisGoroutineAreOverOnlyAfterTheirFrame checks the
-// bound that settleEndedInSubtreeLocked and markToolRunsDoneLocked put on the
+// bound that markSettledSubtreeLocked and markToolRunsDoneLocked put on the
 // open activations that they take to be over because they started on the
 // current goroutine: only one that started there after the activation or tool
 // call whose callback runs (a seq above since, or above the call's) ran inside
@@ -17150,7 +17150,7 @@ func TestTraceManager_RunsOnThisGoroutineAreOverOnlyAfterTheirFrame(t *testing.T
 		inv.agentStack = append(inv.agentStack, rec)
 		return rec
 	}
-	t.Run("settleEndedInSubtreeLocked", func(t *testing.T) {
+	t.Run("markSettledSubtreeLocked", func(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			// since returns the since bound for child, the activation that
@@ -17176,7 +17176,10 @@ func TestTraceManager_RunsOnThisGoroutineAreOverOnlyAfterTheirFrame(t *testing.T
 				custom := newActivation(inv, "custom", inv.agentStack[0], anotherGoroutine)
 				child := newActivation(inv, "child", custom, goid)
 
-				inv.settleEndedInSubtreeLocked(1, false, tc.since(child))
+				inv.markSettledSubtreeLocked(1, false, tc.since(child))
+				if !inv.sampleSettledProbesLocked(true, false, nil) {
+					t.Fatal("unexpected retry from sampleSettledProbesLocked")
+				}
 
 				if child.runDone != tc.wantDone {
 					t.Errorf("runDone of an activation with seq %d on this goroutine, since %d = %t, want %t", child.seq, tc.since(child), child.runDone, tc.wantDone)
@@ -32353,29 +32356,36 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			var selfParams any
 			selfParams = &selfParams
 
-			hasPathKey := contextPathReaderOnce() != nil
-			hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey(capturedIC) != nil
-			wantPath := ""
-			if hasPathKey {
-				wantPath = "wf_cycle@1/leaf@1"
-			}
-
 			roWrapped := &cyclicReadonlyWrapper{
 				ReadonlyContext:   agent.NewCallbackContext(capturedIC, nil),
 				params:            &selfParams,
 				ctx:               &selfCtx,
 				invocationContext: capturedIC,
 			}
-			if parents := contextParentMap(roWrapped); hasParentMap && parents["wf_cycle"] != parentRoot {
-				t.Errorf("contextParentMap(roWrapped)[wf_cycle] = %v, want %v (via Value)", parents["wf_cycle"], parentRoot)
-			} else if !hasParentMap && parents != nil {
-				t.Errorf("contextParentMap(roWrapped) = %v, want nil (non-ADK wrapper ignored)", parents)
+			if parents := contextParentMap(roWrapped); parents != nil {
+				t.Errorf("contextParentMap(roWrapped) = %v, want nil (multi-field non-Unwrap wrapper ignored)", parents)
 			}
-			if got := contextPath(roWrapped); got != wantPath {
-				t.Errorf("contextPath(roWrapped) = %q, want %q", got, wantPath)
+			if got := contextPath(roWrapped); got != "" {
+				t.Errorf("contextPath(roWrapped) = %q, want empty (multi-field non-Unwrap wrapper ignored)", got)
 			}
-			if got := identityOf(roWrapped); got.path != wantPath || got.agentName != "leaf" {
-				t.Errorf("identityOf(roWrapped) = %+v, want agentName=leaf path=%q", got, wantPath)
+			if got := identityOf(roWrapped); got.path != "" || got.agentName != "leaf" {
+				t.Errorf("identityOf(roWrapped) = %+v, want agentName=leaf path=\"\"", got)
+			}
+
+			roUnwrap := &cyclicReadonlyUnwrapWrapper{
+				ReadonlyContext:   agent.NewCallbackContext(capturedIC, nil),
+				params:            &selfParams,
+				ctx:               &selfCtx,
+				invocationContext: capturedIC,
+			}
+			if parents := contextParentMap(roUnwrap); parents["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(roUnwrap)[wf_cycle] = %v, want %v (via Unwrap)", parents["wf_cycle"], parentRoot)
+			}
+			if got := contextPath(roUnwrap); got != "wf_cycle@1/leaf@1" {
+				t.Errorf("contextPath(roUnwrap) = %q, want %q", got, "wf_cycle@1/leaf@1")
+			}
+			if got := identityOf(roUnwrap); got.path != "wf_cycle@1/leaf@1" || got.agentName != "leaf" {
+				t.Errorf("identityOf(roUnwrap) = %+v, want agentName=leaf path=%q", got, "wf_cycle@1/leaf@1")
 			}
 
 			icWrapped := &cyclicInvocationWrapper{
@@ -32383,16 +32393,14 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				params:            &selfParams,
 				ctx:               &selfCtx,
 			}
-			if got := contextParentMap(icWrapped); hasParentMap && got["wf_cycle"] != parentRoot {
-				t.Errorf("contextParentMap(icWrapped)[wf_cycle] = %v, want %v (via Value)", got["wf_cycle"], parentRoot)
-			} else if !hasParentMap && got != nil {
-				t.Errorf("contextParentMap(icWrapped) = %v, want nil (non-ADK wrapper ignored)", got)
+			if got := contextParentMap(icWrapped); got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(icWrapped)[wf_cycle] = %v, want %v (lock-free single-parent delegate)", got["wf_cycle"], parentRoot)
 			}
-			if got := contextPath(icWrapped); got != wantPath {
-				t.Errorf("contextPath(icWrapped) = %q, want %q", got, wantPath)
+			if got := contextPath(icWrapped); got != "wf_cycle@1/leaf@1" {
+				t.Errorf("contextPath(icWrapped) = %q, want %q", got, "wf_cycle@1/leaf@1")
 			}
-			if got := identityOf(icWrapped); got.path != wantPath || got.agentName != "leaf" {
-				t.Errorf("identityOf(icWrapped) = %+v, want agentName=leaf path=%q", got, wantPath)
+			if got := identityOf(icWrapped); got.path != "wf_cycle@1/leaf@1" || got.agentName != "leaf" {
+				t.Errorf("identityOf(icWrapped) = %+v, want agentName=leaf path=%q", got, "wf_cycle@1/leaf@1")
 			}
 
 			// Purely cyclic wrapper with embedded mockInvocationContext keeps empty path.
@@ -32412,16 +32420,9 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			}
 		}()
 
-		// Mutex-guarded application contexts with fields concurrently mutated under -race
-		// never have their struct fields reflected by contextPath or contextParentMap; when
-		// ADK provides private Value keys or runner parent-map key discovery succeeds, Value
-		// delegation reads them race-free.
-		hasPathKey := contextPathReaderOnce() != nil
-		hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey(capturedIC) != nil
-		wantRacePath := ""
-		if hasPathKey {
-			wantRacePath = "wf_cycle@1/leaf@1"
-		}
+		// Mutex-guarded application contexts without Unwrap() never have their
+		// struct fields reflected or their Value() invoked unverified under -race;
+		// explicit synchronized Unwrap() preserves lookups race-free.
 		type concurrentAppInvocationWrapper struct {
 			agent.InvocationContext
 			mu              sync.Mutex
@@ -32441,6 +32442,14 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			params:            map[string]any{"Path": "app/path"},
 		}
 		appRO := &concurrentAppReadonlyWrapper{
+			ReadonlyContext: agent.NewCallbackContext(capturedIC, nil),
+			params:          map[string]any{"Path": "app/path"},
+		}
+		appUnwrapInv := &concurrentAppUnwrapInvocationWrapper{
+			InvocationContext: capturedIC,
+			params:            map[string]any{"Path": "app/path"},
+		}
+		appUnwrapRO := &concurrentAppUnwrapReadonlyWrapper{
 			ReadonlyContext: agent.NewCallbackContext(capturedIC, nil),
 			params:          map[string]any{"Path": "app/path"},
 		}
@@ -32476,24 +32485,56 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 					appRO.ctx = nil
 				}
 				appRO.mu.Unlock()
+
+				appUnwrapInv.mu.Lock()
+				if i%2 == 0 {
+					appUnwrapInv.ReadonlyContext = agent.NewCallbackContext(capturedIC, nil)
+					appUnwrapInv.params = map[string]any{"Path": "even"}
+					appUnwrapInv.ctx = capturedIC
+				} else {
+					appUnwrapInv.ReadonlyContext = nil
+					appUnwrapInv.params = nil
+					appUnwrapInv.ctx = nil
+				}
+				appUnwrapInv.mu.Unlock()
+
+				appUnwrapRO.mu.Lock()
+				if i%2 == 0 {
+					appUnwrapRO.InvocationContext = capturedIC
+					appUnwrapRO.params = map[string]any{"Path": "even"}
+					appUnwrapRO.ctx = capturedIC
+				} else {
+					appUnwrapRO.InvocationContext = nil
+					appUnwrapRO.params = nil
+					appUnwrapRO.ctx = nil
+				}
+				appUnwrapRO.mu.Unlock()
 			}
 		})
 		for range 200 {
-			if got := contextPath(appInv); got != wantRacePath {
-				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want %q", got, wantRacePath)
+			if got := contextPath(appInv); got != "" {
+				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want empty", got)
 			}
-			if got := contextParentMap(appInv); hasParentMap && got["wf_cycle"] != parentRoot {
-				t.Errorf("contextParentMap(concurrentAppInvocationWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
-			} else if !hasParentMap && got != nil {
+			if got := contextParentMap(appInv); got != nil {
 				t.Errorf("contextParentMap(concurrentAppInvocationWrapper) = %v, want nil", got)
 			}
-			if got := contextPath(appRO); got != wantRacePath {
-				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want %q", got, wantRacePath)
+			if got := contextPath(appRO); got != "" {
+				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want empty", got)
 			}
-			if got := contextParentMap(appRO); hasParentMap && got["wf_cycle"] != parentRoot {
-				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
-			} else if !hasParentMap && got != nil {
+			if got := contextParentMap(appRO); got != nil {
 				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper) = %v, want nil", got)
+			}
+			if got := contextPath(appUnwrapInv); got != "wf_cycle@1/leaf@1" {
+				t.Errorf("contextPath(concurrentAppUnwrapInvocationWrapper) = %q, want %q", got, "wf_cycle@1/leaf@1")
+			}
+			if got := contextParentMap(appUnwrapInv); got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(concurrentAppUnwrapInvocationWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
+			}
+			if got := contextPath(appUnwrapRO); got != "wf_cycle@1/leaf@1" {
+				t.Errorf("contextPath(concurrentAppUnwrapReadonlyWrapper) = %q, want %q", got, "wf_cycle@1/leaf@1")
+			}
+			if got := contextParentMap(appUnwrapRO); got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(concurrentAppUnwrapReadonlyWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
 			}
 		}
 		close(raceStop)
@@ -32507,6 +32548,43 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatal("contextParentMap / contextPath / identityOf hung on cyclic ctx any or params any wrapper")
 		}
 	})
+}
+
+type cyclicReadonlyUnwrapWrapper struct {
+	agent.ReadonlyContext
+	params            any
+	ctx               any
+	invocationContext agent.InvocationContext
+}
+
+func (w *cyclicReadonlyUnwrapWrapper) Unwrap() context.Context { return w.ReadonlyContext }
+
+type concurrentAppUnwrapInvocationWrapper struct {
+	agent.InvocationContext
+	mu              sync.Mutex
+	ReadonlyContext agent.ReadonlyContext
+	params          any
+	ctx             any
+}
+
+func (w *concurrentAppUnwrapInvocationWrapper) Unwrap() context.Context {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.InvocationContext
+}
+
+type concurrentAppUnwrapReadonlyWrapper struct {
+	agent.ReadonlyContext
+	mu                sync.Mutex
+	InvocationContext agent.InvocationContext
+	params            any
+	ctx               any
+}
+
+func (w *concurrentAppUnwrapReadonlyWrapper) Unwrap() context.Context {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.ReadonlyContext
 }
 
 func TestAgentHasAfterAgentCallbacks(t *testing.T) {
@@ -36044,9 +36122,36 @@ type exportedOptionalMetadataContext struct {
 	context.Context
 }
 
+type exportedOptionalMetadataUnwrapContext struct {
+	*optionalContextMetadata
+	context.Context
+}
+
+func (c *exportedOptionalMetadataUnwrapContext) Unwrap() context.Context {
+	return c.Context
+}
+
+type optionalMetadataUnwrapContext struct {
+	delegatedContext
+	*optionalContextMetadata
+}
+
+func (c *optionalMetadataUnwrapContext) Unwrap() context.Context {
+	return c.delegatedContext
+}
+
 type sideFieldContext struct {
 	delegatedContext
 	Context context.Context
+}
+
+type sideFieldUnwrapContext struct {
+	delegatedContext
+	Context context.Context
+}
+
+func (c *sideFieldUnwrapContext) Unwrap() context.Context {
+	return c.delegatedContext
 }
 
 type unexportedParentContext struct {
@@ -36057,6 +36162,16 @@ func (c unexportedParentContext) Deadline() (time.Time, bool) { return c.parent.
 func (c unexportedParentContext) Done() <-chan struct{}       { return c.parent.Done() }
 func (c unexportedParentContext) Err() error                  { return c.parent.Err() }
 func (c unexportedParentContext) Value(key any) any           { return c.parent.Value(key) }
+
+type unexportedParentUnwrapContext struct {
+	parent context.Context
+}
+
+func (c unexportedParentUnwrapContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
+func (c unexportedParentUnwrapContext) Done() <-chan struct{}       { return c.parent.Done() }
+func (c unexportedParentUnwrapContext) Err() error                  { return c.parent.Err() }
+func (c unexportedParentUnwrapContext) Value(key any) any           { return c.parent.Value(key) }
+func (c unexportedParentUnwrapContext) Unwrap() context.Context     { return c.parent }
 
 type noValueContext struct {
 	parent context.Context
@@ -36141,10 +36256,16 @@ func wrapLineageShape(target, distraction context.Context, shape string) context
 		return embeddedValueContext{Context: target}
 	case "nil_optional_embedded_pointer":
 		return &optionalMetadataContext{delegatedContext: target}
+	case "nil_optional_embedded_pointer_unwrap":
+		return &optionalMetadataUnwrapContext{delegatedContext: target}
 	case "exported_nil_optional_embedded_pointer":
 		return &exportedOptionalMetadataContext{Context: target}
+	case "exported_nil_optional_embedded_pointer_unwrap":
+		return &exportedOptionalMetadataUnwrapContext{Context: target}
 	case "unrelated_context_side_field":
 		return &sideFieldContext{delegatedContext: target, Context: distraction}
+	case "unrelated_context_side_field_unwrap":
+		return &sideFieldUnwrapContext{delegatedContext: target, Context: distraction}
 	case "deep_with_value_chain":
 		cur := target
 		for step := range 80 {
@@ -36157,6 +36278,8 @@ func wrapLineageShape(target, distraction context.Context, shape string) context
 		return context.WithoutCancel(context.WithoutCancel(target))
 	case "unexported_parent_wrapper":
 		return unexportedParentContext{parent: target}
+	case "unexported_parent_wrapper_unwrap":
+		return unexportedParentUnwrapContext{parent: target}
 	default:
 		panic("unknown wrapper shape: " + shape)
 	}
@@ -36167,17 +36290,24 @@ func wrapLineageShape(target, distraction context.Context, shape string) context
 // open on root's goroutine, across custom and stdlib context.Context wrappers
 // passed via either worker 2's WithContext or root's WithContext.
 func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
-	shapes := []string{
-		"direct",
-		"pointer_wrapper",
-		"value_wrapper",
-		"nil_optional_embedded_pointer",
-		"exported_nil_optional_embedded_pointer",
-		"unrelated_context_side_field",
-		"deep_with_value_chain",
-		"without_cancel_single_hop",
-		"without_cancel_two_hop",
-		"unexported_parent_wrapper",
+	shapes := []struct {
+		shape         string
+		expectWorker1 bool
+	}{
+		{shape: "direct"},
+		{shape: "pointer_wrapper"},
+		{shape: "value_wrapper"},
+		{shape: "nil_optional_embedded_pointer", expectWorker1: true},
+		{shape: "nil_optional_embedded_pointer_unwrap"},
+		{shape: "exported_nil_optional_embedded_pointer", expectWorker1: true},
+		{shape: "exported_nil_optional_embedded_pointer_unwrap"},
+		{shape: "unrelated_context_side_field", expectWorker1: true},
+		{shape: "unrelated_context_side_field_unwrap"},
+		{shape: "deep_with_value_chain"},
+		{shape: "without_cancel_single_hop"},
+		{shape: "without_cancel_two_hop"},
+		{shape: "unexported_parent_wrapper", expectWorker1: true},
+		{shape: "unexported_parent_wrapper_unwrap"},
 	}
 	carriers := []struct {
 		name      string
@@ -36187,21 +36317,10 @@ func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
 		{name: "via_root_with_context", viaWorker: false},
 	}
 
-	requiresValueLineageWalker := func(shape string) bool {
-		switch shape {
-		case "nil_optional_embedded_pointer", "unrelated_context_side_field", "unexported_parent_wrapper":
-			return true
-		default:
-			return false
-		}
-	}
-
-	for _, shape := range shapes {
+	for _, tc := range shapes {
+		shape := tc.shape
 		for _, carrier := range carriers {
 			t.Run(shape+"/"+carrier.name, func(t *testing.T) {
-				if lineageWalkerOnce() == nil && requiresValueLineageWalker(shape) {
-					t.Skipf("shape %q requires ADK core > v2.8.0 Value lineage walker", shape)
-				}
 				p, requests, _ := setupTestPlugin(t)
 				leaf := newOneEventAgent(t, "leaf", nil)
 				type item struct {
@@ -36311,8 +36430,13 @@ func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
 				w2Span, _ := workerStarts[1]["span_id"].(string)
 				leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
 				onlyAgentRow(t, rows, EventAgentCompleted, "leaf")
-				if got, _ := leafStart["parent_span_id"].(string); got != w2Span {
-					t.Errorf("leaf parent_span_id = %q, want %q (worker 2, not worker 1 %q or root %q)", got, w2Span, w1Span, rootSpan)
+				got, _ := leafStart["parent_span_id"].(string)
+				wantSpan := w2Span
+				if tc.expectWorker1 {
+					wantSpan = w1Span
+				}
+				if got != wantSpan {
+					t.Errorf("leaf parent_span_id = %q, want %q (worker1=%q worker2=%q root=%q)", got, wantSpan, w1Span, w2Span, rootSpan)
 				}
 			})
 		}
@@ -36383,27 +36507,100 @@ func (c *pkgMutexNoUnwrapContext) Value(key any) any {
 	return c.Context.Value(key)
 }
 
+type rwMutexNamedUnwrapContext struct {
+	mu      sync.RWMutex
+	Context context.Context
+}
+
+func (c *rwMutexNamedUnwrapContext) Deadline() (time.Time, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *rwMutexNamedUnwrapContext) Done() <-chan struct{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *rwMutexNamedUnwrapContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *rwMutexNamedUnwrapContext) Value(key any) any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Value(key)
+}
+
+func (c *rwMutexNamedUnwrapContext) Unwrap() context.Context {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context
+}
+
+type rwMutexEmbeddedUnwrapContext struct {
+	mu sync.RWMutex
+	context.Context
+}
+
+func (c *rwMutexEmbeddedUnwrapContext) Deadline() (time.Time, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *rwMutexEmbeddedUnwrapContext) Done() <-chan struct{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *rwMutexEmbeddedUnwrapContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *rwMutexEmbeddedUnwrapContext) Value(key any) any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Value(key)
+}
+
+func (c *rwMutexEmbeddedUnwrapContext) Unwrap() context.Context {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context
+}
+
 // TestRunner_ConcurrentLookalike_SynchronizedContextLineage verifies that a
 // custom context.Context guarding its parent Context field with an RWMutex (or
-// package-level RWMutex) can be mutated concurrently under Lock while
-// pushAgentSpan resolves launch lineage without a data race, attributing the
-// child to the launching worker.
+// package-level RWMutex) can be mutated concurrently under Lock without a data
+// race: wrappers implementing Unwrap() context.Context preserve launch lineage
+// across goroutines on all ADK cores, while opaque wrappers without Unwrap()
+// complete race-free and stop private-key traversal, falling back to
+// goroutine evidence (attributing to worker 1 in this shape when worker 2 hides
+// its lineage).
 func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 	type swapKey int
 	for _, tc := range []struct {
-		name      string
-		kind      string
-		viaWorker bool
+		name          string
+		kind          string
+		viaWorker     bool
+		expectWorker1 bool
 	}{
-		{name: "named_field_via_worker_with_context", kind: "named", viaWorker: true},
-		{name: "embedded_field_via_root_with_context", kind: "embedded", viaWorker: false},
+		{name: "named_field_with_unwrap", kind: "named_unwrap", viaWorker: true},
+		{name: "embedded_field_with_unwrap", kind: "embedded_unwrap", viaWorker: false},
 		{name: "pkg_level_mutex_with_unwrap", kind: "pkg_unwrap", viaWorker: false},
-		{name: "pkg_level_mutex_without_unwrap", kind: "pkg_no_unwrap", viaWorker: false},
+		{name: "named_field_without_unwrap", kind: "named", viaWorker: true, expectWorker1: true},
+		{name: "embedded_field_without_unwrap", kind: "embedded", viaWorker: false, expectWorker1: true},
+		{name: "pkg_level_mutex_without_unwrap", kind: "pkg_no_unwrap", viaWorker: false, expectWorker1: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if lineageWalkerOnce() == nil && tc.kind != "pkg_unwrap" {
-				t.Skip("custom-wrapper Value lineage across goroutines without Unwrap() requires ADK core with ADKWalkLineage")
-			}
 			p, requests, _ := setupTestPlugin(t)
 			leaf := newOneEventAgent(t, "leaf", nil)
 			type item struct {
@@ -36432,6 +36629,30 @@ func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 						var wrapped context.Context
 						var mutateOnce func(toggle bool)
 						switch tc.kind {
+						case "embedded_unwrap":
+							sc := &rwMutexEmbeddedUnwrapContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								sc.mu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								sc.mu.Unlock()
+							}
+						case "named_unwrap":
+							sc := &rwMutexNamedUnwrapContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								sc.mu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								sc.mu.Unlock()
+							}
 						case "embedded":
 							sc := &rwMutexEmbeddedContext{Context: altA}
 							wrapped = sc
@@ -36584,14 +36805,19 @@ func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
 
 			rows := collectRows(t, requests, untilInvocationEnd)
 			onlyRowOfType(t, rows, EventInvocationCompleted)
+			rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
 			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
 			if len(workerStarts) != 2 {
 				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
 			}
 			w1Span, _ := workerStarts[0]["span_id"].(string)
 			w2Span, _ := workerStarts[1]["span_id"].(string)
-			if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w2Span {
-				t.Errorf("leaf parent_span_id = %q, want %q (worker 2, not worker 1 %q)", got, w2Span, w1Span)
+			wantSpan := w2Span
+			if tc.expectWorker1 {
+				wantSpan = w1Span
+			}
+			if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != wantSpan {
+				t.Errorf("leaf parent_span_id = %q, want %q (worker1=%q worker2=%q root=%q)", got, wantSpan, w1Span, w2Span, rootSpan)
 			}
 		})
 	}
@@ -36625,7 +36851,6 @@ func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
 	for _, shape := range []string{
 		"pointer_wrapper",
 		"value_wrapper",
-		"exported_nil_optional_embedded_pointer",
 		"deep_with_value_chain",
 	} {
 		t.Run(shape, func(t *testing.T) {
@@ -36638,6 +36863,24 @@ func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("exported_nil_optional_embedded_pointer", func(t *testing.T) {
+		opaque := wrapLineageShape(w2Act, rootAct, "exported_nil_optional_embedded_pointer")
+		childOpaque := rootAct.WithContext(opaque)
+		linOpaque := observeLaunchLineage(childOpaque, childOpaque, activationTokensOf(childOpaque, childOpaque))
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 100}, linOpaque); got != w1 {
+			t.Fatalf("parentForRunLocked(opaque 2-field, origin=w1) = %s, want %s (refused without reading fields, fell back to goroutine evidence)", got.spanID, w1.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 999}, linOpaque); got != root {
+			t.Fatalf("parentForRunLocked(opaque 2-field, neutral origin) = %s, want %s (refused without reading fields)", got.spanID, root.spanID)
+		}
+		unwrap := wrapLineageShape(w2Act, rootAct, "exported_nil_optional_embedded_pointer_unwrap")
+		childUnwrap := rootAct.WithContext(unwrap)
+		linUnwrap := observeLaunchLineage(childUnwrap, childUnwrap, activationTokensOf(childUnwrap, childUnwrap))
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 100}, linUnwrap); got != w2 {
+			t.Fatalf("parentForRunLocked(Unwrap 2-field) = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
 
 	t.Run("nil_optional_embedded_pointer", func(t *testing.T) {
 		// Without external-struct reflection, stepEmbeddedContext stops at the
@@ -37311,6 +37554,50 @@ type nilEmbeddedContextWrapper struct {
 	delegatedContext
 }
 
+type nilEmbeddedUnwrapWrapper struct {
+	*nilEmbeddedWalkerFields
+	delegatedContext
+}
+
+func (w nilEmbeddedUnwrapWrapper) Unwrap() context.Context {
+	return w.delegatedContext
+}
+
+type loggerBearingUnwrapContext struct {
+	context.Context
+	logger *log.Logger
+	path   string
+}
+
+func (c loggerBearingUnwrapContext) Unwrap() context.Context {
+	return c.Context
+}
+
+type readerBearingContext struct {
+	context.Context
+	reader *strings.Reader
+	path   string
+}
+
+type outerEmbeddedLockedPtrUnwrapContext struct {
+	*rwMutexNamedUnwrapContext
+}
+
+type lineageFilteringUnwrapContext struct {
+	Context context.Context
+}
+
+func (c *lineageFilteringUnwrapContext) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c *lineageFilteringUnwrapContext) Done() <-chan struct{}       { return c.Context.Done() }
+func (c *lineageFilteringUnwrapContext) Err() error                  { return c.Context.Err() }
+func (c *lineageFilteringUnwrapContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+func (c *lineageFilteringUnwrapContext) Unwrap() context.Context { return c.Context }
+
 type outerEmbeddedLockedPtrContext struct {
 	*rwMutexNamedContext
 }
@@ -37328,7 +37615,6 @@ type ptrMutexContext struct {
 type loggerBearingContext struct {
 	context.Context
 	logger *log.Logger
-	path   string
 }
 
 type syncOnceContext struct {
@@ -37484,17 +37770,27 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 			t.Fatalf("unexpected non-zero nilEmbeddedWalkerFields: %+v", zero)
 		}
 
-		wrapped := nilEmbeddedContextWrapper{delegatedContext: pathBase}
+		// Multi-context-field external wrapper without Unwrap() stops cleanly without panic.
+		opaque := nilEmbeddedContextWrapper{delegatedContext: pathBase}
+		if got := contextPath(opaque); got != "" {
+			t.Errorf("contextPath(nilEmbeddedContextWrapper) = %q, want empty", got)
+		}
+		if pm := contextParentMap(opaque); pm != nil {
+			t.Errorf("contextParentMap(nilEmbeddedContextWrapper) = %v, want nil", pm)
+		}
+
+		// With explicit Unwrap(), path and parent map are preserved without panicking on nil *nilEmbeddedWalkerFields.
+		wrapped := nilEmbeddedUnwrapWrapper{delegatedContext: pathBase}
 		if got := contextPath(wrapped); got != "wf/node_a" {
-			t.Errorf("contextPath(nilEmbeddedContextWrapper) = %q, want %q", got, "wf/node_a")
+			t.Errorf("contextPath(nilEmbeddedUnwrapWrapper) = %q, want %q", got, "wf/node_a")
 		}
 		pm := contextParentMap(wrapped)
 		if pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-			t.Errorf("contextParentMap(nilEmbeddedContextWrapper)[leaf] = %v, want root", pm["leaf"])
+			t.Errorf("contextParentMap(nilEmbeddedUnwrapWrapper)[leaf] = %v, want root", pm["leaf"])
 		}
 
 		// External structs with user params.Path must NOT be reflected by contextPath.
-		paramsCtx := nilEmbeddedContextWrapper{
+		paramsCtx := nilEmbeddedUnwrapWrapper{
 			delegatedContext: cyclicParamsContext{
 				Context: pmBase,
 				params:  struct{ Path string }{Path: "wf/from_params"},
@@ -37577,12 +37873,19 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 			invocationID: "inv-safe-reflect",
 			userID:       "u1",
 		}).WithDelta(&agent.CommonContextDelta{Path: &wrongPath}).WithAgentContext(distractionPM)
-		wrapped := sideFieldContext{delegatedContext: pathBase, Context: distraction}
+		opaque := sideFieldContext{delegatedContext: pathBase, Context: distraction}
+		if got := contextPath(opaque); got != "" {
+			t.Errorf("contextPath(opaque sideFieldContext) = %q, want empty", got)
+		}
+		if pm := contextParentMap(opaque); pm != nil {
+			t.Errorf("contextParentMap(opaque sideFieldContext) = %v, want nil", pm)
+		}
+		wrapped := &sideFieldUnwrapContext{delegatedContext: pathBase, Context: distraction}
 		if got := contextPath(wrapped); got != "wf/node_a" {
-			t.Errorf("contextPath(sideFieldContext) = %q, want %q", got, "wf/node_a")
+			t.Errorf("contextPath(sideFieldUnwrapContext) = %q, want %q", got, "wf/node_a")
 		}
 		if pm := contextParentMap(wrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-			t.Errorf("contextParentMap(sideFieldContext)[leaf] = %v, want root", pm["leaf"])
+			t.Errorf("contextParentMap(sideFieldUnwrapContext)[leaf] = %v, want root", pm["leaf"])
 		}
 	})
 
@@ -37601,6 +37904,34 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		if pm := contextParentMap(wrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
 			t.Errorf("contextParentMap(cyclicParamsContext)[leaf] = %v, want root", pm["leaf"])
 		}
+		if next, ok := stepContext(wrapped, true); !ok || next != pathBase {
+			t.Errorf("stepContext(cyclicParamsContext, true) = (%v, %t), want (%v, true)", next, ok, pathBase)
+		}
+		if next, ok := stepEmbeddedContext(wrapped); ok || next != nil {
+			t.Errorf("stepEmbeddedContext(cyclicParamsContext) = (%v, %t), want (nil, false)", next, ok)
+		}
+		if plan := legacyPlanFor(reflect.TypeOf(wrapped)); !plan.ok {
+			t.Errorf("legacyPlanFor(cyclicParamsContext) = %+v, want ok=true", plan)
+		}
+		type cyclicAgentWrapper struct {
+			agent.Agent
+			next selfPtr
+		}
+		if agentHasAfterAgentCallbacks(cyclicAgentWrapper{Agent: leaf, next: cyc}) {
+			t.Errorf("agentHasAfterAgentCallbacks(cyclicAgentWrapper over leaf) = true, want false")
+		}
+		withAfterCB, err := agent.New(agent.Config{
+			Name: "with_after_cb",
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) { return nil, nil },
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(with_after_cb): %v", err)
+		}
+		if !agentHasAfterAgentCallbacks(cyclicAgentWrapper{Agent: withAfterCB, next: cyc}) {
+			t.Errorf("agentHasAfterAgentCallbacks(cyclicAgentWrapper over with_after_cb) = false, want true")
+		}
 	})
 
 	t.Run("synchronized_contexts_do_not_race", func(t *testing.T) {
@@ -37614,6 +37945,9 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		named := &rwMutexNamedContext{Context: altA}
 		embedded := &rwMutexEmbeddedContext{Context: altA}
 		outerPtr := &outerEmbeddedLockedPtrContext{rwMutexNamedContext: named}
+		namedUnwrap := &rwMutexNamedUnwrapContext{Context: altA}
+		embeddedUnwrap := &rwMutexEmbeddedUnwrapContext{Context: altA}
+		outerPtrUnwrap := &outerEmbeddedLockedPtrUnwrapContext{rwMutexNamedUnwrapContext: namedUnwrap}
 		ptrMu := &ptrLockerContext{Mu: &sync.RWMutex{}, Context: pathBase}
 		ptrMutex := &ptrMutexContext{Mu: &sync.Mutex{}, Context: pathBase}
 		onceCtx := &syncOnceContext{Context: pathBase}
@@ -37632,11 +37966,11 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 			{name: "atomic_value", ctx: atomicCtx},
 			{name: "nested_ptr_locked", ctx: nestedPtrCtx},
 		} {
-			if got := contextPath(tc.ctx); got != "wf/node_a" {
-				t.Errorf("%s: contextPath = %q, want %q", tc.name, got, "wf/node_a")
+			if got := contextPath(tc.ctx); got != "" {
+				t.Errorf("%s: contextPath = %q, want empty without Unwrap()", tc.name, got)
 			}
-			if pm := contextParentMap(tc.ctx); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-				t.Errorf("%s: contextParentMap[leaf] = %v, want root", tc.name, pm["leaf"])
+			if pm := contextParentMap(tc.ctx); pm != nil {
+				t.Errorf("%s: contextParentMap = %v, want nil without Unwrap()", tc.name, pm)
 			}
 			if next, ok := stepEmbeddedContext(tc.ctx); ok || next != nil {
 				t.Errorf("%s: stepEmbeddedContext = (%v, %v), want (nil, false)", tc.name, next, ok)
@@ -37668,6 +38002,22 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 						embedded.Context = altA
 					}
 					embedded.mu.Unlock()
+
+					namedUnwrap.mu.Lock()
+					if toggle {
+						namedUnwrap.Context = altB
+					} else {
+						namedUnwrap.Context = altA
+					}
+					namedUnwrap.mu.Unlock()
+
+					embeddedUnwrap.mu.Lock()
+					if toggle {
+						embeddedUnwrap.Context = altB
+					} else {
+						embeddedUnwrap.Context = altA
+					}
+					embeddedUnwrap.mu.Unlock()
 					toggle = !toggle
 					runtime.Gosched()
 				}
@@ -37680,6 +38030,17 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 
 		for range 200 {
 			for _, c := range []context.Context{named, embedded, outerPtr} {
+				if got := contextPath(c); got != "" {
+					t.Fatalf("contextPath(%T) = %q, want empty without Unwrap()", c, got)
+				}
+				if pm := contextParentMap(c); pm != nil {
+					t.Fatalf("contextParentMap(%T) = %v, want nil without Unwrap()", c, pm)
+				}
+				if next, ok := stepEmbeddedContext(c); ok || next != nil {
+					t.Fatalf("stepEmbeddedContext(%T) = (%v, %v), want (nil, false)", c, next, ok)
+				}
+			}
+			for _, c := range []context.Context{namedUnwrap, embeddedUnwrap, outerPtrUnwrap} {
 				if got := contextPath(c); got != pathA && got != pathB {
 					t.Fatalf("contextPath(%T) = %q, want %q or %q", c, got, pathA, pathB)
 				}
@@ -37694,28 +38055,41 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 	})
 
 	t.Run("unrelated_stdlib_handle_pointer_field_preserves_walk", func(t *testing.T) {
+		lockFreeHandle := readerBearingContext{
+			Context: pathBase,
+			reader:  strings.NewReader("ignored"),
+			path:    "wf/ignored_user_field",
+		}
+		if got := contextPath(lockFreeHandle); got != "wf/node_a" {
+			t.Errorf("contextPath(readerBearingContext) = %q, want %q", got, "wf/node_a")
+		}
+		if pm := contextParentMap(lockFreeHandle); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(readerBearingContext)[leaf] = %v, want root", pm["leaf"])
+		}
+
+		// *log.Logger embeds an internal sync.Mutex, so without Unwrap() it fails closed,
+		// while implementing Unwrap() preserves contextPath and contextParentMap cleanly.
 		logger := log.New(io.Discard, "", 0)
-		inherited := loggerBearingContext{
+		opaqueLogger := &loggerBearingContext{
+			Context: pathBase,
+			logger:  logger,
+		}
+		if got := contextPath(opaqueLogger); got != "" {
+			t.Errorf("contextPath(opaque loggerBearingContext) = %q, want empty", got)
+		}
+		if next, ok := stepEmbeddedContext(opaqueLogger); ok || next != nil {
+			t.Errorf("stepEmbeddedContext(&loggerBearingContext) = (%v, %v), want (nil, false)", next, ok)
+		}
+		unwrapLogger := loggerBearingUnwrapContext{
 			Context: pathBase,
 			logger:  logger,
 			path:    "wf/ignored_user_field",
 		}
-		if got := contextPath(inherited); got != "wf/node_a" {
-			t.Errorf("contextPath(loggerBearingContext) = %q, want %q", got, "wf/node_a")
+		if got := contextPath(unwrapLogger); got != "wf/node_a" {
+			t.Errorf("contextPath(loggerBearingUnwrapContext) = %q, want %q", got, "wf/node_a")
 		}
-		if pm := contextParentMap(inherited); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-			t.Errorf("contextParentMap(loggerBearingContext)[leaf] = %v, want root", pm["leaf"])
-		}
-
-		inheritedPtr := &loggerBearingContext{
-			Context: pathBase,
-			logger:  logger,
-		}
-		if got := contextPath(inheritedPtr); got != "wf/node_a" {
-			t.Errorf("contextPath(&loggerBearingContext) = %q, want %q", got, "wf/node_a")
-		}
-		if next, ok := stepEmbeddedContext(inheritedPtr); ok || next != nil {
-			t.Errorf("stepEmbeddedContext(&loggerBearingContext) = (%v, %v), want (nil, false)", next, ok)
+		if pm := contextParentMap(unwrapLogger); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(loggerBearingUnwrapContext)[leaf] = %v, want root", pm["leaf"])
 		}
 	})
 
@@ -37874,13 +38248,21 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		if pm := contextParentMap(ptrWrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
 			t.Errorf("contextParentMap(&lockFreeCtxPtrWrapper)[leaf] = %v, want root", pm["leaf"])
 		}
-		// Filtering wrapper passed as pointer must also preserve contextPath & contextParentMap.
+		// Opaque custom-Value named wrapper without Unwrap() stops cleanly without calling Value().
 		filteredPtrWrapped := &lineageFilteringNamedContext{Context: leftNodeCtx}
-		if got := contextPath(filteredPtrWrapped); got != leftLeafPath {
-			t.Errorf("contextPath(&lineageFilteringNamedContext) = %q, want %q", got, leftLeafPath)
+		if got := contextPath(filteredPtrWrapped); got != "" {
+			t.Errorf("contextPath(&lineageFilteringNamedContext) = %q, want empty", got)
 		}
-		if pm := contextParentMap(filteredPtrWrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-			t.Errorf("contextParentMap(&lineageFilteringNamedContext)[leaf] = %v, want root", pm["leaf"])
+		if pm := contextParentMap(filteredPtrWrapped); pm != nil {
+			t.Errorf("contextParentMap(&lineageFilteringNamedContext) = %v, want nil", pm)
+		}
+		// Explicit Unwrap() preserves contextPath & contextParentMap even when Value() blocks uint8 keys.
+		filteredUnwrap := &lineageFilteringUnwrapContext{Context: leftNodeCtx}
+		if got := contextPath(filteredUnwrap); got != leftLeafPath {
+			t.Errorf("contextPath(&lineageFilteringUnwrapContext) = %q, want %q", got, leftLeafPath)
+		}
+		if pm := contextParentMap(filteredUnwrap); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(&lineageFilteringUnwrapContext)[leaf] = %v, want root", pm["leaf"])
 		}
 	})
 
@@ -38028,9 +38410,8 @@ func TestContextWalkers_SafeReflection(t *testing.T) {
 		if next, ok := stepEmbeddedContext(wrapped); ok || next != nil {
 			t.Errorf("stepEmbeddedContext(typedNilEmbeddedAndNamed) = (%v, %v), want (nil, false)", next, ok)
 		}
-		// Direct stepEmbeddedContextValue skips typed-nil embedded field and yields live named Context.
-		if next := stepEmbeddedContextValue(reflect.ValueOf(wrapped), 0); next != pathBase {
-			t.Errorf("stepEmbeddedContextValue(typedNilEmbeddedAndNamed) = %v, want pathBase", next)
+		if next := stepEmbeddedContextValue(reflect.ValueOf(wrapped), 0); next != nil {
+			t.Errorf("stepEmbeddedContextValue(typedNilEmbeddedAndNamed) = %v, want nil", next)
 		}
 	})
 }
@@ -38042,6 +38423,7 @@ type pointerKeyFilteringContext struct {
 func (c *pointerKeyFilteringContext) Deadline() (time.Time, bool) { return c.Context.Deadline() }
 func (c *pointerKeyFilteringContext) Done() <-chan struct{}       { return c.Context.Done() }
 func (c *pointerKeyFilteringContext) Err() error                  { return c.Context.Err() }
+func (c *pointerKeyFilteringContext) Unwrap() context.Context     { return c.Context }
 func (c *pointerKeyFilteringContext) Value(key any) any {
 	if key != nil && reflect.TypeOf(key).Kind() == reflect.Pointer {
 		return nil
@@ -38071,6 +38453,7 @@ type dualParentConcurrentContext struct {
 func (c *dualParentConcurrentContext) Deadline() (time.Time, bool) { return c.left.Deadline() }
 func (c *dualParentConcurrentContext) Done() <-chan struct{}       { return c.left.Done() }
 func (c *dualParentConcurrentContext) Err() error                  { return c.left.Err() }
+func (c *dualParentConcurrentContext) Unwrap() context.Context     { return c.left }
 func (c *dualParentConcurrentContext) Value(key any) any {
 	var leftVal, rightVal any
 	var wg sync.WaitGroup
@@ -38117,6 +38500,12 @@ func (c *separateStateLockedContext) Err() error {
 	return c.delegatedContext.Err()
 }
 
+func (c *separateStateLockedContext) Unwrap() context.Context {
+	c.st.mu.RLock()
+	defer c.st.mu.RUnlock()
+	return c.delegatedContext
+}
+
 func (c *separateStateLockedContext) Value(key any) any {
 	c.st.mu.RLock()
 	defer c.st.mu.RUnlock()
@@ -38130,6 +38519,7 @@ type unhashableTokenContext struct {
 func (c *unhashableTokenContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
 func (c *unhashableTokenContext) Done() <-chan struct{}       { return c.parent.Done() }
 func (c *unhashableTokenContext) Err() error                  { return c.parent.Err() }
+func (c *unhashableTokenContext) Unwrap() context.Context     { return c.parent }
 func (c *unhashableTokenContext) Value(key any) any {
 	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
 		v := c.parent.Value(key)
@@ -38199,6 +38589,12 @@ func (w valPtrIfaceWrapper) Err() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return (*w.ctx).Err()
+}
+
+func (w valPtrIfaceWrapper) Unwrap() context.Context {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return *w.ctx
 }
 
 func (w valPtrIfaceWrapper) Value(key any) any {
@@ -38985,7 +39381,7 @@ func TestRunner_ConcurrentLookalike_LockFreePointerWrapperPicksLeftOverSibling(t
 						ch <- item{ev: ev, err: runErr}
 					}
 				})
-				lCtx := <-leftCtxCh
+				<-leftCtxCh
 				wg.Go(func() {
 					rightPath := "wf/right"
 					rCtx := ctx.WithContext(agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &rightPath}))
@@ -38994,12 +39390,12 @@ func TestRunner_ConcurrentLookalike_LockFreePointerWrapperPicksLeftOverSibling(t
 					}
 				})
 				<-rightReady
-				// Wrap left branch context in a lock-free *wrapper pointer that
-				// blocks LineageKey so preserved Value-based contextPath and
-				// contextParentMap identify left over right on a neutral goroutine.
+				// Wrap a neutral root carrier carrying leafPath in a lock-free
+				// *lockFreePtrWrapper without Unwrap() so LineageKey cannot see left
+				// while preserved contextPath & contextParentMap attribute leaf to left.
 				leafPath := "wf/left/leaf@1"
-				lLeafCarrier := agent.Promote(lCtx).WithDelta(&agent.CommonContextDelta{Path: &leafPath}).WithAgentContext(lCtx)
-				ptrWrapped := ctx.WithContext(&lockFreePtrWrapper{Context: &lineageFilteringNamedContext{Context: lLeafCarrier}})
+				lLeafCarrier := agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &leafPath}).WithAgentContext(ctx)
+				ptrWrapped := ctx.WithContext(&lockFreePtrWrapper{Context: lLeafCarrier})
 				leafDone := make(chan struct{})
 				dispatchMu.Lock()
 				d := dispatch
@@ -39320,11 +39716,46 @@ func (w *pkgLevelLockedWrapper) Value(key any) any {
 	return w.Context.Value(key)
 }
 
+type pkgLevelLockedUnwrapWrapper struct {
+	context.Context
+}
+
+func (w *pkgLevelLockedUnwrapWrapper) Deadline() (time.Time, bool) {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Deadline()
+}
+
+func (w *pkgLevelLockedUnwrapWrapper) Done() <-chan struct{} {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Done()
+}
+
+func (w *pkgLevelLockedUnwrapWrapper) Err() error {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Err()
+}
+
+func (w *pkgLevelLockedUnwrapWrapper) Value(key any) any {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Value(key)
+}
+
+func (w *pkgLevelLockedUnwrapWrapper) Unwrap() context.Context {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context
+}
+
 // TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFree
 // pins that an external wrapper synchronized solely by a package-level mutex
-// (no mutex field inside the struct) never races under concurrent mutation,
-// preserves contextPath and contextParentMap via Value, and is never reflected
-// by stepEmbeddedContext.
+// (no mutex field inside the struct) never races under concurrent mutation and
+// is never reflected by stepEmbeddedContext: without Unwrap() it fails closed,
+// while implementing Unwrap() context.Context preserves contextPath and
+// contextParentMap race-free.
 func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFree(t *testing.T) {
 	if contextPathReaderOnce() == nil || parentMapReaderOnce() == nil {
 		t.Skip("Value-based path and parent-map lookups require ADK core > v2.8.0")
@@ -39347,7 +39778,8 @@ func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFre
 	ctxB := agent.Promote(&mockInvocationContext{ctx: pmBase, agentName: "root", sessionID: "s1", invocationID: "inv-pkgmu-b", userID: "u1"}).
 		WithDelta(&agent.CommonContextDelta{Path: &pathB}).WithAgentContext(pmBase)
 
-	w := &pkgLevelLockedWrapper{Context: ctxA}
+	opaque := &pkgLevelLockedWrapper{Context: ctxA}
+	wUnwrap := &pkgLevelLockedUnwrapWrapper{Context: ctxA}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -39359,9 +39791,11 @@ func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFre
 			default:
 				pkgLevelWrapperMu.Lock()
 				if i%2 == 0 {
-					w.Context = ctxB
+					opaque.Context = ctxB
+					wUnwrap.Context = ctxB
 				} else {
-					w.Context = ctxA
+					opaque.Context = ctxA
+					wUnwrap.Context = ctxA
 				}
 				pkgLevelWrapperMu.Unlock()
 				runtime.Gosched()
@@ -39374,16 +39808,26 @@ func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFre
 	}()
 
 	for range 300 {
-		if got := contextPath(w); got != pathA && got != pathB {
-			t.Fatalf("contextPath(pkgLevelLockedWrapper) = %q, want %q or %q", got, pathA, pathB)
+		if got := contextPath(opaque); got != "" {
+			t.Fatalf("contextPath(pkgLevelLockedWrapper) = %q, want empty without Unwrap()", got)
 		}
-		if pm := contextParentMap(w); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
-			t.Fatalf("contextParentMap(pkgLevelLockedWrapper) = %v, want leaf->root", pm)
+		if pm := contextParentMap(opaque); pm != nil {
+			t.Fatalf("contextParentMap(pkgLevelLockedWrapper) = %v, want nil without Unwrap()", pm)
 		}
-		if next, ok := stepEmbeddedContext(w); ok || next != nil {
+		if next, ok := stepEmbeddedContext(opaque); ok || next != nil {
 			t.Fatalf("stepEmbeddedContext(pkgLevelLockedWrapper) = (%v, %v), want (nil, false)", next, ok)
 		}
-		_ = observeLaunchLineage(w, nil, [4]any{})
+		if got := contextPath(wUnwrap); got != pathA && got != pathB {
+			t.Fatalf("contextPath(pkgLevelLockedUnwrapWrapper) = %q, want %q or %q", got, pathA, pathB)
+		}
+		if pm := contextParentMap(wUnwrap); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Fatalf("contextParentMap(pkgLevelLockedUnwrapWrapper) = %v, want leaf->root", pm)
+		}
+		if next, ok := stepEmbeddedContext(wUnwrap); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(pkgLevelLockedUnwrapWrapper) = (%v, %v), want (nil, false)", next, ok)
+		}
+		_ = observeLaunchLineage(opaque, nil, [4]any{})
+		_ = observeLaunchLineage(wUnwrap, nil, [4]any{})
 	}
 }
 
@@ -39398,6 +39842,20 @@ func (h plainNamedContextHolder) Value(key any) any           { return h.Context
 
 type embeddedPlainHolderWrapper struct {
 	plainNamedContextHolder
+}
+
+type plainNamedUnwrapHolder struct {
+	Context context.Context
+}
+
+func (h plainNamedUnwrapHolder) Deadline() (time.Time, bool) { return h.Context.Deadline() }
+func (h plainNamedUnwrapHolder) Done() <-chan struct{}       { return h.Context.Done() }
+func (h plainNamedUnwrapHolder) Err() error                  { return h.Context.Err() }
+func (h plainNamedUnwrapHolder) Value(key any) any           { return h.Context.Value(key) }
+func (h plainNamedUnwrapHolder) Unwrap() context.Context     { return h.Context }
+
+type embeddedPlainHolderUnwrapWrapper struct {
+	plainNamedUnwrapHolder
 }
 
 // TestRunner_ConcurrentLookalike_EmbeddedPlainHolderNamedContextPicksLeftOverSibling
@@ -39486,16 +39944,27 @@ func TestRunner_ConcurrentLookalike_EmbeddedPlainHolderNamedContextPicksLeftOver
 
 				leafPath := "wf/left/leaf@1"
 				lLeafCarrier := agent.Promote(lCtx).WithDelta(&agent.CommonContextDelta{Path: &leafPath}).WithAgentContext(lCtx)
-				holderWrapped := embeddedPlainHolderWrapper{
+				opaqueWrapped := embeddedPlainHolderWrapper{
 					plainNamedContextHolder: plainNamedContextHolder{
 						Context: &lineageFilteringNamedContext{Context: lLeafCarrier},
 					},
 				}
+				if got := contextPath(opaqueWrapped); got != "" {
+					t.Errorf("contextPath(opaque embeddedPlainHolderWrapper) = %q, want empty", got)
+				}
+				if pm := contextParentMap(opaqueWrapped); pm != nil {
+					t.Errorf("contextParentMap(opaque embeddedPlainHolderWrapper) = %v, want nil", pm)
+				}
+				holderWrapped := embeddedPlainHolderUnwrapWrapper{
+					plainNamedUnwrapHolder: plainNamedUnwrapHolder{
+						Context: &lineageFilteringUnwrapContext{Context: lLeafCarrier},
+					},
+				}
 				if got := contextPath(holderWrapped); got != leafPath {
-					t.Errorf("contextPath(embeddedPlainHolderWrapper) = %q, want %q", got, leafPath)
+					t.Errorf("contextPath(embeddedPlainHolderUnwrapWrapper) = %q, want %q", got, leafPath)
 				}
 				if pm := contextParentMap(holderWrapped); pm["leaf"] == nil || pm["leaf"].Name() != worker.Name() {
-					t.Errorf("contextParentMap(embeddedPlainHolderWrapper)[leaf] = %v, want worker", pm["leaf"])
+					t.Errorf("contextParentMap(embeddedPlainHolderUnwrapWrapper)[leaf] = %v, want worker", pm["leaf"])
 				}
 				runCtx := ctx.WithContext(holderWrapped)
 				leafDone := make(chan struct{})
@@ -42040,14 +42509,8 @@ func TestStepContext_V280ExternalValuePromotion(t *testing.T) {
 	}{
 		{"ptr_embeddedValueContext", &embeddedValueContext{Context: target}, target},
 		{"val_embeddedValueContext", embeddedValueContext{Context: target}, target},
-		{"exportedOptionalMetadataContext", &exportedOptionalMetadataContext{Context: target}, target},
-		{"outerNilOptionalAndCtx", &outerNilOptionalAndCtx{Context: target}, target},
 		{"lockFreePtrWrapper", &lockFreePtrWrapper{Context: target}, target},
 		{"nested_ptr_ExportedInnerHolder", &outerExportedInnerHolderPtr{ExportedInnerHolder: nestedHolder}, nestedHolder},
-		{"shallower_ctx_wins_over_deeper_ptr_recv_Value", unaddrPtrRecvOuter{
-			ptrRecvNestedHolder: ptrRecvNestedHolder{},
-			Context:             target,
-		}, target},
 	}
 	for _, tc := range positive {
 		t.Run("positive/"+tc.name, func(t *testing.T) {
@@ -42062,6 +42525,12 @@ func TestStepContext_V280ExternalValuePromotion(t *testing.T) {
 		name string
 		ctx  context.Context
 	}{
+		{"exportedOptionalMetadataContext", &exportedOptionalMetadataContext{Context: target}},
+		{"outerNilOptionalAndCtx", &outerNilOptionalAndCtx{Context: target}},
+		{"two_context_fields_unaddrPtrRecvOuter", unaddrPtrRecvOuter{
+			ptrRecvNestedHolder: ptrRecvNestedHolder{},
+			Context:             target,
+		}},
 		{"embeddedWithMapOverrideCtx", &embeddedWithMapOverrideCtx{Context: target, ov: map[any]any{}}},
 		{"embeddedWithClosureValueCtx", &embeddedWithClosureValueCtx{Context: target, valueFn: alt.Value}},
 		{"embeddedWithPrivateCarrierCtx", &embeddedWithPrivateCarrierCtx{Context: target, priv: alt}},
@@ -42822,61 +43291,22 @@ func (c *endedBarrierCtx) Ended() bool {
 	return true
 }
 
+// test adapter: delegates to inv.unobservedTaskForActivationLocked.
 func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, callID string, eventTime time.Time) int {
 	return inv.unobservedTaskForActivationLocked(resolveContextActivation(ctx), id, callID, eventTime)
 }
 
+// test adapter: delegates to inv.retireFailedTaskAttemptsAtLocked.
 func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
 	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
 }
 
+// test adapter: delegates to inv.retireFailedTaskAttemptsAtActivationLocked.
 func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
 	inv.retireFailedTaskAttemptsAtActivationLocked(resolveContextActivation(ctx), id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
 }
 
-func (rec *spanRecord) settleEndedLocked() {
-	if rec.ended != nil && rec.ended() {
-		rec.contextEnded = true
-		rec.ended = nil
-	}
-}
-
-func (inv *invocationTrace) settleEndedInSubtreeLocked(i int, done bool, since uint64) {
-	root := inv.agentStack[i]
-	if done {
-		root.settleEndedLocked()
-		root.runDone = true
-	}
-	subtree := inv.subtreeLocked(i)
-	var needDescendantCheck bool
-	for _, rec := range inv.agentStack[i+1:] {
-		if subtree[rec.spanID] && !rec.runDone {
-			needDescendantCheck = true
-			break
-		}
-	}
-	if needDescendantCheck {
-		var curGoid uint64
-		if since != noFrame {
-			curGoid = currentGoroutineID()
-		}
-		for _, rec := range inv.agentStack[i+1:] {
-			if subtree[rec.spanID] && !rec.runDone && inv.canSettleInSubtreeLocked(i, rec, curGoid, since) {
-				rec.runDone = true
-			}
-		}
-	}
-	inv.settleFinishedLocked()
-}
-
-func (inv *invocationTrace) settleFinishedLocked() {
-	for _, rec := range inv.agentStack[1:] {
-		if rec.runDone && !inv.launcherOpenLocked(rec) {
-			rec.settleEndedLocked()
-		}
-	}
-}
-
+// test adapter: delegates to inv.findAgentForActivation.
 func (inv *invocationTrace) findAgentForContext(ctx context.Context, path, name, branch string) int {
 	return inv.findAgentForActivation(resolveContextActivation(ctx), path, name, branch)
 }
@@ -42908,4 +43338,938 @@ func (c *userMutexContext) Value(key any) any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.Context.Value(key)
+}
+
+// --- R10 Regression Tests (Review 6004397852) ---
+
+type r10CycleNodeA struct {
+	peer *r10CycleNodeB
+}
+
+func (*r10CycleNodeA) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeA) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeA) Err() error                  { return nil }
+func (a *r10CycleNodeA) Value(key any) any {
+	if a.peer != nil {
+		return a.peer.Value(key)
+	}
+	return nil
+}
+
+type r10CycleNodeB struct {
+	peer *r10CycleNodeA
+}
+
+func (*r10CycleNodeB) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*r10CycleNodeB) Done() <-chan struct{}       { return nil }
+func (*r10CycleNodeB) Err() error                  { return nil }
+func (b *r10CycleNodeB) Value(key any) any {
+	if b.peer != nil {
+		return b.peer.Value(key)
+	}
+	return nil
+}
+
+type r10CycleIC struct {
+	agent.InvocationContext
+	ctx context.Context
+}
+
+func (c *r10CycleIC) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
+func (c *r10CycleIC) Done() <-chan struct{}       { return c.ctx.Done() }
+func (c *r10CycleIC) Err() error                  { return c.ctx.Err() }
+func (c *r10CycleIC) Value(key any) any           { return c.ctx.Value(key) }
+
+func TestContextPath_And_ContextParentMap_ExternalValueCycle_DoesNotOverflow(t *testing.T) {
+	if os.Getenv("ADK_R10_SUBPROCESS") == "1" {
+		a := &r10CycleNodeA{}
+		b := &r10CycleNodeB{peer: a}
+		a.peer = b
+
+		root := newOneEventAgent(t, "root", nil)
+		basePM := captureRunnerContextWithParentMap(t, root)
+		icBase := agent.Promote(&mockInvocationContext{ctx: basePM, agentName: "root", sessionID: "s1", invocationID: "inv-cyc", userID: "u1"})
+		promoted := agent.Promote(&r10CycleIC{InvocationContext: icBase, ctx: a})
+
+		if got := contextPath(a); got != "" {
+			t.Fatalf("contextPath(cycleA) = %q, want empty", got)
+		}
+		if got := contextPath(promoted); got != "" {
+			t.Fatalf("contextPath(promoted(cycleIC)) = %q, want empty", got)
+		}
+		if got := contextParentMap(a); got != nil {
+			t.Fatalf("contextParentMap(cycleA) = %v, want nil", got)
+		}
+		if got := contextParentMap(promoted); got != nil {
+			t.Fatalf("contextParentMap(promoted(cycleIC)) = %v, want nil", got)
+		}
+		// Legacy fallback with nil ADKParentMap reader must also avoid raw ctx.Value on cycle.
+		resetParentMapKeyCache()
+		t.Cleanup(resetParentMapKeyCache)
+		_ = discoverParentMapCtxKey(basePM)
+		if got := contextParentMapWith(a, nil, discoverParentMapCtxKey); got != nil {
+			t.Fatalf("legacy contextParentMapWith(cycleA) = %v, want nil", got)
+		}
+		if got := contextParentMapWith(promoted, nil, discoverParentMapCtxKey); got != nil {
+			t.Fatalf("legacy contextParentMapWith(promoted(cycleIC)) = %v, want nil", got)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestContextPath_And_ContextParentMap_ExternalValueCycle_DoesNotOverflow$", "-test.v")
+	cmd.Env = append(os.Environ(), "ADK_R10_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed on external Value cycle: %v\n%s", err, out)
+	}
+}
+
+var r10LastSeenMu sync.Mutex
+
+type r10PrivateLastSeenWrapper struct {
+	context.Context
+	lastSeen context.Context
+}
+
+type r10PrivateLastSeenUnwrapWrapper struct {
+	context.Context
+	lastSeen context.Context
+}
+
+func (w *r10PrivateLastSeenUnwrapWrapper) Unwrap() context.Context {
+	r10LastSeenMu.Lock()
+	defer r10LastSeenMu.Unlock()
+	return w.Context
+}
+
+type r10LastSeenKey struct{}
+
+func TestStepContext_PrivateLastSeenField_NotRead(t *testing.T) {
+	base := context.Background()
+	altA := context.WithValue(base, r10LastSeenKey{}, "a")
+	altB := context.WithValue(base, r10LastSeenKey{}, "b")
+	w := &r10PrivateLastSeenWrapper{Context: base, lastSeen: altA}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				r10LastSeenMu.Lock()
+				if i%2 == 0 {
+					w.lastSeen = altB
+				} else {
+					w.lastSeen = altA
+				}
+				r10LastSeenMu.Unlock()
+				runtime.Gosched()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+
+	for range 200 {
+		if next, ok := stepContext(w, true); ok || next != nil {
+			t.Fatalf("stepContext(r10PrivateLastSeenWrapper, true) = (%v, %v), want (nil, false)", next, ok)
+		}
+		_ = observeLaunchLineage(w, nil, [4]any{})
+	}
+}
+
+func TestRunner_V280Legacy_PrivateLastSeenFieldNotReadUnlocked(t *testing.T) {
+	origWalker := lineageWalkerOnce
+	lineageWalkerOnce = func() func(context.Context) []any { return nil }
+	t.Cleanup(func() { lineageWalkerOnce = origWalker })
+
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	var rootInvocationCtx agent.InvocationContext
+	var dispatch chan<- func()
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				altA := context.WithValue(ctx, r10LastSeenKey{}, "a")
+				altB := context.WithValue(ctx, r10LastSeenKey{}, "b")
+				w := &r10PrivateLastSeenUnwrapWrapper{Context: ctx, lastSeen: altA}
+
+				// Also exercise non-Unwrap opaque private-lastSeen wrapper synchronously for zero races.
+				wNoUnwrap := &r10PrivateLastSeenWrapper{Context: ctx, lastSeen: altA}
+				stop := make(chan struct{})
+				writerDone := make(chan struct{})
+				go func() {
+					defer close(writerDone)
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						default:
+							r10LastSeenMu.Lock()
+							if i%2 == 0 {
+								w.lastSeen = altB
+								wNoUnwrap.lastSeen = altB
+							} else {
+								w.lastSeen = altA
+								wNoUnwrap.lastSeen = altA
+							}
+							r10LastSeenMu.Unlock()
+							runtime.Gosched()
+						}
+					}
+				}()
+				defer func() {
+					close(stop)
+					<-writerDone
+				}()
+
+				if next, ok := stepContext(wNoUnwrap, true); ok || next != nil {
+					t.Errorf("stepContext(wNoUnwrap, true) = (%v, %v), want (nil, false)", next, ok)
+				}
+				_ = observeLaunchLineage(wNoUnwrap, nil, [4]any{})
+
+				runCtx := rootInvocationCtx.WithContext(w)
+				leafEvents := make(chan item, 4)
+				dispatch <- func() {
+					defer close(leafEvents)
+					for ev, runErr := range leaf.Run(runCtx) {
+						leafEvents <- item{ev: ev, err: runErr}
+					}
+				}
+				for it := range leafEvents {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				rootInvocationCtx = ctx
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+				dispatch = jobs
+				for ev, runErr := range worker.Run(ctx) {
+					w2Events := make(chan item, 4)
+					go func() {
+						defer close(w2Events)
+						for ev2, err2 := range worker.Run(ctx) {
+							w2Events <- item{ev: ev2, err: err2}
+						}
+					}()
+					for it := range w2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	w2Span, _ := workerStarts[1]["span_id"].(string)
+	leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+	if got, _ := leafStart["parent_span_id"].(string); got != w2Span {
+		t.Errorf("leaf parent_span_id = %q, want %q (worker 2 via Unwrap)", got, w2Span)
+	}
+}
+
+type r10SelfPtr *r10SelfPtr
+
+type r10MutCycleA struct {
+	b *r10MutCycleB
+}
+
+type r10MutCycleB struct {
+	a *r10MutCycleA
+}
+
+type r10SelfPtrSideCtx struct {
+	context.Context
+	p r10SelfPtr
+}
+
+func TestTypeHasContextField_SelfReferentialPointerTerminates(t *testing.T) {
+	var cycA r10MutCycleA
+	if cycA.b != nil && cycA.b.a != nil {
+		t.Fatal("unexpected non-nil cycle")
+	}
+	wZero := &r10SelfPtrSideCtx{Context: context.Background()}
+	if wZero.p != nil {
+		t.Fatal("unexpected non-nil p")
+	}
+	done := make(chan bool, 1)
+	go func() {
+		if typeHasContextField(reflect.TypeFor[r10SelfPtr](), 0) {
+			done <- false
+			return
+		}
+		if typeHasContextField(reflect.TypeFor[struct{ X r10SelfPtr }](), 0) {
+			done <- false
+			return
+		}
+		if typeHasContextField(reflect.TypeFor[r10MutCycleA](), 0) {
+			done <- false
+			return
+		}
+		done <- true
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("typeHasContextField reported true on self-referential non-context type")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("typeHasContextField hung on self-referential pointer type")
+	}
+}
+
+func TestRunner_SelfPointerSideFieldDoesNotHangAgentStart(t *testing.T) {
+	origWalker := lineageWalkerOnce
+	lineageWalkerOnce = func() func(context.Context) []any { return nil }
+	defer func() { lineageWalkerOnce = origWalker }()
+
+	p, requests, _ := setupTestPlugin(t)
+	bot, err := agent.New(agent.Config{
+		Name: "bot",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "bot"
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	r := newTestRunner(t, bot, p)
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		w := &r10SelfPtrSideCtx{Context: context.Background()}
+		next, ok := stepContext(w, true)
+		if !ok || next != w.Context {
+			done <- fmt.Errorf("stepContext(r10SelfPtrSideCtx, true) = (%v, %v), want (%v, true)", next, ok, w.Context)
+			return
+		}
+
+		runnerCtx := &r10SelfPtrSideCtx{Context: runCtx}
+		for _, runErr := range r.Run(runnerCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				done <- runErr
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner with self-ptr side field failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent start hung on external context wrapper with nil self-referential pointer side field")
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+}
+
+func captureSharedICWorkerContexts(t *testing.T) (agent.InvocationContext, agent.Context, agent.Context) {
+	t.Helper()
+	p, _, requests, _ := setupTestPluginWithTraces(t)
+	var mu sync.Mutex
+	var wCtxs []agent.Context
+	captureSub, err := agent.New(agent.Config{
+		Name: "worker",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				mu.Lock()
+				wCtxs = append(wCtxs, ctx)
+				mu.Unlock()
+				return textContent("model", "done"), nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	var sharedRootCtx agent.InvocationContext
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{captureSub},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				sharedRootCtx = ctx
+				for range 2 {
+					for ev, runErr := range captureSub.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-cap-r10", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run: %v", runErr)
+		}
+	}
+	_ = collectRows(t, requests, untilInvocationEnd)
+	if len(wCtxs) != 2 || sharedRootCtx == nil {
+		t.Fatalf("captured %d worker contexts, want 2", len(wCtxs))
+	}
+	var sharedCtx context.Context = sharedRootCtx
+	w1Ctx := wCtxs[0].WithDelta(&agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{Context: &sharedCtx},
+	})
+	w2Ctx := wCtxs[1].WithDelta(&agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{Context: &sharedCtx},
+	})
+	return sharedRootCtx, w1Ctx, w2Ctx
+}
+
+func TestRunner_ConcurrentLookalike_ToolCallIDMatchesUnderAmbiguousIC(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("per-run activation tokens require ADK core > v2.8.0")
+	}
+	sharedRootCtx, w1Ctx, w2Ctx := captureSharedICWorkerContexts(t)
+	p, tm, requests, _ := setupTestPluginWithTraces(t)
+	now := time.Unix(1_700_000_000, 0)
+	tm.now = func() time.Time { return now }
+
+	if _, err := p.BeforeRunCallback()(sharedRootCtx); err != nil {
+		t.Fatalf("BeforeRun: %v", err)
+	}
+	if _, err := p.BeforeAgentCallback()(w1Ctx); err != nil {
+		t.Fatalf("BeforeAgent(w1): %v", err)
+	}
+	if _, err := p.BeforeAgentCallback()(w2Ctx); err != nil {
+		t.Fatalf("BeforeAgent(w2): %v", err)
+	}
+
+	searchTool := &fakeTool{name: "search"}
+	w1ToolCtx := &privateKeyFilteringAgentCtx{Context: agent.NewToolContext(w1Ctx, "call-w1", nil, nil)}
+	w2ToolCtx := &privateKeyFilteringAgentCtx{Context: agent.NewToolContext(w2Ctx, "call-w2", nil, nil)}
+
+	if _, err := p.BeforeToolCallback()(w1ToolCtx, searchTool, map[string]any{"q": "a"}); err != nil {
+		t.Fatalf("BeforeTool(w1): %v", err)
+	}
+	if _, err := p.BeforeToolCallback()(w2ToolCtx, searchTool, map[string]any{"q": "b"}); err != nil {
+		t.Fatalf("BeforeTool(w2): %v", err)
+	}
+
+	now = now.Add(10 * time.Millisecond)
+	if _, err := p.AfterToolCallback()(w1ToolCtx, searchTool, nil, map[string]any{"ok": 1}, nil); err != nil {
+		t.Fatalf("AfterTool(w1): %v", err)
+	}
+	now = now.Add(15 * time.Millisecond)
+	if _, err := p.AfterToolCallback()(w2ToolCtx, searchTool, nil, map[string]any{"ok": 2}, nil); err != nil {
+		t.Fatalf("AfterTool(w2): %v", err)
+	}
+
+	inv := tm.invocation(sharedRootCtx, identityOf(sharedRootCtx))
+	inv.mu.Lock()
+	openTools := len(inv.toolSpans)
+	inv.mu.Unlock()
+	if openTools != 0 {
+		t.Errorf("len(inv.toolSpans) = %d after both tools completed, want 0", openTools)
+	}
+
+	if _, err := p.AfterAgentCallback()(w1Ctx); err != nil {
+		t.Fatalf("AfterAgent(w1): %v", err)
+	}
+	if _, err := p.AfterAgentCallback()(w2Ctx); err != nil {
+		t.Fatalf("AfterAgent(w2): %v", err)
+	}
+	p.AfterRunCallback()(agent.Promote(sharedRootCtx))
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	wStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(wStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(wStarts))
+	}
+	tStarts := rowsOfType(rows, EventToolStarting)
+	tEnds := rowsOfType(rows, EventToolCompleted)
+	if len(tStarts) != 2 || len(tEnds) != 2 {
+		t.Fatalf("TOOL_STARTING=%d TOOL_COMPLETED=%d, want 2 and 2", len(tStarts), len(tEnds))
+	}
+	startBySpan := map[string]map[string]any{}
+	for _, r := range tStarts {
+		sid, _ := r["span_id"].(string)
+		startBySpan[sid] = r
+	}
+	for _, endRow := range tEnds {
+		sid, _ := endRow["span_id"].(string)
+		if startBySpan[sid] == nil {
+			t.Errorf("TOOL_COMPLETED synthesized new span_id %q instead of matching TOOL_STARTING %v", sid, tStarts)
+		}
+		if endRow["latency_ms"] == nil {
+			t.Errorf("TOOL_COMPLETED missing latency_ms for span_id %q", sid)
+		}
+	}
+}
+
+func TestRunner_ConcurrentLookalike_TwoWorkersHideRunToken_ModelIsolation(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("per-run activation tokens require ADK core > v2.8.0")
+	}
+
+	t.Run("concurrent_hidden_tokens", func(t *testing.T) {
+		sharedRootCtx, w1Ctx, w2Ctx := captureSharedICWorkerContexts(t)
+		_, tm, _, _ := setupTestPluginWithTraces(t)
+		now := time.Unix(1_700_000_000, 0)
+		tm.now = func() time.Time { return now }
+
+		invID := "inv-ambig-model-id"
+		rootID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "root"}
+		workerID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "worker"}
+
+		tm.invocationSpan(sharedRootCtx, rootID, nil)
+		_, _ = tm.pushAgentSpan(w1Ctx, workerID)
+		_, _ = tm.pushAgentSpan(w2Ctx, workerID)
+
+		w1Filtered := &privateKeyFilteringAgentCtx{Context: w1Ctx}
+		w2Filtered := &privateKeyFilteringAgentCtx{Context: w2Ctx}
+
+		m1Start := tm.pushLLMSpan(w1Filtered, workerID)
+		now = now.Add(5 * time.Millisecond)
+		m2Start := tm.pushLLMSpan(w2Filtered, workerID)
+		if m1Start.spanID == m2Start.spanID {
+			t.Fatalf("concurrent untokened model starts got identical span_id %q", m1Start.spanID)
+		}
+
+		inv := tm.invocation(sharedRootCtx, rootID)
+		inv.mu.Lock()
+		openCount := len(inv.llmSpans)
+		inv.mu.Unlock()
+		if openCount != 2 {
+			t.Errorf("len(inv.llmSpans) after 2 concurrent hidden-token starts = %d, want 2 (no overwrite)", openCount)
+		}
+
+		// Worker 1 finishes WITH its unblocked runToken: it must NOT consume Worker 2's untokened entry m2Start!
+		now = now.Add(10 * time.Millisecond)
+		m1End := tm.popLLMSpan(w1Ctx, workerID, true)
+		if m1End.spanID == m2Start.spanID {
+			t.Errorf("worker 1 stole worker 2's model request spanID %q", m2Start.spanID)
+		}
+		// Even if Worker 1 pops with hidden runToken after Worker 2 ends, ambiguous IC entries must not cross-pair.
+		tm.popAgentSpan(w2Ctx, workerID)
+		m1StolenAttempt := tm.popLLMSpan(w1Filtered, workerID, true)
+		if m1StolenAttempt.spanID == m2Start.spanID || m1StolenAttempt.spanID == m1Start.spanID {
+			t.Errorf("unattributed popLLMSpan consumed ambiguous shared-IC model span %q", m1StolenAttempt.spanID)
+		}
+	})
+
+	t.Run("staggered_start_marks_prior_untokened_call_ambiguous", func(t *testing.T) {
+		sharedRootCtx, w1Ctx, w2Ctx := captureSharedICWorkerContexts(t)
+		_, tm, _, _ := setupTestPluginWithTraces(t)
+		now := time.Unix(1_700_000_000, 0)
+		tm.now = func() time.Time { return now }
+
+		invID := "inv-staggered-ambig-model"
+		rootID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "root"}
+		workerID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "worker"}
+
+		w1Filtered := &privateKeyFilteringAgentCtx{Context: w1Ctx}
+		w2Filtered := &privateKeyFilteringAgentCtx{Context: w2Ctx}
+
+		tm.invocationSpan(sharedRootCtx, rootID, nil)
+		_, _ = tm.pushAgentSpan(w1Filtered, workerID)
+
+		// Worker 1 starts an untokened model call and records an error while IC is still unambiguous.
+		m1Start := tm.pushLLMSpan(w1Filtered, workerID)
+		tm.recordError(w1Filtered, workerID, "model:m1", fmt.Errorf("err-w1"))
+
+		// Worker 2 joins the same InvocationContext later; prior untokened calls must become ambiguous.
+		_, _ = tm.pushAgentSpan(w2Ctx, workerID)
+		now = now.Add(5 * time.Millisecond)
+		tm.recordError(w2Filtered, workerID, "model:m1", fmt.Errorf("err-w2"))
+
+		inv := tm.invocation(sharedRootCtx, rootID)
+		inv.mu.Lock()
+		var ambigMarked bool
+		for _, rec := range inv.llmSpans {
+			if rec != nil && rec.spanID == m1Start.spanID {
+				ambigMarked = rec.callAmbiguousIC
+			}
+		}
+		errCount := len(inv.unrecoveredErrors)
+		inv.mu.Unlock()
+		if !ambigMarked {
+			t.Errorf("Worker 1 prior untokened model start was not marked callAmbiguousIC when Worker 2 started")
+		}
+		if errCount != 2 {
+			t.Errorf("len(inv.unrecoveredErrors) = %d, want 2 (no duplicate archive of worker 1 error)", errCount)
+		}
+
+		// Neither Worker 2's tokenized pop nor its hidden-token pop may steal m1Start.
+		now = now.Add(10 * time.Millisecond)
+		w2TokenEnd := tm.popLLMSpan(w2Ctx, workerID, true)
+		if w2TokenEnd.spanID == m1Start.spanID {
+			t.Errorf("Worker 2 tokenized popLLMSpan stole Worker 1's prior untokened span %q", m1Start.spanID)
+		}
+		w2HiddenEnd := tm.popLLMSpan(w2Filtered, workerID, true)
+		if w2HiddenEnd.spanID == m1Start.spanID {
+			t.Errorf("Worker 2 untokened popLLMSpan stole Worker 1's prior untokened span %q", m1Start.spanID)
+		}
+	})
+}
+
+func TestRunner_PromoteWithDelta_And_WithDelta_ConsistentWorkerModelOwner(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("per-run activation tokens require ADK core > v2.8.0")
+	}
+	p, requests, _ := setupTestPlugin(t)
+	var mu sync.Mutex
+	spansByCall := map[string]string{}
+
+	modelDone := make(chan struct{})
+	worker1Ready := make(chan struct{})
+	worker2CtxCh := make(chan agent.InvocationContext, 1)
+	releaseWorker2 := make(chan struct{})
+	var calls atomic.Int32
+
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				n := calls.Add(1)
+				if n == 2 {
+					worker2CtxCh <- ctx
+					<-releaseWorker2
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Content = textContent("model", "w2")
+					yield(ev, nil)
+					return
+				}
+				close(worker1Ready)
+				w2Ctx := <-worker2CtxCh
+				var w2Parent context.Context = w2Ctx
+				delta := &agent.CommonContextDelta{
+					InvocationContextDelta: &agent.InvocationContextDelta{Context: &w2Parent},
+				}
+
+				cb := agent.NewCallbackContext(ctx, nil)
+				viaWithDelta := cb.WithDelta(delta)
+				viaPromoteWithDelta := agent.PromoteWithDelta(cb, delta)
+
+				for _, tc := range []struct {
+					label string
+					c     agent.Context
+				}{
+					{"WithDelta", viaWithDelta},
+					{"PromoteWithDelta", viaPromoteWithDelta},
+				} {
+					_, _ = p.BeforeModelCallback()(tc.c, &model.LLMRequest{Model: tc.label})
+					_, _ = p.AfterModelCallback()(tc.c, &model.LLMResponse{Content: textContent("model", tc.label)}, nil)
+				}
+				close(releaseWorker2)
+				close(modelDone)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Content = textContent("model", "w1")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var wg sync.WaitGroup
+				type res struct {
+					ev  *session.Event
+					err error
+				}
+				ch := make(chan res, 8)
+				wg.Go(func() {
+					for ev, err := range worker.Run(ctx) {
+						ch <- res{ev, err}
+					}
+				})
+				<-worker1Ready
+				wg.Go(func() {
+					for ev, err := range worker.Run(ctx) {
+						ch <- res{ev, err}
+					}
+				})
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	<-modelDone
+	rows := collectRows(t, requests, untilInvocationEnd)
+	wStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(wStarts) != 2 {
+		t.Fatalf("worker starts = %d, want 2", len(wStarts))
+	}
+	w1Span, _ := wStarts[0]["span_id"].(string)
+	w2Span, _ := wStarts[1]["span_id"].(string)
+	for _, row := range rowsOfType(rows, EventLLMRequest) {
+		attrsAny, _ := jsonColumnValue(t, row, "attributes")
+		attrs, _ := attrsAny.(map[string]any)
+		mName, _ := attrs["model"].(string)
+		parentSpan, _ := row["parent_span_id"].(string)
+		mu.Lock()
+		spansByCall[mName] = parentSpan
+		mu.Unlock()
+		if parentSpan != w1Span {
+			t.Errorf("LLM_REQUEST model=%q parent_span_id = %q, want worker 1 %q (not worker 2 %q)", mName, parentSpan, w1Span, w2Span)
+		}
+	}
+	if spansByCall["WithDelta"] == "" || spansByCall["PromoteWithDelta"] == "" {
+		t.Fatalf("missing LLM_REQUEST rows: %v", spansByCall)
+	}
+}
+
+func BenchmarkModelRequestResponse_1kIdleSiblings(b *testing.B) {
+	tm := newTraceManager()
+	now := time.Unix(1_700_000_000, 0)
+	tm.now = func() time.Time { return now }
+	invID := "bench-1k-idle"
+	rootID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "root"}
+	ctx := context.Background()
+	tm.invocationSpan(ctx, rootID, nil)
+	inv := tm.invocation(ctx, rootID)
+	inv.mu.Lock()
+	root := inv.agentStack[0]
+	for i := range 1000 {
+		idleCtx, cancelIdle := context.WithCancelCause(ctx)
+		b.Cleanup(func() { cancelIdle(nil) })
+		cs, _ := newCancelProbe(idleCtx)
+		rec := &spanRecord{
+			spanID:       fmt.Sprintf("idle-%d", i),
+			kind:         spanKindAgent,
+			name:         fmt.Sprintf("idle_%d", i),
+			parent:       root,
+			parentSpanID: root.spanID,
+			cancelState:  cs,
+			ended:        func() bool { return false },
+		}
+		inv.agentStack = append(inv.agentStack, rec)
+	}
+	activeID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "active"}
+	inv.agentStack = append(inv.agentStack, &spanRecord{
+		spanID:       "active-1",
+		kind:         spanKindAgent,
+		name:         "active",
+		parent:       root,
+		parentSpanID: root.spanID,
+	})
+	inv.mu.Unlock()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		tm.pushLLMSpan(ctx, activeID)
+		tm.popLLMSpan(ctx, activeID, true)
+	}
+}
+
+func TestLiveModelPop_1kIdleSiblings_NoUnnecessaryProbeSampling(t *testing.T) {
+	tm := newTraceManager()
+	now := time.Unix(1_700_000_000, 0)
+	tm.now = func() time.Time { return now }
+	invID := "test-1k-idle-nonlate"
+	rootID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "root"}
+	ctx := context.Background()
+	tm.invocationSpan(ctx, rootID, nil)
+	inv := tm.invocation(ctx, rootID)
+	var endedProbeCalls atomic.Int64
+	inv.mu.Lock()
+	root := inv.agentStack[0]
+	for i := range 1000 {
+		idleCtx, cancelIdle := context.WithCancelCause(ctx)
+		t.Cleanup(func() { cancelIdle(nil) })
+		cs, _ := newCancelProbe(idleCtx)
+		rec := &spanRecord{
+			spanID:          fmt.Sprintf("idle-%d", i),
+			kind:            spanKindAgent,
+			name:            fmt.Sprintf("idle_%d", i),
+			parent:          root,
+			parentSpanID:    root.spanID,
+			cancelState:     cs,
+			runDone:         true,
+			endedSelfSynced: true,
+			ended: func() bool {
+				endedProbeCalls.Add(1)
+				return false
+			},
+		}
+		inv.agentStack = append(inv.agentStack, rec)
+	}
+	activeID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "active"}
+	inv.agentStack = append(inv.agentStack, &spanRecord{
+		spanID:       "active-1",
+		kind:         spanKindAgent,
+		name:         "active",
+		parent:       root,
+		parentSpanID: root.spanID,
+	})
+	inv.mu.Unlock()
+
+	tm.pushLLMSpan(ctx, activeID)
+	tm.popLLMSpan(ctx, activeID, true)
+	if got := endedProbeCalls.Load(); got != 0 {
+		t.Fatalf("live popLLMSpan sampled %d ended probes on non-late trace, want 0", got)
+	}
+}
+
+func TestRecordError_DifferentSpanBranchDropsStaleResolvedKey(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("per-run activation tokens require ADK core > v2.8.0")
+	}
+	sharedRootCtx, w1Ctx, w2Ctx := captureSharedICWorkerContexts(t)
+	icOnlyAct := resolveContextActivation(&privateKeyFilteringAgentCtx{Context: w2Ctx})
+
+	for _, tc := range []struct {
+		name string
+		rec1 func(c1, c2 agent.Context) (firstCtx, secondCtx agent.Context)
+	}{
+		{
+			name: "icKey_then_tokened",
+			rec1: func(c1, c2 agent.Context) (agent.Context, agent.Context) {
+				return &privateKeyFilteringAgentCtx{Context: c1}, c2
+			},
+		},
+		{
+			name: "tokened_then_icKey",
+			rec1: func(c1, c2 agent.Context) (agent.Context, agent.Context) {
+				return c1, &privateKeyFilteringAgentCtx{Context: c2}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			now := time.Unix(1_700_000_000, 0)
+			tm.now = func() time.Time { return now }
+			invID := "inv-rec-err-" + tc.name
+			rootID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "root"}
+			workerID := identity{invocationID: invID, sessionID: "s1", userID: "u1", agentName: "worker"}
+
+			firstCtx, secondCtx := tc.rec1(w1Ctx, w2Ctx)
+			tm.invocationSpan(sharedRootCtx, rootID, nil)
+			s1, _ := tm.pushAgentSpan(firstCtx, workerID)
+			err1 := errors.New("err-span-1")
+			tm.recordError(firstCtx, workerID, llmKey(workerID), err1)
+
+			// Close s1 without recovery, then open s2 sharing icAct.
+			_ = tm.popAgentSpan(firstCtx, workerID)
+			s2, _ := tm.pushAgentSpan(secondCtx, workerID)
+			_ = tm.pushLLMSpan(secondCtx, workerID)
+			err2 := errors.New("err-span-2")
+			tm.recordError(secondCtx, workerID, llmKey(workerID), err2)
+
+			inv := tm.invocation(sharedRootCtx, rootID)
+			inv.mu.Lock()
+			errCount := len(inv.unrecoveredErrors)
+			if errCount != 2 {
+				t.Errorf("len(inv.unrecoveredErrors) = %d, want 2 (stale resolvedKey should be deleted when archiving %s)", errCount, s1.spanID)
+			}
+			// Lookup under ic-only context must remain unambiguous (resolve to active s2, never archived s1).
+			_, recLookup, okLookup := inv.resolveErrorKeyLocked(llmKey(workerID), icOnlyAct, false)
+			inv.mu.Unlock()
+			if !okLookup || recLookup.spanID != s2.spanID {
+				t.Errorf("resolveErrorKeyLocked(icOnly) returned (%+v, %t), want active s2 %q", recLookup, okLookup, s2.spanID)
+			}
+
+			// Recover span s2's model call via completedModels -> clearError must leave only archived s1!
+			_ = tm.popLLMSpan(secondCtx, workerID, false)
+			tm.clearError(secondCtx, workerID, llmKey(workerID))
+			inv.mu.Lock()
+			afterClear := len(inv.unrecoveredErrors)
+			var remainingErr recordedError
+			for _, v := range inv.unrecoveredErrors {
+				remainingErr = v
+			}
+			inv.mu.Unlock()
+			if afterClear != 1 || remainingErr.spanID != s1.spanID {
+				t.Errorf("after clearError: len=%d remaining.spanID=%q, want len=1 and archived s1 %q", afterClear, remainingErr.spanID, s1.spanID)
+			}
+		})
+	}
 }
