@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package adkcontext holds the private context key under which an ADK context
-// registers its invocation identity, so it can be recovered from a derived
-// context.Context via agent.IdentityFromContext. It is a tiny leaf package shared
-// by the agent and internal/context packages to avoid an import cycle.
+// Package adkcontext holds the private context keys under which an ADK context
+// registers its invocation identity and the runner records the ID of a runner
+// call, so they can be recovered from a derived context.Context via
+// agent.IdentityFromContext and agent.ExecutionIDFromContext. It is a tiny leaf
+// package shared by the agent, runner and internal/context packages to avoid
+// an import cycle.
 package adkcontext
 
 type ctxKey int
@@ -42,6 +44,17 @@ type ctxKey int
 // authentication boundary. agent.IdentityFromContext states the full rule, and
 // both limits above are pinned by tests in package agent.
 const IdentityKey ctxKey = 0
+
+// ExecutionIDKey is the context value key under which the runner stores the
+// ID of the Run, RunLive or node-path call that a context belongs to, read
+// through agent.ExecutionIDFromContext. The runner sets it with
+// context.WithValue once per call, and the ADK context types pass it to their
+// embedded context like any key other than [IdentityKey], so every callback
+// context of the call sees it. Its type is that of IdentityKey, so the same
+// limits apply: it keeps code outside the google.golang.org/adk/v2
+// import-path tree from declaring an equal key, and is not an authentication
+// boundary.
+const ExecutionIDKey ctxKey = 1
 
 // Recovered returns what read produced, and whether it returned at all.
 //
