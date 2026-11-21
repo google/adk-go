@@ -45,6 +45,13 @@ func (c *callbackContextWrapper) WithICDelta(d *InvocationContextDelta) Invocati
 	return c.context.WithICDelta(d)
 }
 
+func (c *callbackContextWrapper) adkRunToken() any {
+	if c == nil {
+		return nil
+	}
+	return runTokenOf(c.context)
+}
+
 // WithAgentCancel implements [Context].
 func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 	return c.context.WithAgentCancel()

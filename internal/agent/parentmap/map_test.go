@@ -15,13 +15,18 @@
 package parentmap_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 )
@@ -124,4 +129,71 @@ func TestMap_RootAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+type cyclicParentMapCtx struct {
+	parent context.Context
+}
+
+func (c *cyclicParentMapCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cyclicParentMapCtx) Done() <-chan struct{}       { return nil }
+func (c *cyclicParentMapCtx) Err() error                  { return nil }
+func (c *cyclicParentMapCtx) Value(key any) any {
+	if v, ok := adkcontext.ParentMapStep(key, c.parent); ok {
+		return v
+	}
+	if c.parent == nil {
+		return nil
+	}
+	return c.parent.Value(key)
+}
+
+func TestFromContext_SurvivesDeepADKDerivations(t *testing.T) {
+	child := utils.Must(agent.New(agent.Config{Name: "child"}))
+	root := utils.Must(agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{child},
+	}))
+	parents, err := parentmap.New(root)
+	if err != nil {
+		t.Fatalf("parentmap.New: %v", err)
+	}
+
+	type unrelatedKey struct{}
+
+	for _, hops := range []int{1, 63, 64, 65, 200} {
+		t.Run(fmt.Sprintf("adk_hops_%d", hops), func(t *testing.T) {
+			ctx := parentmap.ToContext(t.Context(), parents)
+			for i := range hops {
+				ctx = context.WithValue(ctx, unrelatedKey{}, i)
+				ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: root})
+			}
+			got := parentmap.FromContext(ctx)
+			if got == nil {
+				t.Fatalf("parentmap.FromContext after %d ADK hops = nil, want map", hops)
+			}
+			if got[child.Name()] != root {
+				t.Fatalf("got[%q] = %v, want %q", child.Name(), got[child.Name()], root.Name())
+			}
+			// Verify adkcontext.ReadParentMap remains hop-bounded at 64 ADK hops
+			// (ToContext attaches &parentMapCtx inside context.WithValue, which adds
+			// 1 step on ParentMapKey, so hops <= 64 reach it and hops >= 65 stop).
+			analyticsRaw := adkcontext.ReadParentMap(ctx)
+			if hops <= 64 {
+				if analyticsRaw == nil {
+					t.Fatalf("adkcontext.ReadParentMap after %d ADK hops = nil, want map", hops)
+				}
+			} else if analyticsRaw != nil {
+				t.Fatalf("adkcontext.ReadParentMap after %d ADK hops = %v, want nil (hop budget exceeded)", hops, analyticsRaw)
+			}
+		})
+	}
+
+	t.Run("analytics_reader_terminates_on_adk_cycle", func(t *testing.T) {
+		cyc := &cyclicParentMapCtx{}
+		cyc.parent = cyc
+		if got := adkcontext.ReadParentMap(cyc); got != nil {
+			t.Fatalf("adkcontext.ReadParentMap(cyclic) = %v, want nil", got)
+		}
+	})
 }

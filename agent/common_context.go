@@ -273,6 +273,26 @@ func PromoteWithDelta(ctx InvocationContext, delta *CommonContextDelta) Context 
 	return c.WithDelta(delta)
 }
 
+func runTokenOf(ctx context.Context) any {
+	if ctx == nil {
+		return nil
+	}
+	if r, ok := ctx.(interface{ adkRunToken() any }); ok {
+		return r.adkRunToken()
+	}
+	return nil
+}
+
+func promoteForRun(ctx InvocationContext, delta *CommonContextDelta) Context {
+	promoted := PromoteWithDelta(ctx, delta)
+	if c, ok := promoted.(*commonContext); ok {
+		cp := *c
+		cp.runToken = adkcontext.NewRunToken()
+		return &cp
+	}
+	return promoted
+}
+
 // NewContext returns a full Context backed by parent, with no callback,
 // tool, or node specializations. Use it wherever a plain run context is
 // needed (e.g. running an agent).
@@ -283,11 +303,13 @@ func NewContext(parent InvocationContext) Context {
 		return &commonContext{
 			Context:           p.Context,
 			invocationContext: p.invocationContext,
+			runToken:          p.runToken,
 		}
 	}
 	return &commonContext{
 		Context:           parent,
 		invocationContext: parent,
+		runToken:          runTokenOf(parent),
 	}
 }
 
@@ -300,6 +322,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Con
 		invocationContext: ic,
 		actions:           actions,
 		artifacts:         ic.Artifacts(),
+		runToken:          runTokenOf(ic),
 	}
 	// wrap the commonContext in order to log information about someone using tool-context methods on a callback context
 	wrapper := &callbackContextWrapper{
@@ -319,6 +342,7 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 		invocationContext: ic,
 		actions:           actions,
 		artifacts:         newTrackedArtifacts(ic.Artifacts(), actions),
+		runToken:          runTokenOf(ic),
 	}
 	// wrap the commonContext in order to log information about someone using tool-context methods on a callback context
 	wrapper := &callbackContextWrapper{
@@ -345,6 +369,7 @@ func NewToolContext(ic InvocationContext, functionCallID string, actions *sessio
 		res = commonContext{
 			Context:           ic,
 			invocationContext: ic,
+			runToken:          runTokenOf(ic),
 		}
 	}
 
@@ -410,6 +435,11 @@ type commonContext struct {
 	// into this activation when it runs as a WithUseAsOutput child;
 	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	outputForAncestors []string
+
+	// runToken is minted once per agent.Run execution via promoteForRun and
+	// copied across WithDelta, WithICDelta, WithContext, and callback/tool
+	// context derivation so copies share one stable activation key.
+	runToken any
 }
 
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
@@ -502,11 +532,16 @@ func (c *commonContext) WithAgentCancel() (Context, context.CancelFunc) {
 // If the ctx is InvocationContext, the underlying invocationContext is set to ctx.
 func (c *commonContext) WithAgentContext(ctx context.Context) Context {
 	res := *c
-	if c, ok := ctx.(InvocationContext); ok {
-		res.Context = c
-		res.invocationContext = c
+	if ic, ok := ctx.(InvocationContext); ok {
+		res.Context = ic
+		res.invocationContext = ic
+		res.runToken = runTokenOf(ic)
+		if res.runToken == nil {
+			res.runToken = adkcontext.ReadRunToken(ic)
+		}
 	} else {
 		res.Context = ctx
+		res.runToken = adkcontext.ReadRunToken(ctx)
 	}
 	return &res
 }
@@ -571,8 +606,11 @@ func (c *commonContext) UserID() string {
 
 // Value implements context.Context. For the ADK identity key it returns the
 // [Identity] of the invocation this context speaks for (so [IdentityFromContext]
-// can recover it from a derived context). Every other key delegates to the
-// embedded context, preserving existing behavior.
+// can recover it from a derived context). It also handles ADK's private lineage
+// and workflow-path keys (returning c.path when non-empty, else delegating),
+// and forwards the private parent-map key to invocationContext when the embedded
+// context is nil. Every other key delegates to the embedded context, preserving
+// existing behavior.
 //
 // Only the identity key touches the invocation, so no other key is affected by
 // its state, and a session that panics costs the identity, not the process.
@@ -583,10 +621,53 @@ func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
 		return c.identity()
 	}
+	if v, ok := adkcontext.LineageStepWithRunToken(key, c, c.runToken, c.Context); ok {
+		return v
+	}
+	pathParent := c.Context
+	if pathParent == nil {
+		pathParent = c.invocationContext
+	}
+	if v, ok := adkcontext.PathStep(key, c.path, pathParent); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, pathParent); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, c.runToken, pathParent); ok {
+		return v
+	}
 	if c.Context == nil {
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+func (c *commonContext) adkRunToken() any {
+	if c == nil {
+		return nil
+	}
+	return c.runToken
+}
+
+func (c *commonContext) ADKContextToken() any {
+	return adkcontext.Token(c)
+}
+
+func (*commonContext) ADKWalkLineage(ctx context.Context) []any {
+	return adkcontext.WalkLineage(ctx)
+}
+
+func (*commonContext) ADKContextPath(ctx context.Context) string {
+	return adkcontext.ReadPath(ctx)
+}
+
+func (*commonContext) ADKParentMap(ctx context.Context) any {
+	return adkcontext.ReadParentMap(ctx)
+}
+
+func (*commonContext) ADKRunToken(ctx context.Context) any {
+	return adkcontext.ReadRunToken(ctx)
 }
 
 // identity answers the ADK identity key, as an any so it can report "none".

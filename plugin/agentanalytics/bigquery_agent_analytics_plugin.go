@@ -2276,31 +2276,58 @@ func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	return content, attrs
 }
 
+func isADKStructPkgType(owner reflect.Type) bool {
+	return isADKStructPkg(owner.PkgPath())
+}
+
+// agentUnwrapper may be implemented by user-defined agent decorators to expose
+// the underlying delegate agent safely (for example, while holding a mutex
+// guarding a hot-swapped delegate).
+type agentUnwrapper interface {
+	Unwrap() agent.Agent
+}
+
 // agentConfig returns the configuration that ADK keeps in the base agent of
 // a, such as the llmagent.Config of an LLM agent, or nil. ADK exposes no
 // accessor for it, so it is read with reflection from the exported Config
-// field of the base agent's embedded state. An agent that embeds its base
-// agent in an exported agent.Agent field, as LLM agents do, is unwrapped
-// when its own Config is zero. Agents without a readable Config field yield nil.
+// field of the base agent's embedded ADK state. User decorators may opt into
+// metadata unwrapping by implementing Unwrap() agent.Agent; direct struct
+// field reads are restricted to ADK-owned agent structs so user fields (named
+// Agent, Config, or guarded by a mutex) are never read directly.
 func agentConfig(a agent.Agent) any {
-	// One unwrapping reaches the base agent of the ADK agents; the bound
-	// stops agents that wrap themselves.
-	for range 4 {
-		v := reflect.ValueOf(a)
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				return nil
-			}
-			v = v.Elem()
-		}
-		if v.Kind() != reflect.Struct {
+	var seenPtrs map[visitedContextStruct]bool
+	for range 8 {
+		if a == nil {
 			return nil
 		}
-		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
+		rv := reflect.ValueOf(a)
+		if rv.Kind() == reflect.Pointer {
+			if rv.IsNil() {
+				return nil
+			}
+			key := visitedContextStruct{ptr: rv.Pointer(), typ: rv.Type()}
+			if seenPtrs == nil {
+				seenPtrs = make(map[visitedContextStruct]bool, 4)
+			}
+			if seenPtrs[key] {
+				return nil
+			}
+			seenPtrs[key] = true
+		}
+		if u, ok := a.(agentUnwrapper); ok {
+			a = orZero(u.Unwrap)
+			continue
+		}
+		var seen map[visitedContextStruct]bool
+		v, ok := derefContextStructValueLazy(rv, &seen, true)
+		if !ok || !isADKStructPkg(v.Type().PkgPath()) {
+			return nil
+		}
+		if f, owner := promotedStructFieldOwned(v, "Config", isADKStructPkgType); f.IsValid() && isADKStructPkg(owner.PkgPath()) && f.CanInterface() && !f.IsZero() {
 			return f.Interface()
 		}
-		inner := v.FieldByName("Agent")
-		if !inner.IsValid() || !inner.CanInterface() {
+		inner, owner := promotedStructFieldOwned(v, "Agent", isADKStructPkgType)
+		if !inner.IsValid() || !isADKStructPkg(owner.PkgPath()) || !inner.CanInterface() {
 			return nil
 		}
 		next, ok := reflect.TypeAssert[agent.Agent](inner)
@@ -2340,6 +2367,22 @@ func fieldPathExported(t reflect.Type, idx []int) bool {
 	return true
 }
 
+func fieldOwnerPkgPath(t reflect.Type, idx []int) string {
+	for _, i := range idx[:len(idx)-1] {
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return ""
+		}
+		t = t.Field(i).Type
+	}
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.PkgPath()
+}
+
 func lookupAgentAfterCBLayout(t reflect.Type) agentAfterCBLayout {
 	if cached, ok := agentAfterCBLayouts.Load(t); ok {
 		return cached.(agentAfterCBLayout)
@@ -2351,7 +2394,7 @@ func lookupAgentAfterCBLayout(t reflect.Type) agentAfterCBLayout {
 	if sf, ok := t.FieldByName("afterAgentCallbacks"); ok {
 		layout.afterCBIndex = sf.Index
 	}
-	if sf, ok := t.FieldByName("Agent"); ok && fieldPathExported(t, sf.Index) {
+	if sf, ok := t.FieldByName("Agent"); ok && len(sf.Index) > 0 && fieldPathExported(t, sf.Index) && (sf.Anonymous || isADKStructPkg(fieldOwnerPkgPath(t, sf.Index))) {
 		layout.agentIndex = sf.Index
 	}
 	actual, _ := agentAfterCBLayouts.LoadOrStore(t, layout)
@@ -2379,8 +2422,9 @@ func safeFieldByIndex(v reflect.Value, idx []int) (reflect.Value, bool) {
 
 // agentHasAfterAgentCallbacks reports whether a configures (or conservatively
 // may configure, when a's concrete layout cannot be unwrapped to ADK's base
-// agent within the bounded hop limit) agent-level AfterAgentCallbacks, which
-// ADK invokes after plugins' AfterAgentCallback hooks finish.
+// agent within the bounded hop limit or carries synchronization primitives)
+// agent-level AfterAgentCallbacks, which ADK invokes after plugins'
+// AfterAgentCallback hooks finish.
 func agentHasAfterAgentCallbacks(a agent.Agent) (res bool) {
 	if a == nil {
 		return false
@@ -2390,18 +2434,46 @@ func agentHasAfterAgentCallbacks(a agent.Agent) (res bool) {
 			res = true
 		}
 	}()
+	var seenPtrs map[visitedContextStruct]bool
 	for hop := range 4 {
+		if a == nil {
+			return hop > 0
+		}
 		v := reflect.ValueOf(a)
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return hop > 0
+			}
+			key := visitedContextStruct{ptr: v.Pointer(), typ: v.Type()}
+			if seenPtrs == nil {
+				seenPtrs = make(map[visitedContextStruct]bool, 4)
+			}
+			if seenPtrs[key] {
+				return true
+			}
+			seenPtrs[key] = true
+		}
 		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
 			if v.IsNil() {
 				return hop > 0
 			}
 			v = v.Elem()
 		}
+		if u, ok := a.(agentUnwrapper); ok {
+			next := orZero(u.Unwrap)
+			if next == nil {
+				return true
+			}
+			a = next
+			continue
+		}
 		if v.Kind() != reflect.Struct {
 			return true
 		}
 		vt := v.Type()
+		if !isADKStructPkg(vt.PkgPath()) && hasVisibleSyncPrimitive(vt, 0, nil) {
+			return true
+		}
 		layout := lookupAgentAfterCBLayout(vt)
 		if vt.PkgPath() == agentPkgPath && vt.Name() == "agent" {
 			if len(layout.afterCBIndex) == 0 {
@@ -2495,11 +2567,454 @@ type visitedContextStruct struct {
 	typ reflect.Type
 }
 
-// contextPath returns the execution node path carried by ctx, or "".
-// ADK's callbackContextWrapper.Path logs an error and returns "", and
-// NewCallbackContext wraps the inner InvocationContext without copying its
-// path onto the outer commonContext, so contextPath inspects the wrapped
-// context chain directly before falling back to Path() on non-wrapper types.
+// directStructField returns the direct field of struct v named name, or the
+// zero reflect.Value if v has no direct field with that name. Looking up
+// t.Field(i) / v.Field(i) directly avoids reflect.Value.FieldByName, which
+// chases promoted fields and panics on nil embedded struct pointers.
+func directStructField(v reflect.Value, name string) reflect.Value {
+	t := v.Type()
+	for i := range t.NumField() {
+		if t.Field(i).Name == name {
+			return v.Field(i)
+		}
+	}
+	return reflect.Value{}
+}
+
+// promotedStructField looks up a field named name on struct v or promoted
+// through nested anonymous structs and non-nil struct pointers (up to 8
+// embedding levels), returning the matching field value and the struct type
+// that declares it, or the zero Value when absent or ambiguous at the shallowest
+// matching depth. Walking anonymous fields level by level matches Go's selector
+// promotion rules without calling reflect.Value.FieldByName, which panics when
+// an unrelated nil embedded struct pointer shares or precedes the lookup.
+func promotedStructField(v reflect.Value, name string) (reflect.Value, reflect.Type) {
+	return promotedStructFieldOwned(v, name, nil)
+}
+
+func directStructFieldIndex(t reflect.Type, name string) (int, bool) {
+	for i := range t.NumField() {
+		if t.Field(i).Name == name {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func findPromotedFieldPath(t reflect.Type, name string, maxDepth int, allowOwner func(reflect.Type) bool) ([]int, reflect.Type, bool) {
+	type typeNode struct {
+		typ  reflect.Type
+		path []int
+	}
+	minDepth := map[reflect.Type]int{t: 0}
+	curLevel := []typeNode{{typ: t}}
+	for depth := range maxDepth {
+		nextDepth := depth + 1
+		var nextLevel []typeNode
+		levelCount := make(map[reflect.Type]int)
+		matches := 0
+		var matchPath []int
+		var matchOwner reflect.Type
+		for _, node := range curLevel {
+			for i := range node.typ.NumField() {
+				sf := node.typ.Field(i)
+				if !sf.Anonymous {
+					continue
+				}
+				var subType reflect.Type
+				switch sf.Type.Kind() {
+				case reflect.Struct:
+					subType = sf.Type
+				case reflect.Pointer:
+					if sf.Type.Elem().Kind() != reflect.Struct {
+						continue
+					}
+					subType = sf.Type.Elem()
+				default:
+					continue
+				}
+				if prev, seen := minDepth[subType]; seen && prev < nextDepth {
+					continue
+				}
+				if allowOwner == nil || allowOwner(subType) {
+					if idx, ok := directStructFieldIndex(subType, name); ok {
+						matches++
+						if matches > 1 {
+							return nil, nil, false
+						}
+						matchPath = make([]int, len(node.path)+2)
+						copy(matchPath, node.path)
+						matchPath[len(node.path)] = i
+						matchPath[len(node.path)+1] = idx
+						matchOwner = subType
+					}
+				}
+				levelCount[subType]++
+				if levelCount[subType] <= 2 {
+					minDepth[subType] = nextDepth
+					nextPath := make([]int, len(node.path)+1)
+					copy(nextPath, node.path)
+					nextPath[len(node.path)] = i
+					nextLevel = append(nextLevel, typeNode{typ: subType, path: nextPath})
+				}
+			}
+		}
+		if matches == 1 {
+			return matchPath, matchOwner, true
+		}
+		if len(nextLevel) == 0 {
+			break
+		}
+		curLevel = nextLevel
+	}
+	return nil, nil, false
+}
+
+func promotedStructFieldOwned(v reflect.Value, name string, allowOwner func(reflect.Type) bool) (reflect.Value, reflect.Type) {
+	if allowOwner == nil || allowOwner(v.Type()) {
+		if f := directStructField(v, name); f.IsValid() {
+			return f, v.Type()
+		}
+	}
+	const maxPromoDepth = 8
+	hasAnonStruct := false
+	vt := v.Type()
+	for sf := range vt.Fields() {
+		if sf.Anonymous && (sf.Type.Kind() == reflect.Struct || (sf.Type.Kind() == reflect.Pointer && sf.Type.Elem().Kind() == reflect.Struct)) {
+			hasAnonStruct = true
+			break
+		}
+	}
+	if !hasAnonStruct {
+		return reflect.Value{}, nil
+	}
+	path, owner, ok := findPromotedFieldPath(vt, name, maxPromoDepth, allowOwner)
+	if !ok {
+		return reflect.Value{}, nil
+	}
+	cur := v
+	for _, idx := range path[:len(path)-1] {
+		cur = cur.Field(idx)
+		if cur.Kind() == reflect.Pointer {
+			if cur.IsNil() {
+				return reflect.Value{}, nil
+			}
+			cur = cur.Elem()
+		}
+	}
+	return cur.Field(path[len(path)-1]), owner
+}
+
+func isNilContextField(v reflect.Value) bool {
+	for v.IsValid() && v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return true
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+var contextPathReaderOnce = sync.OnceValue(func() func(context.Context) string {
+	p := any(agent.Promote(nil))
+	if r, ok := p.(interface{ ADKContextPath(context.Context) string }); ok {
+		return r.ADKContextPath
+	}
+	return nil
+})
+
+type promotedPathKind uint8
+
+const (
+	promotedPathCustom promotedPathKind = iota
+	promotedPathConcreteADK
+	promotedPathDynamicInterface
+)
+
+type promotedPathInfo struct {
+	kind       promotedPathKind
+	ifaceField []int
+}
+
+const maxPathDelegateHops = 16
+
+var (
+	pathCarrierType   = reflect.TypeFor[interface{ Path() string }]()
+	promotedPathCache sync.Map // map[reflect.Type]promotedPathInfo
+)
+
+func declaredDirectMethod(t reflect.Type, methodName string) bool {
+	if t == nil {
+		return false
+	}
+	m, ok := t.MethodByName(methodName)
+	if !ok || !m.Func.IsValid() || m.Func.Pointer() == 0 {
+		return false
+	}
+	fn := runtime.FuncForPC(m.Func.Pointer())
+	if fn == nil {
+		return false
+	}
+	file, _ := fn.FileLine(fn.Entry())
+	return file != "" && file != "<autogenerated>"
+}
+
+func hasDeclaredMethodOnType(t reflect.Type, addressable bool, methodName string) bool {
+	if t == nil {
+		return false
+	}
+	if declaredDirectMethod(t, methodName) {
+		return true
+	}
+	if addressable && t.Kind() != reflect.Pointer {
+		return declaredDirectMethod(reflect.PointerTo(t), methodName)
+	}
+	return false
+}
+
+func isADKConcretePathType(ft reflect.Type, outerAddr bool) bool {
+	if ft == nil || ft.Kind() == reflect.Interface {
+		return false
+	}
+	pkg := ft.PkgPath()
+	if ft.Kind() == reflect.Pointer {
+		if ft.Elem().Kind() == reflect.Interface {
+			return false
+		}
+		pkg = ft.Elem().PkgPath()
+	}
+	if pkg != agentPkgPath && pkg != internalContextPkgPath {
+		return false
+	}
+	if ft.Implements(pathCarrierType) {
+		return true
+	}
+	return outerAddr && ft.Kind() != reflect.Pointer && reflect.PointerTo(ft).Implements(pathCarrierType)
+}
+
+func classifyPromotedPath(vt reflect.Type) promotedPathInfo {
+	if vt == nil {
+		return promotedPathInfo{kind: promotedPathCustom}
+	}
+	if cached, ok := promotedPathCache.Load(vt); ok {
+		return cached.(promotedPathInfo)
+	}
+	res := computePromotedPathInfo(vt)
+	actual, _ := promotedPathCache.LoadOrStore(vt, res)
+	return actual.(promotedPathInfo)
+}
+
+// computePromotedPathInfo classifies how vt obtains its Path() method so
+// inspectPromotedPath can resolve dynamic interface promotion safely at runtime
+// without deferring concrete user Path() overrides hidden behind forwarding
+// wrappers (such as struct{ agent.Context }) to an ADK ancestor path.
+func computePromotedPathInfo(origVT reflect.Type) promotedPathInfo {
+	type node struct {
+		typ         reflect.Type
+		addressable bool
+		path        []int
+	}
+	type seenKey struct {
+		typ         reflect.Type
+		addressable bool
+	}
+	startAddr := origVT.Kind() == reflect.Pointer
+	if isADKConcretePathType(origVT, startAddr) {
+		return promotedPathInfo{kind: promotedPathConcreteADK}
+	}
+	vt := origVT
+	if startAddr {
+		vt = vt.Elem()
+	}
+	if vt.Kind() != reflect.Struct {
+		return promotedPathInfo{kind: promotedPathCustom}
+	}
+	if hasDeclaredMethodOnType(vt, startAddr, "Path") {
+		return promotedPathInfo{kind: promotedPathCustom}
+	}
+	level := []node{{typ: vt, addressable: startAddr}}
+	var seen map[seenKey]bool
+	for depth := 0; depth < maxPathDelegateHops && len(level) > 0; depth++ {
+		var next []node
+		var dynFound *promotedPathInfo
+		for _, cur := range level {
+			if cur.typ.Kind() != reflect.Struct {
+				continue
+			}
+			for sf := range cur.typ.Fields() {
+				if !sf.Anonymous {
+					continue
+				}
+				ft := sf.Type
+				if isADKConcretePathType(ft, cur.addressable) {
+					return promotedPathInfo{kind: promotedPathConcreteADK}
+				}
+				fieldPath := slices.Concat(cur.path, sf.Index)
+				if ft.Kind() == reflect.Interface && ft.Implements(pathCarrierType) {
+					if dynFound == nil {
+						dynFound = &promotedPathInfo{
+							kind:       promotedPathDynamicInterface,
+							ifaceField: fieldPath,
+						}
+					}
+					continue
+				}
+				childAddr := cur.addressable
+				base := ft
+				if base.Kind() == reflect.Pointer {
+					childAddr = true
+					base = base.Elem()
+				}
+				if base.Kind() != reflect.Interface && hasDeclaredMethodOnType(base, childAddr, "Path") {
+					return promotedPathInfo{kind: promotedPathCustom}
+				}
+				if base.Kind() != reflect.Struct {
+					continue
+				}
+				cn := seenKey{typ: base, addressable: childAddr}
+				if seen == nil {
+					seen = make(map[seenKey]bool, 4)
+				}
+				if !seen[cn] {
+					seen[cn] = true
+					next = append(next, node{typ: base, addressable: childAddr, path: fieldPath})
+				}
+			}
+		}
+		if dynFound != nil {
+			return *dynFound
+		}
+		level = next
+	}
+	return promotedPathInfo{kind: promotedPathCustom}
+}
+
+// inspectPromotedPath determines whether ctx.Path() ultimately resolves to an
+// ADK-owned Path() (deferToADK) and whether calling ctx.Path() is safe from
+// nil dereferences, cycles, or unlocked sync-bearing wrapper fields (canCall).
+func inspectPromotedPath(ctx context.Context) (deferToADK, canCall bool) {
+	if ctx == nil {
+		return false, false
+	}
+	v := reflect.ValueOf(ctx)
+	var seen map[visitedContextStruct]bool
+	for range maxPathDelegateHops {
+		for v.IsValid() && v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return true, false
+			}
+			v = v.Elem()
+		}
+		if !v.IsValid() {
+			return true, false
+		}
+		vt := v.Type()
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return true, false
+			}
+			key := visitedContextStruct{ptr: v.Pointer(), typ: vt}
+			if seen == nil {
+				seen = make(map[visitedContextStruct]bool, 4)
+			}
+			if seen[key] {
+				// Self-referential promoted Path() cycle: skip both early and trailing calls.
+				return false, false
+			}
+			seen[key] = true
+		}
+		if isADKConcretePathType(vt, v.Kind() == reflect.Pointer) {
+			return true, true
+		}
+		info := classifyPromotedPath(vt)
+		switch info.kind {
+		case promotedPathConcreteADK:
+			return true, true
+		case promotedPathCustom:
+			return false, true
+		case promotedPathDynamicInterface:
+			cur := v
+			for _, idx := range info.ifaceField {
+				for cur.Kind() == reflect.Pointer {
+					if cur.IsNil() {
+						return true, false
+					}
+					cur = cur.Elem()
+				}
+				if cur.Kind() != reflect.Struct {
+					return false, false
+				}
+				curType := cur.Type()
+				if !isImmutableContextOrAgentPkg(curType.PkgPath()) && hasVisibleSyncPrimitive(curType, 0, nil) {
+					// Do not read fields of a sync-bearing external wrapper without its lock;
+					// defer to Value(PathKey) / BFS and do not invoke unlocked promoted Path().
+					return true, false
+				}
+				cur = cur.Field(idx)
+			}
+			if cur.Kind() != reflect.Interface || cur.IsNil() {
+				return true, false
+			}
+			v = cur.Elem()
+		default:
+			return false, false
+		}
+	}
+	return false, false
+}
+
+func isADKPathWrapper(ctx context.Context) bool {
+	vt := reflect.TypeOf(ctx)
+	if vt == nil || vt.Kind() != reflect.Pointer {
+		return false
+	}
+	elem := vt.Elem()
+	if elem.PkgPath() != agentPkgPath {
+		return false
+	}
+	name := elem.Name()
+	return name == "callbackContextWrapper" || name == "commonContext" || name == "toolContextWrapper"
+}
+
+func safeCallPath(fn func() string) (s string, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			s = ""
+			ok = false
+		}
+	}()
+	return fn(), true
+}
+
+// contextPath returns the execution node path carried by ctx, or "". A Path()
+// method whose resolved receiver declares its own Path() — either directly on
+// an outer non-ADK wrapper or promoted through a forwarding interface such as
+// agent.Context to an inner custom override — takes precedence (including an
+// empty top-level path); non-ADK wrappers whose promoted Path() resolves to a
+// concrete ADK context defer to ADK's private path key and allowlisted ADK and
+// Go stdlib context layouts, falling back to their promoted Path() only if
+// those yield no path. When an outer non-ADK wrapper declares its own Path()
+// directly (or embeds a concrete struct declaring Path()), classifyPromotedPath
+// identifies it by type/method inspection alone without reading struct fields;
+// when it embeds a Path()-bearing interface without declaring its own Path()
+// (such as struct{ agent.Context }), inspectPromotedPath reads that embedded
+// interface field (skipping wrappers with visible struct-local sync
+// primitives) to distinguish concrete ADK contexts from custom overrides.
+// ADKContextPath then calls Value directly and trailing BFS walks only
+// allowlisted ADK and Go stdlib structs, so ADK-mediated hops terminate under
+// their 64-hop PathStep budget while inner pure-external Value cycles reached
+// through ADKContextPath still recurse without bound (matching Go's
+// context.Context Value delegation contract). Nil, cyclic, or sync-bearing
+// promoted-interface delegates avoid unsafe Path() calls in both the early
+// check and the trailing fallback.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2508,6 +3023,28 @@ func contextPath(ctx context.Context) (path string) {
 	}()
 	if ctx == nil {
 		return ""
+	}
+	type pathCarrier interface {
+		Path() string
+	}
+	p, hasPath := ctx.(pathCarrier)
+	adkWrapper := isADKPathWrapper(ctx)
+	earlyCalled := false
+	canCall := false
+	if hasPath && !adkWrapper {
+		var deferToADK bool
+		deferToADK, canCall = inspectPromotedPath(ctx)
+		if canCall && !deferToADK {
+			earlyCalled = true
+			if s, callOK := safeCallPath(p.Path); callOK {
+				return s
+			}
+		}
+	}
+	if read := contextPathReaderOnce(); read != nil {
+		if s := read(ctx); s != "" {
+			return s
+		}
 	}
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))
@@ -2548,14 +3085,9 @@ func contextPath(ctx context.Context) (path string) {
 		q.push(c1)
 		q.push(c2)
 	}
-	type pathCarrier interface {
-		Path() string
-	}
-	if p, ok := ctx.(pathCarrier); ok {
-		vt := reflect.TypeOf(ctx)
-		if !(vt != nil && vt.Kind() == reflect.Pointer && vt.Elem().PkgPath() == agentPkgPath &&
-			(vt.Elem().Name() == "callbackContextWrapper" || vt.Elem().Name() == "commonContext" || vt.Elem().Name() == "toolContextWrapper")) {
-			return p.Path()
+	if hasPath && !earlyCalled && !adkWrapper && canCall {
+		if s, callOK := safeCallPath(p.Path); callOK {
+			return s
 		}
 	}
 	return ""

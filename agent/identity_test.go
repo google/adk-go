@@ -17,7 +17,10 @@ package agent
 import (
 	"bytes"
 	"context"
+	"iter"
 	"log"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -460,5 +463,267 @@ func TestEmptyDeltaCostsASessionlessForwarderItsUnwrap(t *testing.T) {
 	if id.UserID == "enclosing" {
 		t.Fatalf("empty delta reported the ENCLOSING user, which is the outcome the whole "+
 			"procedure exists to prevent: %+v", id)
+	}
+}
+
+type appObserveMethodKey struct{}
+
+func (appObserveMethodKey) ObserveADKContext(any) bool {
+	panic("application context key method must not be called by ADK Value")
+}
+
+func TestLineageWalksWithoutExposingContextOrInterceptingAppKeys(t *testing.T) {
+	base := context.WithValue(t.Context(), appObserveMethodKey{}, "stored-app-value")
+	outer := &invocationContext{Context: base, session: &identityTestSession{}}
+	promoted := Promote(outer)
+	detached := context.WithoutCancel(promoted)
+	child := Promote(outer).WithContext(detached)
+
+	// Application keys defining ObserveADKContext(any) bool must pass through untouched.
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"invocationContext", outer},
+		{"commonContext", promoted},
+		{"childWithDetachedParent", child},
+	} {
+		if got := tc.ctx.Value(appObserveMethodKey{}); got != "stored-app-value" {
+			t.Fatalf("%s.Value(appObserveMethodKey{}) = %v, want %q", tc.name, got, "stored-app-value")
+		}
+	}
+
+	tokens := adkcontext.WalkLineage(child)
+	if len(tokens) != 3 {
+		t.Fatalf("len(tokens) = %d, want 3 (child, promoted, outer)", len(tokens))
+	}
+	if tokens[0] == tokens[1] || tokens[1] == tokens[2] || tokens[0] == tokens[2] {
+		t.Fatalf("expected distinct tokens along lineage, got %#v", tokens)
+	}
+	for i, tok := range tokens {
+		if _, ok := tok.(context.Context); ok {
+			t.Fatalf("token[%d] implements context.Context (%T); must remain opaque", i, tok)
+		}
+		if _, ok := tok.(InvocationContext); ok {
+			t.Fatalf("token[%d] implements InvocationContext (%T); must remain opaque", i, tok)
+		}
+		rv := reflect.ValueOf(tok)
+		if rv.NumMethod() != 0 || rv.MethodByName("Value").IsValid() {
+			t.Fatalf("token[%d] exposes methods (NumMethod=%d); weak.Pointer.Value must not be reachable", i, rv.NumMethod())
+		}
+		if rv.Kind() != reflect.Struct || rv.NumField() != 1 || rv.Field(0).CanInterface() {
+			t.Fatalf("token[%d] must be a single-field unexported struct (Kind=%v, NumField=%d)", i, rv.Kind(), rv.NumField())
+		}
+		if _, ok := adkcontext.Recovered(func() any {
+			return rv.Field(0).Elem().MethodByName("Value").Call(nil)[0].Interface()
+		}); ok {
+			t.Fatalf("token[%d] allowed reflection recovery of underlying context", i)
+		}
+	}
+
+	if got := promoted.(interface{ ADKContextToken() any }).ADKContextToken(); got != tokens[1] {
+		t.Fatalf("promoted.ADKContextToken() = %#v, want %#v", got, tokens[1])
+	}
+
+	var nilInv *invocationContext
+	var nilCommon *commonContext
+	if nilInv.Value(adkcontext.LineageKey) != nil || nilCommon.Value(adkcontext.LineageKey) != nil {
+		t.Fatal("typed-nil Value returned non-nil")
+	}
+	if nilInv.ADKContextToken() != nil || nilCommon.ADKContextToken() != nil {
+		t.Fatal("typed-nil ADKContextToken returned non-nil")
+	}
+	panickingMid := Promote(outer).WithContext(panickingIntermediary{Context: promoted})
+	if got := adkcontext.WalkLineage(panickingMid); len(got) != 1 || got[0] != panickingMid.(interface{ ADKContextToken() any }).ADKContextToken() {
+		t.Fatalf("WalkLineage across panicking intermediary = %#v, want single outer token", got)
+	}
+
+	pathA := "wf/left"
+	pmVal := map[string]string{"leaf": "worker"}
+	pmCtx := adkcontext.WithParentMap(context.Background(), pmVal)
+	withPath := Promote(outer).WithAgentContext(pmCtx).WithDelta(&CommonContextDelta{Path: &pathA})
+	cbCtx := NewCallbackContext(withPath, nil)
+	pathReader := Promote(nil).(interface{ ADKContextPath(context.Context) string })
+	pmReader := Promote(nil).(interface{ ADKParentMap(context.Context) any })
+	if got := pathReader.ADKContextPath(cbCtx); got != "wf/left" {
+		t.Fatalf("ADKContextPath(cbCtx) = %q, want wf/left", got)
+	}
+	if got, ok := pmReader.ADKParentMap(cbCtx).(map[string]string); !ok || got["leaf"] != "worker" {
+		t.Fatalf("ADKParentMap(cbCtx) = %#v, want leaf->worker", got)
+	}
+}
+
+func TestPromoteADKParentMap_ReturnsSnapshotCopy(t *testing.T) {
+	sub, err := New(Config{Name: "sub_agent"})
+	if err != nil {
+		t.Fatalf("New(sub): %v", err)
+	}
+	root, err := New(Config{Name: "root_agent", SubAgents: []Agent{sub}})
+	if err != nil {
+		t.Fatalf("New(root): %v", err)
+	}
+	other, err := New(Config{Name: "other_agent"})
+	if err != nil {
+		t.Fatalf("New(other): %v", err)
+	}
+
+	type runnerParentMap map[string]Agent
+	src := runnerParentMap{"sub_agent": root, "nil_entry": nil}
+	ctx := context.WithValue(context.Background(), adkcontext.ParentMapKey, src)
+
+	carrier, ok := Promote(nil).(interface{ ADKParentMap(context.Context) any })
+	if !ok {
+		t.Fatal("Promote(nil) does not expose ADKParentMap")
+	}
+	got, ok := carrier.ADKParentMap(ctx).(runnerParentMap)
+	if !ok {
+		t.Fatalf("ADKParentMap() type = %T, want runnerParentMap", carrier.ADKParentMap(ctx))
+	}
+	if _, hasNil := got["nil_entry"]; hasNil {
+		t.Fatalf("ADKParentMap() kept nil entry: %v", got)
+	}
+	if got["sub_agent"] != root {
+		t.Fatalf("ADKParentMap()[sub_agent] = %v, want %v", got["sub_agent"], root)
+	}
+	got["sub_agent"] = other
+	got["injected"] = other
+	if src["sub_agent"] != root {
+		t.Fatalf("mutating ADKParentMap() overwrote source map: %v", src["sub_agent"])
+	}
+	if _, leaked := src["injected"]; leaked {
+		t.Fatalf("mutating ADKParentMap() injected key into source map: %v", src)
+	}
+
+	nilMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, runnerParentMap(nil))
+	if gotNil := carrier.ADKParentMap(nilMapCtx); gotNil != nil {
+		t.Fatalf("ADKParentMap(typed-nil map) = %#v, want nil", gotNil)
+	}
+}
+
+type runTokenUint8Blocker struct {
+	context.Context
+}
+
+func (c *runTokenUint8Blocker) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestRunToken_StableWithinRun_FreshPerChild(t *testing.T) {
+	type runTestSpanKey struct{}
+	outer := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+	rtReader, ok := any(Promote(nil)).(interface{ ADKRunToken(context.Context) any })
+	if !ok {
+		t.Fatal("Promote(nil) does not expose ADKRunToken")
+	}
+
+	var nilCtx context.Context
+	if got := rtReader.ADKRunToken(nilCtx); got != nil {
+		t.Fatalf("ADKRunToken(nil) = %#v, want nil", got)
+	}
+	if got := rtReader.ADKRunToken(Promote(outer)); got != nil {
+		t.Fatalf("ADKRunToken(unpromoted outer) = %#v, want nil", got)
+	}
+
+	var parentBeforeTok, parentAfterDeltaTok, parentAfterCtxTok, cbTok, toolTok, childTok any
+	var resetBgTok, resetBlockedTok, reboundTok any
+	var childLineage []any
+	var childCtx InvocationContext
+
+	child, err := New(Config{
+		Name: "child",
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				childCtx = ctx
+				childTok = rtReader.ADKRunToken(ctx)
+				childLineage = adkcontext.WalkLineage(ctx)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(child): %v", err)
+	}
+
+	parent, err := New(Config{
+		Name:      "parent",
+		SubAgents: []Agent{child},
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				parentBeforeTok = rtReader.ADKRunToken(ctx)
+				icCopy := ctx.WithICDelta(&InvocationContextDelta{Branch: new("b1")})
+				parentAfterDeltaTok = rtReader.ADKRunToken(icCopy)
+				withSpan := icCopy.WithContext(context.WithValue(icCopy, runTestSpanKey{}, "span"))
+				parentAfterCtxTok = rtReader.ADKRunToken(withSpan)
+				cbTok = rtReader.ADKRunToken(NewCallbackContext(icCopy, nil))
+				tCtx := NewToolContext(withSpan, "call-1", nil, nil)
+				toolTok = rtReader.ADKRunToken(tCtx)
+
+				// Synthetic child InvocationContext directly wrapping nodeCtx stops RunTokenKey.
+				synthetic := &invocationContext{Context: ctx, session: &identityTestSession{}}
+				if got := rtReader.ADKRunToken(synthetic); got != nil {
+					t.Fatalf("synthetic invocationContext stole parent runToken: %#v", got)
+				}
+
+				for ev, runErr := range child.Run(icCopy) {
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+
+				// WithAgentContext resets runToken on non-InvocationContext contexts
+				// rather than retaining a stale parent token, and picks up another
+				// run's token when wrapping a context derived from that run.
+				withSpanCtx, ok := withSpan.(Context)
+				if !ok {
+					t.Fatalf("withSpan %T does not implement agent.Context", withSpan)
+				}
+				resetBgTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(context.Background()))
+				resetBlockedTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(&runTokenUint8Blocker{Context: withSpan}))
+				reboundTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(context.WithValue(childCtx, runTestSpanKey{}, "other")))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(parent): %v", err)
+	}
+
+	for _, runErr := range parent.Run(outer) {
+		if runErr != nil {
+			t.Fatalf("parent.Run error: %v", runErr)
+		}
+	}
+
+	if parentBeforeTok == nil {
+		t.Fatal("parentBeforeTok = nil, want non-nil per-run token")
+	}
+	for name, got := range map[string]any{
+		"WithICDelta":        parentAfterDeltaTok,
+		"WithContext":        parentAfterCtxTok,
+		"NewCallbackContext": cbTok,
+		"NewToolContext":     toolTok,
+	} {
+		if got != parentBeforeTok {
+			t.Fatalf("%s runToken = %#v, want parent token %#v", name, got, parentBeforeTok)
+		}
+	}
+	if childTok == nil || childTok == parentBeforeTok {
+		t.Fatalf("child runToken = %#v, want fresh token != %#v", childTok, parentBeforeTok)
+	}
+	if resetBgTok != nil {
+		t.Fatalf("WithAgentContext(Background) retained stale runToken %#v, want nil", resetBgTok)
+	}
+	if resetBlockedTok != nil {
+		t.Fatalf("WithAgentContext(uint8Blocker) retained stale runToken %#v, want nil", resetBlockedTok)
+	}
+	if reboundTok != childTok {
+		t.Fatalf("WithAgentContext(WithValue(childCtx)) runToken = %#v, want child token %#v", reboundTok, childTok)
+	}
+	if !slices.Contains(childLineage, childTok) || !slices.Contains(childLineage, parentBeforeTok) {
+		t.Fatalf("child WalkLineage = %#v, want both child (%#v) and parent (%#v) runTokens", childLineage, childTok, parentBeforeTok)
+	}
+	if rtReader.ADKRunToken(outer) != nil {
+		t.Fatal("parent outer invocationContext mutated by child run")
 	}
 }

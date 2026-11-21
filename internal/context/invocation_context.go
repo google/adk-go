@@ -124,8 +124,10 @@ func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationCon
 }
 
 // Value implements context.Context. It returns this invocation's [agent.Identity]
-// for the ADK identity key (so agent.IdentityFromContext can recover it). Every
-// other key delegates to the embedded context, preserving existing behavior.
+// for the ADK identity key (so agent.IdentityFromContext can recover it), and
+// participates in ADK's private lineage and workflow-path lookups. Every other
+// key (including the parent-map key) delegates to the embedded context,
+// preserving existing behavior.
 //
 // This type owns its session, so the identity key is answered here even when the
 // session cannot be read — with no identity rather than the enclosing
@@ -150,10 +152,42 @@ func (c *InvocationContext) Value(key any) any {
 		}
 		return nil
 	}
+	if v, ok := adkcontext.LineageStep(key, c, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, c.params.Path, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if adkcontext.IsRunTokenKey(key) {
+		return nil
+	}
 	if c.Context == nil {
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+func (c *InvocationContext) ADKContextToken() any {
+	return adkcontext.Token(c)
+}
+
+func (*InvocationContext) ADKWalkLineage(ctx context.Context) []any {
+	return adkcontext.WalkLineage(ctx)
+}
+
+func (*InvocationContext) ADKContextPath(ctx context.Context) string {
+	return adkcontext.ReadPath(ctx)
+}
+
+func (*InvocationContext) ADKParentMap(ctx context.Context) any {
+	return adkcontext.ReadParentMap(ctx)
+}
+
+func (*InvocationContext) ADKRunToken(ctx context.Context) any {
+	return adkcontext.ReadRunToken(ctx)
 }
 
 // ResumedInput always returns (nil, false) for the base

@@ -187,7 +187,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
-		nodeCtx := PromoteWithDelta(ctx, &CommonContextDelta{
+		nodeCtx := promoteForRun(ctx, &CommonContextDelta{
 			InvocationContextDelta: icDelta,
 		})
 
@@ -487,9 +487,11 @@ func (c *invocationContext) Session() session.Session {
 }
 
 // Value implements context.Context, answering the ADK identity key like every
-// other invocation context so a promoted copy and this one cannot disagree. It
-// owns its session, so no session means no identity — never the enclosing
-// invocation's, whose user made no such call.
+// other invocation context so a promoted copy and this one cannot disagree, and
+// participating in ADK's private lineage and workflow-path lookups before
+// delegating remaining keys (including the parent-map key) to the embedded
+// context. It owns its session, so no session means no identity — never the
+// enclosing invocation's, whose user made no such call.
 func (c *invocationContext) Value(key any) any {
 	if c == nil {
 		return nil
@@ -500,10 +502,42 @@ func (c *invocationContext) Value(key any) any {
 		}
 		return nil
 	}
+	if v, ok := adkcontext.LineageStep(key, c, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if adkcontext.IsRunTokenKey(key) {
+		return nil
+	}
 	if c.Context == nil {
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+func (c *invocationContext) ADKContextToken() any {
+	return adkcontext.Token(c)
+}
+
+func (*invocationContext) ADKWalkLineage(ctx context.Context) []any {
+	return adkcontext.WalkLineage(ctx)
+}
+
+func (*invocationContext) ADKContextPath(ctx context.Context) string {
+	return adkcontext.ReadPath(ctx)
+}
+
+func (*invocationContext) ADKParentMap(ctx context.Context) any {
+	return adkcontext.ReadParentMap(ctx)
+}
+
+func (*invocationContext) ADKRunToken(ctx context.Context) any {
+	return adkcontext.ReadRunToken(ctx)
 }
 
 func (c *invocationContext) InvocationID() string {

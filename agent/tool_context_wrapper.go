@@ -44,6 +44,13 @@ func (c *toolContextWrapper) WithICDelta(d *InvocationContextDelta) InvocationCo
 	return c.context.WithICDelta(d)
 }
 
+func (c *toolContextWrapper) adkRunToken() any {
+	if c == nil {
+		return nil
+	}
+	return runTokenOf(c.context)
+}
+
 // WithAgentCancel implements [Context].
 func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 	// this one is needed for tool context.
