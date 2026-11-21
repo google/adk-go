@@ -3459,16 +3459,20 @@ func TestFunctionResponseIsError(t *testing.T) {
 		want     bool
 	}{
 		{name: "flow_error_message", response: map[string]any{"error": "Error in tool \"get_weather\": upstream timeout"}, want: true},
-		{name: "error_object", response: map[string]any{"error": map[string]any{"code": 500}}, want: true},
-		{name: "error_true", response: map[string]any{"error": true}, want: true},
 		{name: "mcp_isError", response: map[string]any{"isError": true, "content": []any{}}, want: true},
 		{name: "mcp_is_error", response: map[string]any{"is_error": true}, want: true},
+		{name: "mcp_is_error_number", response: map[string]any{"is_error": 1}, want: true},
+		{name: "measurement_error_number", response: map[string]any{"estimate": 42, "error": 0.125}, want: false},
+		{name: "measurement_error_string", response: map[string]any{"estimate": 42, "error": "+/-0.1"}, want: false},
+		{name: "error_number_alone", response: map[string]any{"error": 0.125}, want: false},
+		{name: "error_object", response: map[string]any{"error": map[string]any{"code": 500}}, want: false},
+		{name: "error_true", response: map[string]any{"error": true}, want: false},
+		{name: "error_empty_string", response: map[string]any{"error": ""}, want: false},
 		{name: "result", response: map[string]any{"result": "sunny"}, want: false},
 		{name: "empty_response", response: map[string]any{}, want: false},
 		{name: "error_nil", response: map[string]any{"error": nil, "result": "sunny"}, want: false},
-		{name: "error_empty_string", response: map[string]any{"error": "", "result": "sunny"}, want: false},
-		{name: "error_false", response: map[string]any{"error": false}, want: false},
 		{name: "mcp_isError_false", response: map[string]any{"isError": false, "content": []any{}}, want: false},
+		{name: "mcp_is_error_empty_string", response: map[string]any{"is_error": ""}, want: false},
 	}
 
 	var body map[string]any
