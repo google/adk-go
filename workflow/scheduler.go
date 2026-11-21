@@ -1236,8 +1236,8 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 // NodeInfo (with OutputFor) belong to the copy, because the scheduler
 // writes Content.Role and NodeInfo.Path, and the runner writes
 // top-level fields such as Timestamp and Actions.Compaction. Everything
-// else stays shared with the node: the Part values, the Actions maps
-// and LongRunningToolIDs. Consumers must replace those, not modify
+// else stays shared with the node: the Part values, the Actions maps,
+// CustomMetadata and LongRunningToolIDs. Consumers must replace those, not modify
 // them in place.
 func copyPartialEvent(ev *session.Event) *session.Event {
 	c := *ev
