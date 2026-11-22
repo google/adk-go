@@ -110,8 +110,8 @@ func isModelResponseCode(code string) bool {
 }
 
 func stripGenericParams(name string) string {
-	if idx := strings.IndexByte(name, '['); idx >= 0 {
-		return name[:idx]
+	if before, _, ok := strings.Cut(name, "["); ok {
+		return before
 	}
 	return name
 }
@@ -230,7 +230,7 @@ hopLoop:
 				visited[key] = true
 			}
 			if v.CanInterface() && v.Type().Implements(unwrapToolType) {
-				if u, ok := v.Interface().(interface{ Unwrap() tool.Tool }); ok {
+				if u, ok := reflect.TypeAssert[interface{ Unwrap() tool.Tool }](v); ok {
 					if inner := orZero(u.Unwrap); !isNil(inner) {
 						v = reflect.ValueOf(inner)
 						continue hopLoop
@@ -246,7 +246,7 @@ hopLoop:
 			return reflect.Value{}
 		}
 		if !fromPtr && v.CanInterface() && v.Type().Implements(unwrapToolType) {
-			if u, ok := v.Interface().(interface{ Unwrap() tool.Tool }); ok {
+			if u, ok := reflect.TypeAssert[interface{ Unwrap() tool.Tool }](v); ok {
 				if inner := orZero(u.Unwrap); !isNil(inner) {
 					v = reflect.ValueOf(inner)
 					continue hopLoop
@@ -346,7 +346,7 @@ func findAgentA2AByName(v reflect.Value, targetName string, visited map[uintptr]
 			}
 		}
 		if v.CanInterface() {
-			if ag, ok := v.Interface().(agent.Agent); ok && ag != nil {
+			if ag, ok := reflect.TypeAssert[agent.Agent](v); ok && ag != nil {
 				if strings.TrimSpace(orZero(ag.Name)) == targetName {
 					return true, isRemoteA2AAgentValue(v)
 				}
@@ -610,7 +610,7 @@ func formatCompactionValue(v reflect.Value, maxLen int, redact bool) (map[string
 	}
 
 	if v.Kind() == reflect.Map && v.CanInterface() {
-		if m, ok := v.Interface().(map[string]any); ok {
+		if m, ok := reflect.TypeAssert[map[string]any](v); ok {
 			out := maps.Clone(m)
 			normalizeCompactionKeys(out)
 			_, hasStart := out["start_timestamp"]
@@ -662,7 +662,7 @@ func compactionTimestamp(f reflect.Value) any {
 	if !f.IsValid() || !f.CanInterface() || f.IsZero() {
 		return nil
 	}
-	if ts, ok := f.Interface().(time.Time); ok {
+	if ts, ok := reflect.TypeAssert[time.Time](f); ok {
 		return epochSeconds(ts)
 	}
 	if f.Type() == jsonNumberType {
@@ -951,36 +951,48 @@ func (p *analyticsPlugin) emitUserMessageSignalEvents(ctx agent.InvocationContex
 	}
 }
 
+// scrubCustomMetadataValue redacts a single custom metadata entry under its
+// original keys when redact is true and reports whether safety caps or
+// placeholders discarded any nested content.
+func scrubCustomMetadataValue(key string, val any, redact bool) (any, bool) {
+	if !redact {
+		return val, false
+	}
+	if isSensitiveKey(key) || isSensitiveKey(strings.TrimPrefix(key, "a2a:")) {
+		return redactedValue, false
+	}
+	return sanitizeValue(val, -1, true)
+}
+
 // scrubA2ACustomMetadata filters and redacts custom metadata map.
 // Only keys allowed by allowlist or starting with "a2a:" are retained,
-// and their values are scrubbed using standard key-based redaction (redactJSONValue).
-func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter, redact bool) (map[string]any, bool) {
+// and their values are sanitized with sensitive-key and credential redaction.
+// It also returns the retained keys whose values lost content to a safety cap
+// or placeholder, or nil if none did.
+func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter, redact bool) (map[string]any, map[string]bool) {
 	if len(meta) == 0 {
-		return nil, false
+		return nil, nil
 	}
 	out := make(map[string]any)
-	var trunc bool
+	var lost map[string]bool
 	for k, v := range meta {
-		if !allowlist.allows(k) && !strings.HasPrefix(k, "a2a:") {
+		allowed := allowlist.allows(k)
+		if !allowed && !strings.HasPrefix(k, "a2a:") {
 			continue
 		}
-		if redact {
-			if isSensitiveKey(k) || isSensitiveKey(strings.TrimPrefix(k, "a2a:")) {
-				out[k] = redactedValue
-				continue
+		cleanVal, contentLost := scrubCustomMetadataValue(k, v, redact)
+		out[k] = cleanVal
+		if contentLost {
+			if lost == nil {
+				lost = make(map[string]bool)
 			}
-			budget := &nodeBudget{remaining: maxSanitizeNodes}
-			cleanVal, _, lost := redactJSONValue(v, 0, budget)
-			out[k] = cleanVal
-			trunc = trunc || lost
-		} else {
-			out[k] = v
+			lost[k] = true
 		}
 	}
 	if len(out) == 0 {
-		return nil, false
+		return nil, nil
 	}
-	return out, trunc
+	return out, lost
 }
 
 // emitSessionEventSignals evaluates all orthogonal session.Event signals without
@@ -1003,13 +1015,14 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 		id.path = ev.NodeInfo.Path
 	}
 	span := p.traces.eventSpan(ctx, id, ev.Author, ev.Branch)
-	cleanCustomMeta, a2aTrunc := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
+	cleanCustomMeta, customMetaLost := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
+	a2aTrunc := len(customMetaLost) > 0
 	applyEventBase := func(d *eventData) {
 		d.sourceEvent = ev
 		d.author = ev.Author
 		d.customMetadata = cleanCustomMeta
 		d.customMetadataScrubbed = true
-		d.customMetadataTruncated = a2aTrunc
+		d.customMetadataLost = customMetaLost
 	}
 
 	// 1. STATE_DELTA (scrubbing temp: keys, writing delta to attributes.state_delta only).
@@ -1043,15 +1056,21 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 	}
 
 	// 4. AGENT_STATE_CHECKPOINT.
-	if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(cleanCustomMeta); ok {
-		p.logSessionEvent(ctx, id, EventAgentStateCheckpoint, span, func(d *eventData) {
-			applyEventBase(d)
-			d.content = map[string]any{
-				"agent_state":  stateVal,
-				"end_of_agent": endOfAgent,
+	if p.shouldLogSessionEvent(EventAgentStateCheckpoint) {
+		if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(ev.CustomMetadata); ok {
+			var stateTrunc bool
+			if !isNil(stateVal) {
+				stateVal, stateTrunc = scrubCustomMetadataValue("agent_state", stateVal, p.config.redactSensitiveKeys())
 			}
-			d.contentTruncated = a2aTrunc
-		})
+			p.logSessionEvent(ctx, id, EventAgentStateCheckpoint, span, func(d *eventData) {
+				applyEventBase(d)
+				d.content = map[string]any{
+					"agent_state":  stateVal,
+					"end_of_agent": endOfAgent,
+				}
+				d.contentTruncated = stateTrunc
+			})
+		}
 	}
 
 	// 5. HITL Requests, TOOL_PAUSED, and HITL Completions.
@@ -1210,15 +1229,14 @@ func (p *analyticsPlugin) emitHITLAndPauseSignals(ctx agent.InvocationContext, i
 		if fc.Name == workflow.WorkflowInputFunctionCallName {
 			emittedInput = true
 		}
-		fcCopy := fc
 		p.logSessionEvent(ctx, id, hitl.requestEvent, span, func(d *eventData) {
-			args, argsTrunc := nonNilMap(fcCopy.Args), false
+			args, argsTrunc := nonNilMap(fc.Args), false
 			applyEventBase(d)
-			d.functionCallID = fcCopy.ID
+			d.functionCallID = fc.ID
 			d.contentTruncated = argsTrunc
 			d.content = map[string]any{
-				"tool_id": fcCopy.ID,
-				"tool":    fcCopy.Name,
+				"tool_id": fc.ID,
+				"tool":    fc.Name,
 				"args":    args,
 			}
 		})

@@ -17,6 +17,7 @@ package agentanalytics
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
@@ -38,19 +40,26 @@ const (
 	gcsUploadTimeout = 10 * time.Second
 
 	// rawPartsKey is the row key under which the plugin queues the payloads
-	// that the BatchProcessor still has to upload. It is not a column.
+	// that the batchProcessor still has to upload. It is not a column.
 	rawPartsKey = "_raw_parts"
 
 	// summaryBuilderKey is the row key under which addContent attaches a
 	// contentSummaryBuilder when a row has pending text uploads. Like
-	// rawPartsKey, it is deleted by resolveUploads before Arrow encoding.
+	// rawPartsKey, it is deleted by resolveUploadsForBatch before Arrow
+	// encoding.
 	summaryBuilderKey = "_summary_builder"
 
-	// deferredUploadsKey holds a *deferredRowUploads on a row whose uploads
-	// were cut short or skipped under a caller deadline without triggering the
-	// shared cooldown. If the batch's subsequent BigQuery write in flushRunEnd runs
-	// out of flushCtx and the batch is deferred to the next flush, those
-	// uploads are retried under the next flush's budget.
+	// deferredUploadsKey holds a *deferredRowUploads, which
+	// resolveUploadsForBatch attaches to every row with uploads. When canDefer
+	// is true and the end of the caller's context, rather than the batch's own
+	// upload timeout, ends the uploads of a batch that did not pause them, the
+	// row's uploads that returned an error are recorded on it (none if all of
+	// them succeeded), so that if the batch's subsequent BigQuery write in
+	// flushRunEnd also runs out of flushCtx and the batch is deferred to the
+	// next flush, that flush retries those uploads; the key then stays on the
+	// row until the caller requeues the uploads (requeueDeferredUploads) or
+	// clears them (clearDeferredUploads). Otherwise resolveUploadsForBatch
+	// removes it itself.
 	deferredUploadsKey = "_deferred_uploads"
 
 	// mediaOffloadedText is the text of an uploaded binary part.
@@ -84,6 +93,25 @@ const (
 
 	// fallbackExtension is the extension of objects whose MIME type has none.
 	fallbackExtension = ".bin"
+
+	// maxGCSObjectNameBytes is Cloud Storage's 1,024-byte UTF-8 object name
+	// limit. maxGCSPrefixBytes and maxPathSegmentBytes bound an unchanged
+	// prefix and each identifier segment, which keeps the names of the objects
+	// that the plugin uploads at 905 bytes or less (see
+	// gcsObjectPathFromCleanPrefix), but not every name: a direct gcsObjectPath
+	// call that combines a long unchanged prefix with long identifiers, or that
+	// passes an oversized extension, assembles a longer name, which gcsObjectPath
+	// cuts to maxGCSObjectNameBytes. maxGCSRewrittenPrefixBytes bounds a
+	// rewritten prefix (at most 402 readable UTF-8 bytes plus the 65-byte
+	// "~<sha256>" suffix) so that with the 45 folder bytes
+	// "/<YYYY-MM-DD>/<32-hex-trace-id>/" that the plugin appends after the
+	// prefix, the folder part of the object name stays within the 512-byte
+	// folder limit of Cloud Storage buckets with hierarchical namespace.
+	maxGCSObjectNameBytes      = 1024
+	maxGCSPrefixBytes          = 750
+	maxGCSRewrittenPrefixBytes = 467
+	maxPathSegmentBytes        = 128
+	pathSegmentHashSuffixLen   = 65 // "~" + 64 lowercase hex digits (256-bit SHA-256)
 
 	// defaultMaxPendingUploadBytes caps total bytes held in memory by pending
 	// uploads across queued rows (256 MiB).
@@ -128,7 +156,7 @@ type pendingUpload struct {
 	// fallbackTruncated reports whether the inline fallback text for this part
 	// was truncated by MaxContentLen.
 	fallbackTruncated bool
-	// reserved is the byte count reserved in BatchProcessor.pendingUploadBytes.
+	// reserved is the byte count reserved in batchProcessor.pendingUploadBytes.
 	reserved int64
 }
 
@@ -232,22 +260,208 @@ func isSafeExtension(ext string) bool {
 	return true
 }
 
-// pathSegment returns id for use as a part of an object name: id with
-// anything but letters, digits, '-', '_' and '.' replaced, or fallback if id
-// is empty or is nothing but dots, which would make it a relative path
-// element such as "..".
+// pathSegmentHashSuffix returns a deterministic 65-byte "~<64 hex digits>"
+// suffix containing the full 256-bit SHA-256 digest of s. The leading "~"
+// lies outside the unchanged safe identifier alphabet ([A-Za-z0-9._-]), so
+// hashed outputs occupy a separate namespace from unchanged identifiers.
+func pathSegmentHashSuffix(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("~%x", sum)
+}
+
+// truncateWithHash cuts base to at most maxBytes-pathSegmentHashSuffixLen
+// bytes on a UTF-8 rune boundary and appends pathSegmentHashSuffix(raw), so
+// raw inputs that sanitize or truncate to the same base still get distinct
+// results of at most maxBytes bytes. The suffix holds the full 256-bit
+// SHA-256 digest, which gives about 128-bit collision resistance. maxBytes
+// must be at least pathSegmentHashSuffixLen: callers pass
+// maxPathSegmentBytes, maxGCSRewrittenPrefixBytes, maxGCSObjectNameBytes, or
+// maxGCSObjectNameBytes less the length of an extension that gcsObjectPath
+// has checked is short enough. base must be valid UTF-8: the cut keeps it
+// valid but does not make it so, while raw may be any bytes.
+func truncateWithHash(base, raw string, maxBytes int) string {
+	suffix := pathSegmentHashSuffix(raw)
+	limit := maxBytes - len(suffix)
+	if len(base) > limit {
+		for limit > 0 && !utf8.RuneStart(base[limit]) {
+			limit--
+		}
+		base = base[:limit]
+	}
+	return base + suffix
+}
+
+// pathSegment returns id for use as a part of an object name. An id that is
+// at most maxPathSegmentBytes bytes of ASCII letters, digits, '-', '_' and
+// '.', and is not only dots, is returned unchanged. An empty id returns
+// fallback, which must not be empty, and an id of only dots returns fallback
+// followed by the "~<sha256>" suffix of id. Any other id has each rune
+// outside that set (including '~') and each byte that is not valid UTF-8
+// replaced with '_', and is cut to fit maxPathSegmentBytes with the
+// "~<sha256>" suffix of the raw id appended.
 func pathSegment(id, fallback string) string {
-	if strings.Trim(id, ".") == "" {
+	if id == "" {
 		return fallback
 	}
-	return strings.Map(func(r rune) rune {
+	if strings.Trim(id, ".") == "" {
+		return truncateWithHash(fallback, id, maxPathSegmentBytes)
+	}
+	var sb strings.Builder
+	sb.Grow(min(len(id), maxPathSegmentBytes))
+	altered := false
+	for _, r := range id {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			return r
+			sb.WriteRune(r)
 		default:
+			sb.WriteByte('_')
+			altered = true
+		}
+	}
+	sanitized := sb.String()
+	if !altered && len(sanitized) <= maxPathSegmentBytes {
+		return sanitized
+	}
+	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
+}
+
+// isUnsafeGCSPrefixRune reports whether r is a control or line-separator
+// character replaced in a GCSPathPrefix. Cloud Storage rejects CR and LF in
+// object names and recommends avoiding the control characters that XML 1.0
+// does not allow; control characters (U+0000 to U+001F and U+007F to U+009F,
+// including U+0085) and the Unicode line and paragraph separators (U+2028 and
+// U+2029) are replaced so names stay printable on one line. It reports false
+// for spaces, '=', '\', '~' and other printable Unicode characters. '~' is
+// reserved as the hash-suffix delimiter, but cleanGCSPrefixWithReason and
+// sanitizeExtension check for it themselves.
+func isUnsafeGCSPrefixRune(r rune) bool {
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
+		r == '\u2028' || r == '\u2029'
+}
+
+// hasReservedACMEPrefix reports whether the first two '/'-separated segments of
+// s are, case-insensitively, ".well-known" and "acme-challenge".
+func hasReservedACMEPrefix(s string) bool {
+	seg0, rest, ok := strings.Cut(s, "/")
+	if !ok || !strings.EqualFold(seg0, ".well-known") {
+		return false
+	}
+	seg1, _, _ := strings.Cut(rest, "/")
+	return strings.EqualFold(seg1, "acme-challenge")
+}
+
+// cleanGCSPrefix returns the object name prefix for a configured
+// GCSPathPrefix, following the contract documented on Config.GCSPathPrefix.
+// Leading and trailing slashes are trimmed first, so "/logs/" and "logs"
+// share a prefix. The trimmed prefix is returned verbatim unless it is
+// longer than maxGCSPrefixBytes; contains '~' (reserved as the hash-suffix
+// delimiter), a byte that is not valid UTF-8, or a rune for which
+// isUnsafeGCSPrefixRune reports true; or its first two '/'-separated
+// segments are, case-insensitively, ".well-known" and "acme-challenge", which
+// Cloud Storage reserves (a second segment such as "acme-challenge-x" is kept
+// as is). Any other prefix has '~' and those bytes and runes replaced with '_'
+// and a leading ".well-known" segment before "acme-challenge" renamed
+// "_well-known", and is cut to fit maxGCSRewrittenPrefixBytes with the
+// "~<sha256>" suffix of the trimmed prefix appended, so distinct trimmed
+// prefixes do not collapse onto the same object prefix, the folder part of
+// the plugin's object names fits the 512-byte folder limit on
+// hierarchical-namespace buckets, and unchanged and rewritten prefixes occupy
+// strictly disjoint namespaces.
+func cleanGCSPrefix(prefix string) string {
+	cleaned, _ := cleanGCSPrefixWithReason(prefix)
+	return cleaned
+}
+
+func cleanGCSPrefixWithReason(prefix string) (cleaned, reason string) {
+	trimmed := strings.Trim(prefix, "/")
+	if trimmed == "" {
+		return "", ""
+	}
+	var (
+		sb             strings.Builder
+		hasInvalidUTF8 bool
+		hasControl     bool
+		hasTilde       bool
+	)
+	sb.Grow(min(len(trimmed), maxGCSPrefixBytes))
+	for i := 0; i < len(trimmed); {
+		r, width := utf8.DecodeRuneInString(trimmed[i:])
+		switch {
+		case r == utf8.RuneError && width == 1:
+			sb.WriteByte('_')
+			hasInvalidUTF8 = true
+		case r == '~':
+			sb.WriteByte('_')
+			hasTilde = true
+		case isUnsafeGCSPrefixRune(r):
+			sb.WriteByte('_')
+			hasControl = true
+		default:
+			sb.WriteRune(r)
+		}
+		i += width
+	}
+	cleaned = sb.String()
+	hasReservedACME := hasReservedACMEPrefix(cleaned)
+	if hasReservedACME {
+		_, rest, _ := strings.Cut(cleaned, "/")
+		cleaned = "_well-known/" + rest
+	}
+	var reasons []string
+	if hasInvalidUTF8 {
+		reasons = append(reasons, "contains invalid UTF-8")
+	}
+	if hasControl {
+		reasons = append(reasons, "contains control or line-separator character")
+	}
+	if hasTilde {
+		reasons = append(reasons, "contains reserved '~'")
+	}
+	if hasReservedACME {
+		reasons = append(reasons, "starts with reserved .well-known/acme-challenge prefix")
+	}
+	if len(trimmed) > maxGCSPrefixBytes {
+		reasons = append(reasons, fmt.Sprintf("exceeds %d bytes", maxGCSPrefixBytes))
+	}
+	if len(reasons) == 0 {
+		return cleaned, ""
+	}
+	return truncateWithHash(cleaned, trimmed, maxGCSRewrittenPrefixBytes), strings.Join(reasons, "; ")
+}
+
+// resolveGCSPathPrefix returns cleanGCSPrefix(c.GCSPathPrefix) and logs a
+// constant-format warning with the rewrite reason and byte counts when
+// c.GCSPathPrefix had to be rewritten, without logging raw or sanitized prefix
+// text. Config.GCSPathPrefix itself is left unmodified; newBatchProcessor
+// caches the returned effective prefix so uploads neither re-clean nor
+// double-normalize it.
+func resolveGCSPathPrefix(c Config) string {
+	trimmed := strings.Trim(c.GCSPathPrefix, "/")
+	cleaned, reason := cleanGCSPrefixWithReason(c.GCSPathPrefix)
+	if reason != "" {
+		c.logf(
+			"agentanalytics: WARNING: Config.GCSPathPrefix (%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes): %s",
+			len(c.GCSPathPrefix), len(trimmed), len(cleaned), reason,
+		)
+	}
+	return cleaned
+}
+
+// sanitizeExtension returns ext as the readable part of a name that ends in a
+// hash because ext is not one that isSafeExtension accepts. Each run of bytes
+// that is not valid UTF-8 is replaced with one '_', and so is each rune for
+// which isUnsafeGCSPrefixRune reports true, '/', '\', and '~', so an unsafe
+// extension cannot add a path separator or hash marker to the readable part.
+// Other runes are kept, including a literal U+FFFD, as cleanGCSPrefix keeps
+// them. The result is valid UTF-8 and no longer than ext, but replacements are
+// not injective, so the name must end in the hash of the extension as it was.
+func sanitizeExtension(ext string) string {
+	return strings.Map(func(r rune) rune {
+		if isUnsafeGCSPrefixRune(r) || r == '/' || r == '\\' || r == '~' {
 			return '_'
 		}
-	}, id)
+		return r
+	}, strings.ToValidUTF8(ext, "_"))
 }
 
 // gcsObjectPath returns the name of the object that holds a part:
@@ -262,10 +476,30 @@ func pathSegment(id, fallback string) string {
 // the rows that share a span. The name is a function of its inputs, so retries
 // of the same deterministic row/part path by the storage Writer itself target
 // the same object.
+//
+// The extension is part of the name as is only if it is empty or
+// isSafeExtension accepts it, as every extension that extensionForMIME returns
+// is. For any other extension, which only a direct call can pass, the name is
+// never returned as is, however short: it gets the "~<sha256>" suffix of the
+// whole name, as a name over maxGCSObjectNameBytes does. So '~' marks a
+// rewritten name in the extension too, and an extension that carries the
+// suffix of a rewritten name cannot make a name equal to that one.
+//
+// Such an extension may also be invalid UTF-8, or hold a line break or another
+// control character, which the prefix and the ids never do. The name is then
+// valid UTF-8 and free of such characters too: its readable part is the name up
+// to the extension followed by sanitizeExtension of the extension, which
+// replaces each run of invalid bytes and each such rune with '_', while the
+// hash still covers the name with the extension as it was, so extensions that
+// differ only in those bytes or runes give distinct names.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
+	return gcsObjectPathFromCleanPrefix(cleanGCSPrefix(prefix), ts, traceID, spanID, eventID, contentOrd, partIdx, ext)
+}
+
+func gcsObjectPathFromCleanPrefix(cleanPrefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
-	if p := strings.Trim(prefix, "/"); p != "" {
-		sb.WriteString(p)
+	if cleanPrefix != "" {
+		sb.WriteString(cleanPrefix)
 		sb.WriteByte('/')
 	}
 	fmt.Fprintf(&sb, "%s/%s/%s_%s_c%d_p%d%s",
@@ -274,7 +508,34 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 		pathSegment(spanID, missingSpanID),
 		pathSegment(eventID, missingEventID),
 		contentOrd, partIdx, ext)
-	return sb.String()
+	out := sb.String()
+	// With the hex identifiers that the plugin generates (32, 16, and 32 bytes),
+	// the longest int ordinals (20 bytes each), and an extension that
+	// isSafeExtension accepts (at most 17 bytes from extensionForMIME), out is at
+	// most 905 bytes when cleanGCSPrefix fits maxGCSPrefixBytes (750 bytes). Only
+	// a direct call with a long unchanged prefix and long pathSegment
+	// identifiers, or with an oversized or unsafe extension, reaches the cap
+	// below.
+	//
+	// A name is returned as is only if its extension is empty or safe. The
+	// name of any other extension ends in the hash of out, however short it
+	// is, so that '~' marks a rewritten name in the extension as it does in
+	// the ids and the prefix: an extension that holds the "~<sha256>" suffix
+	// of a rewritten name cannot make a name equal to that one.
+	if len(out) <= maxGCSObjectNameBytes && (ext == "" || isSafeExtension(ext)) {
+		return out
+	}
+	if isSafeExtension(ext) && len(ext) < maxGCSObjectNameBytes-pathSegmentHashSuffixLen {
+		return truncateWithHash(out[:len(out)-len(ext)], out, maxGCSObjectNameBytes-len(ext)) + ext
+	}
+	// Only an unsafe extension can make out invalid UTF-8 or put a control
+	// character in it: cleanGCSPrefix and pathSegment return valid UTF-8 without
+	// control characters, and a safe extension is ASCII letters and digits. Out
+	// ends with ext, so only the extension is sanitized for the readable part:
+	// the '/' that separate the parts and the '~' of their own hash suffixes
+	// stay. The hash is still that of the raw out.
+	readable := out[:len(out)-len(ext)] + sanitizeExtension(ext)
+	return truncateWithHash(readable, out, maxGCSObjectNameBytes)
 }
 
 // uploadTask is one payload to upload and the content_parts entry that is
@@ -291,34 +552,71 @@ type uploadTask struct {
 	err error
 }
 
-// resolveUploads uploads the payloads that were queued with the rows of batch
-// and rewrites the matching content_parts entries to refer to the objects. No
-// row is lost to a storage problem: a text part whose upload fails keeps its
-// truncated inline text, and a binary part whose upload fails gets the text
-// "[UPLOAD FAILED]", its raw bytes not being stored inline.
+// uploadResolveOptions configures how resolveUploadsForBatch handles a batch's
+// Cloud Storage uploads.
+type uploadResolveOptions struct {
+	pauseOnCallerDeadline bool
+	canDefer              bool
+}
+
+// resolveUploadsForBatch uploads the payloads that were queued with the rows of
+// batch and rewrites the matching content_parts entries to refer to the
+// objects. No row is lost to a storage problem: a text part whose upload fails
+// keeps its truncated inline text, and a binary part whose upload fails gets
+// the text "[UPLOAD FAILED]", its raw bytes not being stored inline.
 //
 // Uploads run concurrently, at most GCSMaxConcurrentUploads at a time, under a
-// single batch-level timeout that ctx can end sooner. If the batch's own
-// GCSUploadTimeout ends the uploads after at least one upload started and
-// either an in-flight upload timed out under the batch deadline or no upload
-// in the batch succeeded, uploads are paused for one GCSUploadTimeout.
-// With pauseOnCallerDeadline, it returns true when a timed-out upload ran for
-// at least three quarters of the batch's upload window, bounded below by
-// ShutdownTimeout/8 and above by 3*ShutdownTimeout/8. The caller then skips
-// uploads for the rest of this run-end flush. Pausing uploads across flushes
-// requires at least 3*ShutdownTimeout/8 of upload time, so a shrinking run-end
-// budget alone does not trigger the shared cooldown. Time waiting for an
-// upload slot or cleaning up after the deadline does not count.
-// Successful uploads in the same batch do not hide a stalled upload. A canceled
-// context, or one already done before any upload starts, does not trigger a pause.
-// Batches resolved during the pause fall back at once without uploading.
-// Python uploads during content parsing; Go bounds uploads here so storage
-// stalls leave time to write the analytics rows.
-// resolveUploads does not reserve any of ctx for the caller's own work: a
-// caller that has to write the batch afterwards bounds ctx accordingly.
+// single batch-level timeout that ctx can end sooner. Cloud Storage is not
+// keeping up when at least one upload started and:
+//
+//   - the batch's own GCSUploadTimeout ended the uploads, and either an
+//     in-flight upload timed out under the batch deadline or no upload in the
+//     batch succeeded; or
+//   - opts.pauseOnCallerDeadline is true and the deadline of ctx ended the
+//     uploads first, and either no upload in the batch succeeded or the
+//     deadline cut short an upload that had been running for at least three
+//     quarters of the time that the batch had for its uploads, whether or not
+//     other uploads in the batch succeeded. An upload that the offloader
+//     failed with a deadline error of its own, such as a per-request timeout,
+//     while that deadline had not passed yet was not cut short by it.
+//
+// The uploads are then paused for the length of the timeout, and the batches
+// resolved in that time do not call the offloader but fall back at once, so
+// neither a full Cloud Storage outage nor a partial brownout makes every
+// batch wait in turn. A caller deadline when opts.pauseOnCallerDeadline is
+// false, a caller deadline that cuts short only uploads that ran for less than
+// that in a batch where another upload succeeded (such as uploads that started
+// late, after waiting for a free slot behind other uploads), a ctx that is
+// canceled, or a ctx that is already done before any upload starts says
+// nothing about Cloud Storage and pauses nothing. The cause of the batch's
+// context tells which deadline ended the uploads, and the time that an upload
+// ran is counted up to that deadline, so that neither depends on how soon the
+// offloader returns once the context is done.
+//
+// resolveUploadsForBatch attaches deferredUploadsKey to every row with uploads.
+// When opts.canDefer is true, ctx has ended the uploads (its deadline passed or
+// it was canceled) rather than the batch's own timeout, and the batch did not
+// pause them, every upload in the batch that returned an error (whether ctx cut
+// it short in flight or while it waited for a slot, or it had already failed
+// with another error) is recorded on its row's deferredUploadsKey and stays
+// reserved: a caller that defers the batch requeues these uploads with it
+// (requeueDeferredUploads), and one that writes or drops the batch releases
+// them (clearDeferredUploads). Until then, a row whose uploads all succeeded
+// keeps an empty deferredUploadsKey. Otherwise resolveUploadsForBatch removes
+// the key from every row and keeps none of the uploads; in particular, a batch
+// that paused the uploads keeps none of them, like the batches resolved during
+// the pause. An upload that returned no error but a URI that is not a gs:// URI
+// fails only when it is applied, and is not kept.
+// resolveUploadsForBatch does not reserve any of ctx for the caller's own work:
+// a caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) bool {
+// The failure of a deferred upload is not logged yet; clearDeferredUploads and
+// requeueDeferredUploads log it once it is known whether the upload is
+// retried. A write that panics before the caller settles the deferred uploads
+// leaves them to dropDeferredUploadsQuietly, which the caller defers. The
+// failure of an upload that is not deferred is logged at once.
+func (b *batchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
@@ -326,10 +624,12 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	var tasks []*uploadTask
 	var summaries []rowSummary
 	var reservedTotal, deferredReserved int64
-	var staleDrops []deferredUploadFailure
+	// Deferred uploads that a caller left unsettled are dropped before the
+	// loop takes over the reservations of the queued payloads, so that a
+	// Logger that panics on their failures cannot leak any of those.
+	b.clearDeferredUploads(batch)
 	for i := range batch {
 		row := batch[i]
-		staleDrops = append(staleDrops, b.releaseDeferredRowUpload(row)...)
 		builder, _ := row[summaryBuilderKey].(*contentSummaryBuilder)
 		delete(row, summaryBuilderKey)
 		pending, ok := row[rawPartsKey].([]pendingUpload)
@@ -364,28 +664,23 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			}
 		}
 	}
-	// A normal return leaves deferred rows with the caller, which still holds
-	// the batch. A panic does not: flushRunEnd has already taken the batch off
-	// the queue and has not stored it, and afterRun recovers the panic. Release
-	// those rows too, or their bytes stay reserved for the life of the process.
-	// This defer is registered first so it still runs when the log defer panics.
+	var completedNormally bool
 	defer func() {
-		if r := recover(); r != nil {
-			for i := range batch {
-				b.releaseDeferredRowUpload(batch[i])
+		if !completedNormally {
+			for _, row := range batch {
+				delete(row, deferredUploadsKey)
 			}
+			b.releaseUploadBytes(reservedTotal)
+		} else {
 			b.releaseUploadBytes(reservedTotal - deferredReserved)
-			panic(r)
 		}
-		b.releaseUploadBytes(reservedTotal - deferredReserved)
-	}()
-	defer func() {
-		logDroppedDeferredUploads(b.config.Logger, staleDrops)
 	}()
 
 	offloader := b.config.GCSOffloader
 	if len(tasks) == 0 || offloader == nil {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		if offloader == nil {
 			for _, t := range tasks {
 				if t.pending.isText {
@@ -402,12 +697,15 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 				s.builder.applyToRow(s.row)
 			}
 		}
-		return false
+		completedNormally = true
+		return
 	}
 
 	uploadTimeout := cmp.Or(b.uploadTimeout, b.config.GCSUploadTimeout, gcsUploadTimeout)
 	if until := b.uploadCooldownUntil.Load(); until > 0 && time.Now().UnixNano() < until {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		for _, t := range tasks {
 			t.err = errUploadCooldown
 			b.applyUpload(t, false)
@@ -415,16 +713,20 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		for _, s := range summaries {
 			s.builder.applyToRow(s.row)
 		}
-		return false
+		completedNormally = true
+		return
 	}
-	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
+	// The cause that WithTimeoutCause records tells which deadline ended the
+	// uploads, so that this does not depend on when the offloaders return.
+	now := time.Now()
+	uploadCtx, cancel := context.WithTimeoutCause(ctx, uploadTimeout, errBatchUploadTimeout)
 	defer cancel()
-	// WithTimeout uses the earlier of the caller's and the batch's deadlines.
+	// An upload that the deadline ends is a stall if it had been running for at
+	// least three quarters of the time that the batch has for its uploads, which
+	// ends at the earlier of the batch's own timeout and the deadline of ctx.
+	// The time that it waited for a free slot before it started does not count.
 	deadline, _ := uploadCtx.Deadline()
-	window := time.Until(deadline)
-	shutdownTimeout := b.shutdownTimeout()
-	sharedStallMin := shutdownTimeout / 8 * 3
-	localStallMin := min(sharedStallMin, max(window/4*3, shutdownTimeout/8))
+	stallAfter := max(deadline.Sub(now), 0) * 3 / 4
 
 	limit := b.config.GCSMaxConcurrentUploads
 	if limit <= 0 {
@@ -432,60 +734,82 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	}
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
-	var anyStarted, anySucceeded, anyStalledOnBatchTimeout, anyStalledOnCallerDeadline atomic.Bool
-	var anyStalledInWindow atomic.Bool
+	var anyStarted, anySucceeded, anyCutShort, anyStalled atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
-			var started time.Time
+			var started bool
+			start := time.Now()
 			t.uri, started, t.err = b.upload(uploadCtx, offloader, t)
-			if !started.IsZero() {
+			// Whether the deadline of uploadCtx had passed when the upload
+			// returned. An offloader can fail with a deadline error of its own,
+			// such as a per-request timeout, before that deadline, which then
+			// did not cut the upload short.
+			deadlinePassed := errors.Is(uploadCtx.Err(), context.DeadlineExceeded)
+			if started {
 				anyStarted.Store(true)
-				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
-					anyStalledOnBatchTimeout.Store(true)
-					if pauseOnCallerDeadline {
-						// Offloaders may take time to return after cancellation.
-						elapsed := min(time.Since(started), deadline.Sub(started))
-						if elapsed >= localStallMin {
-							anyStalledInWindow.Store(true)
-						}
-						if elapsed >= sharedStallMin {
-							anyStalledOnCallerDeadline.Store(true)
-						}
+				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && deadlinePassed) {
+					anyCutShort.Store(true)
+					// Only an upload that the deadline cut short can have
+					// stalled until it. The offloader may return a while after
+					// the deadline, which is no time that the upload spent
+					// running.
+					if ran := min(time.Since(start), deadline.Sub(start)); deadlinePassed && ran >= stallAfter {
+						anyStalled.Store(true)
 					}
 				}
 			}
 			if t.err == nil && strings.HasPrefix(t.uri, "gs://") {
 				anySucceeded.Store(true)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
 	// Pause uploads when at least one upload started and:
-	//   - the batch's own GCSUploadTimeout expired (ctx.Err() == nil) and either
-	//     an in-flight upload timed out under the batch deadline (brownout) or
-	//     no upload in the batch succeeded, or
-	//   - a caller deadline expired after an upload ran for at least
-	//     3*ShutdownTimeout/8, even if other uploads succeeded.
-	batchTimedOut := errors.Is(uploadCtx.Err(), context.DeadlineExceeded) &&
-		((ctx.Err() == nil && (anyStalledOnBatchTimeout.Load() || !anySucceeded.Load())) ||
-			anyStalledOnCallerDeadline.Load())
-	if anyStarted.Load() && batchTimedOut {
+	//   - the batch's own GCSUploadTimeout ended the uploads and either an
+	//     in-flight upload timed out under the batch deadline (brownout) or no
+	//     upload in the batch succeeded, or
+	//   - a caller deadline allowed to pause (opts.pauseOnCallerDeadline) ended
+	//     the uploads before the batch's own timeout and either no upload in the
+	//     batch succeeded or the deadline cut short an upload that had been
+	//     running for at least stallAfter, even if other uploads in the batch
+	//     succeeded (partial outage). An upload that failed with a deadline
+	//     error of its own before the deadline passed does not count.
+	ownTimeoutExpired := context.Cause(uploadCtx) == errBatchUploadTimeout
+	var batchTimedOut bool
+	switch {
+	case ownTimeoutExpired:
+		batchTimedOut = anyCutShort.Load() || !anySucceeded.Load()
+	case opts.pauseOnCallerDeadline && errors.Is(uploadCtx.Err(), context.DeadlineExceeded):
+		batchTimedOut = anyStalled.Load() || !anySucceeded.Load()
+	}
+	paused := anyStarted.Load() && batchTimedOut
+	if paused {
 		b.uploadCooldownUntil.Store(time.Now().Add(uploadTimeout).UnixNano())
 	} else if anySucceeded.Load() {
 		b.uploadCooldownUntil.Store(0)
 	}
 
-	callerExpired := !batchTimedOut && ctx.Err() != nil
+	// When opts.canDefer is true and ctx has ended the uploads, rather than the
+	// batch's own timeout, every upload that returned an error in the batch is
+	// kept for a retry of the batch, unless this batch paused the uploads: the
+	// uploads that failed once ctx had ended them, and any that had already
+	// failed, so that a custom offloader that returns an opaque error when ctx
+	// ends is retried too. An upload that returned no error is not kept, even
+	// if its URI is not a gs:// URI.
+	keepCutShort := opts.canDefer && !ownTimeoutExpired && ctx.Err() != nil && !paused
 	for _, t := range tasks {
 		deferred := false
-		if callerExpired && (errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && uploadCtx.Err() != nil)) {
+		if keepCutShort && t.err != nil {
 			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
-				d.pending = append(d.pending, t.pending)
+				eventID, _ := t.row[eventIDField].(string)
+				d.pending = append(d.pending, deferredUpload{
+					upload:     t.pending,
+					eventID:    eventID,
+					errSummary: safeUploadErrorSummary(t.err),
+				})
 				deferredReserved += t.pending.reserved
 				deferred = true
 			}
@@ -497,81 +821,77 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		}
 		b.applyUpload(t, deferred)
 	}
-	if !callerExpired {
+	if !keepCutShort {
 		b.clearDeferredUploads(batch)
 	}
 	for _, s := range summaries {
 		s.builder.applyToRow(s.row)
 	}
-	return errors.Is(uploadCtx.Err(), context.DeadlineExceeded) && anyStalledInWindow.Load()
+	completedNormally = true
 }
 
-// deferredUploadFailure is the log context for one upload deferred in this pass.
-// It is not part of the queued payload.
-type deferredUploadFailure struct {
-	eventID string
-	partIdx int
-	size    int
-	summary string
+// deferredUpload is a failed upload of a batch whose uploads returned after
+// the caller's context had ended, by an expired deadline or a cancellation,
+// without pausing uploads across flushes: either one that the end of the
+// context cut short or skipped, or one that had already failed with another
+// error while a sibling upload kept the batch running.
+// Its failure is logged only once it is known whether the upload is retried:
+// when clearDeferredUploads drops it, or when requeueDeferredUploads queues it
+// again for the next flush.
+type deferredUpload struct {
+	upload     pendingUpload
+	eventID    string
+	errSummary string
 }
 
+// deferredRowUploads is what deferredUploadsKey holds: the deferred uploads of
+// a row, and what requeueDeferredUploads needs to put the row back in the form
+// it was queued in.
 type deferredRowUploads struct {
-	pending              []pendingUpload
+	pending              []deferredUpload
 	builder              *contentSummaryBuilder
 	nonDeferredTruncated bool
-	// failures is log context for uploads deferred in this pass. The retry
-	// sentence is logged from requeueDeferredUploads, only when that upload
-	// is actually put back on the row.
-	failures []deferredUploadFailure
 }
 
-// releaseDeferredRowUpload drops one row's deferred uploads and releases their
-// reserved bytes. Logging happens afterwards, so a panicking logger cannot
-// keep this row's reservation.
-func (b *BatchProcessor) releaseDeferredRowUpload(row map[string]any) []deferredUploadFailure {
-	d, ok := row[deferredUploadsKey].(*deferredRowUploads)
-	delete(row, deferredUploadsKey)
-	if !ok {
-		return nil
-	}
+// clearDeferredUploads drops the deferred uploads of the rows of batch, whose
+// parts keep the inline form that resolveUploadsForBatch gave them, and logs
+// their failures as final. The reservations of all the rows are released before
+// anything is logged, so that a panicking Logger cannot leak any of them.
+func (b *batchProcessor) clearDeferredUploads(batch []map[string]any) {
+	b.logDeferredUploadFailures(b.dropDeferredUploadsQuietly(batch), false)
+}
+
+// dropDeferredUploadsQuietly drops the deferred uploads of the rows of batch
+// and releases their reservations without logging anything, and returns the
+// dropped uploads. A caller that writes a batch with deferred uploads defers
+// it, so that a write that panics, as a panicking Logger makes it do, before
+// the caller settles the deferred uploads cannot leak their reservations. On
+// a batch whose deferred uploads are settled, it does nothing.
+func (b *batchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []deferredUpload {
+	var dropped []deferredUpload
 	var total int64
-	for _, u := range d.pending {
-		total += u.reserved
+	for _, row := range batch {
+		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
+		delete(row, deferredUploadsKey)
+		if !ok {
+			continue
+		}
+		for _, du := range d.pending {
+			total += du.upload.reserved
+		}
+		dropped = append(dropped, d.pending...)
 	}
 	b.releaseUploadBytes(total)
-	return d.failures
+	return dropped
 }
 
-func logDroppedDeferredUploads(logger Logger, failures []deferredUploadFailure) {
-	if logger == nil {
-		return
-	}
-	for _, f := range failures {
-		logger.Printf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-			f.eventID, f.partIdx, f.size, f.summary)
-	}
-}
-
-// clearDeferredRowUploads releases one row's deferred bytes without logging.
-// releaseRowUploads calls it once per row of a dropped batch, so a panicking
-// log here would skip the release of the rows after it. The failures stay on
-// the row, and clearDeferredUploads logs them once the batch is released.
-func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
-	if failures := b.releaseDeferredRowUpload(row); len(failures) > 0 {
-		row[deferredUploadsKey] = &deferredRowUploads{failures: failures}
-	}
-}
-
-func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
-	var failures []deferredUploadFailure
-	for _, row := range batch {
-		failures = append(failures, b.releaseDeferredRowUpload(row)...)
-	}
-	logDroppedDeferredUploads(b.config.Logger, failures)
-}
-
-func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
-	var failures []deferredUploadFailure
+// requeueDeferredUploads queues the deferred uploads of the rows of batch
+// again, with their parts back in the form they were queued in, so that the
+// next flush of batch retries them; the uploads keep their reservations. Their
+// failures are logged as pending that retry, but only once every row has been
+// requeued, so that a panicking Logger cannot leave a row without its uploads.
+func (b *batchProcessor) requeueDeferredUploads(batch []map[string]any) {
+	var requeued []deferredUpload
 	for _, row := range batch {
 		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
 		delete(row, deferredUploadsKey)
@@ -579,8 +899,10 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 			continue
 		}
 		parts, _ := row[columnContentParts].([]map[string]any)
+		pending := make([]pendingUpload, 0, len(d.pending))
 		hasText := false
-		for _, u := range d.pending {
+		for _, du := range d.pending {
+			u := du.upload
 			if u.slot >= 0 && u.slot < len(parts) && !u.isText {
 				parts[u.slot]["text"] = inlineDataText
 			}
@@ -590,8 +912,9 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 					d.builder.omitTextFromSummary(u.contentOrd, u.partIdx)
 				}
 			}
+			pending = append(pending, u)
 		}
-		row[rawPartsKey] = d.pending
+		row[rawPartsKey] = pending
 		if d.builder != nil {
 			if hasText {
 				d.builder.applyToRow(row)
@@ -600,19 +923,21 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 		} else if hasText {
 			row["is_truncated"] = d.nonDeferredTruncated
 		}
-		failures = append(failures, d.failures...)
+		requeued = append(requeued, d.pending...)
 	}
-	// flushRunEnd stores the batch only after this function returns. Persist it
-	// first so a panicking logger cannot drop the batch or its reservations.
-	b.deferredBatch = batch
-	for _, f := range failures {
-		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
-			f.eventID, f.partIdx, f.size, f.summary)
+	b.logDeferredUploadFailures(requeued, true)
+}
+
+// logDeferredUploadFailures logs the failures of deferred uploads that were
+// dropped or, if retry is true, requeued.
+func (b *batchProcessor) logDeferredUploadFailures(uploads []deferredUpload, retry bool) {
+	for _, du := range uploads {
+		b.logUploadFailure(du.eventID, du.upload, du.errSummary, retry)
 	}
 }
 
 // objectPath returns the name of the object that holds the part u of row.
-func (b *BatchProcessor) objectPath(row map[string]any, u pendingUpload) string {
+func (b *batchProcessor) objectPath(row map[string]any, u pendingUpload) string {
 	ts, _ := row[timestampField].(time.Time)
 	if ts.IsZero() {
 		ts = time.Now()
@@ -620,7 +945,11 @@ func (b *BatchProcessor) objectPath(row map[string]any, u pendingUpload) string 
 	traceID, _ := row["trace_id"].(string)
 	spanID, _ := row["span_id"].(string)
 	eventID, _ := row[eventIDField].(string)
-	return gcsObjectPath(b.config.GCSPathPrefix, ts, traceID, spanID, eventID, u.contentOrd, u.partIdx, extensionForMIME(u.mimeType))
+	cleanPrefix := b.effectiveGCSPathPrefix
+	if !b.gcsPathPrefixResolved {
+		cleanPrefix = cleanGCSPrefix(b.config.GCSPathPrefix)
+	}
+	return gcsObjectPathFromCleanPrefix(cleanPrefix, ts, traceID, spanID, eventID, u.contentOrd, u.partIdx, extensionForMIME(u.mimeType))
 }
 
 type offloaderPanicError struct {
@@ -646,6 +975,12 @@ func (e ownedUploadError) Unwrap() error {
 var (
 	errInvalidGCSURI  = errors.New("offloader returned a URI that is not a gs:// URI")
 	errUploadCooldown = errors.New("upload skipped during timeout cooldown")
+
+	// errBatchUploadTimeout is the cause of the context of the uploads of a
+	// batch when the batch's own timeout ended them, rather than the caller's
+	// context. It wraps context.DeadlineExceeded so an offloader returning
+	// context.Cause(ctx) logs a deadline error.
+	errBatchUploadTimeout = fmt.Errorf("batch upload timeout: %w", context.DeadlineExceeded)
 )
 
 // safeUploadErrorSummary returns diagnostic metadata for err without calling
@@ -664,16 +999,13 @@ func safeUploadErrorSummary(err error) string {
 	case errors.Is(err, errUploadCooldown):
 		return errUploadCooldown.Error()
 	}
-	var panicErr offloaderPanicError
-	if errors.As(err, &panicErr) {
+	if panicErr, ok := errors.AsType[offloaderPanicError](err); ok {
 		return panicErr.Error()
 	}
-	var owned ownedUploadError
-	if errors.As(err, &owned) {
+	if owned, ok := errors.AsType[ownedUploadError](err); ok {
 		return stripURIQueries(redactErrorMessage(owned.Error()))
 	}
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return fmt.Sprintf("HTTP %d", apiErr.Code)
 	}
 	return fmt.Sprintf("error type %T", err)
@@ -699,16 +1031,16 @@ func stripURIQueries(msg string) string {
 // panic in it is turned into an error that names only its type. Once ctx is
 // done the offloader is no longer called, which is what ends the uploads that
 // were still waiting for their turn.
-func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started time.Time, err error) {
+func (b *batchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			uri, err = "", offloaderPanicError{valueType: fmt.Sprintf("%T", r)}
 		}
 	}()
 	if cerr := ctx.Err(); cerr != nil {
-		return "", time.Time{}, cerr
+		return "", false, cerr
 	}
-	started = time.Now()
+	started = true
 	uri, err = offloader.UploadContent(ctx, GCSUploadRequest{
 		Path:        t.path,
 		Data:        t.pending.payload(),
@@ -717,33 +1049,27 @@ func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffload
 	return uri, started, err
 }
 
-// applyUpload rewrites the content_parts entry of a successful upload to
-// refer to the object, and logs a failed one. The entry already has the MIME
-// type of the part, as it was queued with the one that is uploaded.
-func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
+// applyUpload rewrites the content_parts entry of a successful upload to refer
+// to the object, or records the fallback state of a failed upload on the row
+// and part. When err == nil and uri is a gs:// URI, the inline payload is
+// replaced with the GCS reference: the part carries storage_mode, uri, and
+// object_ref, a text part keeps a textPreview, and the summary drops the text
+// part (the entry already has the MIME type of the part, as it was queued with
+// the one that is uploaded). Otherwise the failure is logged at once unless the
+// upload is deferred (whether a deferred upload is retried is only known later,
+// so its failure is logged when clearDeferredUploads drops it or
+// requeueDeferredUploads queues it again), and the fallback state is recorded:
+// for a binary part the part text becomes [UPLOAD FAILED]; for a text part the
+// inline text is kept, the summary retains it via retainInlineSummary, and
+// is_truncated is set to true when fallbackTruncated indicates the inline
+// fallback was itself truncated.
+func (b *batchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	u := t.pending
 	err := t.err
 	if err == nil && !strings.HasPrefix(t.uri, "gs://") {
 		err = errInvalidGCSURI
 	}
 	if err != nil {
-		eventID, _ := t.row[eventIDField].(string)
-		summary := safeUploadErrorSummary(err)
-		if deferred {
-			// Logged later: the plain failure when the upload is dropped, or
-			// the retry sentence when requeueDeferredUploads puts it back.
-			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
-				d.failures = append(d.failures, deferredUploadFailure{
-					eventID: eventID,
-					partIdx: u.partIdx,
-					size:    u.size(),
-					summary: summary,
-				})
-			}
-		} else {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-				eventID, u.partIdx, u.size(), summary)
-		}
 		if !u.isText {
 			t.part["text"] = uploadFailedText
 		} else {
@@ -754,6 +1080,10 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 				fallbackText, _ := t.part["text"].(string)
 				t.builder.retainInlineSummary(u.contentOrd, u.partIdx, fallbackText, u.fallbackTruncated)
 			}
+		}
+		if !deferred {
+			eventID, _ := t.row[eventIDField].(string)
+			b.logUploadFailure(eventID, u, safeUploadErrorSummary(err), false)
 		}
 		return
 	}
@@ -768,6 +1098,19 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	} else {
 		t.part["text"] = mediaOffloadedText
 	}
+}
+
+// logUploadFailure logs that the upload of part u of the row of eventID
+// failed, with its byte size and errSummary but nothing from its payload.
+// retry reports whether the upload is retried on the next flush.
+func (b *batchProcessor) logUploadFailure(eventID string, u pendingUpload, errSummary string, retry bool) {
+	if retry {
+		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+			eventID, u.partIdx, u.size(), errSummary)
+		return
+	}
+	b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+		eventID, u.partIdx, u.size(), errSummary)
 }
 
 // gcsOffloader is the GCSContentOffloader that stores objects in a Cloud

@@ -18,6 +18,7 @@ package sessiontestsuite
 
 import (
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,6 +32,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 // ExpectedSession represents a snapshot of a session's public state for test comparisons.
@@ -50,9 +52,7 @@ func Snapshot(s session.Session) ExpectedSession {
 
 	state := make(map[string]any)
 	if s.State() != nil {
-		for k, v := range s.State().All() {
-			state[k] = v
-		}
+		maps.Insert(state, s.State().All())
 	}
 
 	var events []*session.Event
@@ -75,7 +75,11 @@ func Snapshot(s session.Session) ExpectedSession {
 type SuiteOptions struct {
 	SupportsUserProvidedSessionID bool
 	ProvidesServerAssignedEventID bool
-	AppName                       string
+	// ChecksRequestedAuthConfigs runs the case that requires AppendEvent to
+	// refuse an event whose requested auth config does not decode as a
+	// toolauth.Config. session.Service does not require that check.
+	ChecksRequestedAuthConfigs bool
+	AppName                    string
 }
 
 // RunServiceTests runs a battery of standard tests against a Session.Service.
@@ -597,6 +601,133 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 			if diff := cmp.Diff(want, c.ExcludedEvents); diff != "" {
 				t.Errorf("excluded events mismatch (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run("requested_auth_configs_round_trip", func(t *testing.T) {
+			// A pending credential request is recorded only on the event that
+			// made it. The user may answer after a restart or on another
+			// server, and a backend that drops the config leaves nothing to
+			// match the answer against.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			requested := func() map[string]toolauth.Config {
+				return map[string]toolauth.Config{"call-1": {
+					AuthScheme: toolauth.Scheme{
+						Type: toolauth.SchemeTypeOAuth2,
+						Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+							AuthorizationURL: "https://example.com/authorize",
+							TokenURL:         "https://example.com/token",
+							Scopes:           map[string]string{"read": "Read"},
+						}},
+					},
+					RawAuthCredential: &toolauth.Credential{
+						AuthType: toolauth.CredentialTypeOAuth2,
+						OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", TokenEndpointAuthMethod: "client_secret_basic"},
+					},
+					CredentialKey: "my_tool_tokens",
+				}}
+			}
+			event := &session.Event{
+				ID:           "auth_request_event",
+				Author:       "agent",
+				InvocationID: "inv-auth",
+				Actions:      session.EventActions{RequestedAuthConfigs: requested()},
+			}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 1 {
+				t.Fatalf("Expected 1 event, got %d", len(snap.Events))
+			}
+			if diff := cmp.Diff(requested(), snap.Events[0].Actions.RequestedAuthConfigs); diff != "" {
+				t.Errorf("RequestedAuthConfigs mismatch after a round trip (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run("requested_auth_config_that_does_not_decode_is_refused", func(t *testing.T) {
+			// A toolauth.Config struct literal is not checked when it is
+			// built, and its encoder accepts configs its decoder refuses. A
+			// backend that stored one could not read the session back. A
+			// backend that opts in refuses the append, even if it never
+			// decodes.
+			if !opts.ChecksRequestedAuthConfigs {
+				t.Skip("Skipping: the backend does not check requested auth configs on append")
+			}
+			s := setup(t)
+			for _, tc := range []struct {
+				name   string
+				config toolauth.Config
+			}{
+				{
+					name:   "zero_scheme",
+					config: toolauth.Config{CredentialKey: "k"},
+				},
+				{
+					name: "oauth2_flow_without_urls",
+					config: toolauth.Config{AuthScheme: toolauth.Scheme{
+						Type:  toolauth.SchemeTypeOAuth2,
+						Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{}},
+					}},
+				},
+				{
+					name: "credential_without_auth_type",
+					config: toolauth.Config{
+						AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+						RawAuthCredential: &toolauth.Credential{APIKey: "k"},
+					},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := t.Context()
+
+					created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+					if err != nil {
+						t.Fatalf("Setup: Create failed: %v", err)
+					}
+					event := &session.Event{
+						ID:           "bad_auth_request_event",
+						Author:       "agent",
+						InvocationID: "inv-auth",
+						Actions: session.EventActions{
+							RequestedAuthConfigs: map[string]toolauth.Config{"call-1": tc.config},
+						},
+					}
+					if err := s.AppendEvent(ctx, created.Session, event); err == nil {
+						t.Error("AppendEvent() succeeded, want an error for a request that does not decode")
+					}
+
+					got, err := s.Get(ctx, &session.GetRequest{
+						AppName:   testAppName,
+						UserID:    "user1",
+						SessionID: created.Session.ID(),
+					})
+					if err != nil {
+						t.Fatalf("Get() after the refused append failed: %v", err)
+					}
+					if n := got.Session.Events().Len(); n != 0 {
+						t.Errorf("Get() returned %d events, want 0", n)
+					}
+					if n := created.Session.Events().Len(); n != 0 {
+						t.Errorf("the caller's session holds %d events after the refused append, want 0", n)
+					}
+				})
 			}
 		})
 

@@ -338,7 +338,7 @@ func TestDefaultValidateOutput_ContentFallback(t *testing.T) {
 		// String-typed schemas must still enforce per-string
 		// constraints (e.g. minLength); the fallback re-validates
 		// before returning the projected text.
-		schema, err := (&jsonschema.Schema{Type: "string", MinLength: jsonschema.Ptr(5)}).Resolve(nil)
+		schema, err := (&jsonschema.Schema{Type: "string", MinLength: new(5)}).Resolve(nil)
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
@@ -415,7 +415,7 @@ func TestDefaultValidateOutput_StringFallback(t *testing.T) {
 	t.Run("string_schema_min_length_violation_fails", func(t *testing.T) {
 		// The string output path must enforce per-string constraints
 		// just like the *genai.Content path.
-		schema, err := (&jsonschema.Schema{Type: "string", MinLength: jsonschema.Ptr(5)}).Resolve(nil)
+		schema, err := (&jsonschema.Schema{Type: "string", MinLength: new(5)}).Resolve(nil)
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}

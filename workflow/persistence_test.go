@@ -19,6 +19,7 @@ import (
 	"errors"
 	"iter"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,8 +171,7 @@ func TestReconstructRunState_LatestOutcome(t *testing.T) {
 }
 
 func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
-	rerun := true
-	c := NewFunctionNode("c", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{RerunOnResume: &rerun})
+	c := NewFunctionNode("c", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{RerunOnResume: new(true)})
 	wf, err := New("root", []Edge{{From: Start, To: c}})
 	if err != nil {
 		t.Fatal(err)
@@ -254,6 +254,254 @@ func TestReconstructRunState_CancellationAfterInterrupt(t *testing.T) {
 				t.Fatal("cancellation confused an outstanding pause with failed re-entry")
 			}
 		})
+	}
+}
+
+// A re-entry node on a loop can pause once per visit. An answer belongs to
+// the activation that got it. Once history records that the activation
+// completed, the answer must not count for the next pause of the node.
+// Until then the node still needs it.
+func TestReconstructRunState_AnswerConsumedByCompletedActivation(t *testing.T) {
+	count := newDummyNode("count")
+	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
+	wf := mustNew(t, []Edge{
+		{From: Start, To: count},
+		{From: count, To: ask},
+		{From: ask, To: count, Route: StringRoute("again")},
+	})
+	// The events of ask are stamped the way the scheduler stamps them.
+	askEvent := func() *session.Event {
+		return &session.Event{NodeInfo: &session.NodeInfo{Path: "ask@1"}}
+	}
+	raised := func(id string) *session.Event {
+		ev := askEvent()
+		ev.LongRunningToolIDs = []string{id}
+		return ev
+	}
+	answered := func(id, payload string) *session.Event {
+		ev := &session.Event{Author: "user"}
+		ev.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": payload}, genai.RoleUser)
+		ev.Content.Parts[0].FunctionResponse.ID = id
+		return ev
+	}
+	output := func() *session.Event {
+		ev := askEvent()
+		ev.Output, ev.Routes = "again", []string{"again"}
+		ev.NodeInfo.OutputFor = []string{ev.NodeInfo.Path}
+		return ev
+	}
+	record := func(key string, value any) *session.Event {
+		ev := askEvent()
+		ev.CustomMetadata = map[string]any{key: value}
+		return ev
+	}
+	// completed is the record of a resumed activation that completed
+	// with output, and completedEmpty the one of an activation that
+	// completed without. failed is the record of a failed attempt.
+	completed := func() *session.Event { return record(workflowNodeResumeCompletedKey, true) }
+	completedEmpty := func() *session.Event { return record(workflowNodeCompletedKey, true) }
+	failed := func() *session.Event { return record(workflowNodeOutcomeKey, workflowNodeFailureOutcome) }
+	delegated := func() *session.Event {
+		ev := completedEmpty()
+		ev.CustomMetadata[workflowDelegatedOutputKey] = "again"
+		return ev
+	}
+	for _, tc := range []struct {
+		name           string
+		history        sliceEvents
+		wantStatus     NodeStatus
+		wantInterrupts []string
+		wantResumed    map[string]any
+		// wantNoOutput checks that history keeps no output of ask, the
+		// output it emitted having been cleared by an answer.
+		wantNoOutput bool
+	}{
+		{
+			name:           "second_pause_under_a_new_id",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:           "repeated_answer_to_the_first_pause",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2"), answered("ask-1", "again")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:        "second_pause_answered",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2"), answered("ask-2", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask-2": "stop"},
+		},
+		{
+			name:           "second_pause_under_the_same_id",
+			history:        sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask"},
+		},
+		{
+			name:        "second_pause_under_the_same_id_answered",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask"), answered("ask", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "stop"},
+		},
+		{
+			// The first visit completed without output, which the
+			// scheduler records for every activation.
+			name:           "first_visit_completed_without_output",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), completedEmpty(), raised("ask-2")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			// Output is not the end of the activation. Here the node
+			// emitted output and paused again in the same run, so the
+			// rerun needs the first answer. A loop stored before the
+			// scheduler wrote completion records looks the same and
+			// keeps the behavior it had.
+			name:           "output_then_second_pause",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), raised("ask-2")},
+			wantStatus:     NodePending,
+			wantInterrupts: []string{"ask-2"},
+			wantResumed:    map[string]any{"ask-1": "again"},
+		},
+		{
+			name:        "output_then_second_pause_answered",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), raised("ask-2"), answered("ask-2", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask-1": "again", "ask-2": "stop"},
+		},
+		{
+			// A failed re-entry is retried with the answer it had.
+			name:        "output_then_failure",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), failed()},
+			wantStatus:  NodeFailed,
+			wantResumed: map[string]any{"ask-1": "again"},
+		},
+		{
+			// A dynamic node records its delegated output before the
+			// activation is over. That is not a completion yet.
+			name:        "delegated_output_then_failure",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), delegated(), failed()},
+			wantStatus:  NodeFailed,
+			wantResumed: map[string]any{"ask-1": "again"},
+		},
+		{
+			// A node that raises an ID again waits for a new answer,
+			// completed or not. Same as adk-python.
+			name:           "asked_again_before_completing",
+			history:        sliceEvents{raised("ask"), answered("ask", "again"), raised("ask")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask"},
+		},
+		{
+			name:        "asked_again_before_completing_answered",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), raised("ask"), answered("ask", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "stop"},
+		},
+		{
+			// The answer to a pause raised again is the first answer to
+			// that pause. Like any first answer it discards output the
+			// node emitted while it waited, in the scan and in the
+			// outputs kept for successors.
+			name:         "output_during_second_pause_under_the_same_id",
+			history:      sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask"), output(), answered("ask", "stop")},
+			wantStatus:   NodePending,
+			wantResumed:  map[string]any{"ask": "stop"},
+			wantNoOutput: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := wf.ReconstructRunState(fakeSession{events: tc.history}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "ask")
+			if ns.Status != tc.wantStatus || !reflect.DeepEqual(ns.Interrupts, tc.wantInterrupts) || !reflect.DeepEqual(ns.ResumedInputs, tc.wantResumed) {
+				t.Errorf("ask = status %v, interrupts %v, resumed inputs %v, want status %v, interrupts %v, resumed inputs %v",
+					ns.Status, ns.Interrupts, ns.ResumedInputs, tc.wantStatus, tc.wantInterrupts, tc.wantResumed)
+			}
+			if tc.wantNoOutput {
+				outputs, _ := collectNodeOutputs(tc.history, buildNodesByName(wf.graph), "", wf.name)
+				if out, ok := outputs["ask"]; ok {
+					t.Errorf("history keeps output %v of ask, want none", out)
+				}
+			}
+		})
+	}
+}
+
+// A resumed re-entry node that completes with output gets one record that
+// says so. Nodes that were not resumed get none, since nothing reads it there.
+func TestScheduler_ResumeCompletionRecord(t *testing.T) {
+	records := func(events []*session.Event) []string {
+		var paths []string
+		for _, ev := range events {
+			if ev.CustomMetadata[workflowNodeResumeCompletedKey] == true {
+				paths = append(paths, ev.NodeInfo.Path)
+			}
+		}
+		return paths
+	}
+	t.Run("not_resumed", func(t *testing.T) {
+		a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
+		b := NewFunctionNode("b", func(agent.Context, string) (string, error) { return "B", nil }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: a}, {From: a, To: b}})
+		if got := records(drain(t, wf.Run(newSeededMockCtx(t)))); len(got) != 0 {
+			t.Errorf("records on %v, want none", got)
+		}
+	})
+	t.Run("resumed", func(t *testing.T) {
+		ask := NewFunctionNode("ask", func(ctx agent.Context, _ any) (string, error) {
+			if _, ok := ctx.ResumedInput("approval"); !ok {
+				return "", errors.New("no answer")
+			}
+			return "done", nil
+		}, NodeConfig{RerunOnResume: new(true)})
+		next := NewFunctionNode("next", func(agent.Context, string) (string, error) { return "next", nil }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: ask}, {From: ask, To: next}})
+		state := NewRunState()
+		state.Nodes["ask"] = &NodeState{Status: NodeWaiting, Interrupts: []string{"approval"}}
+		got := records(drain(t, wf.Resume(agent.Promote(newMockCtx(t)), state, map[string]any{"approval": "yes"})))
+		if want := []string{"ask@1"}; !slices.Equal(got, want) {
+			t.Errorf("records on %v, want %v", got, want)
+		}
+	})
+}
+
+// A node that routes back to itself and to another node is queued behind
+// that node under a concurrency cap. Queueing it must not turn the run that
+// just completed into a failed one in history.
+func TestScheduler_SelfLoopUnderConcurrencyCapRecordsNoFailure(t *testing.T) {
+	visits := 0
+	loop := NewEmittingFunctionNode("loop", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		visits++
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = visits
+		if visits == 1 {
+			ev.Routes = []string{"again"}
+		}
+		return nil, emit(ev)
+	}, NodeConfig{})
+	side := NewFunctionNode("side", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{})
+	wf, err := New("", []Edge{
+		{From: Start, To: loop},
+		{From: loop, To: side, Route: StringRoute("again")},
+		{From: loop, To: loop, Route: StringRoute("again")},
+	}, WithMaxConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := drain(t, wf.Run(newSeededMockCtx(t)))
+	for _, ev := range events {
+		if outcome := workflowNodeOutcome(ev); outcome != "" {
+			t.Errorf("%s recorded as %s", ev.NodeInfo.Path, outcome)
+		}
+	}
+	if visits != 2 {
+		t.Errorf("loop ran %d times, want 2", visits)
 	}
 }
 
@@ -423,8 +671,7 @@ func TestWorkflow_CancelledDynamicChildDoesNotReplayOutput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := "root@1"
-			resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path})
+			resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("root@1")})
 			var sawJoin bool
 			for ev, err := range wf.Resume(resumeCtx, state, map[string]any{"b": "approved"}) {
 				if err != nil {

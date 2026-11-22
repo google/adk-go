@@ -29,6 +29,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -226,14 +228,12 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 		t.Fatalf("RunLive failed: %v", err)
 	}
 
-	// Key on content, not on any event: the connection that drops still yields
-	// a content-less event for the setup exchange before it dies.
+	// Key on content, not on any event: the turn that proves recovery is the
+	// pong from a connection after the drop.
 	sawTurn := make(chan struct{})
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		once := false
 		for ev, err := range seq {
 			if err != nil {
@@ -244,7 +244,7 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 				close(sawTurn)
 			}
 		}
-	}()
+	})
 	select {
 	case <-sawTurn:
 	case <-time.After(drainTimeout):
@@ -261,6 +261,178 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 	if got := connCount.Load(); got != 2 {
 		t.Errorf("dialled %d times, want 2", got)
 	}
+}
+
+// TestRunLiveResumedConnectionDoesNotReplayHistory pins that a reconnect which
+// resumes the session with the server's handle does not send the conversation
+// history again. The server already holds it, and SendHistory ends a history
+// whose last turn is the user's with turnComplete, so a replay would also have
+// the model answer that turn a second time. The server reports the session as
+// not resumable just before the drop, as it does while the model is answering,
+// so the reconnect also has to keep the handle it was offered before that.
+func TestRunLiveResumedConnectionDoesNotReplayHistory(t *testing.T) {
+	const handle = "handle-1"
+	firstConnFrame := make(chan string, 1)
+	resumedConnFrames := make(chan []string, 1)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		switch connNum {
+		case 1:
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				t.Errorf("reading the first connection's history failed: %v", err)
+				return
+			}
+			firstConnFrame <- string(frame)
+			for _, update := range []string{
+				`{"sessionResumptionUpdate":{"newHandle":"` + handle + `","resumable":true}}`,
+				`{"sessionResumptionUpdate":{"resumable":false}}`,
+			} {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(update)); err != nil {
+					return
+				}
+			}
+			// Then the connection drops.
+		case 2:
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+				return
+			}
+			// Everything the client sends until it closes. A history replay is
+			// written before the client reads the turn above, so it is here.
+			var frames []string
+			for {
+				_, frame, err := conn.ReadMessage()
+				if err != nil {
+					break
+				}
+				frames = append(frames, string(frame))
+			}
+			resumedConnFrames <- frames
+		}
+	})
+	f := newReconnectFlow(client, testLiveReconnectPolicy(4, 20))
+	f.RequestProcessors = append(f.RequestProcessors, func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+		req.Contents = []*genai.Content{genai.NewContentFromText("Book a table for two.", genai.RoleUser)}
+		return func(yield func(*session.Event, error) bool) {}
+	})
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	done := startDrainClosingOnContent(sess, seq)
+
+	select {
+	case frame := <-firstConnFrame:
+		if !strings.Contains(frame, `"clientContent"`) {
+			t.Fatalf("first connection got %s, want the history as clientContent", frame)
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the first connection never received the history")
+	}
+	select {
+	case frames := <-resumedConnFrames:
+		for _, frame := range frames {
+			if strings.Contains(frame, `"clientContent"`) {
+				t.Errorf("resumed connection replayed the history: %s", frame)
+			}
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the session never resumed on a second connection")
+	}
+	if _, err := awaitDrain(t, done); err != nil {
+		t.Errorf("caller got an error after a resumed drop: %v", err)
+	}
+
+	if got := ctx.(*icontext.InvocationContext).LiveSessionResumptionHandle(); got != handle {
+		t.Errorf("resumption handle = %q, want %q", got, handle)
+	}
+	if got := connCount.Load(); got != 2 {
+		t.Errorf("dialled %d times, want 2", got)
+	}
+}
+
+// TestRunLiveCallerHandleDoesNotReplayHistory covers the other way a
+// connection resumes: the caller hands RunLive a handle from an earlier run in
+// LiveRunConfig.SessionResumption. That first connection resumes the session
+// too, so it must not replay the history either.
+func TestRunLiveCallerHandleDoesNotReplayHistory(t *testing.T) {
+	frames := make(chan []string, 1)
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			return
+		}
+		var got []string
+		for {
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			got = append(got, string(frame))
+		}
+		frames <- got
+	})
+	f := newReconnectFlow(client, testLiveReconnectPolicy(4, 20))
+	f.RequestProcessors = append(f.RequestProcessors, func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+		req.Contents = []*genai.Content{genai.NewContentFromText("Book a table for two.", genai.RoleUser)}
+		return func(yield func(*session.Event, error) bool) {}
+	})
+	testAgent, err := agent.New(agent.Config{Name: "test-live-agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live: &agent.LiveRunConfig{
+				SessionResumption: &genai.SessionResumptionConfig{Handle: "earlier-run-handle"},
+			},
+		}),
+		icontext.InvocationContextParams{Agent: testAgent},
+	)
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	done := startDrainClosingOnContent(sess, seq)
+
+	select {
+	case got := <-frames:
+		for _, frame := range got {
+			if strings.Contains(frame, `"clientContent"`) {
+				t.Errorf("connection resuming the caller's handle replayed the history: %s", frame)
+			}
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the connection never closed")
+	}
+	if _, err := awaitDrain(t, done); err != nil {
+		t.Errorf("caller got an error: %v", err)
+	}
+}
+
+// startDrainClosingOnContent is startDrain that closes sess once the first
+// event with content arrives, which ends a session the server keeps open.
+func startDrainClosingOnContent(sess agent.LiveSession, seq iter.Seq2[*session.Event, error]) <-chan drainResult {
+	done := make(chan drainResult, 1)
+	go func() {
+		var r drainResult
+		for ev, err := range seq {
+			if err != nil {
+				r.err = err
+			}
+			if ev != nil {
+				r.events++
+				if ev.LLMResponse.Content != nil {
+					_ = sess.Close()
+				}
+			}
+		}
+		done <- r
+	}()
+	return done
 }
 
 // TestRunLiveReconnectStopsOnTeardown pins that neither Close nor cancellation
@@ -587,15 +759,13 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxTotal.
 	time.Sleep(10 * connLifetime)
@@ -645,15 +815,13 @@ func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for more cycles than the ceiling would allow.
 	time.Sleep(6 * connLifetime)
@@ -694,15 +862,13 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxAttempts.
 	time.Sleep(10 * connLifetime)
@@ -724,12 +890,15 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 // slowness to the connection: a backend that dies at once then reads as healthy
 // and spends none of the ceiling.
 //
-// The server sends nothing, so each connection produces exactly one event, the
-// setup exchange. The reader hands that off and is free again before it meets
-// the error, which is what puts the caller's delay after the error is stamped
-// rather than before.
+// The server sends one turnComplete frame per connection, so each connection
+// produces exactly one event. The frame has no content, so it does not reset
+// the consecutive budget. The reader hands the event off and is free again
+// before it meets the error, which is what puts the caller's delay after the
+// error is stamped rather than before.
 func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
-	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {})
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"turnComplete":true}}`))
+	})
 	// maxAttempts well above maxTotal, so the ceiling is what fires.
 	p := testLiveReconnectPolicy(100, 3)
 	p.healthyUptime = 20 * time.Millisecond
@@ -745,9 +914,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
@@ -755,7 +922,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 			// Far slower than healthyUptime, which is the whole point.
 			time.Sleep(10 * p.healthyUptime)
 		}
-	}()
+	})
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

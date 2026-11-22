@@ -575,8 +575,9 @@ func TestMCPToolRunContent(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			tool := &mcpTool{
-				name:      "test_tool",
-				mcpClient: &fixedResultMCPClient{result: test.result},
+				name:         "test_tool",
+				originalName: "test_tool",
+				mcpClient:    &fixedResultMCPClient{result: test.result},
 			}
 			got, err := tool.Run(&agent.ContextMock{}, map[string]any{})
 			if test.wantErr != "" {

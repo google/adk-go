@@ -73,11 +73,17 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 	if isObjectSchema(newTool.userSchema) {
 		newTool.wrappedSchema = newTool.userSchema
 	} else {
+		// The unwrapped value becomes the task's output, and a nil output reads
+		// as "the task did not finish", so the delegation would never close.
+		// Declare and validate the result as non-nullable. Copy the schema so
+		// the agent's own OutputSchema keeps the Nullable the user set.
+		result := *newTool.userSchema
+		result.Nullable = nil
 		newTool.wrapperKey = defaultWrapperKey
 		newTool.wrappedSchema = &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
-				newTool.wrapperKey: newTool.userSchema,
+				newTool.wrapperKey: &result,
 			},
 			Required: []string{newTool.wrapperKey},
 		}
@@ -180,6 +186,8 @@ func (t *FinishTaskTool) validateArgs(args map[string]any) error {
 		return utils.ValidateMapOnSchema(args, t.userSchema, false)
 	}
 
+	// wrappedSchema is the declared schema, whose result is non-nullable,
+	// so a null result is rejected here as well.
 	return utils.ValidateMapOnSchema(
 		args,
 		t.wrappedSchema,

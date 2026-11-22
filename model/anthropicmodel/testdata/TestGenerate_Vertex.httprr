@@ -1,0 +1,15 @@
+httprr trace v1
+537 277
+POST https://us-east5-aiplatform.googleapis.com/v1/projects/test-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-5-20250929:rawPredict HTTP/1.1
+Host: us-east5-aiplatform.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 183
+Accept: application/json
+Anthropic-Version: 2023-06-01
+Content-Type: application/json
+
+{"max_tokens":8192,"messages":[{"content":[{"text":"What is 2 + 2? Reply with the digit only.","type":"text"}],"role":"user"}],"temperature":0,"anthropic_version":"vertex-2023-10-16"}HTTP/1.1 200 OK
+Content-Length: 205
+Content-Type: application/json
+
+{"id":"msg_vertex_01","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"4"}],"usage":{"input_tokens":14,"output_tokens":2}}

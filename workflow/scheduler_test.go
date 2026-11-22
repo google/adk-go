@@ -19,7 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sort"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -506,7 +506,10 @@ func TestScheduler_CallerBreakStopsScheduling(t *testing.T) {
 	})
 
 	// Caller breaks immediately after the first event.
-	for range w.Run(mockCtx) {
+	for _, err := range w.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
 		break
 	}
 
@@ -622,7 +625,7 @@ func outputsOf(events []*session.Event) []string {
 		}
 		out = append(out, fmt.Sprint(ev.Output))
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -1179,7 +1182,7 @@ func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
 	if got, want := len(events), 4; got != want {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if events[i].Output != nil {
 			t.Errorf("event %d Output = %v, want nil (progress)", i, events[i].Output)
 		}
@@ -1315,7 +1318,7 @@ type progressThenSchemaOutputNode struct {
 
 func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for i := 0; i < n.progress; i++ {
+		for range n.progress {
 			if !yield(session.NewEvent(ctx, ctx.InvocationID()), nil) {
 				return
 			}

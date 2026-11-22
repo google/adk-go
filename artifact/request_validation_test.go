@@ -122,6 +122,24 @@ func TestSaveRequest_Validate(t *testing.T) {
 			wantErr:    true,
 			wantErrMsg: "invalid name: filename cannot contain path separators",
 		},
+		{
+			// An artifact reference part carries neither text nor inline data. The
+			// shared contract must reject it so backends that don't understand
+			// references (e.g. GCS) keep their behavior; only inMemoryService.Save
+			// tolerates it via its own scope check.
+			name: "Artifact reference part is rejected by the shared contract",
+			req: &SaveRequest{
+				AppName:   "MyApp",
+				UserID:    "user-123",
+				SessionID: "sess-abc",
+				FileName:  "alias.txt",
+				Part: &genai.Part{FileData: &genai.FileData{
+					FileURI: "artifact://apps/MyApp/users/user-123/sessions/sess-abc/artifacts/file.txt/versions/1",
+				}},
+			},
+			wantErr:    true,
+			wantErrMsg: "invalid save request: Part.InlineData or Part.Text has to be set",
+		},
 	}
 	executeValidatorTestCases(t, "SaveRequest", testCases)
 }

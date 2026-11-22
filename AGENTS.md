@@ -40,7 +40,7 @@ workspace, while `./...` matches only the module you are standing in:
 - Build:       `go build -mod=readonly work`
 - Test:        `go test -race -mod=readonly -count=1 -shuffle=on work`
 - Single pkg:  `go test -race ./agent/...`
-- Lint:        `golangci-lint run`   (per module; v2, CI pins v2.3.1; config in `.golangci.yml`)
+- Lint:        `golangci-lint run`   (per module; v2, CI pins v2.15.0; config in `.golangci.yml`)
 - Tidy check:  `go mod tidy -diff`   (per module; must print nothing)
 - Format:      `golangci-lint fmt`   (per module; applies gofumpt + goimports)
 
@@ -51,7 +51,7 @@ Install the same `golangci-lint` CI uses. A newer release reports findings CI
 does not, which reads as a failure you did not cause:
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ```
 
 `golangci-lint` and `go mod tidy` are per-module, so a run from the repo root
@@ -92,7 +92,7 @@ A change is complete only when all of these pass locally:
   `workflowagents/` holds `loopagent`, `parallelagent`, `sequentialagent`)
 - `runner/`    Execution engine that drives the run loop
 - `workflow/`  Node/graph-based workflow engine for multi-agent apps
-- `model/`     LLM abstraction (`gemini`, `apigee`, `openaimodel`)
+- `model/`     LLM abstraction (`gemini`, `apigee`, `anthropicmodel`, `openaimodel`)
 - `tool/`      Tool/Toolset interface + built-in tools (incl. `skilltoolset/`, `mcptoolset/`)
 - `session/`   Conversation state + events
 - `memory/`, `artifact/`   Long-term memory and file/data services
@@ -355,6 +355,10 @@ on, optionally scoped as `fix(runner):`. Release tooling reads the landed
 subject to choose the next version and build the release notes, and it skips
 anything with no recognized type without reporting an error. A mistitled PR
 merges green and then goes missing from the changelog.
+
+To have the release notes link the issue a PR fixes, end the commit message with
+a `Fixes #123` line. Release tooling reads issue references only from that
+final trailer block, never from the PR description.
 
 ## Self-review
 
