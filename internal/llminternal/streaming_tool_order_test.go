@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"encoding/json"
+	"io"
 	"iter"
 	"sync"
 	"testing"
@@ -88,12 +89,11 @@ func TestLiveErrorFollowUpOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = sess.Close() }()
-	go func() {
-		for range seq {
-		}
-	}()
+	done := startDrain(seq)
 	for _, want := range []string{"pending", "error"} {
 		select {
+		case result := <-done:
+			t.Fatalf("live stream ended early: %v", result.err)
 		case response := <-got:
 			if response != want {
 				t.Fatalf("response kind = %q, want %q", response, want)
@@ -104,6 +104,12 @@ func TestLiveErrorFollowUpOrder(t *testing.T) {
 	}
 }
 
+// Returning EOF during request encoding makes the live sender reconnect
+// before it can accept another response on the first connection.
+type reconnectOnMarshal struct{}
+
+func (reconnectOnMarshal) MarshalJSON() ([]byte, error) { return nil, io.EOF }
+
 // If a connection drops after RunLive queues pendingSend for a streaming tool
 // call and before inputCh drains it, reconnect discards pendingSend with the
 // dead socket. The pending gate must still open so the streaming tool's chunk
@@ -112,7 +118,6 @@ func TestLiveReconnectDropsQueuedPendingResponseReleasesTool(t *testing.T) {
 	const toolCall = `{"toolCall":{"functionCalls":[` +
 		`{"id":"call_1","name":"lookup","args":{"value":"x"}},` +
 		`{"id":"call_2","name":"slow","args":{}}]}}`
-	conn1Closed := make(chan struct{})
 	chunkReady := make(chan struct{})
 	var chunkReadyOnce sync.Once
 	sessReady := make(chan struct{})
@@ -122,8 +127,7 @@ func TestLiveReconnectDropsQueuedPendingResponseReleasesTool(t *testing.T) {
 		if connNum == 1 {
 			<-sessReady
 			_ = conn.WriteMessage(websocket.TextMessage, []byte(toolCall))
-			_ = conn.Close()
-			close(conn1Closed)
+			_, _, _ = conn.ReadMessage()
 			return
 		}
 		chunkReadyOnce.Do(func() { close(chunkReady) })
@@ -168,16 +172,14 @@ func TestLiveReconnectDropsQueuedPendingResponseReleasesTool(t *testing.T) {
 			}
 		})
 	slow := &mockFunctionTool{name: "slow", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
-		<-conn1Closed
-		// Give Connection 1's reader time to observe EOF and park on errChan;
-		// also write once through inputCh so Connection 1's sender goroutine
-		// fails on the closed socket and exits before pendingSend is queued,
-		// ensuring select deterministically takes the reconnect branch.
-		time.Sleep(15 * time.Millisecond)
-		go func() {
-			_ = sess.Send(agent.LiveRequest{RealtimeInput: &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0}}})
-		}()
-		time.Sleep(15 * time.Millisecond)
+		err := sess.Send(agent.LiveRequest{Content: &genai.Content{Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				Name: "disconnect", Response: map[string]any{"value": reconnectOnMarshal{}},
+			},
+		}}}})
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{"ok": true}, nil
 	}}
 
@@ -194,12 +196,11 @@ func TestLiveReconnectDropsQueuedPendingResponseReleasesTool(t *testing.T) {
 	}
 	close(sessReady)
 	defer func() { _ = sess.Close() }()
-	go func() {
-		for range seq {
-		}
-	}()
+	done := startDrain(seq)
 
 	select {
+	case result := <-done:
+		t.Fatalf("live stream ended early: %v", result.err)
 	case text := <-gotOnConn2:
 		if text != "Function lookup returned: after-reconnect" {
 			t.Fatalf("conn 2 text = %q, want %q", text, "Function lookup returned: after-reconnect")

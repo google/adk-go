@@ -152,9 +152,13 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("unexpected args type, got: %T", args)})
 			return
 		}
-		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+		input, validationFailed, err := typeutil.ConvertWithValidationResult[map[string]any, TArgs](m, f.inputSchema)
 		if err != nil {
-			yield("", &toolerror.BeforeHandler{Err: err})
+			if validationFailed {
+				yield("", &toolerror.BeforeHandler{Err: err})
+			} else {
+				yield("", &handlerError{err: err})
+			}
 			return
 		}
 
@@ -195,10 +199,8 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 	}
 }
 
-// handlerError wraps errors yielded by a streaming handler so live-mode
-// streamingToolErrorMessage's exact *toolerror.BeforeHandler assertion does not
-// treat handler-re-yielded framework errors as trusted pre-handler text, while
-// keeping Error() and Unwrap() identical to the handler's error outside live mode.
+// handlerError keeps application errors from handlers and JSON conversions opaque
+// to the live model while preserving their text and cause for direct callers.
 type handlerError struct{ err error }
 
 func (e *handlerError) Error() string { return e.err.Error() }

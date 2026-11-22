@@ -347,11 +347,10 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 	// Create response sessions, transform the storageSessions into
 	responseSessions := make([]session.Session, 0, len(foundSessions))
 	for _, storage := range foundSessions {
-		s := storage
-		sess, err := createSessionFromStorageSession(&s)
+		sess, err := createSessionFromStorageSession(&storage)
 		if err != nil {
 			// If we encounter a single mapping error, we fail the whole request.
-			return nil, fmt.Errorf("failed to map storage object for session %s: %w", s.ID, err)
+			return nil, fmt.Errorf("failed to map storage object for session %s: %w", storage.ID, err)
 		}
 
 		userState, ok := userStates[sess.UserID()]

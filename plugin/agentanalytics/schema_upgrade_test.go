@@ -133,23 +133,66 @@ func TestEnsureTableAndSchema_NotFoundCreatesTableWithVersionLabel(t *testing.T)
 }
 
 func TestEnsureTableAndSchema_ConflictOnCreateRecovery(t *testing.T) {
-	t.Run("DisableSchemaUpgrade=true treats 409 as success without re-fetching", func(t *testing.T) {
+	t.Run("DisableSchemaUpgrade=true re-fetches metadata after 409 and skips Update", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.DisableSchemaUpgrade = true
 		table := &mockTableOps{
 			metadataSeq: []metadataResponse{
 				{err: &googleapi.Error{Code: http.StatusNotFound}},
+				{md: &bq.TableMetadata{
+					Type:   bq.RegularTable,
+					Schema: bq.Schema{{Name: "timestamp", Type: bq.TimestampFieldType, Required: true}},
+					ETag:   "etag-after-409",
+				}},
 			},
 			createErr: &googleapi.Error{Code: http.StatusConflict, Message: "already exists"},
 		}
 		if err := ensureTableAndSchema(context.Background(), table, cfg, nil); err != nil {
 			t.Fatalf("ensureTableAndSchema() error = %v", err)
 		}
-		if table.metadataCalls != 1 {
-			t.Errorf("metadataCalls = %d, want 1", table.metadataCalls)
+		if table.metadataCalls != 2 {
+			t.Errorf("metadataCalls = %d, want 2", table.metadataCalls)
 		}
 		if table.updateCalls != 0 {
 			t.Errorf("updateCalls = %d, want 0", table.updateCalls)
+		}
+	})
+
+	t.Run("DisableSchemaUpgrade=true fails when follow-up metadata after 409 returns 404", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.DisableSchemaUpgrade = true
+		table := &mockTableOps{
+			metadataSeq: []metadataResponse{
+				{err: &googleapi.Error{Code: http.StatusNotFound}},
+				{err: &googleapi.Error{Code: http.StatusNotFound}},
+			},
+			createErr: &googleapi.Error{Code: http.StatusConflict, Message: "already exists"},
+		}
+		err := ensureTableAndSchema(context.Background(), table, cfg, nil)
+		if err == nil {
+			t.Fatal("ensureTableAndSchema() error = nil, want 404 error after 409")
+		}
+		var apiErr *googleapi.Error
+		if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
+			t.Errorf("ensureTableAndSchema() error = %v, want wrapped 404 googleapi.Error", err)
+		}
+	})
+
+	t.Run("DisableSchemaUpgrade=true fails when follow-up metadata after 409 returns VIEW", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.TableName = "events"
+		cfg.DisableSchemaUpgrade = true
+		table := &mockTableOps{
+			metadataSeq: []metadataResponse{
+				{err: &googleapi.Error{Code: http.StatusNotFound}},
+				{md: &bq.TableMetadata{Type: bq.ViewTable, Schema: EventsSchema()}},
+			},
+			createErr: &googleapi.Error{Code: http.StatusConflict, Message: "already exists"},
+		}
+		err := ensureTableAndSchema(context.Background(), table, cfg, nil)
+		const wantErr = "BigQuery destination events has type VIEW, want TABLE"
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("ensureTableAndSchema() error = %v, want substring %q", err, wantErr)
 		}
 	})
 
@@ -823,5 +866,47 @@ func TestUpgradeTableSchema_CaseInsensitiveNestedRecordLookup(t *testing.T) {
 	}
 	if len(merged) != 1 || len(merged[0].Schema) != 2 {
 		t.Fatalf("merged subfields count = %d, want 2", len(merged[0].Schema))
+	}
+}
+
+func TestValidateDestinationTableType(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		tableType bq.TableType
+		wantErr   string
+	}{
+		{name: "regular_table", tableType: bq.RegularTable},
+		{name: "empty_synthetic_metadata", tableType: ""},
+		{name: "view", tableType: bq.ViewTable, wantErr: "BigQuery destination events has type VIEW, want TABLE"},
+		{name: "materialized_view", tableType: bq.MaterializedView, wantErr: "BigQuery destination events has type MATERIALIZED_VIEW, want TABLE"},
+		{name: "external_table", tableType: bq.ExternalTable, wantErr: "BigQuery destination events has type EXTERNAL, want TABLE"},
+		{name: "snapshot", tableType: bq.Snapshot, wantErr: "BigQuery destination events has type SNAPSHOT, want TABLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			md := &bq.TableMetadata{Type: tc.tableType, Schema: EventsSchema()}
+			err := validateDestinationTableType("events", md)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateDestinationTableType(%q) error = %v, want nil", tc.tableType, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateDestinationTableType(%q) error = %v, want substring %q", tc.tableType, err, tc.wantErr)
+			}
+
+			for _, disableUpgrade := range []bool{false, true} {
+				cfg := DefaultConfig()
+				cfg.TableName = "events"
+				cfg.DisableSchemaUpgrade = disableUpgrade
+				ops := &mockTableOps{metadataSeq: []metadataResponse{{md: md}}}
+				ensureErr := ensureTableAndSchema(context.Background(), ops, cfg, nil)
+				if tc.wantErr == "" {
+					if ensureErr != nil {
+						t.Errorf("ensureTableAndSchema(DisableSchemaUpgrade=%v) error = %v, want nil", disableUpgrade, ensureErr)
+					}
+				} else if ensureErr == nil || !strings.Contains(ensureErr.Error(), tc.wantErr) {
+					t.Errorf("ensureTableAndSchema(DisableSchemaUpgrade=%v) error = %v, want substring %q", disableUpgrade, ensureErr, tc.wantErr)
+				}
+			}
+		})
 	}
 }

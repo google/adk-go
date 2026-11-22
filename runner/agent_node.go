@@ -178,7 +178,7 @@ func answeredInterrupts(sess session.Session, userContent *genai.Content) map[st
 	}
 	longRunning := map[string]struct{}{}
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		for _, id := range ev.LongRunningToolIDs {
 			longRunning[id] = struct{}{}

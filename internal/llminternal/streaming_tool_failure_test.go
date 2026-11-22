@@ -122,6 +122,27 @@ func liveFrameworkErrorMessage(t *testing.T, lookup tool.Tool, input map[string]
 	return ""
 }
 
+type privateDecoderArgs struct {
+	Value string `json:"value"`
+}
+
+func (*privateDecoderArgs) UnmarshalJSON([]byte) error {
+	return errors.New("private application decoder detail")
+}
+
+func TestLiveStreamingToolSanitizesArgumentDecoderErrors(t *testing.T) {
+	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"}, func(agent.Context, privateDecoderArgs) iter.Seq2[string, error] {
+		t.Fatal("handler ran despite a decoding error")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := liveFrameworkErrorMessage(t, lookup, map[string]any{"value": "valid"}, nil); got != streamingToolInternalError("lookup") {
+		t.Errorf("live error = %q, want generic tool error", got)
+	}
+}
+
 func TestLiveFrameworkErrorClassification(t *testing.T) {
 	type args struct {
 		Value string `json:"value"`
