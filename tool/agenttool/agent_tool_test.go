@@ -396,6 +396,68 @@ func TestAgentTool_Run_CodeParts(t *testing.T) {
 	}
 }
 
+func TestAgentTool_Run_StructuredOutputCodeParts(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"ok": {Type: genai.TypeBoolean}},
+		Required:   []string{"ok"},
+	}
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  map[string]any
+	}{
+		{
+			name: "executable_code",
+			parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+				{Text: `{"ok":true}`},
+			},
+			want: map[string]any{"ok": true},
+		},
+		{
+			name: "execution_result",
+			parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1\n", Outcome: genai.OutcomeOK}},
+				{Text: `{"ok":true}`},
+			},
+			want: map[string]any{"ok": true},
+		},
+		{
+			name: "split_json",
+			parts: []*genai.Part{
+				{Text: `{"ok":tr`},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1\n", Outcome: genai.OutcomeOK}},
+				{Text: `ue}`},
+			},
+			want: map[string]any{"ok": true},
+		},
+		{
+			name: "code_only",
+			parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "{\"ok\":true}\n", Outcome: genai.OutcomeOK}},
+			},
+			want: map[string]any{"result": ""},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm := &testutil.MockModel{
+				Responses: []*genai.Content{{Role: genai.RoleModel, Parts: tt.parts}},
+			}
+			child := createAgentWithModel(t, nil, outputSchema, llm)
+			wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
+			got, err := wrapped.Run(createToolContext(t, child), map[string]any{"request": "calculate"})
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if !cmp.Equal(got, tt.want) {
+				t.Error("Run returned an unexpected tool result")
+			}
+		})
+	}
+}
+
 func TestAgentTool_Run_FiltersThoughtParts(t *testing.T) {
 	testLLM := &testutil.MockModel{
 		Responses: []*genai.Content{
