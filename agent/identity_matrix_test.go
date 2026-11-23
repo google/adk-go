@@ -983,7 +983,7 @@ func (a userArtifacts) Load(context.Context, string) (*artifact.LoadResponse, er
 	return nil, nil
 }
 
-func (a userArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+func (a userArtifacts) LoadVersion(context.Context, string, *int64) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
 

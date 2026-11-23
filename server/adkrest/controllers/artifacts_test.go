@@ -16,6 +16,7 @@ package controllers_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -63,18 +64,22 @@ func artifactVars(name, version string) map[string]string {
 	return vars
 }
 
-// artifactServiceWithFile returns an in-memory service holding one saved artifact.
+// artifactServiceWithFile returns an in-memory service holding two versions
+// (0 = "v0 artifact", 1 = "v1 artifact") so tests can distinguish version 0
+// from the latest version.
 func artifactServiceWithFile(t *testing.T) artifact.Service {
 	t.Helper()
 	svc := artifact.InMemoryService()
-	if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
-		AppName:   testArtifactApp,
-		UserID:    testArtifactUser,
-		SessionID: testArtifactSession,
-		FileName:  testArtifactName,
-		Part:      genai.NewPartFromText("hello artifact"),
-	}); err != nil {
-		t.Fatalf("save artifact: %v", err)
+	for _, text := range []string{"v0 artifact", "v1 artifact"} {
+		if _, err := svc.Save(t.Context(), &artifact.SaveRequest{
+			AppName:   testArtifactApp,
+			UserID:    testArtifactUser,
+			SessionID: testArtifactSession,
+			FileName:  testArtifactName,
+			Part:      genai.NewPartFromText(text),
+		}); err != nil {
+			t.Fatalf("save artifact: %v", err)
+		}
 	}
 	return svc
 }
@@ -85,11 +90,27 @@ func TestLoadArtifactHandler(t *testing.T) {
 		artifactName string
 		query        string
 		wantStatus   int
+		wantText     string
 	}{
 		{
-			name:         "existing_artifact",
+			name:         "existing_artifact_latest",
 			artifactName: testArtifactName,
 			wantStatus:   http.StatusOK,
+			wantText:     "v1 artifact",
+		},
+		{
+			name:         "existing_artifact_version_0",
+			artifactName: testArtifactName,
+			query:        "?version=0",
+			wantStatus:   http.StatusOK,
+			wantText:     "v0 artifact",
+		},
+		{
+			name:         "existing_artifact_version_1",
+			artifactName: testArtifactName,
+			query:        "?version=1",
+			wantStatus:   http.StatusOK,
+			wantText:     "v1 artifact",
 		},
 		{
 			name:         "missing_artifact",
@@ -101,6 +122,24 @@ func TestLoadArtifactHandler(t *testing.T) {
 			artifactName: testArtifactName,
 			query:        "?version=42",
 			wantStatus:   http.StatusNotFound,
+		},
+		{
+			name:         "int64_version_above_int32",
+			artifactName: testArtifactName,
+			query:        "?version=2147483648",
+			wantStatus:   http.StatusNotFound,
+		},
+		{
+			name:         "non_integer_version",
+			artifactName: testArtifactName,
+			query:        "?version=latest",
+			wantStatus:   http.StatusBadRequest,
+		},
+		{
+			name:         "overflow_version",
+			artifactName: testArtifactName,
+			query:        "?version=99999999999999999999",
+			wantStatus:   http.StatusBadRequest,
 		},
 		{
 			name:         "empty_artifact_name",
@@ -121,7 +160,16 @@ func TestLoadArtifactHandler(t *testing.T) {
 			apiController.LoadArtifactHandler(rr, req)
 
 			if got := rr.Code; got != tt.wantStatus {
-				t.Errorf("LoadArtifactHandler status = %d, want %d (body %q)", got, tt.wantStatus, rr.Body.String())
+				t.Fatalf("LoadArtifactHandler status = %d, want %d (body %q)", got, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantText != "" {
+				var part genai.Part
+				if err := json.Unmarshal(rr.Body.Bytes(), &part); err != nil {
+					t.Fatalf("decode response part: %v", err)
+				}
+				if part.Text != tt.wantText {
+					t.Errorf("LoadArtifactHandler text = %q, want %q", part.Text, tt.wantText)
+				}
 			}
 		})
 	}
@@ -133,12 +181,21 @@ func TestLoadArtifactVersionHandler(t *testing.T) {
 		artifactName string
 		version      string
 		wantStatus   int
+		wantText     string
 	}{
 		{
-			name:         "existing_version",
+			name:         "existing_version_0",
+			artifactName: testArtifactName,
+			version:      "0",
+			wantStatus:   http.StatusOK,
+			wantText:     "v0 artifact",
+		},
+		{
+			name:         "existing_version_1",
 			artifactName: testArtifactName,
 			version:      "1",
 			wantStatus:   http.StatusOK,
+			wantText:     "v1 artifact",
 		},
 		{
 			name:         "missing_version",
@@ -147,15 +204,27 @@ func TestLoadArtifactVersionHandler(t *testing.T) {
 			wantStatus:   http.StatusNotFound,
 		},
 		{
+			name:         "int64_version_above_int32",
+			artifactName: testArtifactName,
+			version:      "2147483648",
+			wantStatus:   http.StatusNotFound,
+		},
+		{
 			name:         "missing_artifact",
 			artifactName: "no-such-file.txt",
-			version:      "1",
+			version:      "0",
 			wantStatus:   http.StatusNotFound,
 		},
 		{
 			name:         "non_integer_version",
 			artifactName: testArtifactName,
 			version:      "latest",
+			wantStatus:   http.StatusBadRequest,
+		},
+		{
+			name:         "overflow_version",
+			artifactName: testArtifactName,
+			version:      "99999999999999999999",
 			wantStatus:   http.StatusBadRequest,
 		},
 	}
@@ -171,7 +240,16 @@ func TestLoadArtifactVersionHandler(t *testing.T) {
 			apiController.LoadArtifactVersionHandler(rr, req)
 
 			if got := rr.Code; got != tt.wantStatus {
-				t.Errorf("LoadArtifactVersionHandler status = %d, want %d (body %q)", got, tt.wantStatus, rr.Body.String())
+				t.Fatalf("LoadArtifactVersionHandler status = %d, want %d (body %q)", got, tt.wantStatus, rr.Body.String())
+			}
+			if tt.wantText != "" {
+				var part genai.Part
+				if err := json.Unmarshal(rr.Body.Bytes(), &part); err != nil {
+					t.Fatalf("decode response part: %v", err)
+				}
+				if part.Text != tt.wantText {
+					t.Errorf("LoadArtifactVersionHandler text = %q, want %q", part.Text, tt.wantText)
+				}
 			}
 		})
 	}

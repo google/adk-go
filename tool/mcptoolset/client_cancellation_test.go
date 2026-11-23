@@ -80,7 +80,7 @@ func TestSessionWaitCancellation(t *testing.T) {
 					}
 
 					waiterCtx, waiterCancel := context.WithCancel(t.Context())
-					wantErr := error(context.Canceled)
+					wantErr := context.Canceled
 					if deadline {
 						waiterCancel()
 						waiterCtx, waiterCancel = context.WithTimeout(t.Context(), 50*time.Millisecond)

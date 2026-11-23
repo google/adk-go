@@ -140,13 +140,13 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		artifact *genai.Part
 	}{
 		// file1.
-		{"file1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-		{"file1", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
-		{"file1", 3, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
+		{"file1", 0, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
+		{"file1", 1, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+		{"file1", 2, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		// file2.
-		{"file2", 1, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
+		{"file2", 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		// file3.
-		{"file3", 1, genai.NewPartFromText("file v1")},
+		{"file3", 0, genai.NewPartFromText("file v1")},
 	}
 
 	t.Log("Save file1 and file2")
@@ -166,30 +166,33 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		fileName := "file1"
 		for _, tc := range []struct {
 			name    string
-			version int64
+			version *int64
 			want    *genai.Part
 		}{
-			{"latest", 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
-			{"ver=1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-			{"ver=2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+			{"latest", nil, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
+			{"ver=0", new(int64(0)), genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
+			{"ver=1", new(int64(1)), genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+			{"ver=2", new(int64(2)), genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
 		} {
 			got, err := srv.Load(ctx, &artifact.LoadRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
 				Version: tc.version,
 			})
 			if err != nil || !cmp.Equal(got.Part, tc.want) {
-				t.Errorf("Load(%v) = (%v, %v), want (%v, nil)", tc.version, got.Part, err, tc.want)
+				t.Errorf("Load(%s) = (%v, %v), want (%v, nil)", tc.name, got, err, tc.want)
 			}
 		}
 	})
 
 	t.Run(fmt.Sprintf("LoadNonexistentVersion_%s", testSuffix), func(t *testing.T) {
-		got, err := srv.Load(ctx, &artifact.LoadRequest{
-			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
-			Version: 99,
-		})
-		if !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("Load('file1', ver=99) = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		for _, ver := range []int64{-1, 3, 99} {
+			got, err := srv.Load(ctx, &artifact.LoadRequest{
+				AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+				Version: new(ver),
+			})
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("Load('file1', ver=%d) = (%v, %v), want error(%v)", ver, got, err, fs.ErrNotExist)
+			}
 		}
 	})
 
@@ -217,21 +220,21 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		}
 		got := resp.Versions
 		slices.Sort(got)
-		want := []int64{1, 2, 3}
+		want := []int64{0, 1, 2}
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("Versions('file1') = %v, want %v", got, want)
 		}
 	})
 
-	t.Log("Delete file1 version 3")
+	t.Log("Delete file1 version 2")
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
-		Version: 3,
+		Version: new(int64(2)),
 	}); err != nil {
-		t.Fatalf("Delete(file1@v3) failed: %v", err)
+		t.Fatalf("Delete(file1@v2) failed: %v", err)
 	}
 
-	t.Run(fmt.Sprintf("LoadAfterDeleteVersion3_%s", testSuffix), func(t *testing.T) {
+	t.Run(fmt.Sprintf("LoadAfterDeleteVersion2_%s", testSuffix), func(t *testing.T) {
 		resp, err := srv.Load(ctx, &artifact.LoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
 		})
@@ -246,10 +249,37 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 
 		deleted, err := srv.Load(ctx, &artifact.LoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
-			Version: 3,
+			Version: new(int64(2)),
 		})
 		if !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("Load('file1', ver=3) = (%v, %v), want error(%v)", deleted, err, fs.ErrNotExist)
+			t.Fatalf("Load('file1', ver=2) = (%v, %v), want error(%v)", deleted, err, fs.ErrNotExist)
+		}
+	})
+
+	// Deleting version 0 explicitly must remove only version 0, not all versions.
+	if err := srv.Delete(ctx, &artifact.DeleteRequest{
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+		Version: new(int64(0)),
+	}); err != nil {
+		t.Fatalf("Delete(file1@v0) failed: %v", err)
+	}
+
+	t.Run(fmt.Sprintf("LoadAfterDeleteVersion0_%s", testSuffix), func(t *testing.T) {
+		if _, err := srv.Load(ctx, &artifact.LoadRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+			Version: new(int64(0)),
+		}); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Load('file1', ver=0) err = %v, want %v", err, fs.ErrNotExist)
+		}
+		resp, err := srv.Load(ctx, &artifact.LoadRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+		})
+		if err != nil {
+			t.Fatalf("Load('file1') after deleting v0 failed: %v", err)
+		}
+		want := genai.NewPartFromBytes([]byte("file v2"), "text/plain")
+		if diff := cmp.Diff(resp.Part, want); diff != "" {
+			t.Fatalf("Load('file1') after deleting v0 mismatch (-want +got):\n%s", diff)
 		}
 	})
 
@@ -319,13 +349,13 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		metadata  map[string]any
 	}{
 		// file1.
-		{"user:file1", "save-session-1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain"), map[string]any{"version": "v1"}},
-		{"user:file1", "save-session-2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain"), map[string]any{"version": "v2"}},
-		{"user:file1", "save-session-3", 3, genai.NewPartFromBytes([]byte("file v3"), "text/plain"), map[string]any{"version": "v3"}},
+		{"user:file1", "save-session-1", 0, genai.NewPartFromBytes([]byte("file v1"), "text/plain"), map[string]any{"version": "v1"}},
+		{"user:file1", "save-session-2", 1, genai.NewPartFromBytes([]byte("file v2"), "text/plain"), map[string]any{"version": "v2"}},
+		{"user:file1", "save-session-3", 2, genai.NewPartFromBytes([]byte("file v3"), "text/plain"), map[string]any{"version": "v3"}},
 		// file2.
-		{"file2", sessionID, 1, genai.NewPartFromBytes([]byte("file v3"), "text/plain"), nil},
+		{"file2", sessionID, 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain"), nil},
 		// file3.
-		{"user:file3", "another-save-session", 1, genai.NewPartFromText("file v1"), nil},
+		{"user:file3", "another-save-session", 0, genai.NewPartFromText("file v1"), nil},
 	}
 
 	t.Log("Save file1 and file2")
@@ -345,19 +375,19 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		fileName := "user:file1"
 		for _, tc := range []struct {
 			name    string
-			version int64
+			version *int64
 			want    *genai.Part
 		}{
-			{"latest", 0, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
-			{"ver=1", 1, genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
-			{"ver=2", 2, genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
+			{"latest", nil, genai.NewPartFromBytes([]byte("file v3"), "text/plain")},
+			{"ver=0", new(int64(0)), genai.NewPartFromBytes([]byte("file v1"), "text/plain")},
+			{"ver=1", new(int64(1)), genai.NewPartFromBytes([]byte("file v2"), "text/plain")},
 		} {
 			got, err := srv.Load(ctx, &artifact.LoadRequest{
 				AppName: appName, UserID: userID, SessionID: "'user' should be used instead", FileName: fileName,
 				Version: tc.version,
 			})
 			if err != nil || !cmp.Equal(got.Part, tc.want) {
-				t.Errorf("Load(%v) = (%v, %v), want (%v, nil)", tc.version, got.Part, err, tc.want)
+				t.Errorf("Load(%s) = (%v, %v), want (%v, nil)", tc.name, got, err, tc.want)
 			}
 		}
 	})
@@ -385,7 +415,7 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		}
 		got := resp.Versions
 		slices.Sort(got)
-		want := []int64{1, 2, 3}
+		want := []int64{0, 1, 2}
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Errorf("Versions('user:file1') = %v, want %v", got, want)
 		}
@@ -394,12 +424,13 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 	t.Run(fmt.Sprintf("GetArtifactVersion_%s", testSuffix), func(t *testing.T) {
 		for _, tc := range []struct {
 			name         string
-			version      int64
+			version      *int64
 			wantVersion  int64
 			wantMetadata map[string]any
 		}{
-			{name: "latest", wantVersion: 3, wantMetadata: map[string]any{"version": "v3"}},
-			{name: "specific", version: 2, wantVersion: 2, wantMetadata: map[string]any{"version": "v2"}},
+			{name: "latest", wantVersion: 2, wantMetadata: map[string]any{"version": "v3"}},
+			{name: "first", version: new(int64(0)), wantVersion: 0, wantMetadata: map[string]any{"version": "v1"}},
+			{name: "specific", version: new(int64(1)), wantVersion: 1, wantMetadata: map[string]any{"version": "v2"}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
@@ -407,19 +438,19 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 					Version: tc.version,
 				})
 				if err != nil {
-					t.Fatalf("GetArtifactVersion(%d) failed: %v", tc.version, err)
+					t.Fatalf("GetArtifactVersion(%s) failed: %v", tc.name, err)
 				}
 				assertArtifactVersion(t, resp.ArtifactVersion, tc.wantVersion, "text/plain", tc.wantMetadata)
 			})
 		}
 	})
 
-	t.Log("Delete user:file1 version 3")
+	t.Log("Delete user:file1 version 2")
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
 		AppName: appName, UserID: userID, SessionID: sessionID, FileName: "user:file1",
-		Version: 3,
+		Version: new(int64(2)),
 	}); err != nil {
-		t.Fatalf("Delete(user:file1@v3) failed: %v", err)
+		t.Fatalf("Delete(user:file1@v2) failed: %v", err)
 	}
 	t.Run(fmt.Sprintf("GetArtifactVersionAfterDeleteLatest_%s", testSuffix), func(t *testing.T) {
 		resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
@@ -428,10 +459,10 @@ func testArtifactService_UserScoped(ctx context.Context, t *testing.T, srv artif
 		if err != nil {
 			t.Fatalf("GetArtifactVersion() failed: %v", err)
 		}
-		assertArtifactVersion(t, resp.ArtifactVersion, 2, "text/plain", map[string]any{"version": "v2"})
+		assertArtifactVersion(t, resp.ArtifactVersion, 1, "text/plain", map[string]any{"version": "v2"})
 	})
 
-	t.Run(fmt.Sprintf("LoadAfterDeleteVersion3_%s", testSuffix), func(t *testing.T) {
+	t.Run(fmt.Sprintf("LoadAfterDeleteVersion2_%s", testSuffix), func(t *testing.T) {
 		resp, err := srv.Load(ctx, &artifact.LoadRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "user:file1",
 		})
@@ -554,7 +585,7 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		{genai.NewPartFromBytes([]byte("v2"), "image/png"), map[string]any{"version": "v2", "count": 2}},
 		{genai.NewPartFromText("v3"), map[string]any{"version": "v3", "enabled": true}},
 	} {
-		wantVersion := int64(i + 1)
+		wantVersion := int64(i)
 		got, err := srv.Save(ctx, &artifact.SaveRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
 			Part: data.part, CustomMetadata: data.metadata,
@@ -567,21 +598,21 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 	canonicalURIs := make(map[int64]string)
 	for _, tc := range []struct {
 		name         string
-		version      int64
+		version      *int64
 		wantVersion  int64
 		wantMimeType string
 		wantMetadata map[string]any
 	}{
-		{name: "latest", wantVersion: 3, wantMimeType: "text/plain", wantMetadata: map[string]any{"version": "v3", "enabled": "true"}},
-		{name: "specific", version: 2, wantVersion: 2, wantMimeType: "image/png", wantMetadata: map[string]any{"version": "v2", "count": "2"}},
-		{name: "empty metadata", version: 1, wantVersion: 1, wantMimeType: "text/plain", wantMetadata: map[string]any{}},
+		{name: "latest", wantVersion: 2, wantMimeType: "text/plain", wantMetadata: map[string]any{"version": "v3", "enabled": "true"}},
+		{name: "specific", version: new(int64(1)), wantVersion: 1, wantMimeType: "image/png", wantMetadata: map[string]any{"version": "v2", "count": "2"}},
+		{name: "empty metadata", version: new(int64(0)), wantVersion: 0, wantMimeType: "text/plain", wantMetadata: map[string]any{}},
 	} {
 		t.Run(fmt.Sprintf("GetArtifactVersion_%s_%s", tc.name, testSuffix), func(t *testing.T) {
 			resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
 				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: tc.version,
 			})
 			if err != nil {
-				t.Fatalf("GetArtifactVersion(%d) failed: %v", tc.version, err)
+				t.Fatalf("GetArtifactVersion(%s) failed: %v", tc.name, err)
 			}
 			assertArtifactVersion(t, resp.ArtifactVersion, tc.wantVersion, tc.wantMimeType, tc.wantMetadata)
 			canonicalURIs[tc.wantVersion] = resp.ArtifactVersion.CanonicalURI
@@ -624,11 +655,13 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 	}
 
 	t.Run(fmt.Sprintf("GetArtifactVersion_nonexistent-version_%s", testSuffix), func(t *testing.T) {
-		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
-			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 99,
-		})
-		if !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("GetArtifactVersion(99) = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		for _, ver := range []int64{-1, 3, 99} {
+			got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+				AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: new(ver),
+			})
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("GetArtifactVersion(%d) = (%v, %v), want error(%v)", ver, got, err, fs.ErrNotExist)
+			}
 		}
 	})
 	t.Run(fmt.Sprintf("GetArtifactVersion_nonexistent-file_%s", testSuffix), func(t *testing.T) {
@@ -641,9 +674,9 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 	})
 
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
-		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 3,
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: new(int64(2)),
 	}); err != nil {
-		t.Fatalf("Delete(%s@v3) failed: %v", fileName, err)
+		t.Fatalf("Delete(%s@v2) failed: %v", fileName, err)
 	}
 	t.Run(fmt.Sprintf("GetArtifactVersionAfterDeleteLatest_%s", testSuffix), func(t *testing.T) {
 		resp, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
@@ -652,7 +685,7 @@ func testArtifactService_GetArtifactVersion(ctx context.Context, t *testing.T, s
 		if err != nil {
 			t.Fatalf("GetArtifactVersion() failed: %v", err)
 		}
-		assertArtifactVersion(t, resp.ArtifactVersion, 2, "image/png", map[string]any{"version": "v2", "count": "2"})
+		assertArtifactVersion(t, resp.ArtifactVersion, 1, "image/png", map[string]any{"version": "v2", "count": "2"})
 	})
 
 	if err := srv.Delete(ctx, &artifact.DeleteRequest{
