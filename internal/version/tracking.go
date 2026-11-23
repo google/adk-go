@@ -32,20 +32,27 @@ import (
 //
 // dest is the URL the request goes to. When it is a Google API endpoint and
 // the process runs on a runtime ADK recognizes, the ADK label names that
-// runtime, as in "google-adk/2.6.0+cloud_run". Any other dest, including "",
+// runtime, as in "google-adk/2.6.0+cloud_run". Any other dest, including nil,
 // gets the label without a suffix.
-func TrackingHeader(dest string) string {
+func TrackingHeader(dest *url.URL) string {
 	return strings.Join(trackingTokens(dest), " ")
 }
 
-var languageToken = "gl-go/" + strings.TrimPrefix(runtime.Version(), "go")
+var goTokens = languageTokens(runtime.Version())
 
-func trackingTokens(dest string) []string {
+// languageTokens returns the label for the Go version v, as header tokens. It
+// is one token for a release, and more for a development toolchain, whose
+// version holds spaces.
+func languageTokens(v string) []string {
+	return strings.Fields("gl-go/" + strings.TrimPrefix(v, "go"))
+}
+
+func trackingTokens(dest *url.URL) []string {
 	adk := "google-adk/" + Version
 	if tag := runtimeTag(); tag != "" && isGoogleAPI(dest) {
 		adk += "+" + tag
 	}
-	return []string{adk, languageToken}
+	return append([]string{adk}, goTokens...)
 }
 
 // runtimeTag returns the tag of the runtime hosting the process, or "" when
@@ -69,21 +76,25 @@ func runtimeTag() string {
 	return ""
 }
 
-// isGoogleAPI reports whether dest is an https URL of a host under
-// googleapis.com. It follows adk-python's is_googleapis_url, and also rejects
-// a URL that url.Parse does. A URL with userinfo is rejected, because HTTP
+// isGoogleAPI reports whether a request to dest goes, over TLS, to a DNS name
+// under googleapis.com. It follows adk-python's is_googleapis_url and is
+// stricter in one way: the host may hold only the characters of a DNS name.
+// That leaves out an IP address, whose IPv6 zone can end in the suffix while
+// the address is anyone's. A URL with userinfo is rejected, because HTTP
 // clients disagree on which host it names.
-func isGoogleAPI(dest string) bool {
-	u, err := url.Parse(dest)
-	if err != nil {
+func isGoogleAPI(dest *url.URL) bool {
+	if dest == nil || dest.Scheme != "https" || dest.User != nil {
 		return false
 	}
 	const suffix = ".googleapis.com"
-	host := u.Hostname()
-	// Compared as bytes of the same length rather than after strings.ToLower,
-	// which turns letters such as "İ" into ASCII ones.
+	host := dest.Hostname()
+	for i := range len(host) {
+		if c := host[i]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
 	i := len(host) - len(suffix)
-	return u.Scheme == "https" && u.User == nil && i >= 0 && strings.EqualFold(host[i:], suffix)
+	return i >= 0 && strings.EqualFold(host[i:], suffix)
 }
 
 // WithTrackingHeaders returns a copy of h whose user-agent and
@@ -91,7 +102,7 @@ func isGoogleAPI(dest string) bool {
 // h held under any casing of those names, without duplicates. It is the rule
 // adk-python's merge_tracking_headers applies. dest is the URL the request
 // goes to, as for [TrackingHeader]. h is not modified.
-func WithTrackingHeaders(h http.Header, dest string) http.Header {
+func WithTrackingHeaders(h http.Header, dest *url.URL) http.Header {
 	merged := h.Clone()
 	if merged == nil {
 		merged = make(http.Header)
