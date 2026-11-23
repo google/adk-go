@@ -40,7 +40,7 @@ func convertResponse(resp *oairesponses.Response) (*genai.GenerateContentRespons
 	}
 	return &genai.GenerateContentResponse{
 		Candidates:    []*genai.Candidate{candidate},
-		ModelVersion:  string(resp.Model),
+		ModelVersion:  resp.Model,
 		ResponseID:    resp.ID,
 		UsageMetadata: convertUsage(resp.Usage),
 	}, nil

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"iter"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -675,6 +676,221 @@ func runResumeTurn(t *testing.T, root agent.Agent, msg *genai.Content, onResume 
 		authors[ev.Author]++
 	}
 	return authors, nil
+}
+
+// TestRun_FunctionResponseAfterSecondPauseInLoop checks a re-entry node that
+// pauses once per pass of a loop. The answer to its first pause is used up by
+// the pass that got it. Sent again while the node waits on its second pause, it
+// must not rerun the node, and the answer to the second pause must be the one
+// the node gets.
+//
+// With one ID for both pauses a repeated answer cannot be told from the second
+// answer, and the last answer won before this change too. That case is here to
+// check that the pause is opened again once its first answer is used up, or the
+// second answer would resume nothing.
+//
+// In the self loop case the node routes straight back to itself, so the next
+// pass starts before the completion of the first one is recorded.
+func TestRun_FunctionResponseAfterSecondPauseInLoop(t *testing.T) {
+	tests := []struct {
+		name        string
+		interruptID func(pass int) string
+		// repeatFirst sends the first answer again during the second pause.
+		// With one ID for both pauses it would be the second answer.
+		repeatFirst bool
+		// selfLoop has ask route back to itself instead of through count.
+		// ask then counts its passes itself.
+		selfLoop bool
+	}{
+		{name: "new id per pause", interruptID: func(pass int) string { return "ask-" + strconv.Itoa(pass) }, repeatFirst: true},
+		{name: "same id", interruptID: func(int) string { return "ask" }},
+		{name: "self loop", interruptID: func(pass int) string { return "ask-" + strconv.Itoa(pass) }, repeatFirst: true, selfLoop: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			passes, runs := 0, 0
+			var answers []any
+			count := workflow.NewFunctionNode("count", func(agent.Context, any) (int, error) {
+				passes++
+				return passes, nil
+			}, workflow.NodeConfig{})
+			ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
+				runs++
+				pass := passes
+				if !tc.selfLoop {
+					pass = in.(int)
+				}
+				reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: tc.interruptID(pass)})
+				if err != nil {
+					return nil, err
+				}
+				answers = append(answers, reply)
+				if tc.selfLoop && reply == "again" {
+					passes++
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Routes = []string{reply.(string)}
+				ev.Output = reply
+				return nil, emit(ev)
+			}, workflow.NodeConfig{RerunOnResume: new(true)})
+			edges := []workflow.Edge{
+				{From: workflow.Start, To: count},
+				{From: count, To: ask},
+				{From: ask, To: count, Route: workflow.StringRoute("again")},
+			}
+			if tc.selfLoop {
+				passes = 1
+				edges = []workflow.Edge{
+					{From: workflow.Start, To: ask},
+					{From: ask, To: ask, Route: workflow.StringRoute("again")},
+				}
+			}
+			wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: edges})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "repro", Agent: wf, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(msg *genai.Content) error {
+				for _, err := range r.Run(t.Context(), "u", "s", msg, agent.RunConfig{}) {
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			answer := func(pass int, reply string) *genai.Content {
+				return resumeContent(tc.interruptID(pass), workflow.WorkflowInputFunctionCallName, reply)
+			}
+
+			if err := run(genai.NewContentFromText("start", genai.RoleUser)); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if err := run(answer(1, "again")); err != nil {
+				t.Fatalf("answer to the first pause: %v", err)
+			}
+			if tc.repeatFirst {
+				before := runs
+				if err := run(answer(1, "again")); !errors.Is(err, workflow.ErrNothingToResume) || runs != before {
+					t.Errorf("repeated answer to the first pause: error %v, ask ran %d more times, want ErrNothingToResume and no rerun", err, runs-before)
+				}
+			}
+			if err := run(answer(2, "stop")); err != nil {
+				t.Fatalf("answer to the second pause: %v", err)
+			}
+			if want := []any{"again", "stop"}; !slices.Equal(answers, want) {
+				t.Errorf("ask got the answers %v, want %v", answers, want)
+			}
+		})
+	}
+}
+
+// TestRun_FunctionResponseKeepsAnswersUntilNodeCompletes checks a re-entry node
+// that asks two questions in a row and emits output in between. Output does not
+// end the activation, so the first answer still belongs to it. After the second
+// answer the node must get both and finish, without asking the first question
+// again.
+func TestRun_FunctionResponseKeepsAnswersUntilNodeCompletes(t *testing.T) {
+	asked := map[string]int{}
+	var got []any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		request := func(id string) (any, error) {
+			if _, ok := ctx.ResumedInput(id); !ok {
+				asked[id]++
+			}
+			return workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: id})
+		}
+		name, err := request("name")
+		if err != nil {
+			return nil, err
+		}
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = name
+		if err := emit(ev); err != nil {
+			return nil, err
+		}
+		confirmed, err := request("confirm")
+		if err != nil {
+			return nil, err
+		}
+		got = []any{name, confirmed}
+		return nil, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+	wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: []workflow.Edge{{From: workflow.Start, To: ask}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "repro", Agent: wf, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range []*genai.Content{
+		genai.NewContentFromText("start", genai.RoleUser),
+		resumeContent("name", workflow.WorkflowInputFunctionCallName, "Ada"),
+		resumeContent("confirm", workflow.WorkflowInputFunctionCallName, "yes"),
+	} {
+		for _, err := range r.Run(t.Context(), "u", "s", msg, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("turn failed: %v", err)
+			}
+		}
+	}
+	if want := []any{"Ada", "yes"}; !slices.Equal(got, want) || asked["name"] != 1 || asked["confirm"] != 1 {
+		t.Errorf("ask got the answers %v after asking %v times, want %v with each question asked once", got, asked, want)
+	}
+}
+
+// TestRun_FunctionResponseRetriesFailedNodeWithItsAnswer checks a re-entry node
+// that gets its answer, emits output and then fails. The answer was not used up
+// by a completed activation, so sending it again must retry the node with it.
+func TestRun_FunctionResponseRetriesFailedNodeWithItsAnswer(t *testing.T) {
+	runs := 0
+	var got any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask"})
+		if err != nil {
+			return nil, err
+		}
+		runs++
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = reply
+		if err := emit(ev); err != nil {
+			return nil, err
+		}
+		if runs == 1 {
+			return nil, errors.New("scripted failure")
+		}
+		got = reply
+		return nil, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+	wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: []workflow.Edge{{From: workflow.Start, To: ask}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "repro", Agent: wf, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(msg *genai.Content) error {
+		for _, err := range r.Run(t.Context(), "u", "s", msg, agent.RunConfig{}) {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	answer := resumeContent("ask", workflow.WorkflowInputFunctionCallName, "yes")
+	if err := run(genai.NewContentFromText("start", genai.RoleUser)); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	if err := run(answer); err == nil {
+		t.Fatal("the turn in which the node fails returned no error")
+	}
+	if err := run(answer); err != nil || got != "yes" {
+		t.Errorf("answer sent again after the failure: error %v, ask finished with %v, want no error and yes", err, got)
+	}
 }
 
 // TestRun_FunctionResponseNarrowsOnlyFirstLoopPass checks that a composite

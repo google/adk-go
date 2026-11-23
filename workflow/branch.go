@@ -98,7 +98,7 @@ func commonBranchPrefix(branches []string) string {
 		}
 	}
 	commonCount := 0
-	for i := 0; i < minLen; i++ {
+	for i := range minLen {
 		seg := splits[0][i]
 		for _, s := range splits[1:] {
 			if s[i] != seg {

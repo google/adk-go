@@ -1118,10 +1118,10 @@ func TestAgentTransfer(t *testing.T) {
 
 	check := func(t *testing.T, rootAgent agent.Agent, wants [][]content) {
 		runner := testutil.NewTestAgentRunner(t, rootAgent)
-		for i := range len(wants) {
+		for i := range wants {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
 			if err != nil {
-				t.Fatalf("[round $d]: stream ended with an error: %v", err)
+				t.Fatalf("[round %d]: stream ended with an error: %v", i, err)
 			}
 			if diff := cmp.Diff(wants[i], got); diff != "" {
 				t.Errorf("[round %d] events diff (-want, +got) = %v", i, diff)
