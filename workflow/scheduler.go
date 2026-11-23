@@ -734,17 +734,15 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureI
 	return ev
 }
 
-// recordTrigger stores in metadata how the node's current activation was
-// started (see workflowNodeTriggerPrefix).
+// recordTrigger stores in metadata the node that triggered the node's
+// current activation (see workflowNodeTriggerPrefix). It stores the name
+// only: metadata reaches A2A clients, and the input may not.
 func (s *scheduler) recordTrigger(metadata map[string]any, name string) {
 	ns := s.state.Nodes[name]
 	if ns == nil {
 		return
 	}
-	metadata[workflowNodeTriggerPrefix+s.workflowName] = map[string]any{
-		"from":  ns.TriggeredBy,
-		"input": ns.Input,
-	}
+	metadata[workflowNodeTriggerPrefix+s.workflowName] = ns.TriggeredBy
 }
 
 // finalize errors if more than one terminal node (no outgoing edges,

@@ -20,6 +20,7 @@ import (
 	"iter"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -243,11 +244,11 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 		return ev
 	}
 	// recorded adds the scheduler's trigger record for workflow "wf".
-	recorded := func(ev *session.Event, from string, input any) *session.Event {
+	recorded := func(ev *session.Event, from string) *session.Event {
 		if ev.CustomMetadata == nil {
 			ev.CustomMetadata = map[string]any{}
 		}
-		ev.CustomMetadata[workflowNodeTriggerPrefix+"wf"] = map[string]any{"from": from, "input": input}
+		ev.CustomMetadata[workflowNodeTriggerPrefix+"wf"] = from
 		return ev
 	}
 	// stored passes the event's metadata through JSON, as a database
@@ -276,8 +277,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 		edges   []Edge
 		history []*session.Event
 		// pause is what ask itself recorded. By default it raised
-		// "approval", recorded as triggered by b with "B", and got the
-		// answer.
+		// "approval", recorded as triggered by b, and got the answer.
 		pause       []*session.Event
 		wantStatus  NodeStatus
 		wantTrigger string
@@ -301,24 +301,34 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 				{From: Start, To: ask},
 			},
 			history:     []*session.Event{finished("a", "A", "skip")},
-			pause:       []*session.Event{recorded(raised("ask", "approval"), Start.Name(), "seed"), answered("approval")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), Start.Name()), answered("approval")},
 			wantTrigger: Start.Name(),
 			wantInput:   "seed",
 		},
 		{
-			// b ran again after it triggered ask. ask gets the output
-			// it ran with, not b's latest one.
-			name: "recorded_input_older_than_latest_output",
+			// b ran again after ask paused. ask gets the output b had
+			// when ask recorded its pause, not b's latest one.
+			name: "output_after_record",
 			edges: []Edge{
 				{From: Start, To: b},
 				{From: b, To: ask},
 				{From: ask, To: c, Route: StringRoute("again")},
 				{From: c, To: b, Route: Default},
 			},
-			history:     []*session.Event{finished("b", "B1"), finished("b", "B2")},
-			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B1"), answered("approval")},
+			history:     []*session.Event{finished("b", "B1")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b"), finished("b", "B2"), answered("approval")},
 			wantTrigger: "b",
 			wantInput:   "B1",
+		},
+		{
+			// The recorded node has no output before the record, so the
+			// input cannot be rebuilt and ask resumes the way history
+			// without records does.
+			name:        "recorded_node_without_output",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip")},
+			wantTrigger: "a",
+			wantInput:   "A",
 		},
 		{
 			// The pause came from a dynamic child of ask. The scheduler
@@ -326,7 +336,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			name:        "recorded_on_child_pause",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{recorded(raised("ask@1/child", "approval"), "b", "B"), answered("approval")},
+			pause:       []*session.Event{recorded(raised("ask@1/child", "approval"), "b"), answered("approval")},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
@@ -336,7 +346,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			name:        "partial_resume",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B"), recorded(raised("ask", "second"), "b", "B"), answered("approval")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b"), recorded(raised("ask", "second"), "b"), answered("approval")},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
@@ -346,20 +356,20 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			name:        "failed_after_answer",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{raised("ask", "approval"), answered("approval"), recorded(failed("ask"), "b", "B")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval"), recorded(failed("ask"), "b")},
 			wantStatus:  NodeFailed,
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
 		{
-			// A database session service returns the record as plain
+			// A database session service returns the metadata as plain
 			// JSON values.
 			name:        "recorded_after_json_round_trip",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{stored(recorded(raised("ask", "approval"), "b", map[string]any{"n": 1})), answered("approval")},
+			pause:       []*session.Event{stored(recorded(raised("ask", "approval"), "b")), answered("approval")},
 			wantTrigger: "b",
-			wantInput:   map[string]any{"n": float64(1)},
+			wantInput:   "B",
 		},
 		{
 			// Only the latest pause counts. Here it has no record, so ask
@@ -368,7 +378,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			edges:   routedElsewhere,
 			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
 			pause: []*session.Event{
-				recorded(raised("ask", "first"), "b", "B"), answered("first"), finished("ask", "done"),
+				recorded(raised("ask", "first"), "b"), answered("first"), finished("ask", "done"),
 				raised("ask", "approval"), answered("approval"),
 			},
 			wantTrigger: "a",
@@ -381,17 +391,24 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			edges:   routedElsewhere,
 			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
 			pause: []*session.Event{
-				recorded(raised("ask", "approval"), "b", "B"), raised("ask", ""), answered("approval"),
+				recorded(raised("ask", "approval"), "b"), raised("ask", ""), answered("approval"),
 			},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
 		{
-			// The graph no longer has the recorded edge.
-			name:        "recorded_node_not_a_predecessor",
-			edges:       routedElsewhere,
-			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{recorded(raised("ask", "approval"), "gone", "G"), answered("approval")},
+			// The recorded node is still in the graph, with output, but its
+			// edge into ask is gone.
+			name: "recorded_node_not_a_predecessor",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: a, To: b, Route: StringRoute("skip")},
+				{From: b, To: ask},
+				{From: b, To: c, Route: StringRoute("other")},
+			},
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B"), finished("c", "C")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "c"), answered("approval")},
 			wantTrigger: "a",
 			wantInput:   "A",
 		},
@@ -403,7 +420,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
 			pause: func() []*session.Event {
 				ev := raised("ask", "approval")
-				ev.CustomMetadata = map[string]any{workflowNodeTriggerPrefix + "outer": map[string]any{"from": "b", "input": "B"}}
+				ev.CustomMetadata = map[string]any{workflowNodeTriggerPrefix + "outer": "b"}
 				return []*session.Event{ev, answered("approval")}
 			}(),
 			wantTrigger: "a",
@@ -493,7 +510,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			seed.Content = genai.NewContentFromText("seed", genai.RoleUser)
 			pause := tc.pause
 			if pause == nil {
-				pause = []*session.Event{recorded(raised("ask", "approval"), "b", "B"), answered("approval")}
+				pause = []*session.Event{recorded(raised("ask", "approval"), "b"), answered("approval")}
 			}
 			events := append(sliceEvents{seed}, tc.history...)
 			events = append(events, pause...)
@@ -520,44 +537,74 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 	}
 }
 
-// The scheduler records how it started a node on the node's pause events and
-// failure records, and nowhere else.
+// The scheduler records the node that triggered a node, keyed by the workflow
+// name, on the node's pause events and failure and cancellation records, and
+// nowhere else. A dynamic child's pause gets the record of the node it pauses.
+// Only the name is recorded: the input is not copied into the metadata.
 func TestScheduler_RecordsTrigger(t *testing.T) {
 	records := func(events []*session.Event) map[string]any {
 		got := map[string]any{}
 		for _, ev := range events {
-			if record, ok := ev.CustomMetadata[workflowNodeTriggerPrefix]; ok {
-				got[ev.NodeInfo.Path] = record
+			for key, value := range ev.CustomMetadata {
+				if strings.HasPrefix(key, workflowNodeTriggerPrefix) {
+					got[key+" on "+ev.NodeInfo.Path] = value
+				}
 			}
 		}
 		return got
 	}
-	t.Run("pause", func(t *testing.T) {
-		a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
-		ask := NewDynamicNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
-			return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "approval"})
-		}, NodeConfig{})
-		wf := mustNew(t, []Edge{{From: Start, To: a}, {From: a, To: ask}})
-		got := records(drain(t, wf.Run(newSeededMockCtx(t))))
-		want := map[string]any{"ask@1": map[string]any{"from": "a", "input": "A"}}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("trigger records %v, want %v", got, want)
-		}
-	})
-	t.Run("failure", func(t *testing.T) {
-		f := NewFunctionNode("f", func(agent.Context, any) (any, error) { return nil, errors.New("scripted failure") }, NodeConfig{})
-		wf := mustNew(t, []Edge{{From: Start, To: f}})
-		var events []*session.Event
-		for ev, err := range wf.Run(newSeededMockCtx(t)) {
-			if err == nil {
-				events = append(events, ev)
+	a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
+	asks := func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "approval"})
+	}
+	for _, tc := range []struct {
+		name  string
+		edges func() []Edge
+		want  map[string]any
+	}{
+		{
+			name: "pause",
+			edges: func() []Edge {
+				return []Edge{{From: Start, To: a}, {From: a, To: NewDynamicNode("ask", asks, NodeConfig{})}}
+			},
+			want: map[string]any{workflowNodeTriggerPrefix + "wf on wf@1/ask@1": "a"},
+		},
+		{
+			name: "dynamic_child_pause",
+			edges: func() []Edge {
+				child := NewDynamicNode("child", asks, NodeConfig{})
+				ask := NewDynamicNode("ask", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+					return RunNode[any](ctx, child, in)
+				}, NodeConfig{})
+				return []Edge{{From: Start, To: a}, {From: a, To: ask}}
+			},
+			want: map[string]any{workflowNodeTriggerPrefix + "wf on wf@1/ask@1/child@1": "a"},
+		},
+		{
+			name: "failure",
+			edges: func() []Edge {
+				f := NewFunctionNode("f", func(agent.Context, any) (any, error) { return nil, errors.New("scripted failure") }, NodeConfig{})
+				return []Edge{{From: Start, To: a}, {From: a, To: f}}
+			},
+			want: map[string]any{workflowNodeTriggerPrefix + "wf on wf@1/f@1": "a"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, err := New("wf", tc.edges())
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		want := map[string]any{"f@1": map[string]any{"from": Start.Name(), "input": "seed"}}
-		if got := records(events); !reflect.DeepEqual(got, want) {
-			t.Errorf("trigger records %v, want %v", got, want)
-		}
-	})
+			var events []*session.Event
+			for ev, err := range wf.Run(newSeededMockCtx(t)) {
+				if err == nil {
+					events = append(events, ev)
+				}
+			}
+			if got := records(events); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("trigger records %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestResume_FailedSiblingRequiresMatchedInterrupt(t *testing.T) {

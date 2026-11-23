@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 
@@ -48,30 +49,71 @@ const workflowBasePathPrefix = "adk.workflow.base_path."
 
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
 
-// The scheduler of workflow W stores under workflowNodeTriggerPrefix+W how
-// it started a node's activation: the node it set as TriggeredBy and the
-// input it passed. It adds this to the node's pause events and failure
+// The scheduler of workflow W stores under workflowNodeTriggerPrefix+W the
+// name of the node it set as TriggeredBy for a node's activation. It adds
+// it to the node's pause events and to its failure and cancellation
 // records, which is where a resume picks the node up again. History
 // cannot tell which edge fired, so without it the input of a rerun node
 // has to be guessed. The workflow name in the key keeps the records of
 // nested workflows apart, as with workflowBasePathPrefix.
+//
+// Only the name is stored, never the input. Custom metadata is forwarded
+// to A2A clients, and the input can be a node output that never leaves
+// the server. The input is rebuilt from history instead (see
+// resolveTriggerInputs).
 const workflowNodeTriggerPrefix = "adk.workflow.trigger."
 
-// nodeTrigger is a trigger record read back from history.
+// nodeTrigger is a trigger record read back from history: the recorded
+// node, the position of the event that carried the record, and the input
+// rebuilt for it.
 type nodeTrigger struct {
-	from  string
-	input any
+	from     string
+	at       int
+	input    any
+	hasInput bool
 }
 
 // recordedTrigger returns the trigger that the scheduler of workflowName
-// stored on ev, or nil if there is none.
-func recordedTrigger(ev *session.Event, workflowName string) *nodeTrigger {
-	record, ok := ev.CustomMetadata[workflowNodeTriggerPrefix+workflowName].(map[string]any)
+// stored on ev, the event at position at, or nil if there is none.
+func recordedTrigger(ev *session.Event, workflowName string, at int) *nodeTrigger {
+	from, ok := ev.CustomMetadata[workflowNodeTriggerPrefix+workflowName].(string)
 	if !ok {
 		return nil
 	}
-	from, _ := record["from"].(string)
-	return &nodeTrigger{from: from, input: record["input"]}
+	return &nodeTrigger{from: from, at: at}
+}
+
+// eventsBefore is the part of events before position n.
+type eventsBefore struct {
+	events session.Events
+	n      int
+}
+
+func (e eventsBefore) Len() int                { return e.n }
+func (e eventsBefore) At(i int) *session.Event { return e.events.At(i) }
+func (e eventsBefore) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {
+		for i := range e.n {
+			if !yield(e.events.At(i)) {
+				return
+			}
+		}
+	}
+}
+
+// resolveTriggerInputs sets the input of each recorded trigger to the
+// output its node had in history just before the record, which is the
+// output the scheduler passed on. A node triggered over START gets the
+// workflow input later, in predecessorInput.
+func (w *Workflow) resolveTriggerInputs(scans map[string]*nodeScanState, events session.Events, nodesByName map[string]Node, invocationID string) {
+	for _, scan := range scans {
+		t := scan.trigger
+		if t == nil || t.from == Start.Name() {
+			continue
+		}
+		outputs, _ := collectNodeOutputs(eventsBefore{events, t.at}, nodesByName, invocationID, w.name)
+		t.input, t.hasInput = outputs[t.from]
+	}
 }
 
 // raisesInterrupt reports whether ev pauses its node.
@@ -162,8 +204,8 @@ type nodeScanState struct {
 	finished bool
 	failed   bool
 	// trigger is the trigger record on the event of the node's latest
-	// pause or failure, nil if that event has none, as in history
-	// written before the scheduler recorded triggers.
+	// pause, failure or cancellation, nil if that event has none, as in
+	// history written before the scheduler recorded triggers.
 	trigger *nodeTrigger
 }
 
@@ -233,6 +275,7 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// Stage 1: scan history into a per-node view of the pause
 	// (interrupts raised, responses that resolved them, schemas).
 	scans := scanHistory(events, nodesByName, invocationID, w.name)
+	w.resolveTriggerInputs(scans, events, nodesByName, invocationID)
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
@@ -351,7 +394,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 				sf.finished, sf.failed = true, false
 			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
 				sf.branch = ev.Branch
-				sf.trigger = recordedTrigger(ev, workflowName)
+				sf.trigger = recordedTrigger(ev, workflowName, i)
 				sf.finished = false
 				// A sibling failure may cancel an asker just after its
 				// pause was persisted. Its interrupt still owns the resume;
@@ -363,7 +406,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			}
 		}
 		if raisesInterrupt(ev) {
-			s.trigger = recordedTrigger(ev, workflowName)
+			s.trigger = recordedTrigger(ev, workflowName, i)
 		}
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
@@ -633,21 +676,24 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 }
 
 // predecessorInput returns the input and TriggeredBy for a node that
-// resumes by running again.
+// resumes by running again, either because it reruns on resume or
+// because its latest attempt failed and is retried.
 //
-// When the scheduler recorded how it started the node's last activation
-// (see workflowNodeTriggerPrefix), the node gets that input again, and
-// TriggeredBy names the node that triggered it, START included. adk-python
+// When the scheduler recorded which node triggered the last activation
+// (see workflowNodeTriggerPrefix), TriggeredBy names that node, START
+// included, and the input is that node's output just before the record
+// (see resolveTriggerInputs), or the workflow input for START. adk-python
 // gets the same result by replaying the graph on resume: START's
 // successors get the workflow input (_seed_start_triggers in
 // workflow/_workflow.py) and every other node gets the trigger.input of
 // the edge that fired into it. A record is only used while the node it
-// names is still a predecessor.
+// names is still a predecessor and, unless it is START, has output in
+// history before the record.
 //
-// History written before triggers were recorded falls back to a guess
-// from cached outputs: the first declared predecessor other than START
-// that produced output, then the workflow input for a START successor.
-// That predecessor need not be the one whose edge fired.
+// Otherwise, as in history written before triggers were recorded, the
+// input is a guess from cached outputs: the first declared predecessor
+// other than START that produced output, then the workflow input for a
+// START successor. That predecessor need not be the one whose edge fired.
 func (w *Workflow) predecessorInput(node Node, trigger *nodeTrigger, nodeOutputs map[string]any, workflowInput any) (any, string) {
 	if node == nil {
 		return nil, ""
@@ -657,7 +703,12 @@ func (w *Workflow) predecessorInput(node Node, trigger *nodeTrigger, nodeOutputs
 		return nil, ""
 	}
 	if trigger != nil && slices.ContainsFunc(incoming, func(e Edge) bool { return e.From.Name() == trigger.from }) {
-		return trigger.input, trigger.from
+		if trigger.from == Start.Name() {
+			return workflowInput, Start.Name()
+		}
+		if trigger.hasInput {
+			return trigger.input, trigger.from
+		}
 	}
 	for _, e := range incoming {
 		from := e.From.Name()
