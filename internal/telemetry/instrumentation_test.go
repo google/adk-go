@@ -602,7 +602,10 @@ func TestInstrumentGenerateContent_ChunkTiming(t *testing.T) {
 		return modelStep{resp: &r}
 	}
 	whole := func(r model.LLMResponse) modelStep { return modelStep{resp: &r} }
-	stop := model.LLMResponse{FinishReason: genai.FinishReasonStop}
+	parts := func(p ...*genai.Part) *genai.Content { return &genai.Content{Parts: p} }
+	text := model.LLMResponse{Content: parts(genai.NewPartFromText("x"))}
+	stop := model.LLMResponse{Content: parts(genai.NewPartFromText("x")), FinishReason: genai.FinishReasonStop}
+	empty := model.LLMResponse{FinishReason: genai.FinishReasonStop}
 	for _, tc := range []struct {
 		name               string
 		notStreamed        bool
@@ -611,24 +614,24 @@ func TestInstrumentGenerateContent_ChunkTiming(t *testing.T) {
 	}{
 		{
 			name:      "stream",
-			steps:     []modelStep{partial(model.LLMResponse{}), partial(model.LLMResponse{}), partial(stop), whole(stop)},
+			steps:     []modelStep{partial(text), partial(text), partial(stop), whole(stop)},
 			wantFirst: 1, wantPer: 2,
 		},
 		{
 			// A model whose aggregate carries the finish reason: the
 			// aggregate ends the span untimed.
 			name:      "aggregate ends the call",
-			steps:     []modelStep{partial(model.LLMResponse{}), partial(model.LLMResponse{}), whole(stop)},
+			steps:     []modelStep{partial(text), partial(text), whole(stop)},
 			wantFirst: 1, wantPer: 1,
 		},
 		{
 			name:      "model never marks partial",
-			steps:     []modelStep{whole(model.LLMResponse{}), whole(model.LLMResponse{}), whole(stop)},
+			steps:     []modelStep{whole(text), whole(text), whole(stop)},
 			wantFirst: 1, wantPer: 2,
 		},
 		{
 			name:      "chunk after the span ended",
-			steps:     []modelStep{partial(stop), partial(model.LLMResponse{})},
+			steps:     []modelStep{partial(stop), partial(text)},
 			wantFirst: 1,
 		},
 		{
@@ -637,8 +640,26 @@ func TestInstrumentGenerateContent_ChunkTiming(t *testing.T) {
 		},
 		{
 			name:      "error",
-			steps:     []modelStep{partial(model.LLMResponse{}), {resp: &model.LLMResponse{Partial: true}, err: errors.New("boom")}},
+			steps:     []modelStep{partial(text), {resp: &model.LLMResponse{Partial: true}, err: errors.New("boom")}},
 			wantFirst: 1,
+		},
+		{
+			name:      "chunks without output",
+			steps:     []modelStep{partial(model.LLMResponse{Content: parts(&genai.Part{ThoughtSignature: []byte("s")}, nil, &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/pcm"}})}), partial(text), partial(model.LLMResponse{UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1}}), partial(empty)},
+			wantFirst: 1,
+		},
+		{
+			name: "every kind of output",
+			steps: []modelStep{
+				partial(model.LLMResponse{Content: parts(&genai.Part{Text: "t", Thought: true})}),
+				partial(model.LLMResponse{Content: parts(&genai.Part{InlineData: &genai.Blob{Data: []byte("a"), MIMEType: "audio/pcm"}})}),
+				partial(model.LLMResponse{Content: parts(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}})}),
+				partial(model.LLMResponse{Content: parts(&genai.Part{FunctionCall: &genai.FunctionCall{PartialArgs: []*genai.PartialArg{{JsonPath: "$.a"}}}})}),
+				partial(model.LLMResponse{Content: parts(&genai.Part{FunctionCall: &genai.FunctionCall{Args: map[string]any{"a": 1}}})}),
+				partial(model.LLMResponse{Content: parts(&genai.Part{ToolCall: &genai.ToolCall{ToolType: genai.ToolTypeGoogleSearchWeb}})}),
+				partial(stop),
+			},
+			wantFirst: 1, wantPer: 6,
 		},
 		{
 			name:        "not streamed",
@@ -681,9 +702,9 @@ func TestInstrumentGenerateContent_ChunkTimingValues(t *testing.T) {
 	params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}, Stream: true}
 
 	generate(t, params, 0,
-		modelStep{resp: &model.LLMResponse{Partial: true, ModelVersion: "m-001"}, delay: wait},
-		modelStep{resp: &model.LLMResponse{Partial: true}},
-		modelStep{resp: &model.LLMResponse{Partial: true, FinishReason: genai.FinishReasonStop}},
+		modelStep{resp: &model.LLMResponse{Partial: true, Content: genai.NewContentFromText("a", genai.RoleModel), ModelVersion: "m-001"}, delay: wait},
+		modelStep{resp: &model.LLMResponse{Partial: true, Content: genai.NewContentFromText("b", genai.RoleModel)}},
+		modelStep{resp: &model.LLMResponse{Partial: true, Content: genai.NewContentFromText("c", genai.RoleModel), FinishReason: genai.FinishReasonStop}},
 	)
 
 	got := collectMetrics(t, reader)
@@ -805,11 +826,11 @@ func TestInstrumentGenerateContent_TracerChoosesTimes(t *testing.T) {
 			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
 				return func(yield func(*model.LLMResponse, error) bool) {
 					clock = clock.Add(time.Hour)
-					if !yield(&model.LLMResponse{Partial: true}, nil) {
+					if !yield(&model.LLMResponse{Partial: true, Content: genai.NewContentFromText("a", genai.RoleModel)}, nil) {
 						return
 					}
 					clock = clock.Add(10 * time.Minute)
-					yield(&model.LLMResponse{Partial: true, FinishReason: genai.FinishReasonStop}, nil)
+					yield(&model.LLMResponse{Partial: true, Content: genai.NewContentFromText("b", genai.RoleModel), FinishReason: genai.FinishReasonStop}, nil)
 				}
 			}
 			params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}, Stream: true}
@@ -874,7 +895,7 @@ func TestInstrumentGenerateContent_FirstChunkFromSpanStart(t *testing.T) {
 	OverrideTracerForTesting(t, hostTracerProvider{TracerProvider: sdktrace.NewTracerProvider(), unwrapped: true})
 	params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}, Stream: true}
 
-	generate(t, params, 0, modelStep{resp: &model.LLMResponse{Partial: true, FinishReason: genai.FinishReasonStop}})
+	generate(t, params, 0, modelStep{resp: &model.LLMResponse{Partial: true, Content: genai.NewContentFromText("a", genai.RoleModel), FinishReason: genai.FinishReasonStop}})
 
 	if p := collectMetrics(t, reader)["gen_ai.client.inference.time_to_first_chunk"]; len(p) != 1 || p[0].Value < time.Hour.Seconds() {
 		t.Errorf("time_to_first_chunk = %+v, want one point of at least the hour since the span started", p)

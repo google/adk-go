@@ -69,11 +69,11 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 	// ADK's stream aggregator marks each chunk partial, then yields the
 	// answer it assembled from them unmarked. Nothing waited for that
 	// aggregate, so it is not timed. A model that never marks a response
-	// partial has every response timed. Chunks without new output are timed
-	// too, though the conventions exclude them.
+	// partial has every response timed. A response without output, such as
+	// one carrying only usage or a finish reason, is not a chunk.
 	aggregate := c.sawPartial && !resp.Partial
 	c.sawPartial = c.sawPartial || resp.Partial
-	if !c.params.Stream || !spanOpen || err != nil || aggregate {
+	if !c.params.Stream || !spanOpen || err != nil || aggregate || !carriesOutput(resp) {
 		return
 	}
 	now := time.Now()
@@ -86,6 +86,23 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 		inst.timePerOutputChunk.Record(ctx, now.Sub(c.lastChunk).Seconds(), attrs)
 	}
 	c.lastChunk = now
+}
+
+func carriesOutput(resp *model.LLMResponse) bool {
+	if resp.Content == nil {
+		return false
+	}
+	for _, p := range resp.Content.Parts {
+		switch {
+		case p == nil:
+		case p.Text != "",
+			p.InlineData != nil && len(p.InlineData.Data) > 0,
+			p.FunctionCall != nil && (p.FunctionCall.Name != "" || len(p.FunctionCall.Args) > 0 || len(p.FunctionCall.PartialArgs) > 0),
+			p.ToolCall != nil && (p.ToolCall.ToolType != "" || len(p.ToolCall.Args) > 0):
+			return true
+		}
+	}
+	return false
 }
 
 // record records the duration and token usage of the whole call, given how
