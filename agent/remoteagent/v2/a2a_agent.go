@@ -156,7 +156,13 @@ func validateCardInterfaceOrigins(card *a2a.AgentCard, source string) error {
 			return fmt.Errorf("%w: interface URL %q must use https, or http on a loopback host", ErrUntrustedCardInterface, iface.URL)
 		}
 		ifaceScheme, ifaceHost, ifacePort := urlOrigin(ifaceURL)
-		if ifaceScheme != sourceScheme || ifaceHost != sourceHost || ifacePort != sourcePort {
+		// A Google API's mTLS host counts as its plain host, as in
+		// adk-python's _card_target_origin: with a client certificate
+		// requests go to the mTLS host, so a card fetched from one may name
+		// the other. adk-python takes every *.mtls.googleapis.com name for
+		// one. This takes the mTLS names of hosts that have one.
+		sameHost := ifaceHost == sourceHost || googlemtls.Twins(ifaceURL.Hostname(), sourceURL.Hostname())
+		if ifaceScheme != sourceScheme || !sameHost || ifacePort != sourcePort {
 			return fmt.Errorf("%w: interface URL %q does not share the origin of the configured agent card source (%q)", ErrUntrustedCardInterface, iface.URL, source)
 		}
 	}
@@ -177,13 +183,9 @@ var defaultPorts = map[string]string{"http": "80", "https": "443"}
 // cards that spell the port explicitly or the host in a different case,
 // even though DNS hostnames are case-insensitive and both name the same
 // origin.
-//
-// A Google API's mTLS host counts as its plain host, as in adk-python's
-// _card_target_origin: with a client certificate the card fetch goes to the
-// mTLS host, so a card fetched from one may name the other.
 func urlOrigin(u *url.URL) (scheme, host, port string) {
 	scheme = u.Scheme
-	host = googlemtls.PlainHost(u.Hostname())
+	host = strings.ToLower(u.Hostname())
 	port = u.Port()
 	if port == "" {
 		port = defaultPorts[scheme]
@@ -391,7 +393,8 @@ type A2AConfig struct {
 	// which is logged once per interface. A redirect that leaves the card's
 	// host, or downgrades its scheme, is refused, because the credential would
 	// follow it, and a card fetch that carries the credential must use https
-	// or a loopback host.
+	// or a loopback host. A *.googleapis.com host and its .mtls.googleapis.com
+	// name count as one host there, between https URLs.
 	//
 	// The provider is called once per invocation and its credential reused for
 	// every call that invocation makes, as adk-python caches it. It is called
@@ -437,11 +440,14 @@ type A2AConfig struct {
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
 // agent which can run in a different process or on a different host.
 //
-// Unless ClientProvider is set, an https request to a *.googleapis.com host,
-// the agent card fetch with Auth included, presents the client certificate the
-// environment provides, if any, and goes to the host's .mtls.googleapis.com
-// name. Whether there is a certificate follows the rule
-// [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
+// Unless ClientProvider is set, an https request to a *.googleapis.com host
+// presents the client certificate the environment provides, if any, and goes
+// to the host's .mtls.googleapis.com name. Whether there is a certificate
+// follows the rule [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
+// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given, and so do the
+// multi-region *.us.rep and *.eu.rep hosts, which have no such name. The
+// agent card fetch does the same only with Auth: without it the fetch
+// presents no certificate.
 func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
 		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")

@@ -384,9 +384,10 @@ type Config struct {
 	// which is where Google APIs accept a certificate-bound token. Whether
 	// there is a certificate follows the rule
 	// [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
-	// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given. Requests to
-	// other hosts are sent by http.DefaultTransport as before. An HTTPClient
-	// with a Transport is left to manage TLS itself.
+	// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given, and so do
+	// the multi-region *.us.rep and *.eu.rep hosts, which have no such name.
+	// Requests to other hosts are sent by http.DefaultTransport as before. An
+	// HTTPClient with a Transport is left to manage TLS itself.
 	//
 	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
 	// called, so the server can be started again after the connection is
@@ -449,6 +450,11 @@ type Config struct {
 	// one labeled text/event-stream, one on a stream reconnect, or one on a
 	// resume fails the session or the call with the status text as the
 	// reason.
+	//
+	// For that bound a *.googleapis.com host and its .mtls.googleapis.com
+	// name are one host, between https URLs: with a client certificate the
+	// request goes to the mTLS name (see Transport), so the server may
+	// redirect from one name to the other.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two

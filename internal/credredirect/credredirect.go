@@ -38,14 +38,16 @@ const MaxRedirects = 10
 
 // Check refuses a redirect that leaves the original request's host or
 // downgrades its scheme, and one whose request would address another host on
-// the wire than its URL names. It does not cap the number of hops.
+// the wire than its URL names. A Google API host and its mTLS name count as
+// one host between https URLs (see mtlsTwins). It does not cap the number of
+// hops.
 func Check(req *http.Request, via []*http.Request) error {
 	// Check against the original request, then against the hop just taken.
 	// The previous hop is what refuses a chain climbing to https and then
-	// dropping back to http. The original is a second line: sameTarget keeps
-	// a chain on one host and port, so it refuses nothing on its own today,
-	// and the comparison stays in case that ever changes. The order only
-	// decides which origin a refusal names.
+	// dropping back to http. The original is what refuses one climbing to
+	// https and then moving to the host's mTLS name, which counts as the
+	// same host only between two https URLs. The order only decides which
+	// origin a refusal names.
 	for _, from := range []*url.URL{via[0].URL, via[len(via)-1].URL} {
 		if !sameTarget(from, req.URL) {
 			return fmt.Errorf("refusing redirect from %s to %s", origin(from), origin(req.URL))
@@ -109,7 +111,8 @@ func hostHeader(hostport string) (string, bool) {
 // sameTarget reports whether it is safe to replay the credential on a
 // redirect from one URL to the other: every name net/http derives from the
 // host must be identical, and the scheme may only stay the same or be upgraded
-// from http to https, which strictly improves confidentiality.
+// from http to https, which strictly improves confidentiality. The one pair of
+// different names it accepts is the one mtlsTwins describes.
 func sameTarget(from, to *url.URL) bool {
 	if mtlsTwins(from, to) {
 		return true
@@ -141,20 +144,15 @@ func sameTarget(from, to *url.URL) bool {
 // mtlsTwins reports whether from and to are a Google API host and its
 // .mtls.googleapis.com name, both https on the same port. A client that
 // presents a client certificate is sent to the mTLS name, so a server may
-// redirect between the two, and both serve the same API. Only ASCII names
-// qualify: strings.ToLower folds some non-ASCII letters, the Kelvin sign
-// among them, into ASCII ones.
+// redirect between the two, and both serve the same API. It also reports true
+// for one ASCII name on both sides, which the rest of sameTarget accepts as
+// well.
 func mtlsTwins(from, to *url.URL) bool {
 	if !strings.EqualFold(from.Scheme, "https") || !strings.EqualFold(to.Scheme, "https") ||
 		defaultedPort(from) != defaultedPort(to) {
 		return false
 	}
-	f, t := from.Hostname(), to.Hostname()
-	if !isASCII(f) || !isASCII(t) {
-		return false
-	}
-	pf, pt := googlemtls.PlainHost(f), googlemtls.PlainHost(t)
-	return pf == pt && strings.HasSuffix(pf, ".googleapis.com") && len(pf) > len(".googleapis.com")
+	return googlemtls.Twins(from.Hostname(), to.Hostname())
 }
 
 // dialName returns the address net/http dials for u, falling back to the

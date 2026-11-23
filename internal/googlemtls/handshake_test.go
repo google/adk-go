@@ -21,6 +21,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
@@ -97,6 +99,82 @@ func TestHandshakeProviderErrorNamesOptOut(t *testing.T) {
 	}
 }
 
+// countingProvider presents srv's client certificate and counts the handshakes
+// that asked for it.
+func countingProvider(t *testing.T, srv *googlemtlstest.Server) *atomic.Int32 {
+	var handshakes atomic.Int32
+	t.Cleanup(googlemtls.SetTestHooks(func() (func(*tls.CertificateRequestInfo) (*tls.Certificate, error), error) {
+		return func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			handshakes.Add(1)
+			return srv.Provider(info)
+		}, nil
+	}, srv.Configure))
+	return &handshakes
+}
+
+// The mTLS transport is built once, so a second request finds the first
+// one's connection instead of running another handshake.
+func TestMTLSConnectionIsReused(t *testing.T) {
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
+	srv := googlemtlstest.NewServer(t)
+	handshakes := countingProvider(t, srv)
+	tr := googlemtls.NewTransport(unusedTransport{t})
+	for range 2 {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://aiplatform.googleapis.com/v1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip error = %v", err)
+		}
+		_ = resp.Body.Close()
+		<-srv.Requests
+	}
+	if got := handshakes.Load(); got != 1 {
+		t.Errorf("two requests ran %d handshakes, want 1", got)
+	}
+}
+
+// Concurrent first requests all present the certificate. Run with -race,
+// which is what reports an mTLS transport built without the lock.
+func TestConcurrentFirstRequestsPresentCertificate(t *testing.T) {
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
+	srv := googlemtlstest.NewServer(t)
+	srv.Install(t)
+	tr := googlemtls.NewTransport(unusedTransport{t})
+	const n = 8
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://aiplatform.googleapis.com/v1", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Errorf("RoundTrip error = %v", err)
+				return
+			}
+			_ = resp.Body.Close()
+		})
+	}
+	wg.Wait()
+	want := googlemtlstest.Request{Host: "aiplatform.mtls.googleapis.com", ServerName: "aiplatform.mtls.googleapis.com", PeerCerts: 1, Leaf: srv.Leaf()}
+	for range n {
+		select {
+		case got := <-srv.Requests:
+			if got != want {
+				t.Errorf("server saw %+v, want %+v", got, want)
+			}
+		default:
+			// The server records a request before it answers it.
+			t.Fatalf("fewer than %d requests reached the server", n)
+		}
+	}
+}
+
 // A request that is not for a Google API host goes to base, which presents
 // nothing, even though a certificate is configured.
 func TestNonGoogleHostGetsNoCertificate(t *testing.T) {
@@ -166,8 +244,8 @@ func TestNewTransportBrokenEnvironmentCertificate(t *testing.T) {
 	base := &countingBase{}
 	tr := googlemtls.NewTransport(base)
 	_, err := roundTrip(t, tr, "https://aiplatform.googleapis.com/v1")
-	if err == nil || !strings.Contains(err.Error(), "GOOGLE_API_USE_CLIENT_CERTIFICATE=false") {
-		t.Errorf("RoundTrip error = %v, want the load error with the opt-out", err)
+	if err == nil || strings.Count(err.Error(), "GOOGLE_API_USE_CLIENT_CERTIFICATE=false") != 1 {
+		t.Errorf("RoundTrip error = %v, want the load error naming the opt-out once", err)
 	}
 	if _, err := roundTrip(t, tr, "https://example.test/"); err != nil || base.n != 1 {
 		t.Errorf("non-Google request: error = %v, base got %d requests; want nil, 1", err, base.n)

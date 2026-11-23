@@ -541,12 +541,14 @@ const a2aRequestTimeout = 3 * time.Minute
 // redirect that leaves the card's host or downgrades its scheme, because the
 // transport applies the credential again on every hop, so nothing else bounds
 // where the secret travels. adk-python's HTTP client follows no redirects at
-// all by default; this one still follows a same-origin redirect.
+// all by default; this one still follows a same-origin redirect, and one
+// between a Google API host and its mTLS name over https (see
+// credredirect.Check).
 func authHTTPClient(provider auth.CredentialProvider) *http.Client {
 	return &http.Client{
 		Timeout:       a2aRequestTimeout,
 		CheckRedirect: checkRedirect,
-		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: googlemtls.NewTransport(nil)},
+		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: googlemtls.NewTransport(http.DefaultTransport)},
 	}
 }
 

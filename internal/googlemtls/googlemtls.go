@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/adk/v2/internal/clientcert"
 )
@@ -52,9 +53,11 @@ type provider = func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 
 // source returns the provider to present to Google API hosts, nil when none
 // is to be presented, or an error when a certificate the environment
-// configures cannot be loaded. A transport keeps the first provider it gets:
-// the auth library resolves its source once per process, so later calls
-// return the same one.
+// configures cannot be loaded. A transport keeps the first provider it gets.
+// The auth library resolves its own once per process, and a workload
+// certificate config's provider reads the certificate files again for every
+// handshake, so a rotated certificate is picked up. A config that later
+// names other files is not.
 type source func() (provider, error)
 
 // defaultSource is the environment's source, under the rule clientcert.Source
@@ -66,7 +69,7 @@ var defaultSource source = clientcert.Source
 var testConfigure func(*http.Transport)
 
 // SetTestHooks makes transports created by NewTransport after it returns use
-// src as their certificate source, the environment's when src is nil, and
+// src as their certificate source, the one in place when src is nil, and
 // apply configure to their mTLS transport, until restore is called. It is for
 // tests in other packages, which must not run in parallel while the hooks are
 // set.
@@ -81,16 +84,19 @@ func SetTestHooks(src func() (func(*tls.CertificateRequestInfo) (*tls.Certificat
 
 // NewTransport returns a RoundTripper that sends an https request for a
 // *.googleapis.com host over mutual TLS when the environment provides a client
-// certificate, to the host's .mtls.googleapis.com name. Every other request,
-// and every Google API request while the environment provides no certificate,
-// goes to base unchanged. A Google API request fails when a certificate the
-// environment configures cannot be loaded. A nil base stands for
-// http.DefaultTransport, looked up on each request.
+// certificate, to the host's .mtls.googleapis.com name if it has one (see
+// mtlsHost). Every other request, and every Google API request while the
+// environment provides no certificate, goes to base unchanged. A Google API
+// request fails when a certificate the environment configures cannot be
+// loaded. A nil base stands for http.DefaultTransport, looked up on each
+// request.
 //
-// The mTLS requests do not go through base: they use a clone of
-// http.DefaultTransport, taken at the first such request, that presents the
-// certificate and refuses an https proxy, which would be offered the
-// certificate in its own handshake.
+// The mTLS requests do not go through base. They use a transport of this
+// one's own, with its own connections, built at the first such request: a
+// clone of http.DefaultTransport, or net/http's default settings when the
+// application replaced that with a wrapper. It presents the certificate and
+// refuses an https proxy, which would be offered the certificate in its own
+// handshake.
 func NewTransport(base http.RoundTripper) http.RoundTripper {
 	return &transport{base: base, source: defaultSource, configure: testConfigure}
 }
@@ -165,26 +171,22 @@ func (t *transport) provider(ctx context.Context) (provider, error) {
 	case <-c.done:
 		return c.p, c.err
 	case <-ctx.Done():
-		return nil, fmt.Errorf("googlemtls: waiting for the client certificate source: %w", context.Cause(ctx))
+		return nil, fmt.Errorf("googlemtls: waiting for the client certificate source: %w (%s)", context.Cause(ctx), optOut)
 	}
 }
 
 func (t *transport) run(c *lookup) {
 	defer func() {
 		if r := recover(); r != nil {
-			c.p, c.err = nil, fmt.Errorf("googlemtls: the client certificate source panicked: %v", r)
+			c.p, c.err = nil, fmt.Errorf("googlemtls: the client certificate source panicked: %v (%s)", r, optOut)
 		}
 		t.mu.Lock()
 		t.call = nil
 		t.mu.Unlock()
 		close(c.done)
 	}()
-	p, err := t.source()
-	if err != nil {
-		c.err = fmt.Errorf("googlemtls: loading the client certificate: %w (%s)", err, optOut)
-		return
-	}
-	c.p = p
+	// clientcert.Source's errors say what failed and name the opt-out.
+	c.p, c.err = t.source()
 }
 
 func (t *transport) mtlsTransport(p provider) *http.Transport {
@@ -245,42 +247,82 @@ func guardProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request)
 	}
 }
 
-// isGoogleAPI reports whether u is an https URL on a *.googleapis.com host.
+// isGoogleAPI reports whether u is an https URL on a *.googleapis.com host,
+// written as an ASCII name (see asciiName).
 func isGoogleAPI(u *url.URL) bool {
 	if u == nil || !strings.EqualFold(u.Scheme, "https") {
 		return false
 	}
-	h := strings.ToLower(u.Hostname())
-	return len(h) > len(googleAPIsSuffix) && strings.HasSuffix(h, googleAPIsSuffix)
+	h := u.Hostname()
+	return asciiName(h) && len(h) > len(googleAPIsSuffix) && strings.HasSuffix(strings.ToLower(h), googleAPIsSuffix)
 }
 
-// PlainHost returns host lowercased, with a *.mtls.googleapis.com name
-// replaced by the Google API host it serves. A transport from NewTransport
-// may send a request for one to the other, so a check comparing hosts
-// should compare these.
-func PlainHost(host string) string {
+// asciiName reports whether host is written as an ASCII name. Other
+// spellings can end in .googleapis.com, or lowercase alike, and be different
+// hosts: strings.ToLower folds some non-ASCII letters into ASCII ones, U+0130
+// into i among them, while net/http dials the IDNA form of the name as
+// written, and the zone of an IPv6 literal can hold any text.
+func asciiName(host string) bool {
+	return isASCII(host) && !strings.Contains(host, ":")
+}
+
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// Twins reports whether a and b name one host: one name in any letter case,
+// or a Google API host that has an mTLS name (see hasMTLSName) and that name.
+// A transport from NewTransport may send a request for the first to the
+// second, so a check that compares hosts should take such a pair as one.
+// Only ASCII names qualify (see asciiName).
+func Twins(a, b string) bool {
+	return asciiName(a) && asciiName(b) && plainHost(a) == plainHost(b)
+}
+
+// plainHost returns the ASCII name host lowercased, with an mTLS name
+// replaced by the Google API host it belongs to. Only the mTLS name of a host
+// that has one is replaced (see hasMTLSName).
+func plainHost(host string) string {
 	h := strings.ToLower(host)
-	if label, ok := strings.CutSuffix(h, mtlsSuffix); ok {
-		return label + googleAPIsSuffix
+	label, ok := strings.CutSuffix(h, mtlsSuffix)
+	if !ok || label == "" {
+		return h
+	}
+	if plain := label + googleAPIsSuffix; hasMTLSName(plain) {
+		return plain
 	}
 	return h
 }
 
-// mtlsHost returns the mTLS name for u's host, keeping its port, and false
-// when u is already on one, has none, or GOOGLE_API_USE_MTLS_ENDPOINT=never
-// asks to keep the host as given.
+// hasMTLSName reports whether the Google API host h, in lower case, has an
+// mTLS name: it is not one itself and not a multi-region host.
+func hasMTLSName(h string) bool {
+	if h == "mtls.googleapis.com" || strings.HasSuffix(h, mtlsSuffix) {
+		return false
+	}
+	for _, s := range noMTLSSuffixes {
+		if strings.HasSuffix(h, s) {
+			return false
+		}
+	}
+	return true
+}
+
+// mtlsHost returns the mTLS name for the host of u, a Google API URL, keeping
+// its port, and false when the host has none or
+// GOOGLE_API_USE_MTLS_ENDPOINT=never asks to keep the host as given.
 func mtlsHost(u *url.URL) (string, bool) {
 	if strings.EqualFold(os.Getenv("GOOGLE_API_USE_MTLS_ENDPOINT"), "never") {
 		return "", false
 	}
 	h := strings.ToLower(u.Hostname())
-	if h == "mtls.googleapis.com" || strings.HasSuffix(h, mtlsSuffix) {
+	if !hasMTLSName(h) {
 		return "", false
-	}
-	for _, s := range noMTLSSuffixes {
-		if strings.HasSuffix(h, s) {
-			return "", false
-		}
 	}
 	h = strings.TrimSuffix(h, googleAPIsSuffix) + mtlsSuffix
 	if port := u.Port(); port != "" {

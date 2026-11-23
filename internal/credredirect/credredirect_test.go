@@ -107,6 +107,9 @@ func TestSameTarget(t *testing.T) {
 		{name: "kelvin sign in the plain twin", from: "https://agent\u212a.googleapis.com/rpc", to: "https://agentk.mtls.googleapis.com/rpc", want: false},
 		{name: "empty label and its mtls name", from: "https://.googleapis.com/rpc", to: "https://.mtls.googleapis.com/rpc", want: false},
 		{name: "bare mtls host to bare googleapis", from: "https://googleapis.com/rpc", to: "https://mtls.googleapis.com/rpc", want: false},
+		// Names the client certificate transport never moves a request to.
+		{name: "multi-region host and an mtls name it does not have", from: "https://agent.us.rep.googleapis.com/rpc", to: "https://agent.us.rep.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls host and a doubled mtls name", from: "https://mtls.googleapis.com/rpc", to: "https://mtls.mtls.googleapis.com/rpc", want: false},
 		{name: "ipv6 literal, same", from: "https://[::1]:8443/rpc", to: "https://[::1]:8443/rpc", want: true},
 		{name: "ipv6 literals differ", from: "https://[::1]:8443/rpc", to: "https://[2001:db8::1]:8443/rpc", want: false},
 	}
@@ -142,6 +145,10 @@ func TestCheck(t *testing.T) {
 		{name: "same origin", via: []string{"https://h/a"}, to: "https://h/b"},
 		{name: "cross host", via: []string{"https://h/a"}, to: "https://other/b", wantErr: true},
 		{name: "upgrade then downgrade", via: []string{"http://h/a", "https://h/b"}, to: "http://h/c", wantErr: true},
+		{name: "google api host to its mtls name", via: []string{"https://agent.googleapis.com/a"}, to: "https://agent.mtls.googleapis.com/b"},
+		// Only the comparison with the original request refuses this one:
+		// the two names count as one host between https URLs alone.
+		{name: "upgrade then move to the mtls name", via: []string{"http://agent.googleapis.com/a", "https://agent.googleapis.com/b"}, to: "https://agent.mtls.googleapis.com/c", wantErr: true},
 		{name: "same origin across a chain", via: []string{"http://h/a", "https://h/b"}, to: "https://h:443/c"},
 		{name: "host header names the same host", via: []string{"http://h/a"}, to: "http://h/b", host: "h"},
 		{name: "host header names another host", via: []string{"http://h/a"}, to: "http://h/b", host: "evil.test", wantErr: true},

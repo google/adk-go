@@ -23,8 +23,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -55,6 +57,16 @@ func TestRoute(t *testing.T) {
 		{url: "https://notgoogleapis.com/"},
 		{url: "https://127.0.0.1/"},
 		{url: "https://[::1]:443/"},
+		// Only an ASCII name counts. strings.ToLower folds U+0130 into i and
+		// the Kelvin sign into k, while net/http dials the IDNA form of the
+		// name as written, which for the first two is outside
+		// googleapis.com.
+		{url: "https://aiplatform.mtls.googleap\u0130s.com/"},
+		{url: "https://aiplatform.googleap\u0130s.com/"},
+		{url: "https://aiplatform\u212a.googleapis.com/"},
+		// An IPv6 literal, whose zone can end in any text.
+		{url: "https://[2001:db8::1%25.googleapis.com]/"},
+		{url: "https://[2001:db8::1%25a.mtls.googleapis.com]/"},
 	} {
 		t.Run(tc.url, func(t *testing.T) {
 			if tc.never {
@@ -124,7 +136,17 @@ func TestNonGoogleRequestSkipsSource(t *testing.T) {
 	rec := &recordingTransport{}
 	src, calls := countingSource(nil, errors.New("must not be called"))
 	tr := &transport{base: rec, source: src}
-	for _, u := range []string{"https://example.test/a", "http://aiplatform.googleapis.com/b"} {
+	urls := []string{
+		"https://example.test/a",
+		"http://aiplatform.googleapis.com/b",
+		// Names with a non-ASCII letter.
+		"https://aiplatform.mtls.googleap\u0130s.com/c",
+		"https://aiplatform.googleap\u0130s.com/d",
+		"https://aiplatform\u212a.googleapis.com/e",
+		// An IP address whose zone ends like one.
+		"https://[2001:db8::1%25.googleapis.com]/f",
+	}
+	for _, u := range urls {
 		if _, err := get(t, tr, u); err != nil {
 			t.Fatalf("RoundTrip(%s) error = %v", u, err)
 		}
@@ -132,8 +154,8 @@ func TestNonGoogleRequestSkipsSource(t *testing.T) {
 	if n := calls.Load(); n != 0 {
 		t.Errorf("source called %d times for non-Google requests, want 0", n)
 	}
-	if len(rec.urls) != 2 {
-		t.Errorf("plain transport got %v, want both requests", rec.urls)
+	if len(rec.urls) != len(urls) {
+		t.Errorf("plain transport got %v, want all %d requests", rec.urls, len(urls))
 	}
 }
 
@@ -159,7 +181,8 @@ func TestNoProviderPassesThroughUnchanged(t *testing.T) {
 }
 
 func TestSourceErrorFailsRequestAndClosesBody(t *testing.T) {
-	src, _ := countingSource(nil, errors.New("bad cert config"))
+	srcErr := errors.New("bad cert config")
+	src, _ := countingSource(nil, srcErr)
 	tr := &transport{base: failingTransport{t}, source: src}
 	body := &closeRecorder{Reader: strings.NewReader("{}")}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://aiplatform.googleapis.com/v1", body)
@@ -167,13 +190,8 @@ func TestSourceErrorFailsRequestAndClosesBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = tr.RoundTrip(req)
-	if err == nil {
-		t.Fatal("RoundTrip error = nil, want the source error")
-	}
-	for _, want := range []string{"bad cert config", "GOOGLE_API_USE_CLIENT_CERTIFICATE=false"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("RoundTrip error = %q, want it to contain %q", err, want)
-		}
+	if !errors.Is(err, srcErr) {
+		t.Fatalf("RoundTrip error = %v, want the source error", err)
 	}
 	if !body.closed.Load() {
 		t.Error("request body not closed after the source failed")
@@ -193,7 +211,8 @@ func (c *closeRecorder) Close() error {
 func TestHangingSourceReleasesRequestOnContextEnd(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	tr := &transport{base: failingTransport{t}, source: func() (provider, error) {
+	base := &countingTransport{}
+	tr := &transport{base: base, source: func() (provider, error) {
 		<-release
 		return nil, nil
 	}}
@@ -204,24 +223,77 @@ func TestHangingSourceReleasesRequestOnContextEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	_, err = tr.RoundTrip(req)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("RoundTrip error = %v, want context.DeadlineExceeded", err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.RoundTrip(req)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "GOOGLE_API_USE_CLIENT_CERTIFICATE=false") {
+			t.Errorf("RoundTrip error = %v, want context.DeadlineExceeded with the opt-out", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RoundTrip still waits for the source 5s after its context ended")
 	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("RoundTrip returned after %v, want it released by the context", d)
+	if n := base.n.Load(); n != 0 {
+		t.Errorf("plain transport got %d requests after the context ended, want 0", n)
 	}
 	if !body.closed.Load() {
 		t.Error("request body not closed after the context ended")
 	}
 }
 
+type countingTransport struct{ n atomic.Int32 }
+
+func (c *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+}
+
+// Requests that arrive while a lookup is under way wait for it, so a
+// certificate helper that hangs holds one goroutine and not one per request.
+func TestConcurrentRequestsShareOneLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var calls atomic.Int32
+		base := &countingTransport{}
+		tr := &transport{base: base, source: func() (provider, error) {
+			calls.Add(1)
+			<-release
+			return nil, nil
+		}}
+		const n = 8
+		var wg sync.WaitGroup
+		for range n {
+			wg.Go(func() {
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://aiplatform.googleapis.com/v1", nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if _, err := tr.RoundTrip(req); err != nil {
+					t.Errorf("RoundTrip error = %v", err)
+				}
+			})
+		}
+		synctest.Wait()
+		if got := calls.Load(); got != 1 {
+			t.Errorf("source called %d times for %d concurrent requests, want 1", got, n)
+		}
+		close(release)
+		wg.Wait()
+		if got := base.n.Load(); got != n {
+			t.Errorf("plain transport got %d requests, want %d", got, n)
+		}
+	})
+}
+
 func TestPanickingSourceFailsRequest(t *testing.T) {
 	tr := &transport{base: failingTransport{t}, source: func() (provider, error) { panic("boom") }}
 	_, err := get(t, tr, "https://aiplatform.googleapis.com/v1")
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Errorf("RoundTrip error = %v, want one naming the panic", err)
+	if err == nil || !strings.Contains(err.Error(), "boom") || !strings.Contains(err.Error(), "GOOGLE_API_USE_CLIENT_CERTIFICATE=false") {
+		t.Errorf("RoundTrip error = %v, want one naming the panic and the opt-out", err)
 	}
 }
 
@@ -272,6 +344,116 @@ func TestMTLSTransportGuardsInheritedProxy(t *testing.T) {
 	http.DefaultTransport = &http.Transport{}
 	if tr := newMTLSTransport(p); tr.Proxy != nil {
 		t.Error("Proxy is set although http.DefaultTransport has none")
+	}
+
+	// An application's wrapper hides the proxy setting, so the transport
+	// takes the environment's, as net/http's own default does.
+	http.DefaultTransport = &recordingTransport{}
+	if tr := newMTLSTransport(p); tr.Proxy == nil {
+		t.Error("Proxy is not set although http.DefaultTransport is a wrapper")
+	}
+}
+
+func TestPlainHost(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"agent.mtls.googleapis.com", "agent.googleapis.com"},
+		{"Agent.MTLS.GoogleAPIs.com", "agent.googleapis.com"},
+		{"a.b.mtls.googleapis.com", "a.b.googleapis.com"},
+		{"agent.asia.rep.mtls.googleapis.com", "agent.asia.rep.googleapis.com"},
+		{"Agent.GoogleAPIs.com", "agent.googleapis.com"},
+		{"agent.mtls.example.com", "agent.mtls.example.com"},
+		// Not the mTLS name of any host: mtlsHost never produces these.
+		{"mtls.googleapis.com", "mtls.googleapis.com"},
+		{".mtls.googleapis.com", ".mtls.googleapis.com"},
+		{"mtls.mtls.googleapis.com", "mtls.mtls.googleapis.com"},
+		{"agent.mtls.mtls.googleapis.com", "agent.mtls.mtls.googleapis.com"},
+		{"agent.us.rep.mtls.googleapis.com", "agent.us.rep.mtls.googleapis.com"},
+		{"agent.eu.rep.mtls.googleapis.com", "agent.eu.rep.mtls.googleapis.com"},
+	} {
+		if got := plainHost(tc.host); got != tc.want {
+			t.Errorf("plainHost(%q) = %q, want %q", tc.host, got, tc.want)
+		}
+	}
+}
+
+func TestTwins(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"agent.googleapis.com", "agent.mtls.googleapis.com", true},
+		{"Agent.GoogleAPIs.com", "agent.MTLS.googleapis.com", true},
+		{"example.com", "Example.COM", true},
+		{"agent.googleapis.com", "other.mtls.googleapis.com", false},
+		{"agent.example.com", "agent.mtls.example.com", false},
+		{"agent.us.rep.googleapis.com", "agent.us.rep.mtls.googleapis.com", false},
+		{"mtls.googleapis.com", "mtls.mtls.googleapis.com", false},
+		{".googleapis.com", ".mtls.googleapis.com", false},
+		// Only ASCII names: U+0130 and the Kelvin sign lowercase into i and
+		// k, and other letters lowercase alike without being one host.
+		{"agent.googleapis.com", "agent.mtls.googleap\u0130s.com", false},
+		{"agent.mtls.googleapis.com", "agent.googleap\u0130s.com", false},
+		{"agentk.googleapis.com", "agent\u212a.mtls.googleapis.com", false},
+		{"agent\u212a.googleapis.com", "agentk.mtls.googleapis.com", false},
+		{"B\u00dcCHER.example", "b\u00fccher.example", false},
+		// An IPv6 literal, whose zone can end in any text.
+		{"2001:db8::1%a.googleapis.com", "2001:db8::1%a.mtls.googleapis.com", false},
+		{"::1", "::1", false},
+	} {
+		if got := Twins(tc.a, tc.b); got != tc.want {
+			t.Errorf("Twins(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+		if got := Twins(tc.b, tc.a); got != tc.want {
+			t.Errorf("Twins(%q, %q) = %v, want %v", tc.b, tc.a, got, tc.want)
+		}
+	}
+}
+
+// plainHost undoes exactly what mtlsHost does: a name maps back to a host
+// only when the transport sends that host's requests to it. The hosts are
+// every sequence of up to three labels, out of the ones either function looks
+// for and two others, under each suffix. TestPlainHost and TestTwins have
+// what this leaves out: upper case, an empty label, non-ASCII names and IP
+// literals.
+func TestPlainHostInvertsMTLSHost(t *testing.T) {
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
+	labels := []string{"a", "mtls", "us", "eu", "asia", "rep"}
+	var prefixes []string
+	var build func(prefix string, depth int)
+	build = func(prefix string, depth int) {
+		prefixes = append(prefixes, prefix)
+		if depth == 3 {
+			return
+		}
+		for _, l := range labels {
+			build(prefix+l+".", depth+1)
+		}
+	}
+	build("", 0)
+	mapped := 0
+	for _, prefix := range prefixes {
+		for _, suffix := range []string{"googleapis.com", "mtls.googleapis.com", "example.com"} {
+			host := prefix + suffix
+			u := &url.URL{Scheme: "https", Host: host}
+			if isGoogleAPI(u) {
+				if m, ok := mtlsHost(u); ok {
+					mapped++
+					if got := plainHost(m); got != host {
+						t.Errorf("mtlsHost(%q) = %q, but plainHost(%q) = %q", host, m, m, got)
+					}
+				}
+			}
+			if plain := plainHost(host); plain != host {
+				pu := &url.URL{Scheme: "https", Host: plain}
+				if m, ok := mtlsHost(pu); !isGoogleAPI(pu) || !ok || m != host {
+					t.Errorf("plainHost(%q) = %q, but mtlsHost(%q) = %q, %v", host, plain, plain, m, ok)
+				}
+			}
+		}
+	}
+	// A guard that the loop reaches hosts the transport rewrites.
+	if mapped == 0 {
+		t.Error("no generated host has an mTLS name")
 	}
 }
 

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package googlemtlstest runs a local TLS server that stands in for every
-// Google API host, for tests of clients built on googlemtls.
+// Package googlemtlstest runs a local TLS server that stands in for the
+// Google API hosts one label below googleapis.com and their mTLS names, for
+// tests of clients built on googlemtls.
 package googlemtlstest
 
 import (
@@ -157,8 +158,9 @@ func Fingerprint(der []byte) string {
 }
 
 // Route makes transports that googlemtls.NewTransport creates during the test
-// send their mTLS requests to s, while the certificate still comes from the
-// environment. The test must not run in parallel.
+// send their mTLS requests to s, while the certificate source stays the one
+// in place, the environment's unless a test replaced it. The test must not
+// run in parallel.
 func (s *Server) Route(t testing.TB) {
 	t.Helper()
 	t.Cleanup(googlemtls.SetTestHooks(nil, s.Configure))
