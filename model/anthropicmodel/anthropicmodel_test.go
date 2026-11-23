@@ -4214,3 +4214,16 @@ func TestNewModel_VertexRuntimeSuffixKeepsCallerHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestNewModel_Capabilities(t *testing.T) {
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-3-7-sonnet-latest", anthropicmodel.ClientConfig{
+		Backend: anthropicmodel.BackendAnthropic,
+		APIKey:  "test-anthropic-key",
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if !m.Capabilities().OutputSchemaAndTools {
+		t.Error("Capabilities().OutputSchemaAndTools = false, want true")
+	}
+}

@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 )
@@ -126,6 +127,17 @@ func NewModel(ctx context.Context, modelName string, opts ...Option) (*apigeeMod
 func (m *apigeeModel) Name() string {
 	return m.name
 }
+
+func (m *apigeeModel) Capabilities() model.Capabilities {
+	if m == nil {
+		return model.Capabilities{}
+	}
+	return model.Capabilities{
+		OutputSchemaAndTools: !googlellm.IsGeminiModel(m.name),
+	}
+}
+
+var _ model.LLM = (*apigeeModel)(nil)
 
 // GenerateContent calls the underlying model.
 func (m *apigeeModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

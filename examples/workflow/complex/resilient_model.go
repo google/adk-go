@@ -58,6 +58,9 @@ func newResilientModel(inner model.LLM, timeout time.Duration, attempts int, fal
 // Name implements model.LLM.
 func (m *resilientModel) Name() string { return m.inner.Name() }
 
+// Capabilities implements model.LLM.
+func (m *resilientModel) Capabilities() model.Capabilities { return m.inner.Capabilities() }
+
 // GenerateContent implements model.LLM. Each attempt is buffered so a
 // partially streamed failure is discarded cleanly before a retry.
 func (m *resilientModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

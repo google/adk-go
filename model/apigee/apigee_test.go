@@ -414,3 +414,36 @@ func TestGenerateContentSendsNoRuntimeSuffixToProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestApigeeModel_Capabilities(t *testing.T) {
+	tests := []struct {
+		modelName string
+		want      bool
+	}{
+		{modelName: "apigee/vertex_ai/gemini-2.5-flash", want: false},
+		{modelName: "apigee/gemini/gemini-2.5-flash", want: false},
+		{modelName: "apigee/vertex_ai/gemma-3-27b-it", want: true},
+		{modelName: "apigee/gemma-3-27b-it", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelName, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			t.Setenv(googleGenaiUseVertexAIEnvVar, "")
+			t.Setenv(projectEnvVar, "test-project")
+			t.Setenv(locationEnvVar, "test-location")
+			m, err := NewModel(t.Context(), tt.modelName, WithProxyURL(proxyURL), WithHTTPClient(&http.Client{}))
+			if err != nil {
+				t.Fatalf("NewModel(%q) error = %v", tt.modelName, err)
+			}
+			if got := m.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+	t.Run("nil_receiver", func(t *testing.T) {
+		var nilModel *apigeeModel
+		if got := nilModel.Capabilities(); got != (model.Capabilities{}) {
+			t.Errorf("(*apigeeModel)(nil).Capabilities() = %+v, want zero value", got)
+		}
+	})
+}

@@ -44,6 +44,10 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+func (m *Model) Capabilities() model.Capabilities {
+	return model.Capabilities{OutputSchemaAndTools: true}
+}
+
 // GenerateContent converts a generic LLMRequest into a Chat Completions request
 // and calls the API, streaming or not.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

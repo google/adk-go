@@ -23,6 +23,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 // TestBasicRequestProcessor_OutputSchemaPerMode pins how
@@ -115,5 +116,150 @@ func TestBasicRequestProcessor_OutputSchemaPerMode(t *testing.T) {
 				t.Errorf("ResponseMIMEType = %q, want %q", got, wantMIMEType)
 			}
 		})
+	}
+}
+
+func runBasicRequestProcessor(t *testing.T, s *State) *model.LLMRequest {
+	t.Helper()
+	a, err := agent.New(agent.Config{Name: "test_agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: &mockLLMAgent{Agent: a, s: s},
+	})
+	req := &model.LLMRequest{}
+	for ev, err := range basicRequestProcessor(ctx, req, &Flow{}) {
+		if ev != nil {
+			t.Fatalf("basicRequestProcessor unexpectedly yielded an event: %+v", ev)
+		}
+		if err != nil {
+			t.Fatalf("basicRequestProcessor failed: %v", err)
+		}
+	}
+	if req.Config == nil {
+		t.Fatal("req.Config is nil; want non-nil")
+	}
+	return req
+}
+
+func TestBasicRequestProcessor_CapabilitiesDecideOutputSchemaWithTools(t *testing.T) {
+	t.Parallel()
+
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"city": {Type: genai.TypeString}},
+		Required:   []string{"city"},
+	}
+	tests := []struct {
+		name         string
+		mode         Mode
+		model        model.LLM
+		tools        []tool.Tool
+		toolsets     []tool.Toolset
+		wantSchema   *genai.Schema
+		wantMIMEType string
+	}{
+		{
+			name:         "model_declares_support_with_tools",
+			mode:         ModeChat,
+			model:        &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: true}},
+			tools:        []tool.Tool{&mockTool{name: "dummy_tool"}},
+			wantSchema:   schema,
+			wantMIMEType: "application/json",
+		},
+		{
+			name:  "model_declares_no_support_with_tools",
+			mode:  ModeChat,
+			model: &mockLLM{name: "gemini-2.5-flash", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			tools: []tool.Tool{&mockTool{name: "dummy_tool"}},
+		},
+		{
+			name:     "model_declares_no_support_with_toolsets",
+			mode:     ModeChat,
+			model:    &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			toolsets: []tool.Toolset{&mockToolset{}},
+		},
+		{
+			name:         "model_declares_no_support_without_tools",
+			mode:         ModeChat,
+			model:        &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			wantSchema:   schema,
+			wantMIMEType: "application/json",
+		},
+		{
+			name:  "task_mode_ignores_declared_support",
+			mode:  ModeTask,
+			model: &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: true}},
+			tools: []tool.Tool{&mockTool{name: "dummy_tool"}},
+		},
+		{
+			name:         "nil_model_with_tools_does_not_panic",
+			mode:         ModeChat,
+			model:        nil,
+			tools:        []tool.Tool{&mockTool{name: "dummy_tool"}},
+			wantSchema:   schema,
+			wantMIMEType: "application/json",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := runBasicRequestProcessor(t, &State{
+				Mode:         tc.mode,
+				Model:        tc.model,
+				Tools:        tc.tools,
+				Toolsets:     tc.toolsets,
+				OutputSchema: schema,
+			})
+
+			if diff := cmp.Diff(tc.wantSchema, req.Config.ResponseSchema); diff != "" {
+				t.Errorf("ResponseSchema mismatch (-want +got):\n%s", diff)
+			}
+			if got := req.Config.ResponseMIMEType; got != tc.wantMIMEType {
+				t.Errorf("ResponseMIMEType = %q, want %q", got, tc.wantMIMEType)
+			}
+		})
+	}
+}
+
+type countingCapabilitiesLLM struct {
+	model.LLM
+	capCalls int
+}
+
+func (m *countingCapabilitiesLLM) Name() string { return "counting" }
+func (m *countingCapabilitiesLLM) Capabilities() model.Capabilities {
+	m.capCalls++
+	return model.Capabilities{}
+}
+
+func TestProcessorsSkipCapabilitiesWithoutOutputSchema(t *testing.T) {
+	t.Parallel()
+
+	llm := &countingCapabilitiesLLM{}
+	state := &State{
+		Mode:  ModeChat,
+		Model: llm,
+		Tools: []tool.Tool{&mockTool{name: "dummy_tool"}},
+	}
+
+	_ = runBasicRequestProcessor(t, state)
+
+	a, err := agent.New(agent.Config{Name: "test_agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: &mockLLMAgent{Agent: a, s: state},
+	})
+	for ev, err := range outputSchemaRequestProcessor(ctx, &model.LLMRequest{}, &Flow{}) {
+		if ev != nil || err != nil {
+			t.Fatalf("outputSchemaRequestProcessor yielded (%v, %v)", ev, err)
+		}
+	}
+
+	if llm.capCalls != 0 {
+		t.Errorf("Capabilities() called %d times without OutputSchema, want 0", llm.capCalls)
 	}
 }

@@ -436,6 +436,10 @@ func (m *anthropicModel) Name() string {
 	return m.name
 }
 
+func (m *anthropicModel) Capabilities() model.Capabilities {
+	return model.Capabilities{OutputSchemaAndTools: true}
+}
+
 func (m *anthropicModel) logger() *slog.Logger {
 	if m.cfgLogger != nil {
 		return m.cfgLogger

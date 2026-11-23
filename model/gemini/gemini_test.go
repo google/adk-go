@@ -1205,3 +1205,50 @@ func adkLabels(header string) []string {
 	}
 	return labels
 }
+
+func TestGeminiModel_Capabilities(t *testing.T) {
+	vertexCfg := &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "test-project",
+		Location:   "us-central1",
+		HTTPClient: &http.Client{},
+	}
+	geminiAPICfg := &genai.ClientConfig{
+		Backend:    genai.BackendGeminiAPI,
+		APIKey:     "fake-key",
+		HTTPClient: &http.Client{},
+	}
+	tests := []struct {
+		name      string
+		modelName string
+		config    *genai.ClientConfig
+		want      bool
+	}{
+		{name: "gemini_2_0_on_vertex", modelName: "gemini-2.0-flash", config: vertexCfg, want: true},
+		{name: "gemini_2_5_on_vertex", modelName: "gemini-2.5-flash", config: vertexCfg, want: true},
+		{name: "gemini_1_5_on_vertex", modelName: "gemini-1.5-pro", config: vertexCfg, want: false},
+		{name: "gemini_non_numeric_on_vertex", modelName: "gemini-early-exp", config: vertexCfg, want: false},
+		{name: "gemma_on_vertex", modelName: "gemma-3-27b-it", config: vertexCfg, want: true},
+		{name: "tuned_endpoint_on_vertex", modelName: "projects/p/locations/us-central1/endpoints/12345", config: vertexCfg, want: true},
+		{name: "gemini_2_5_on_gemini_api", modelName: "gemini-2.5-flash", config: geminiAPICfg, want: false},
+		{name: "gemini_3_0_on_gemini_api", modelName: "gemini-3.0-pro", config: geminiAPICfg, want: false},
+		{name: "gemma_on_gemini_api", modelName: "gemma-3-27b-it", config: geminiAPICfg, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm, err := NewModel(t.Context(), tt.modelName, tt.config)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			if got := llm.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+	t.Run("nil_receiver", func(t *testing.T) {
+		var m *geminiModel
+		if got := m.Capabilities(); got != (model.Capabilities{}) {
+			t.Errorf("(*geminiModel)(nil).Capabilities() = %+v, want zero value", got)
+		}
+	})
+}

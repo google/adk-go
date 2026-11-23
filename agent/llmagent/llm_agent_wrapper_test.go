@@ -173,6 +173,8 @@ type scriptedLLM struct {
 
 func (s *scriptedLLM) Name() string { return "scripted-mock" }
 
+func (*scriptedLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	idx := s.callIdx
 	s.callIdx++
@@ -912,6 +914,8 @@ func TestRunLLMAgentAsNode_DeclaredSingleTurn_BindsForTheRequestProcessors(t *te
 type recordingLLM struct{ got *model.LLMRequest }
 
 func (*recordingLLM) Name() string { return "recording" }
+
+func (*recordingLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *recordingLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	if m.got == nil {

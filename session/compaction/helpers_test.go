@@ -62,6 +62,8 @@ type fakeModel struct {
 
 func (m *fakeModel) Name() string { return "fake-model" }
 
+func (*fakeModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *fakeModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.requests = append(m.requests, req)
 	return func(yield func(*model.LLMResponse, error) bool) {

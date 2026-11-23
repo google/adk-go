@@ -56,6 +56,8 @@ func (m *mockModel) Name() string {
 	return "mock-model"
 }
 
+func (*mockModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *mockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.Calls++
@@ -245,6 +247,8 @@ type singleCallMockModel struct {
 
 func (m *singleCallMockModel) Name() string { return "single-call-mock" }
 
+func (*singleCallMockModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *singleCallMockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
@@ -423,6 +427,8 @@ type noArgsCallModel struct {
 
 func (m *noArgsCallModel) Name() string                       { return "gemini-2.5-flash" }
 func (m *noArgsCallModel) GetGoogleLLMVariant() genai.Backend { return genai.BackendGeminiAPI }
+
+func (*noArgsCallModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *noArgsCallModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	m.calls++
