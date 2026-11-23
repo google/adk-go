@@ -329,6 +329,16 @@ func RecordError(span trace.Span, err error) {
 	}
 }
 
+// RecordPanic records err, the error for a recovered panic, as an exception on
+// span when content capture on spans is enabled. Otherwise it records nothing,
+// because the text of err carries the panic value, which may be user data, and
+// the goroutine stack.
+func RecordPanic(span trace.Span, err error) {
+	if captureContentOnSpans() {
+		span.RecordError(err)
+	}
+}
+
 // errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
 func errorType(err error) attribute.KeyValue {
 	if apiErr, ok := errors.AsType[genai.APIError](err); ok {

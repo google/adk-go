@@ -501,7 +501,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
-		final.ModelVersion = string(term.resp.Model)
+		final.ModelVersion = term.resp.Model
 	}
 	if !term.seen {
 		// The model never said why it stopped, and finishReason would read that

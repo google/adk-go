@@ -144,12 +144,12 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 	queryParams := req.URL.Query()
 	version := queryParams.Get("version")
 	if version != "" {
-		versionInt, err := strconv.Atoi(version)
+		versionInt, err := strconv.ParseInt(version, 10, 64)
 		if err != nil {
 			http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
 			return
 		}
-		loadReq.Version = int64(versionInt)
+		loadReq.Version = new(versionInt)
 	}
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
@@ -194,7 +194,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		return
 	}
 
-	versionInt, err := strconv.Atoi(version)
+	versionInt, err := strconv.ParseInt(version, 10, 64)
 	if err != nil {
 		http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
 		return
@@ -205,7 +205,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
 		FileName:  artifactName,
-		Version:   int64(versionInt),
+		Version:   new(versionInt),
 	}
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)

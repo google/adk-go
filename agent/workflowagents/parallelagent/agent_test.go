@@ -16,6 +16,7 @@ package parallelagent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	rand "math/rand/v2"
@@ -34,8 +35,10 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
@@ -45,6 +48,7 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 const modelName = "gemini-2.5-flash"
@@ -646,6 +650,939 @@ func TestParallelAgent_StateSync(t *testing.T) {
 	}
 	if gotValue != "test_value" {
 		t.Fatalf("expected state value 'test_value', got %v", gotValue)
+	}
+}
+
+// adk-python's ParallelAgent stops its remaining branches as soon as a direct
+// sub-agent yields an event with Actions.escalate (parallel_agent.py,
+// _asks_this_agent_to_exit; asserted by
+// test_run_async_short_circuits_other_agents_on_escalate_action). The Go
+// agent kept every sibling running to completion.
+func TestParallelAgent_EscalateStopsSiblings(t *testing.T) {
+	var resumed atomic.Bool
+	escalator, err := agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if !yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil) {
+					return
+				}
+				// adk-python never resumes the escalating branch.
+				resumed.Store(true)
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("after escalate", genai.RoleModel)},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// slow never yields on its own; only a cancel ends it.
+	var cancelled atomic.Bool
+	slow, err := agent.New(agent.Config{
+		Name: "slow",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-ctx.Done()
+				cancelled.Store(true)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{escalator, slow}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The deadline only bounds a regression: without the fix, slow keeps the
+	// run open until this context ends.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var authors []string
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		authors = append(authors, ev.Author)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline: sibling kept running after escalate, want it cancelled")
+	}
+	if !cancelled.Load() {
+		t.Errorf("slow was not cancelled after escalate")
+	}
+	if resumed.Load() {
+		t.Errorf("escalating branch was resumed after its escalate event, want it stopped")
+	}
+	if want := []string{"escalator"}; !slices.Equal(authors, want) {
+		t.Errorf("events authored by %v, want %v", authors, want)
+	}
+}
+
+// When a sibling fails before a direct sub-agent escalates, the caller must
+// still get the failure. adk-python queues the failure when it happens and
+// raises it before the later escalation is handled (parallel_agent.py).
+func TestParallelAgent_SiblingErrorSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	// The escalator waits for the failure to cancel its context and then
+	// escalates anyway, so the failure always comes first. The parallel agent
+	// then picks between the cancel and the escalation at random, so repeat.
+	for i := range 50 {
+		failing, err := agent.New(agent.Config{
+			Name: "failing",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) { yield(nil, boom) }
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		escalator, err := agent.New(agent.Config{
+			Name: "escalator",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					<-ctx.Done()
+					yield(&session.Event{
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+						Actions:     session.EventActions{Escalate: true},
+					}, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parallelAgent, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{failing, escalator}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		sawErr := false
+		for _, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if errors.Is(err, boom) {
+				sawErr = true
+			}
+		}
+		if !sawErr {
+			t.Fatalf("run %d: sibling error was not returned after an escalate", i)
+		}
+	}
+}
+
+// A sibling's error must reach the caller even when a direct sub-agent
+// escalates while that sibling is still unwinding: errgroup only records the
+// error once the sibling's Run has returned.
+func TestParallelAgent_ErrorDuringSiblingTeardownSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	failed := make(chan struct{})
+	failing, err := agent.New(agent.Config{
+		Name: "failing",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, boom)
+				close(failed)
+				// Teardown that lasts until the run cancels it.
+				<-ctx.Done()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	escalator, err := agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-failed
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{failing, escalator}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The deadline only bounds a regression where the run never cancels the
+	// failing sibling's teardown.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawErr := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if errors.Is(err, boom) {
+			sawErr = true
+		}
+		if ev != nil && ev.Actions.Escalate {
+			t.Errorf("escalate event yielded after a sibling error, want the error instead")
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawErr {
+		t.Errorf("sibling error was not returned")
+	}
+}
+
+// A caller cancel that comes after a sibling's failure must not hide that
+// failure when a direct sub-agent then escalates.
+func TestParallelAgent_CancelAfterSiblingErrorKeepsError(t *testing.T) {
+	boom := errors.New("boom")
+	// The escalator sees the failure, the caller cancels, then the escalator
+	// escalates anyway. The parallel agent then picks between the cancel and
+	// the escalation at random, so repeat.
+	for i := range 50 {
+		ctx, cancel := context.WithCancel(t.Context())
+		failing, err := agent.New(agent.Config{
+			Name: "failing",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) { yield(nil, boom) }
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		escalator, err := agent.New(agent.Config{
+			Name: "escalator",
+			Run: func(ictx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					<-ictx.Done()
+					cancel()
+					yield(&session.Event{
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+						Actions:     session.EventActions{Escalate: true},
+					}, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parallelAgent, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{failing, escalator}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		sawErr := false
+		for _, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if errors.Is(err, boom) {
+				sawErr = true
+			}
+		}
+		cancel()
+		if !sawErr {
+			t.Fatalf("run %d: sibling error was hidden by a later caller cancel", i)
+		}
+	}
+}
+
+// An escalation from a deeper agent ends that agent's own parent workflow, not
+// this one. adk-python only reacts to escalations authored by a direct
+// sub-agent (parallel_agent.py, _asks_this_agent_to_exit).
+func TestParallelAgent_NestedEscalateKeepsSiblings(t *testing.T) {
+	escalator, err := agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{escalator}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// slow yields only once the caller has seen the nested escalation, so the
+	// test separates the two behaviors without depending on timing.
+	seenEscalate := make(chan struct{})
+	slow, err := agent.New(agent.Config{
+		Name: "slow",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				select {
+				case <-seenEscalate:
+				case <-ctx.Done():
+					return
+				}
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("slow finished", genai.RoleModel)},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{inner, slow}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The deadline only bounds a regression where the nested escalation is
+	// never yielded and slow waits for it.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var authors []string
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		authors = append(authors, ev.Author)
+		if ev.Author == "escalator" && ev.Actions.Escalate {
+			close(seenEscalate)
+		}
+	}
+	if !slices.Contains(authors, "escalator") {
+		t.Errorf("events authored by %v: the nested escalation was never yielded", authors)
+	}
+	if !slices.Contains(authors, "slow") {
+		t.Errorf("events authored by %v: sibling was stopped by a nested escalate, want it to finish", authors)
+	}
+}
+
+// An error yielded by an agent nested below a direct sub-agent, for example
+// inside an inner ParallelAgent, must be returned when another direct
+// sub-agent escalates after it, even if the agents in between have not
+// returned the error yet. Each case runs once; with the fix the outcome does
+// not depend on timing.
+func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	parallel := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	sequential := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	loop := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(loopagent.New(loopagent.Config{MaxIterations: 1, AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	nestings := []struct {
+		name string
+		wrap func(failing agent.Agent) agent.Agent
+	}{
+		{"inner parallel", func(f agent.Agent) agent.Agent { return parallel("inner", f) }},
+		{"sequential then parallel", func(f agent.Agent) agent.Agent { return sequential("seq", parallel("inner", f)) }},
+		{"loop then parallel", func(f agent.Agent) agent.Agent { return loop("loop", parallel("inner", f)) }},
+		{"loop, sequential, parallel", func(f agent.Agent) agent.Agent {
+			return loop("loop", sequential("seq", parallel("inner", f)))
+		}},
+		{"parallel, sequential, parallel", func(f agent.Agent) agent.Agent {
+			return parallel("mid", sequential("seq", parallel("inner", f)))
+		}},
+	}
+	cleanups := []struct {
+		name string
+		run  func(ctx agent.InvocationContext)
+	}{
+		{"no cleanup", func(agent.InvocationContext) {}},
+		{"50ms cleanup", func(agent.InvocationContext) { time.Sleep(50 * time.Millisecond) }},
+		// Cleanup that lasts until the run cancels it.
+		{"cleanup until canceled", func(ctx agent.InvocationContext) { <-ctx.Done() }},
+	}
+	for _, nesting := range nestings {
+		for _, cleanup := range cleanups {
+			t.Run(nesting.name+"/"+cleanup.name, func(t *testing.T) {
+				failed := make(chan struct{})
+				failing := must(agent.New(agent.Config{
+					Name: "failing",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							defer cleanup.run(ctx)
+							yield(nil, boom)
+							close(failed)
+						}
+					},
+				}))
+				escalator := must(agent.New(agent.Config{
+					Name: "escalator",
+					Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							<-failed
+							yield(&session.Event{
+								LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+								Actions:     session.EventActions{Escalate: true},
+							}, nil)
+						}
+					},
+				}))
+				outer := parallel("outer", nesting.wrap(failing), escalator)
+				r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// The deadline only bounds a regression where the run never
+				// cancels the failing agent's cleanup.
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				sawErr := false
+				for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+					if errors.Is(err, boom) {
+						sawErr = true
+					}
+					if ev != nil && ev.Actions.Escalate {
+						t.Errorf("escalate event yielded after a nested error, want the error instead")
+					}
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("run ended only at the test deadline")
+				}
+				if !sawErr {
+					t.Errorf("nested error was not returned")
+				}
+			})
+		}
+	}
+}
+
+// An inner ParallelAgent that ends on its own escalation cancels its other
+// branches. The error a canceled branch yields then never leaves the inner
+// agent, so it must not replace a later escalation of the outer one.
+func TestParallelAgent_CanceledNestedBranchErrorKeepsEscalate(t *testing.T) {
+	parallel := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	sequential := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	escalate := func(text string) *session.Event {
+		return &session.Event{
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)},
+			Actions:     session.EventActions{Escalate: true},
+		}
+	}
+	for _, nesting := range []struct {
+		name string
+		wrap func(inner agent.Agent) agent.Agent
+	}{
+		{"inner parallel", func(inner agent.Agent) agent.Agent { return inner }},
+		{"sequential then parallel", func(inner agent.Agent) agent.Agent { return sequential("seq", inner) }},
+	} {
+		t.Run(nesting.name, func(t *testing.T) {
+			started := make(chan struct{})
+			waitingFailed := make(chan struct{})
+			waiting := must(agent.New(agent.Config{
+				Name: "waiting",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						defer close(waitingFailed)
+						close(started)
+						<-ctx.Done()
+						// As a model call cut off by cancellation does.
+						yield(nil, ctx.Err())
+					}
+				},
+			}))
+			innerEsc := must(agent.New(agent.Config{
+				Name: "inner_esc",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						<-started
+						yield(escalate("inner done"), nil)
+					}
+				},
+			}))
+			outerEsc := must(agent.New(agent.Config{
+				Name: "outer_esc",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						<-waitingFailed
+						yield(escalate("outer done"), nil)
+					}
+				},
+			}))
+			outer := parallel("outer", nesting.wrap(parallel("inner", innerEsc, waiting)), outerEsc)
+			r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			sawOuterEsc := false
+			for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Errorf("run yielded error %v, want the outer_esc escalation", err)
+				}
+				if ev != nil && ev.Author == "outer_esc" && ev.Actions.Escalate {
+					sawOuterEsc = true
+				}
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("run ended only at the test deadline")
+			}
+			if !sawOuterEsc {
+				t.Errorf("outer_esc escalation was not yielded")
+			}
+		})
+	}
+}
+
+// An agent between two ParallelAgents that catches the inner one's error and
+// carries on keeps that error from the outer one, so it must not replace an
+// escalation of the outer one.
+func TestParallelAgent_CaughtNestedErrorKeepsEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) { yield(nil, boom) }
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	recovered := make(chan struct{})
+	catcher := must(agent.New(agent.Config{
+		Name:      "catcher",
+		SubAgents: []agent.Agent{inner},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				defer close(recovered)
+				for ev, err := range inner.Run(ctx) {
+					if err != nil {
+						yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("fallback", genai.RoleModel)}}, nil)
+						return
+					}
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-recovered
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{catcher, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sawEsc := false
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("run yielded error %v, want the escalation", err)
+		}
+		if ev != nil && ev.Author == "escalator" && ev.Actions.Escalate {
+			sawEsc = true
+		}
+	}
+	if !sawEsc {
+		t.Errorf("escalation was not yielded")
+	}
+}
+
+// An agent that runs a ParallelAgent itself and catches or retries its error
+// keeps that error from the outer ParallelAgent, even when the inner one is
+// also declared as a step of a SequentialAgent or LoopAgent under the outer
+// one. Each shape must end with the escalation and no error.
+func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
+	newAgent := func(name string, run func(agent.InvocationContext, func(*session.Event, error) bool)) agent.Agent {
+		return must(agent.New(agent.Config{Name: name, Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) { run(ctx, yield) }
+		}}))
+	}
+	text := func(s string) *session.Event {
+		return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(s, genai.RoleModel)}}
+	}
+	escalation := func(s string) *session.Event {
+		ev := text(s)
+		ev.Actions.Escalate = true
+		return ev
+	}
+	// newInner returns a ParallelAgent named name whose only branch fails on
+	// its first run and succeeds after.
+	newNamedInner := func(name string) agent.Agent {
+		var runs atomic.Int32
+		flaky := newAgent("flaky", func(_ agent.InvocationContext, yield func(*session.Event, error) bool) {
+			if runs.Add(1) == 1 {
+				yield(nil, errors.New("boom"))
+				return
+			}
+			yield(text("ok"), nil)
+		})
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: []agent.Agent{flaky}}}))
+	}
+	newInner := func() agent.Agent { return newNamedInner("inner") }
+	// retryingNode runs a in a workflow node that tries it twice.
+	retryingNode := func(t *testing.T, a agent.Agent) *workflow.AgentNode {
+		node, err := workflow.NewAgentNode(a, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return node
+	}
+	// newNamedCatcher runs inner without declaring it and turns its error
+	// into fallback, then closes caught.
+	newNamedCatcher := func(name string, inner agent.Agent, fallback *session.Event, caught chan struct{}) agent.Agent {
+		return newAgent(name, func(ctx agent.InvocationContext, yield func(*session.Event, error) bool) {
+			defer close(caught)
+			for ev, err := range inner.Run(ctx) {
+				if err != nil {
+					yield(fallback, nil)
+					return
+				}
+				if !yield(ev, nil) {
+					return
+				}
+			}
+		})
+	}
+	newCatcher := func(inner agent.Agent, fallback *session.Event, caught chan struct{}) agent.Agent {
+		return newNamedCatcher("catcher", inner, fallback, caught)
+	}
+
+	tests := []struct {
+		name string
+		// build returns the outer ParallelAgent's sub-agent that holds the
+		// inner one, and a channel closed once the inner error was handled.
+		build func(t *testing.T) (agent.Agent, <-chan struct{})
+	}{
+		{"catcher in a SequentialAgent that lists the inner agent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			inner := newInner()
+			caught := make(chan struct{})
+			return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+				Name: "seq", SubAgents: []agent.Agent{newCatcher(inner, text("fallback"), caught), inner},
+			}})), caught
+		}},
+		{"catcher with an escalating fallback in a LoopAgent that lists the inner agent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			inner := newInner()
+			caught := make(chan struct{})
+			return must(loopagent.New(loopagent.Config{AgentConfig: agent.Config{
+				Name: "loop", SubAgents: []agent.Agent{newCatcher(inner, escalation("fallback"), caught), inner},
+			}})), caught
+		}},
+		{"workflow agent retrying the inner agent in a SequentialAgent that lists it", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			inner := newInner()
+			node := retryingNode(t, inner)
+			wf := must(workflowagent.New(workflowagent.Config{Name: "wf", Edges: workflow.Chain(workflow.Start, node)}))
+			done := make(chan struct{})
+			// The workflow agent ends after its retry succeeded.
+			signal := newAgent("signal", func(agent.InvocationContext, func(*session.Event, error) bool) { close(done) })
+			return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+				Name: "seq", SubAgents: []agent.Agent{wf, signal, inner},
+			}})), done
+		}},
+		{"workflow agent retrying an inner agent it declares", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			inner := newInner()
+			node := retryingNode(t, inner)
+			wf := must(workflowagent.New(workflowagent.Config{Name: "wf", SubAgents: []agent.Agent{inner}, Edges: workflow.Chain(workflow.Start, node)}))
+			done := make(chan struct{})
+			signal := newAgent("signal", func(agent.InvocationContext, func(*session.Event, error) bool) { close(done) })
+			return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+				Name: "seq", SubAgents: []agent.Agent{wf, signal},
+			}})), done
+		}},
+	}
+	tests = append(tests, []struct {
+		name  string
+		build func(t *testing.T) (agent.Agent, <-chan struct{})
+	}{
+		// A wrapper may keep the name of the agent it wraps, so the relay
+		// has to tell agents apart by identity, not by name.
+		{"wrapper named like the undeclared inner agent it catches", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			return newNamedCatcher("inner", newInner(), text("fallback"), caught), caught
+		}},
+		{"same-name wrapper in a SequentialAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+				Name: "seq", SubAgents: []agent.Agent{newNamedCatcher("inner", newInner(), text("fallback"), caught)},
+			}})), caught
+		}},
+		// A SequentialAgent or LoopAgent the catcher runs itself gets no
+		// relay to pass on.
+		{"catcher running the inner agent through an undeclared SequentialAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			hidden := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "hidden", SubAgents: []agent.Agent{newInner()}}}))
+			return newCatcher(hidden, text("fallback"), caught), caught
+		}},
+		{"catcher running the inner agent through an undeclared LoopAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			hidden := must(loopagent.New(loopagent.Config{MaxIterations: 1, AgentConfig: agent.Config{Name: "hidden", SubAgents: []agent.Agent{newInner()}}}))
+			return newCatcher(hidden, text("fallback"), caught), caught
+		}},
+	}...)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			holder, handled := tt.build(t)
+			escalator := newAgent("escalator", func(_ agent.InvocationContext, yield func(*session.Event, error) bool) {
+				<-handled
+				yield(escalation("done"), nil)
+			})
+			outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{holder, escalator}}}))
+			r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			sawEsc := false
+			for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Errorf("run yielded error %v, want the escalation", err)
+				}
+				if ev != nil && ev.Author == "escalator" && ev.Actions.Escalate {
+					sawEsc = true
+				}
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("run ended only at the test deadline")
+			}
+			if !sawEsc {
+				t.Errorf("escalation was not yielded")
+			}
+		})
+	}
+}
+
+// A LoopAgent runs its later passes with a different context, and still passes
+// the relay on there. An error from the inner ParallelAgent on the second pass
+// must replace the escalation while the failing branch is cleaning up.
+func TestParallelAgent_LoopLaterPassErrorSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	failed := make(chan struct{})
+	var passes atomic.Int32
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if passes.Add(1) == 1 {
+					yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("pass one", genai.RoleModel)}}, nil)
+					return
+				}
+				// Cleanup that lasts until the run cancels it.
+				defer func() { <-ctx.Done() }()
+				yield(nil, boom)
+				close(failed)
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-failed
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	loop := must(loopagent.New(loopagent.Config{MaxIterations: 3, AgentConfig: agent.Config{Name: "loop", SubAgents: []agent.Agent{inner}}}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{loop, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawErr := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if errors.Is(err, boom) {
+			sawErr = true
+		}
+		if ev != nil && ev.Actions.Escalate {
+			t.Errorf("escalate event yielded after the second pass failed, want the error instead")
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawErr {
+		t.Errorf("error from the second pass was not returned")
+	}
+}
+
+// embeddedAgent embeds an agent without its State, so the relay treats it as
+// any other agent.
+type embeddedAgent struct{ agent.Agent }
+
+func TestParallelAgent_EmbeddedAgentDoesNotPassErrors(t *testing.T) {
+	boom := errors.New("boom")
+	failed := make(chan struct{})
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Cleanup that lasts until the run cancels it, so the error
+				// reaches the outer agent early only through the relay.
+				defer func() { <-ctx.Done() }()
+				yield(nil, boom)
+				close(failed)
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-failed
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	seq := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{inner}}}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{embeddedAgent{seq}, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawEscalate := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("run yielded %v, want the escalation: the embedding agent had not yielded the error", err)
+		}
+		if ev != nil && ev.Actions.Escalate {
+			sawEscalate = true
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawEscalate {
+		t.Errorf("escalate event was not yielded")
+	}
+}
+
+// appendHookService calls hook before appending each event.
+type appendHookService struct {
+	session.Service
+	hook func(*session.Event)
+}
+
+func (s *appendHookService) AppendEvent(ctx context.Context, sess session.Session, ev *session.Event) error {
+	s.hook(ev)
+	return s.Service.AppendEvent(ctx, sess, ev)
+}
+
+// A ParallelAgent seals its error record before it yields its own escalation.
+// A branch that fails while the caller is still handling that escalation does
+// not report up, because this agent returns the escalation, not the error.
+func TestParallelAgent_ErrorDuringOwnEscalationIsNotReported(t *testing.T) {
+	escAppending := make(chan struct{})
+	failingDone := make(chan struct{})
+	newAgent := func(name string, run func(func(*session.Event, error) bool)) agent.Agent {
+		return must(agent.New(agent.Config{Name: name, Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) { run(yield) }
+		}}))
+	}
+	escalate := func(text string) *session.Event {
+		return &session.Event{
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)},
+			Actions:     session.EventActions{Escalate: true},
+		}
+	}
+	innerEsc := newAgent("inner_esc", func(yield func(*session.Event, error) bool) { yield(escalate("inner done"), nil) })
+	failing := newAgent("failing", func(yield func(*session.Event, error) bool) {
+		defer close(failingDone)
+		<-escAppending
+		yield(nil, errors.New("boom"))
+	})
+	outerEsc := newAgent("outer_esc", func(yield func(*session.Event, error) bool) {
+		<-failingDone
+		yield(escalate("outer done"), nil)
+	})
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{innerEsc, failing}}}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{inner, outerEsc}}}))
+	// Hold inner's escalation in the caller until the sibling has failed.
+	svc := &appendHookService{Service: session.InMemoryService(), hook: func(ev *session.Event) {
+		if ev.Author == "inner_esc" && ev.Actions.Escalate {
+			close(escAppending)
+			<-failingDone
+		}
+	}}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: svc, AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawOuterEsc := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("run yielded error %v, want the outer_esc escalation", err)
+		}
+		if ev != nil && ev.Author == "outer_esc" && ev.Actions.Escalate {
+			sawOuterEsc = true
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawOuterEsc {
+		t.Errorf("outer_esc escalation was not yielded")
 	}
 }
 

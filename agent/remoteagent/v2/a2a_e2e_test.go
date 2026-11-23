@@ -231,7 +231,7 @@ func TestA2AInputRequired(t *testing.T) {
 			}
 
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg2a, task2a.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
@@ -300,7 +300,7 @@ func TestA2ARunnerResumesMixedFunctionResponses(t *testing.T) {
 					t.Fatalf("initial Run() reported error: %s", event.ErrorMessage)
 				}
 				if id, _ := adka2a.GetA2ATaskInfo(event); id != "" {
-					taskID = a2a.TaskID(id)
+					taskID = id
 				}
 				for _, response := range utils.FunctionResponses(event.Content) {
 					if response.Name == approvalToolName {
@@ -549,7 +549,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 				}),
 			}
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg3, task2.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
@@ -1370,7 +1370,6 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-	recording := false
 	transport, recording := newGeminiTestClientConfig(t, trace)
 	if recording { // if we are recording httprr trace, don't use the fakeKey.
 		apiKey = ""
