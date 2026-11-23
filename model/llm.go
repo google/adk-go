@@ -53,8 +53,11 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content                              `json:"content,omitempty"`
-	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	Content          *genai.Content          `json:"content,omitempty"`
+	CitationMetadata *genai.CitationMetadata `json:"citationMetadata,omitempty"`
+	// GroundingMetadata is the grounding metadata of the model's first
+	// candidate. An error response from the Gemini model (ErrorCode set)
+	// carries none.
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`

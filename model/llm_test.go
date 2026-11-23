@@ -205,6 +205,98 @@ func TestCreateResponse(t *testing.T) {
 				FinishReason:     FinishReasonRecitation,
 			},
 		},
+		{
+			name: "CreateEmptyContentWithStopReason",
+			input: genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{{
+					Content:      &genai.Content{Parts: []*genai.Part{}},
+					FinishReason: FinishReasonStop,
+				}},
+			},
+			want: model.LLMResponse{
+				Content:      &genai.Content{Parts: []*genai.Part{}},
+				FinishReason: FinishReasonStop,
+			},
+		},
+		{
+			name: "CreateErrorCaseDropsGroundingMetadata",
+			input: genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{{
+					Content:           &genai.Content{Role: "model", Parts: []*genai.Part{}},
+					FinishReason:      FinishReasonSafety,
+					FinishMessage:     "Safety filter triggered",
+					GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q1"}},
+					LogprobsResult:    emptyLogprobs,
+				}},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, TotalTokenCount: 5},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+			want: model.LLMResponse{
+				ErrorCode:      string(FinishReasonSafety),
+				ErrorMessage:   "Safety filter triggered",
+				FinishReason:   FinishReasonSafety,
+				LogprobsResult: emptyLogprobs,
+				UsageMetadata:  &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5, TotalTokenCount: 5},
+				ModelVersion:   "gemini-2.5-flash",
+			},
+		},
+		{
+			name: "CreateSuccessWithGroundingAndSecondCandidateIgnored",
+			input: genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{
+					{
+						Content:           &genai.Content{Parts: []*genai.Part{{Text: "first"}}},
+						FinishReason:      FinishReasonStop,
+						GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q1"}},
+					},
+					{
+						Content:           &genai.Content{Parts: []*genai.Part{{Text: "second"}}},
+						FinishReason:      FinishReasonSafety,
+						GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q2"}},
+					},
+				},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 3, CandidatesTokenCount: 1, TotalTokenCount: 4},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+			want: model.LLMResponse{
+				Content:           &genai.Content{Parts: []*genai.Part{{Text: "first"}}},
+				FinishReason:      FinishReasonStop,
+				GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"q1"}},
+				UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 3, CandidatesTokenCount: 1, TotalTokenCount: 4},
+				ModelVersion:      "gemini-2.5-flash",
+			},
+		},
+		{
+			name: "CreateNoCandidatesWithUsageAndModelVersion",
+			input: genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{},
+				PromptFeedback: &genai.GenerateContentResponsePromptFeedback{
+					BlockReason:        BlockedReasonSafety,
+					BlockReasonMessage: "Prompt blocked",
+				},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 4, TotalTokenCount: 4},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+			want: model.LLMResponse{
+				ErrorCode:     string(BlockedReasonSafety),
+				ErrorMessage:  "Prompt blocked",
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 4, TotalTokenCount: 4},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+		},
+		{
+			name: "CreateEmptyCandidatesWithoutPromptFeedback",
+			input: genai.GenerateContentResponse{
+				Candidates:    []*genai.Candidate{},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, TotalTokenCount: 10},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+			want: model.LLMResponse{
+				Content:       &genai.Content{Role: "model", Parts: []*genai.Part{}},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, TotalTokenCount: 10},
+				ModelVersion:  "gemini-2.5-flash",
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -238,6 +330,18 @@ func TestCreateResponse(t *testing.T) {
 
 			if !reflect.DeepEqual(got.CitationMetadata, tc.want.CitationMetadata) {
 				t.Errorf("CitationMetadata mismatch: want %+v, got %+v", tc.want.CitationMetadata, got.CitationMetadata)
+			}
+
+			if !reflect.DeepEqual(got.GroundingMetadata, tc.want.GroundingMetadata) {
+				t.Errorf("GroundingMetadata mismatch: want %+v, got %+v", tc.want.GroundingMetadata, got.GroundingMetadata)
+			}
+
+			if !reflect.DeepEqual(got.UsageMetadata, tc.want.UsageMetadata) {
+				t.Errorf("UsageMetadata mismatch: want %+v, got %+v", tc.want.UsageMetadata, got.UsageMetadata)
+			}
+
+			if got.ModelVersion != tc.want.ModelVersion {
+				t.Errorf("ModelVersion mismatch: want %q, got %q", tc.want.ModelVersion, got.ModelVersion)
 			}
 		})
 	}
