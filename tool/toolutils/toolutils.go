@@ -33,10 +33,16 @@ type Tool interface {
 	Declaration() *genai.FunctionDeclaration
 }
 
-// PackTool ensures that in case there is a usage of multiple function tools,
-// all of them are consolidated into one genai tool that has all the function declarations
-// provided by the tools. So, if there is already a tool with a function declaration,
-// it appends another to it; otherwise, it creates a new genai tool.
+// PackTool registers t in req.Tools under t.Name() and appends t's function
+// declaration to the first genai.Tool of req.Config.Tools whose
+// FunctionDeclarations list is not empty, or to a new genai.Tool when there is
+// none, so successive calls share one genai.Tool.
+//
+// A tool whose Declaration returns nil is registered and adds no declaration.
+// The LLM flow does not offer such a tool to the model, and a function call to
+// its name gets the same tool-not-found result as a call to an unknown name.
+//
+// PackTool returns an error when req.Tools already holds t.Name().
 func PackTool(req *model.LLMRequest, t Tool) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
@@ -58,7 +64,7 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 	// Find an existing genai.Tool with FunctionDeclarations
 	var funcTool *genai.Tool
 	for _, tool := range req.Config.Tools {
-		if tool != nil && tool.FunctionDeclarations != nil {
+		if tool != nil && len(tool.FunctionDeclarations) > 0 {
 			funcTool = tool
 			break
 		}

@@ -326,7 +326,11 @@ type Config struct {
 	// If a callback returns result/error, then the execution of the callback
 	// list stops AND the actual tool call is skipped.
 	BeforeToolCallbacks []BeforeToolCallback
-	// Tools available to the agent.
+	// Tools available to the agent. The model is offered the function
+	// declaration of each tool. A tool whose Declaration method returns nil is
+	// not offered, and a function call to its name gets the tool-not-found
+	// result. In live mode (RunLive) the second rule holds only for a tool
+	// that registers itself in the request, as toolutils.PackTool does.
 	Tools []tool.Tool
 	// Callbacks are executed in the order they are provided.
 	// If a callback returns result/error, then the execution of the callback
