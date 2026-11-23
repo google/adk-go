@@ -190,8 +190,9 @@ func storeCredentialAnswers(state session.State, requests map[string]*toolauth.T
 // to an answer after it asked, has nothing to resume. adk-python resumes every
 // call that shared an answered key in such a response, so a call that already
 // finished runs again and repeats its side effects. The REST server accepts a
-// new session's events from the client, calls and requests in this agent's
-// name included, but never the credential requests a tool records.
+// new session's events from the client, tool calls in this agent's name
+// included, but neither adk_request_credential calls nor the credential
+// requests a tool records.
 func toolCallsToResume(events []*session.Event, agentName string, requests map[string]*toolauth.ToolArguments, authorized map[string]bool) map[string]bool {
 	named := map[string]bool{}
 	for _, req := range requests {
