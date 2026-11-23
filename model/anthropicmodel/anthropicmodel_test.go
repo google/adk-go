@@ -4042,13 +4042,28 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 }
 
 // Claude on Vertex AI names the hosting runtime in its tracking headers only
-// when the request goes to a Google API endpoint.
+// on a request that goes to a Google API endpoint, whichever option decided
+// where the request goes.
 func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("CLOUD_RUN_JOB", "job")
-	const proxy = "https://proxy.example.com"
+	const (
+		proxy      = "https://proxy.example.com"
+		regional   = "us-east5-aiplatform.googleapis.com"
+		mtls       = "us-east5-aiplatform.mtls.googleapis.com"
+		proxyHost  = "proxy.example.com"
+		noSuffix   = ""
+		withSuffix = "cloud_run"
+	)
+	// toHost stands for a caller's middleware that sends requests elsewhere.
+	toHost := func(host string) option.RequestOption {
+		return option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			r.URL.Host = host
+			return next(r)
+		})
+	}
 
 	tests := []struct {
 		name       string
@@ -4056,18 +4071,28 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 		baseURL    string
 		reqOpts    []option.RequestOption
 		wantHost   string
-		wantSuffix bool
+		wantSuffix string
+		// wantUA is the User-Agent, when it is not the ADK labels.
+		wantUA string
 	}{
-		{name: "regional endpoint", location: "us-east5", wantHost: "us-east5-aiplatform.googleapis.com", wantSuffix: true},
-		{name: "global endpoint", location: "global", wantHost: "aiplatform.googleapis.com", wantSuffix: true},
-		{name: "Google base URL", location: "us-east5", baseURL: "https://us-east5-aiplatform.mtls.googleapis.com", wantHost: "us-east5-aiplatform.mtls.googleapis.com", wantSuffix: true},
-		{name: "other base URL", location: "us-east5", baseURL: proxy, wantHost: "proxy.example.com"},
-		{name: "other base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: "proxy.example.com"},
-		{name: "request options replace a Google base URL", location: "us-east5", baseURL: "https://us-east5-aiplatform.googleapis.com", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: "proxy.example.com"},
+		{name: "regional endpoint", location: "us-east5", wantHost: regional, wantSuffix: withSuffix},
+		{name: "global endpoint", location: "global", wantHost: "aiplatform.googleapis.com", wantSuffix: withSuffix},
+		{name: "multi-region endpoint", location: "eu", wantHost: "aiplatform.eu.rep.googleapis.com", wantSuffix: withSuffix},
+		{name: "Google base URL", location: "us-east5", baseURL: "https://" + mtls, wantHost: mtls, wantSuffix: withSuffix},
+		{name: "other base URL", location: "us-east5", baseURL: proxy, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "other base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "Google base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL("https://" + mtls)}, wantHost: mtls, wantSuffix: withSuffix},
+		{name: "request options replace a Google base URL", location: "us-east5", baseURL: "https://" + regional, reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		// WithConfig sets a base URL only when none is set, and Vertex sets one.
+		{name: "config base URL that Vertex overrides", location: "us-east5", reqOpts: []option.RequestOption{option.WithConfigQuiet(&config.Config{BaseURL: proxy}), option.WithAPIKey("unused")}, wantHost: regional, wantSuffix: withSuffix},
+		{name: "middleware that leaves the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
+		{name: "middleware that changes the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(proxyHost)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "middleware that changes the host back", location: "us-east5", baseURL: proxy, reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
+		{name: "caller's User-Agent", location: "us-east5", reqOpts: []option.RequestOption{option.WithHeader("User-Agent", "caller-app/1.0")}, wantHost: regional, wantSuffix: withSuffix, wantUA: "caller-app/1.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var sent *http.Request
+			var sent []*http.Request
 			m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
 				Backend:        anthropicmodel.BackendVertex,
 				Project:        "proj",
@@ -4076,7 +4101,11 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 				BaseURL:        tt.baseURL,
 				RequestOptions: tt.reqOpts,
 				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-					sent = r
+					sent = append(sent, r)
+					// The first attempt fails, so the retry is checked too.
+					if len(sent) == 1 {
+						return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Retry-After-Ms": {"1"}}, Body: http.NoBody, Request: r}, nil
+					}
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Header:     http.Header{"Content-Type": {"application/json"}},
@@ -4093,20 +4122,32 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 					t.Fatalf("GenerateContent() error = %v", err)
 				}
 			}
-			if sent == nil {
-				t.Fatal("no request was sent")
+			if len(sent) != 2 {
+				t.Fatalf("%d requests were sent, want a failed attempt and its retry", len(sent))
 			}
-			if got := sent.URL.Hostname(); got != tt.wantHost {
-				t.Fatalf("request went to %q, want %q", got, tt.wantHost)
-			}
-			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
-				adk, _, _ := strings.Cut(sent.Header.Get(name), " ")
-				_, suffix, _ := strings.Cut(adk, "+")
-				if !strings.HasPrefix(adk, "google-adk/") {
-					t.Errorf("%s = %q, want it to start with a google-adk label", name, sent.Header.Get(name))
+			for i, r := range sent {
+				if got := r.URL.Hostname(); got != tt.wantHost {
+					t.Fatalf("attempt %d went to %q, want %q", i, got, tt.wantHost)
 				}
-				if want := map[bool]string{true: "cloud_run"}[tt.wantSuffix]; suffix != want {
-					t.Errorf("%s = %q, want runtime suffix %q", name, sent.Header.Get(name), want)
+				for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+					got := r.Header.Values(name)
+					if len(got) != 1 {
+						t.Fatalf("attempt %d: %s = %q, want one value", i, name, got)
+					}
+					if name == "User-Agent" && tt.wantUA != "" {
+						if got[0] != tt.wantUA {
+							t.Errorf("attempt %d: User-Agent = %q, want %q", i, got[0], tt.wantUA)
+						}
+						continue
+					}
+					adk, rest, _ := strings.Cut(got[0], " ")
+					label, suffix, _ := strings.Cut(adk, "+")
+					if !strings.HasPrefix(label, "google-adk/") || !strings.HasPrefix(rest, "gl-go/") {
+						t.Errorf("attempt %d: %s = %q, want the google-adk and gl-go labels", i, name, got[0])
+					}
+					if suffix != tt.wantSuffix {
+						t.Errorf("attempt %d: %s = %q, want runtime suffix %q", i, name, got[0], tt.wantSuffix)
+					}
 				}
 			}
 		})

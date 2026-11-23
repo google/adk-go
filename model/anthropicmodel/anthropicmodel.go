@@ -235,18 +235,7 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 			opts = append(opts, option.WithBaseURL(strings.TrimSpace(cfg.BaseURL)))
 		}
 
-		// The SDK's own Vertex endpoints are all hosts under googleapis.com.
-		// A base URL from RequestOptions replaces any other, and only its
-		// presence is known here, so it gets the labels without the hosting
-		// runtime.
-		dest := "https://aiplatform.googleapis.com/"
-		switch {
-		case reqOptsHasBaseURL:
-			dest = ""
-		case cfg.BaseURL != "":
-			dest = strings.TrimSpace(cfg.BaseURL)
-		}
-		trackingHeader := version.TrackingHeader(dest)
+		trackingHeader := version.TrackingHeader(nil)
 		opts = append(opts,
 			option.WithHeader("x-goog-api-client", trackingHeader),
 			option.WithHeader("user-agent", trackingHeader),
@@ -258,6 +247,11 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 	}
 	if len(cfg.RequestOptions) > 0 {
 		opts = append(opts, cfg.RequestOptions...)
+	}
+	if backend == BackendVertex {
+		// Last, so it runs after the caller's middleware and sees the URL the
+		// request is sent to, whichever option decided it.
+		opts = append(opts, option.WithMiddleware(nameHostingRuntime))
 	}
 
 	var promptCache *PromptCacheConfig
@@ -281,6 +275,22 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 		cfgLogger:   cfg.Logger,
 		client:      anthropic.NewClient(opts...),
 	}, nil
+}
+
+// nameHostingRuntime is a middleware that makes ADK's tracking labels name the
+// hosting runtime on a request to a Google API endpoint (see
+// [version.TrackingHeader]). A header that no longer holds exactly the labels
+// NewModel set, because RequestOptions replaced or extended it, is left alone.
+func nameHostingRuntime(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	plain := version.TrackingHeader(nil)
+	if labels := version.TrackingHeader(r.URL); labels != plain {
+		for _, name := range []string{"X-Goog-Api-Client", "User-Agent"} {
+			if got := r.Header.Values(name); len(got) == 1 && got[0] == plain {
+				r.Header.Set(name, labels)
+			}
+		}
+	}
+	return next(r)
 }
 
 func defaultAnthropicHTTPClient() *http.Client {

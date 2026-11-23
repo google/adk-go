@@ -364,7 +364,10 @@ type Config struct {
 	// either have no effect. A nil HTTPClient stands for http.DefaultClient,
 	// except with Auth (see there). The copied client puts the ADK client
 	// labels ("google-adk/<version> gl-go/<version>") at the front of the
-	// User-Agent and X-Goog-Api-Client headers of every request. The
+	// User-Agent and X-Goog-Api-Client headers of every request. On a request
+	// to an https host under googleapis.com, the first label also names the
+	// runtime when ADK runs on Agent Engine, Cloud Run or Kubernetes, as in
+	// "google-adk/<version>+cloud_run". The
 	// HTTPClient's own Transport runs after that. A User-Agent it
 	// sets with Header.Set replaces the labels, and one it adds with
 	// Header.Add is not sent, because net/http sends only the first value.

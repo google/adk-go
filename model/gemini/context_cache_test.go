@@ -23,6 +23,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -1477,7 +1478,7 @@ func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
 	}
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	const google, proxy = "https://generativelanguage.googleapis.com/", "https://proxy.example.com/"
-	plain := version.TrackingHeader("")
+	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+k8s ", 1)
 
 	for _, tt := range []struct {
@@ -1492,7 +1493,11 @@ func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
 		{name: "proxy client, no options", clientBaseURL: proxy, want: plain},
 		{name: "proxy client, options with Google", clientBaseURL: proxy, opts: &genai.HTTPOptions{BaseURL: google}, want: tagged},
 	} {
-		m := &geminiModel{baseURL: tt.clientBaseURL}
+		baseURL, err := url.Parse(tt.clientBaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := &geminiModel{baseURL: baseURL}
 		c := &contextCache{trackingHeader: m.trackingHeader}
 		headers := c.httpOptions(tt.opts).Headers
 		for _, name := range []string{"x-goog-api-client", "user-agent"} {
@@ -1500,5 +1505,118 @@ func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
 				t.Errorf("%s: %s = %q, want %q", tt.name, name, got, tt.want)
 			}
 		}
+	}
+}
+
+// TestGenerateContent_ContextCacheRuntimeSuffix checks the labels on the calls
+// that create and delete a cache, as the provider receives them.
+func TestGenerateContent_ContextCacheRuntimeSuffix(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	const (
+		googleHost = "generativelanguage.googleapis.com"
+		proxyHost  = "proxy.example.com"
+		tagged     = "google-adk/" + version.Version + "+k8s"
+		plain      = "google-adk/" + version.Version
+	)
+
+	tests := []struct {
+		name string
+		// clientBaseURL and createBaseURL are the base URLs of the client and
+		// of the call that creates a cache, when not the default.
+		clientBaseURL, createBaseURL string
+		wantHosts                    []string
+		wantCreate, wantDelete       string
+	}{
+		{
+			name:       "Google client",
+			wantHosts:  []string{"POST " + googleHost, "POST " + googleHost, "DELETE " + googleHost},
+			wantCreate: tagged,
+			wantDelete: tagged,
+		},
+		{
+			name:          "Google client, cache created through a proxy",
+			createBaseURL: "https://" + proxyHost + "/",
+			wantHosts:     []string{"POST " + proxyHost, "POST " + googleHost, "DELETE " + googleHost},
+			wantCreate:    plain,
+			wantDelete:    tagged,
+		},
+		{
+			name:          "proxy client",
+			clientBaseURL: "https://" + proxyHost + "/",
+			wantHosts:     []string{"POST " + proxyHost, "POST " + proxyHost, "DELETE " + proxyHost},
+			wantCreate:    plain,
+			wantDelete:    plain,
+		},
+		{
+			name:          "proxy client, cache created at Google",
+			clientBaseURL: "https://" + proxyHost + "/",
+			createBaseURL: "https://" + googleHost + "/",
+			wantHosts:     []string{"POST " + googleHost, "POST " + proxyHost, "DELETE " + proxyHost},
+			wantCreate:    tagged,
+			wantDelete:    plain,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The failed generation makes the model delete the cache it created.
+			api := &fakeCacheAPI{generateStatus: http.StatusInternalServerError, expireTime: cacheTestNow.Add(time.Hour)}
+			var hosts []string
+			llm, err := NewModel(t.Context(), "test-model", &genai.ClientConfig{
+				APIKey:      "key",
+				Backend:     genai.BackendGeminiAPI,
+				HTTPOptions: genai.HTTPOptions{BaseURL: tt.clientBaseURL},
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					hosts = append(hosts, r.Method+" "+r.URL.Hostname())
+					if r.Body == nil {
+						r.Body = http.NoBody
+					}
+					rec := httptest.NewRecorder()
+					api.serve(rec, r)
+					return rec.Result(), nil
+				})},
+			})
+			if err != nil {
+				t.Fatalf("NewModel: %v", err)
+			}
+			m := llm.(*geminiModel)
+			cfg := &model.ContextCacheConfig{}
+			if tt.createBaseURL != "" {
+				cfg.CreateHTTPOptions = &genai.HTTPOptions{BaseURL: tt.createBaseURL}
+			}
+			req := cacheTestRequest(cfg)
+			req.PreviousPromptTokenCount = 5000
+			req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+
+			if _, err := generate(cacheTestContext(t), m, req); err == nil {
+				t.Fatal("GenerateContent() error = nil, want the model's error")
+			}
+			if diff := cmp.Diff([]string{"create", "generate", "delete cachedContents/1"}, api.calls); diff != "" {
+				t.Fatalf("API calls mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantHosts, hosts); diff != "" {
+				t.Fatalf("hosts called mismatch (-want +got):\n%s", diff)
+			}
+			for _, call := range []struct {
+				name    string
+				headers http.Header
+				want    string
+			}{
+				{name: "create", headers: api.createHeaders[0], want: tt.wantCreate},
+				{name: "delete", headers: api.deleteHeaders[0], want: tt.wantDelete},
+			} {
+				for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+					got := call.headers.Values(name)
+					if len(got) != 1 {
+						t.Fatalf("%s call: %s = %q, want one value", call.name, name, got)
+					}
+					if diff := cmp.Diff([]string{call.want}, adkLabels(got[0])); diff != "" {
+						t.Errorf("%s call: %s = %q: ADK labels mismatch (-want +got):\n%s", call.name, name, got[0], diff)
+					}
+				}
+			}
+		})
 	}
 }

@@ -1419,7 +1419,8 @@ func TestUserAgentHasNoRuntimeSuffix(t *testing.T) {
 	if want := "https://bigquery.googleapis.com/bigquery/v2/"; c.endpoint != want {
 		t.Fatalf("endpoint = %q, want %q", c.endpoint, want)
 	}
-	if want := userAgentPrefix + " google-adk/"; !strings.HasPrefix(c.userAgent, want) || strings.Contains(c.userAgent, "+") {
-		t.Errorf("userAgent = %q, want it to start with %q and hold no suffix", c.userAgent, want)
+	tokens := strings.Fields(c.userAgent)
+	if len(tokens) < 2 || tokens[0] != userAgentPrefix || !strings.HasPrefix(tokens[1], "google-adk/") || strings.Contains(tokens[1], "+") {
+		t.Errorf("userAgent = %q, want %q and then a google-adk label without a suffix", c.userAgent, userAgentPrefix)
 	}
 }

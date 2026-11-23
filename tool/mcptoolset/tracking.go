@@ -33,7 +33,7 @@ type trackingTransport struct {
 
 func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	req.Header = version.WithTrackingHeaders(req.Header, req.URL.String())
+	req.Header = version.WithTrackingHeaders(req.Header, req.URL)
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport

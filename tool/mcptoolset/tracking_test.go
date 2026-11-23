@@ -15,6 +15,7 @@
 package mcptoolset
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -52,7 +53,7 @@ func (r *headerRecorder) all() []http.Header {
 
 func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "ua_server", Version: "v1"}, nil)
-	want := version.TrackingHeader("")
+	want := version.TrackingHeader(nil)
 
 	tests := []struct {
 		name      string
@@ -160,7 +161,7 @@ func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 }
 
 func TestTrackingTransportMergesCallerHeaders(t *testing.T) {
-	adk := version.TrackingHeader("")
+	adk := version.TrackingHeader(nil)
 	tests := []struct {
 		name     string
 		header   http.Header
@@ -284,31 +285,13 @@ func TestAuthCredentialBypassesDefaultClientTransport(t *testing.T) {
 	}
 }
 
-// userAgentTransport stands for a caller's own HTTP transport that sets or adds
-// a User-Agent of its own.
-type userAgentTransport struct{ set bool }
-
-func (u userAgentTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	if u.set {
-		r.Header.Set("User-Agent", "caller-app/1.0")
-	} else {
-		r.Header.Add("User-Agent", "caller-app/1.0")
-	}
-	return http.DefaultTransport.RoundTrip(r)
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
 // The hosting runtime is reported to Google API endpoints only.
 func TestTrackingTransportRuntimeSuffix(t *testing.T) {
 	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("K_SERVICE", "svc")
-	plain := version.TrackingHeader("")
+	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
 
 	for _, tt := range []struct {
@@ -343,7 +326,7 @@ func TestTrackingTransportRuntimeSuffixOnRedirect(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	t.Setenv("K_SERVICE", "svc")
-	plain := version.TrackingHeader("")
+	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
 	const google, other = "https://bigquery.googleapis.com/mcp", "https://mcp.example/mcp"
 
@@ -381,3 +364,36 @@ func TestTrackingTransportRuntimeSuffixOnRedirect(t *testing.T) {
 		}
 	}
 }
+
+// A request without a URL is the base transport's to refuse, as it was before
+// the labels depended on the URL.
+func TestTrackingTransportRequestWithoutURL(t *testing.T) {
+	errBase := errors.New("refused by base")
+	rt := &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got, want := r.Header.Get("User-Agent"), version.TrackingHeader(nil); got != want {
+			t.Errorf("User-Agent = %q, want %q", got, want)
+		}
+		return nil, errBase
+	})}
+	if _, err := rt.RoundTrip(&http.Request{Header: http.Header{}}); !errors.Is(err, errBase) {
+		t.Errorf("RoundTrip() error = %v, want %v", err, errBase)
+	}
+}
+
+// userAgentTransport stands for a caller's own HTTP transport that sets or adds
+// a User-Agent of its own.
+type userAgentTransport struct{ set bool }
+
+func (u userAgentTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	if u.set {
+		r.Header.Set("User-Agent", "caller-app/1.0")
+	} else {
+		r.Header.Add("User-Agent", "caller-app/1.0")
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

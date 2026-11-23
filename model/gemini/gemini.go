@@ -46,6 +46,7 @@ import (
 	"iter"
 	"maps"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"google.golang.org/genai"
@@ -61,10 +62,10 @@ import (
 type geminiModel struct {
 	client *genai.Client
 	name   string
-	// baseURL is the client's base URL. Whether a request goes to a Google API
-	// endpoint, and so may name the hosting runtime in its tracking headers,
-	// is decided by it.
-	baseURL string
+	// baseURL is the client's base URL, or nil if it does not parse. Whether
+	// a request goes to a Google API endpoint, and so may name the hosting
+	// runtime in its tracking headers, is decided by it.
+	baseURL *url.URL
 }
 
 // NewModel returns [model.LLM], backed by the Gemini API.
@@ -88,7 +89,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	// headers alone, so the tracking headers GenerateContent sets per request
 	// never reach it.
 	callerHeaders := cfgCopy.HTTPOptions.Headers
-	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, "")
+	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, nil)
 
 	client, err := genai.NewClient(ctx, &cfgCopy)
 	if err != nil {
@@ -97,7 +98,9 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	// genai resolves the base URL from the config, its defaults and the
 	// environment, so it is known only now. Live.Connect reads the headers
 	// from this map when it dials, so writing into it reaches the handshake.
-	baseURL := client.ClientConfig().HTTPOptions.BaseURL
+	// The client's Interactions service copied the headers while the client
+	// was built, so its calls, which ADK does not make, name no runtime.
+	baseURL, _ := url.Parse(client.ClientConfig().HTTPOptions.BaseURL)
 	maps.Copy(cfgCopy.HTTPOptions.Headers, version.WithTrackingHeaders(callerHeaders, baseURL))
 
 	if client.ClientConfig().HTTPClient != nil {
@@ -235,7 +238,8 @@ func (m *geminiModel) addHeaders(opts *genai.HTTPOptions) {
 // whose BaseURL, when set, replaces the client's.
 func (m *geminiModel) trackingHeader(opts *genai.HTTPOptions) string {
 	if opts != nil && opts.BaseURL != "" {
-		return version.TrackingHeader(opts.BaseURL)
+		baseURL, _ := url.Parse(opts.BaseURL)
+		return version.TrackingHeader(baseURL)
 	}
 	return version.TrackingHeader(m.baseURL)
 }

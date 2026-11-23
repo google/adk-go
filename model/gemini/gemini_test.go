@@ -15,10 +15,12 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"iter"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/httprr"
@@ -657,7 +660,7 @@ func TestModel_NoSideEffects(t *testing.T) {
 }
 
 func TestModel_LiveTrackingHeaders(t *testing.T) {
-	adk := version.TrackingHeader("")
+	adk := version.TrackingHeader(nil)
 	tests := []struct {
 		name          string
 		clientHeaders http.Header
@@ -747,7 +750,7 @@ func TestModel_LiveTrackingHeaders_NilConfig(t *testing.T) {
 	if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
 		t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
 	}
-	adk := version.TrackingHeader("")
+	adk := version.TrackingHeader(nil)
 	checkLiveHandshake(t, handshakes, adk, adk)
 }
 
@@ -1001,7 +1004,7 @@ func TestModel_MaybeAppendUserContent(t *testing.T) {
 // one genai resolved for the client, or the one a request sets.
 func TestModel_TrackingHeaders_RuntimeSuffix(t *testing.T) {
 	const proxy = "https://proxy.example.com/"
-	plain := version.TrackingHeader("")
+	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
 
 	tests := []struct {
@@ -1110,10 +1113,92 @@ func TestModel_TrackingHeaders_RuntimeSuffix(t *testing.T) {
 				t.Fatalf("request went to %q, want %q", got, tt.wantHost)
 			}
 			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
-				if got := sent.Header.Get(name); !strings.HasPrefix(got, tt.wantRequest+" ") {
-					t.Errorf("request %s = %q, want it to start with %q", name, got, tt.wantRequest)
+				got := sent.Header.Values(name)
+				if len(got) != 1 || !strings.HasPrefix(got[0], tt.wantRequest+" ") {
+					t.Fatalf("request %s = %q, want one value that starts with %q", name, got, tt.wantRequest)
+				}
+				// The label for another destination must not follow, either.
+				wantLabel, _, _ := strings.Cut(tt.wantRequest, " ")
+				if diff := cmp.Diff([]string{wantLabel}, adkLabels(got[0])); diff != "" {
+					t.Errorf("request %s = %q: ADK labels mismatch (-want +got):\n%s", name, got[0], diff)
 				}
 			}
 		})
 	}
+}
+
+// The live handshake names the hosting runtime when it goes to a Google API
+// endpoint. Not parallel: it swaps websocket.DefaultDialer, which genai dials
+// with.
+func TestModel_LiveTrackingHeaders_RuntimeSuffix(t *testing.T) {
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	handshakes := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes <- r.Header.Clone()
+		http.Error(w, "no upgrade", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	// The dialer stands in for TLS to the host in the URL and connects to the
+	// test server instead, so the handshake of a wss URL can be read.
+	var dialed string
+	dialer := *websocket.DefaultDialer
+	dialer.Proxy = nil
+	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = addr
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	orig := websocket.DefaultDialer
+	t.Cleanup(func() { websocket.DefaultDialer = orig })
+	websocket.DefaultDialer = &dialer
+
+	tests := []struct {
+		name     string
+		baseURL  string
+		wantDial string
+		want     string
+	}{
+		{name: "default endpoint", wantDial: "generativelanguage.googleapis.com:443", want: tagged},
+		{name: "Google base URL", baseURL: "https://generativelanguage.mtls.googleapis.com/", wantDial: "generativelanguage.mtls.googleapis.com:443", want: tagged},
+		{name: "other base URL", baseURL: "https://proxy.example.com/", wantDial: "proxy.example.com:443", want: plain},
+		{name: "address with a zone that ends in the suffix", baseURL: "https://[::1%25.googleapis.com]/", wantDial: "[::1%.googleapis.com]:443", want: plain},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+				t.Setenv(name, "")
+			}
+			t.Setenv("K_SERVICE", "svc")
+			llm, err := NewModel(t.Context(), "gemini-live-test", &genai.ClientConfig{
+				Backend:     genai.BackendGeminiAPI,
+				APIKey:      "fakekey",
+				HTTPOptions: genai.HTTPOptions{BaseURL: tt.baseURL},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialed = ""
+			if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+				t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+			}
+			if dialed != tt.wantDial {
+				t.Fatalf("Live.Connect() dialed %q, want %q", dialed, tt.wantDial)
+			}
+			checkLiveHandshake(t, handshakes, tt.want, tt.want)
+		})
+	}
+}
+
+// adkLabels returns the tokens of a tracking header value that are ADK's own
+// label, with or without a runtime suffix.
+func adkLabels(header string) []string {
+	var labels []string
+	for token := range strings.FieldsSeq(header) {
+		if strings.HasPrefix(token, "google-adk/") {
+			labels = append(labels, token)
+		}
+	}
+	return labels
 }
