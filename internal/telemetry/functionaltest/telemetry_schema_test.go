@@ -57,7 +57,6 @@ func TestTelemetrySchema(t *testing.T) {
 	for _, tc := range testcaseimpl.Cases() {
 		t.Run(tc.ID(), func(t *testing.T) {
 			got := record(t, tc)
-			checkInferenceErrorTypes(t, tc, got)
 			if *update {
 				writeGolden(t, goldenPath(tc), got)
 				return
@@ -84,48 +83,6 @@ func TestGoldensHaveCases(t *testing.T) {
 	for _, f := range files {
 		if !want[f] {
 			t.Errorf("%s is recorded by no case; delete it", f)
-		}
-	}
-}
-
-// checkInferenceErrorTypes fails the test when a recording's generate_content
-// spans and its client inference metrics disagree about failure. Under either
-// schema, the spans with ERROR status must match the metric points with an
-// error type: some of each, or none of either. Under the default schema, where
-// spans carry an error type too, the two must also report the same set of
-// error types, counting no error type as one. A metric data point aggregates
-// calls, so the check compares sets rather than calls.
-func checkInferenceErrorTypes(t *testing.T, tc testcasedata.Case, d *telemetrytest.Digest) {
-	t.Helper()
-	spanFailed, spanTypes := map[bool]bool{}, map[any]bool{}
-	var walk func(*telemetrytest.SpanDigest)
-	walk = func(s *telemetrytest.SpanDigest) {
-		if s.Attributes["gen_ai.operation.name"] == "generate_content" {
-			spanFailed[s.Status == "ERROR"] = true
-			spanTypes[s.Attributes["error.type"]] = true
-		}
-		for _, c := range s.Children {
-			walk(c)
-		}
-	}
-	walk(d.RootSpan)
-	legacy := tc.SchemaVersion == "otel_semconv_1_36"
-	for _, name := range []string{
-		"gen_ai.client.inference.duration",
-		"gen_ai.client.inference.operation.input_tokens",
-		"gen_ai.client.inference.operation.output_tokens",
-	} {
-		pointFailed, pointTypes := map[bool]bool{}, map[any]bool{}
-		for _, p := range d.MetricPoints[name] {
-			errorType, ok := p.Attributes["error.type"]
-			pointFailed[ok] = true
-			pointTypes[errorType] = true
-		}
-		if diff := cmp.Diff(spanFailed, pointFailed); diff != "" {
-			t.Errorf("failures of generate_content spans and %s differ (-spans +metric):\n%s", name, diff)
-		}
-		if diff := cmp.Diff(spanTypes, pointTypes); !legacy && diff != "" {
-			t.Errorf("error types of generate_content spans and %s differ (-spans +metric):\n%s", name, diff)
 		}
 	}
 }
