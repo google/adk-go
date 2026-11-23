@@ -45,7 +45,8 @@ const (
 // caller holds the options the client was given by its own caller, which go
 // after the returned ones. With an HTTP client among them the client is the
 // caller's to configure, and outside the googleapis.com universe the api
-// library refuses a client certificate. In both cases the options are empty.
+// library refuses a client certificate. In both cases the options are empty,
+// and so they are when the library fails on caller's options.
 //
 // That library has a rule of its own: the certificate is off unless
 // GOOGLE_API_USE_CLIENT_CERTIFICATE is true, and its certificate sources
@@ -86,11 +87,12 @@ func APIOptions(ctx context.Context, caller ...option.ClientOption) (opts []opti
 
 // callerSettings reports whether opts hold an [option.WithHTTPClient], and
 // the universe a client built with them is in: the one an option names, or
-// else the environment's.
+// else the environment's. The universe is empty when the api library fails
+// on opts.
 //
 // Options cannot be inspected, so it asks the api library. Given an HTTP
 // client the library builds nothing: it returns the last client among its
-// options, and the default endpoint with the universe filled in.
+// options, and a default endpoint with the universe in it.
 func callerSettings(ctx context.Context, opts []option.ClientOption) (httpClient bool, universe string) {
 	universe = os.Getenv(envUniverseDomain)
 	if universe == "" {
@@ -101,18 +103,28 @@ func callerSettings(ctx context.Context, opts []option.ClientOption) (httpClient
 	}
 	const prefix = "https://universe.probe."
 	probe := &http.Client{}
-	got, endpoint, err := htransport.NewClient(ctx, append([]option.ClientOption{
+	probeOpts := append([]option.ClientOption{
 		option.WithHTTPClient(probe),
 		internaloption.WithDefaultEndpointTemplate(prefix + "UNIVERSE_DOMAIN"),
-	}, opts...)...)
-	// An error means options the library rejects next to an HTTP client, a
-	// quota project for one. They fail the real call too if opts hold a
-	// client.
+		// The library has an mTLS endpoint in the googleapis.com universe
+		// alone.
+		internaloption.WithDefaultMTLSEndpoint(prefix + defaultUniverse),
+	}, opts...)
+	// The probe reads two settings and leaves the rest to the real call. So
+	// it skips validation, which rejects options that only clash with its
+	// HTTP client, a quota project for one, and ones the client completes
+	// after it asks, a scope for option.ImpersonateCredentials. It leaves out
+	// the caller's endpoint, which the library would return in place of the
+	// default one. And it has a certificate in hand, so that the library
+	// does not search for one of its own, which can run a helper.
+	probeOpts = append(probeOpts, internaloption.SkipDialSettingsValidation(), option.WithEndpoint(""), option.WithClientCertSource(noCertificate))
+	got, endpoint, err := htransport.NewClient(ctx, probeOpts...)
+	// What the library still fails on is its mTLS endpoint outside
+	// googleapis.com, and options it takes for no HTTP client at all.
 	if err != nil {
-		return false, universe
+		return false, ""
 	}
-	// No prefix means an endpoint of the caller's, which wins over the mTLS
-	// one whatever the universe.
+	// No prefix means default endpoints of the caller's own.
 	if u, ok := strings.CutPrefix(endpoint, prefix); ok {
 		universe = u
 	}

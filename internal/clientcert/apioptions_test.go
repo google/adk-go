@@ -16,19 +16,23 @@ package clientcert
 
 import (
 	"bytes"
+	"cmp"
+	"crypto/tls"
 	"net/http"
 	"testing"
 
 	"google.golang.org/api/option"
+	"google.golang.org/api/option/internaloption"
 	htransport "google.golang.org/api/transport/http"
+	"google.golang.org/grpc"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
 )
 
 // TestAPIOptions checks the options by what a client built with them does.
 //
-// No case sets GOOGLE_API_USE_CLIENT_CERTIFICATE to true, here or in the
-// packages that use the options. With it google.golang.org/api consults its
+// No case of this test sets GOOGLE_API_USE_CLIENT_CERTIFICATE to true, and
+// none does in the packages that use the options. With it google.golang.org/api consults its
 // own certificate sources whenever the options hand it no certificate, and
 // those end at the SecureConnect of the machine's real home directory.
 // TestSource covers true, and APIOptions does not look at how the rule came
@@ -69,6 +73,9 @@ func TestAPIOptions(t *testing.T) {
 		{name: "an HTTP client from the caller", useCert: unset, gcloud: unset, config: workload, caller: []option.ClientOption{option.WithHTTPClient(&http.Client{})}},
 		{name: "other options from the caller", useCert: unset, gcloud: unset, config: workload, caller: []option.ClientOption{option.WithQuotaProject("p"), option.WithEndpoint("https://example.test")}, wantCert: der, wantMTLS: true},
 		{name: "another universe from the caller", useCert: unset, gcloud: unset, config: workload, caller: []option.ClientOption{option.WithUniverseDomain("example.com")}},
+		{name: "another universe from the caller, with a quota project", useCert: unset, gcloud: unset, config: workload, caller: []option.ClientOption{option.WithUniverseDomain("example.com"), option.WithQuotaProject("p")}},
+		{name: "another universe from the caller, with an endpoint", useCert: unset, gcloud: unset, config: workload, caller: []option.ClientOption{option.WithUniverseDomain("example.com"), option.WithEndpoint("https://example.test")}},
+		{name: "always, an HTTP client and an endpoint in another universe", useCert: unset, gcloud: unset, config: workload, mode: "always", caller: []option.ClientOption{option.WithHTTPClient(&http.Client{}), option.WithUniverseDomain("example.com"), option.WithEndpoint("https://example.test")}},
 		{name: "another universe from the environment", useCert: unset, gcloud: unset, config: workload, universe: "example.com"},
 
 		{name: "false", useCert: "false", gcloud: unset, config: workload},
@@ -136,16 +143,16 @@ func TestAPIOptionsReportsABrokenConfig(t *testing.T) {
 }
 
 func TestCallerSettings(t *testing.T) {
-	// The probe goes through the api library, which looks for a certificate of
-	// its own when this is true.
-	t.Setenv(envUseClientCert, "false")
-	t.Setenv(envMTLSEndpoint, "")
 	t.Setenv(envMTLSEndpointOld, "")
 	client := option.WithHTTPClient(&http.Client{})
+	cert := option.WithClientCertSource(func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return nil, nil })
+	another := option.WithUniverseDomain("example.com")
 	for _, tc := range []struct {
 		name         string
 		opts         []option.ClientOption
 		env          string // GOOGLE_CLOUD_UNIVERSE_DOMAIN
+		mode         string // GOOGLE_API_USE_MTLS_ENDPOINT
+		useCert      string // GOOGLE_API_USE_CLIENT_CERTIFICATE, false when empty
 		wantClient   bool
 		wantUniverse string
 	}{
@@ -155,16 +162,43 @@ func TestCallerSettings(t *testing.T) {
 		{name: "an HTTP client among others", opts: []option.ClientOption{option.WithEndpoint("https://example.test"), client, option.WithUserAgent("ua")}, wantClient: true, wantUniverse: "googleapis.com"},
 		{name: "credentials", opts: []option.ClientOption{option.WithAPIKey("key")}, wantUniverse: "googleapis.com"},
 		{name: "no authentication", opts: []option.ClientOption{option.WithoutAuthentication()}, wantUniverse: "googleapis.com"},
-		// No HTTP client goes with a quota project, so the probe's own fails.
 		{name: "a quota project", opts: []option.ClientOption{option.WithQuotaProject("p")}, wantUniverse: "googleapis.com"},
 		{name: "a quota project, another universe in the environment", opts: []option.ClientOption{option.WithQuotaProject("p")}, env: "example.com", wantUniverse: "example.com"},
 		{name: "another universe", opts: []option.ClientOption{option.WithUniverseDomain("example.com")}, wantUniverse: "example.com"},
 		{name: "another universe in the environment", opts: []option.ClientOption{option.WithUserAgent("ua")}, env: "example.com", wantUniverse: "example.com"},
 		{name: "the option wins over the environment", opts: []option.ClientOption{option.WithUniverseDomain("googleapis.com")}, env: "example.com", wantUniverse: "googleapis.com"},
-		{name: "an endpoint of the caller's hides the option's universe", opts: []option.ClientOption{option.WithUniverseDomain("example.com"), option.WithEndpoint("https://example.test")}, wantUniverse: "googleapis.com"},
+		// Options the api library takes with no HTTP client next to them,
+		// the probe's own included.
+		{name: "a quota project in another universe", opts: []option.ClientOption{option.WithQuotaProject("p"), another}, wantUniverse: "example.com"},
+		{name: "a request reason in another universe", opts: []option.ClientOption{option.WithRequestReason("r"), another}, wantUniverse: "example.com"},
+		{name: "a client certificate in another universe", opts: []option.ClientOption{cert, another}, wantUniverse: "example.com"},
+		{name: "a gRPC dial option in another universe", opts: []option.ClientOption{option.WithGRPCDialOption(grpc.WithUserAgent("ua")), another}, wantUniverse: "example.com"},
+		{name: "an HTTP client next to a quota project", opts: []option.ClientOption{client, option.WithQuotaProject("p")}, wantClient: true, wantUniverse: "googleapis.com"},
+		// The api library takes the deprecated option only with a scope,
+		// which a client may add after it asks.
+		{name: "an HTTP client next to option.ImpersonateCredentials", opts: []option.ClientOption{option.ImpersonateCredentials("target@example-project.iam.gserviceaccount.com"), client}, wantClient: true, wantUniverse: "googleapis.com"},
+		// The library returns an endpoint of the caller's in place of the
+		// one that names the universe.
+		{name: "an endpoint of the caller's in another universe", opts: []option.ClientOption{another, option.WithEndpoint("https://example.test")}, wantUniverse: "example.com"},
+		// The library picks the mTLS endpoint with always, and with its own
+		// certificate rule on: GOOGLE_API_USE_CLIENT_CERTIFICATE=true. It
+		// has one in googleapis.com alone and fails in another universe,
+		// which leaves no universe to report.
+		{name: "always", opts: []option.ClientOption{option.WithUserAgent("ua")}, mode: "always", wantUniverse: "googleapis.com"},
+		{name: "always, the option wins over the environment", opts: []option.ClientOption{option.WithUniverseDomain("googleapis.com")}, env: "example.com", mode: "always", wantUniverse: "googleapis.com"},
+		{name: "always in another universe", opts: []option.ClientOption{another}, mode: "always", wantUniverse: ""},
+		{name: "always in another universe, an HTTP client and an endpoint", opts: []option.ClientOption{client, another, option.WithEndpoint("https://example.test")}, mode: "always", wantUniverse: ""},
+		{name: "the library's rule on", opts: []option.ClientOption{option.WithUserAgent("ua")}, useCert: "true", wantUniverse: "googleapis.com"},
+		{name: "the library's rule on, another universe", opts: []option.ClientOption{another}, useCert: "true", wantUniverse: ""},
+		// A generated client's default endpoint replaces the probe's.
+		{name: "a default endpoint template among the options", opts: []option.ClientOption{internaloption.WithDefaultEndpointTemplate("https://own.UNIVERSE_DOMAIN/")}, env: "example.com", wantUniverse: "example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envUniverseDomain, tc.env)
+			t.Setenv(envMTLSEndpoint, tc.mode)
+			// With true the api library looks for a certificate of its own,
+			// unless it is handed one, as the probe does.
+			t.Setenv(envUseClientCert, cmp.Or(tc.useCert, "false"))
 			gotClient, gotUniverse := callerSettings(t.Context(), tc.opts)
 			if gotClient != tc.wantClient || gotUniverse != tc.wantUniverse {
 				t.Errorf("callerSettings() = %v, %q, want %v, %q", gotClient, gotUniverse, tc.wantClient, tc.wantUniverse)

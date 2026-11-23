@@ -73,6 +73,9 @@ func TestNewClientFollowsTheCertificateRule(t *testing.T) {
 		{name: "an endpoint from ClientOptions wins", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithEndpoint(explicit)}, wantEndpoint: explicit, wantCert: true},
 		{name: "a certificate from ClientOptions wins", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithClientCertSource(callerSource)}, wantEndpoint: mtls, wantCert: true, wantDER: callerDER},
 		{name: "an HTTP client from ClientOptions is left alone", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithHTTPClient(own)}, wantEndpoint: plain, wantClient: own},
+		// The api library accepts the deprecated option only with a scope,
+		// which the toolset adds.
+		{name: "an HTTP client next to option.ImpersonateCredentials is left alone", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.ImpersonateCredentials("target@example-project.iam.gserviceaccount.com"), option.WithHTTPClient(own)}, wantEndpoint: plain, wantClient: own},
 		// The auth library leaves the certificate off outside googleapis.com.
 		{name: "another universe keeps its endpoint", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithUniverseDomain("example.com")}, wantEndpoint: "https://bigquery.example.com/bigquery/v2/"},
 		{name: "false", useCert: "false", gcloud: unset, wantEndpoint: plain},

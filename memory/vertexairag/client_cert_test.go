@@ -173,27 +173,39 @@ func TestNewVertexRAGClientFollowsTheCertificateRule(t *testing.T) {
 
 	// The api library refuses a certificate outside googleapis.com, so the
 	// clients must not move to the mTLS host there.
-	t.Run("another universe from the caller keeps the regional host", func(t *testing.T) {
-		clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
-		t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
-		c, err := newVertexRAGClient(t.Context(), "us-central1", option.WithoutAuthentication(), option.WithUniverseDomain("example.com"))
-		if err != nil {
-			t.Fatalf("newVertexRAGClient() error = %v", err)
-		}
-		before := len(hosts())
-		if upload, list, retrieve := callAll(t, c); upload == nil || list == nil || retrieve == nil {
-			t.Fatalf("calls through the refusing proxy = %v, %v, %v, want three errors", upload, list, retrieve)
-		}
-		got := hosts()[before:]
-		if len(got) != 3 {
-			t.Fatalf("the proxy saw %d requests (%q), want one from each of the three clients", len(got), got)
-		}
-		for _, h := range got {
-			if h != plain {
-				t.Errorf("request went to %q, want %q", h, plain)
+	for _, tc := range []struct {
+		name string
+		opts []option.ClientOption
+	}{
+		{name: "another universe from the caller keeps the regional host"},
+		// Options the api library takes with no HTTP client next to them,
+		// which must not hide the universe.
+		{name: "another universe with a quota project", opts: []option.ClientOption{option.WithQuotaProject("p")}},
+		{name: "another universe with a request reason", opts: []option.ClientOption{option.WithRequestReason("r")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+			opts := append([]option.ClientOption{option.WithoutAuthentication(), option.WithUniverseDomain("example.com")}, tc.opts...)
+			c, err := newVertexRAGClient(t.Context(), "us-central1", opts...)
+			if err != nil {
+				t.Fatalf("newVertexRAGClient() error = %v", err)
 			}
-		}
-	})
+			before := len(hosts())
+			if upload, list, retrieve := callAll(t, c); upload == nil || list == nil || retrieve == nil {
+				t.Fatalf("calls through the refusing proxy = %v, %v, %v, want three errors", upload, list, retrieve)
+			}
+			got := hosts()[before:]
+			if len(got) != 3 {
+				t.Fatalf("the proxy saw %d requests (%q), want one from each of the three clients", len(got), got)
+			}
+			for _, h := range got {
+				if h != plain {
+					t.Errorf("request went to %q, want %q", h, plain)
+				}
+			}
+		})
+	}
 
 	t.Run("a certificate from the caller wins", func(t *testing.T) {
 		clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
