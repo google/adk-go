@@ -100,6 +100,10 @@ type storageEvent struct {
 	InputTranscription  dynamicJSON
 	OutputTranscription dynamicJSON
 
+	// CacheMetadata carries a context cache from one invocation to the next.
+	// Without it every invocation creates a cache that the next cannot find.
+	CacheMetadata dynamicJSON
+
 	Partial      *bool
 	TurnComplete *bool
 	ErrorCode    *string
@@ -241,6 +245,12 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 			return nil, fmt.Errorf("failed to marshal output transcription: %w", err)
 		}
 	}
+	if event.CacheMetadata != nil {
+		storageEv.CacheMetadata, err = json.Marshal(event.CacheMetadata)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal cache metadata: %w", err)
+		}
+	}
 
 	return storageEv, nil
 }
@@ -314,6 +324,13 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		}
 	}
 
+	var cacheMetadata *model.CacheMetadata
+	if len(se.CacheMetadata) > 0 {
+		if err := json.Unmarshal(se.CacheMetadata, &cacheMetadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal cache metadata: %w", err)
+		}
+	}
+
 	// --- Handle JSON-encoded *string field ---
 	var toolIDs []string
 	if se.LongRunningToolIDsJSON != nil {
@@ -382,6 +399,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 			CitationMetadata:    citationMetadata,
 			InputTranscription:  inputTranscription,
 			OutputTranscription: outputTranscription,
+			CacheMetadata:       cacheMetadata,
 			ErrorCode:           errorCode,
 			ErrorMessage:        errorMessage,
 			Partial:             partial,

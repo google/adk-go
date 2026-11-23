@@ -122,10 +122,13 @@ var ErrClientUnavailable = errors.New("gcp: default credentials client unavailab
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
-// build itself cannot be bounded by a context — FindDefaultCredentials reads the
+// build itself cannot be bounded by a context — credential discovery reads the
 // credentials file with os.ReadFile and probes with the context-free
-// metadata.OnGCE(), neither of which observes cancellation — so the bound lives
-// on the waiting side.
+// metadata.OnGCE(), and where the client certificate comes from SecureConnect,
+// the certificate lookup runs its cert_provider_command with no context or
+// timeout.
+// None of the three observes cancellation, so the bound lives on the waiting
+// side.
 const defaultInitTimeout = 30 * time.Second
 
 // defaultEvictTimeout bounds a store delete that no longer has a caller waiting
@@ -144,10 +147,12 @@ const defaultEvictTimeout = 5 * time.Second
 // enforce:
 //
 //   - Every request must descend from the invoking user's context. A transport
-//     that shares one connection across invocations does not qualify —
-//     mcptoolset included: its per-call POSTs are per-user, but the MCP session
-//     and the standalone server-to-client stream are opened on the context of
-//     whichever user connected first and stay bound to it.
+//     that shares one connection across invocations does not qualify.
+//     mcptoolset comes close: its per-call POSTs are per-user and each user's
+//     credential gets an MCP session of its own, but that session's initialize
+//     handshake, standalone server-to-client stream and closing request run on
+//     a context carrying only the identity of the invocation that opened the
+//     session, not on any later invocation's context.
 //   - The transport must not follow a cross-host redirect. net/http strips
 //     Authorization above the RoundTripper, so [auth.Transport] re-resolves and
 //     re-applies the end user's credential to the redirect target. Set
@@ -173,10 +178,11 @@ const defaultEvictTimeout = 5 * time.Second
 // being served until its entry does, unless the entry is deleted through
 // [Client.CacheKey].
 //
-// ctx is used only to build the default client, and only for its values. Its
-// cancellation is not honored, because that client outlives any one request.
-// Pass the process-scoped context the rest of the app is wired with, not a
-// request's. It is ignored when cfg.Client is set.
+// ctx is not used and nothing of it is retained: the default client is built on
+// first use from the environment alone (see [NewClient]), so a request-scoped
+// context is as good as a process-scoped one here. Through v2.8.0 it was kept
+// for the default client's build, which read an http.Client from it under
+// oauth2.HTTPClient.
 func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvider, error) {
 	if cfg.Scheme.Name == "" {
 		return nil, errors.New("gcp: NewProvider requires a scheme Name")
@@ -210,11 +216,6 @@ func NewProvider(ctx context.Context, cfg ProviderConfig) (auth.CredentialProvid
 	// The provider outlives this call and re-reads Scopes per request, so it must
 	// not alias a caller-mutable slice.
 	p.scheme.Scopes = slices.Clone(cfg.Scheme.Scopes)
-	if cfg.Client == nil {
-		// Captured only where it will be used: it is retained for the life of the
-		// provider, and pinning a caller's context graph for nothing is a leak.
-		p.initCtx = context.WithoutCancel(ctx)
-	}
 	return p, nil
 }
 
@@ -260,12 +261,11 @@ func cacheSlot(c *Client, s ProviderScheme) string {
 type provider struct {
 	scheme ProviderScheme
 	store  auth.CredentialStore
-	// initCtx roots the lazily built default client, which is why NewProvider
-	// asks for a process-scoped context. Nil when a Client was supplied.
-	initCtx context.Context
 	// newClient, initTimeout and evictTimeout are fields, not package constants,
 	// so tests can drive the failure and hang paths a real ADC lookup and a real
-	// store cannot be made to hit.
+	// store cannot be made to hit. The context newClient receives is the first
+	// waiting request's, detached from its cancellation (runInit). The default
+	// builder reads nothing from it.
 	newClient    func(context.Context) (*Client, error)
 	initTimeout  time.Duration
 	evictTimeout time.Duration
@@ -672,7 +672,9 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 	if in == nil {
 		in = &clientInit{done: make(chan struct{}), deadline: time.Now().Add(p.initTimeout)}
 		p.pending = in
-		go p.runInit(in)
+		// The build serves every waiter, so the first one's cancellation must not
+		// end it. Its values ride along for a builder that wants them.
+		go p.runInit(context.WithoutCancel(ctx), in)
 	}
 	p.mu.Unlock()
 
@@ -715,7 +717,7 @@ func (p *provider) resolveClient(ctx context.Context) (*Client, error) {
 }
 
 // runInit builds the default client once and publishes it to the waiters on in.
-func (p *provider) runInit(in *clientInit) {
+func (p *provider) runInit(ctx context.Context, in *clientInit) {
 	// This runs on a goroutine the provider owns, so nothing above can recover a
 	// panic here and it would take the process down — where an eagerly built
 	// client would merely have panicked in the caller's own frame. Report it as
@@ -741,7 +743,7 @@ func (p *provider) runInit(in *clientInit) {
 		p.publish(in)
 	}()
 
-	c, err := p.newClient(p.initCtx)
+	c, err := p.newClient(ctx)
 	switch {
 	case err != nil:
 		in.err = fmt.Errorf("%w: %w", ErrClientUnavailable, err)

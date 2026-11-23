@@ -129,11 +129,9 @@ func TestProviderCredentialConcurrent(t *testing.T) {
 	got := make([]auth.Credential, len(users)*8)
 	errs := make([]error, len(users)*8)
 	for i := range got {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got[i], errs[i] = p.Credential(ctxs[i%len(users)])
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -558,7 +556,13 @@ func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
 	// is the documented contract — so the failure is forced by pointing
 	// Application Default Credentials at a path that does not exist. The file is
 	// never created, so discovery fails on the open rather than on the contents.
+	//
+	// The builder loads a client certificate the shell turns on before
+	// discovery fails, and reads the trust boundary opt-in once per process, so
+	// without the pin this test can run a workstation's certificate signer and
+	// can fix that opt-in for every test that runs after it.
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+	gcp.IsolateADCEnv(t)
 
 	p, err := gcp.NewProvider(t.Context(), cfgFor(testResource))
 	if err != nil {
@@ -2198,12 +2202,10 @@ func TestProviderRefreshConcurrentForcesOnce(t *testing.T) {
 	results := make(chan result, n)
 	var wg sync.WaitGroup
 	for range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cred, err := rp.Refresh(ctx, rejected)
 			results <- result{cred, err}
-		}()
+		})
 	}
 	var got []result
 	timeout := time.After(5 * time.Second)

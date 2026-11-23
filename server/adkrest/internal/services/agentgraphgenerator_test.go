@@ -331,14 +331,14 @@ func TestEdgeHighlighted(t *testing.T) {
 			from:             "A",
 			to:               "B",
 			highlightedPairs: [][]string{{"A", "B"}},
-			expected:         boolPtr(true),
+			expected:         new(true),
 		},
 		{
 			name:             "matching backward",
 			from:             "B",
 			to:               "A",
 			highlightedPairs: [][]string{{"A", "B"}},
-			expected:         boolPtr(false),
+			expected:         new(false),
 		},
 		{
 			name: "no match",

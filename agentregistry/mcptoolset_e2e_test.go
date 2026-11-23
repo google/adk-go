@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -77,14 +78,7 @@ func TestMCPToolset_E2E(t *testing.T) {
 	for _, tl := range tools {
 		names = append(names, tl.Name())
 	}
-	found := false
-	for _, n := range names {
-		if n == toolName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(names, toolName) {
 		t.Errorf("Tools() = %v, want it to contain %q", names, toolName)
 	}
 }

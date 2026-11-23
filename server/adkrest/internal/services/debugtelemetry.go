@@ -124,10 +124,16 @@ func (d *DebugTelemetry) GetSpansBySessionID(sessionID string) []DebugSpan {
 	return d.store.getSpansBySessionID(sessionID)
 }
 
-func convertAttrs(in []attribute.KeyValue) map[string]string {
-	out := make(map[string]string, len(in))
+func convertAttrs(in []attribute.KeyValue) map[string]any {
+	out := make(map[string]any, len(in))
 	for _, attr := range in {
-		out[string(attr.Key)] = attr.Value.Emit()
+		value := telemetry.FromLogValue(attr.Value)
+		// Non-finite numbers (including inside containers) must not prevent
+		// the entire trace response from being encoded as JSON.
+		if _, err := json.Marshal(value); err != nil {
+			continue
+		}
+		out[string(attr.Key)] = value
 	}
 	return out
 }
@@ -137,14 +143,14 @@ func convertAttrs(in []attribute.KeyValue) map[string]string {
 // Attributes and Logs are never nil in a span returned by [DebugTelemetry], so
 // they marshal as {} and [] instead of JSON null.
 type DebugSpan struct {
-	Name         string            `json:"name"`
-	StartTime    int64             `json:"start_time"`
-	EndTime      int64             `json:"end_time"`
-	SpanID       string            `json:"span_id"`
-	TraceID      string            `json:"trace_id"`
-	ParentSpanID string            `json:"parent_span_id"`
-	Attributes   map[string]string `json:"attributes"`
-	Logs         []DebugLog        `json:"logs"`
+	Name         string         `json:"name"`
+	StartTime    int64          `json:"start_time"`
+	EndTime      int64          `json:"end_time"`
+	SpanID       string         `json:"span_id"`
+	TraceID      string         `json:"trace_id"`
+	ParentSpanID string         `json:"parent_span_id"`
+	Attributes   map[string]any `json:"attributes"`
+	Logs         []DebugLog     `json:"logs"`
 }
 
 // DebugLog represents a log in the span.
@@ -318,7 +324,7 @@ type spanRecord struct {
 	EndTime      time.Time
 	Context      trace.SpanContext
 	ParentSpanID trace.SpanID
-	Attributes   map[string]string
+	Attributes   map[string]any
 	Logs         []DebugLog
 }
 
@@ -434,10 +440,10 @@ func convertRecords(records []*spanRecord) []DebugSpan {
 // The result is always a fresh map. The records are shared with the store, so
 // writing the attribute into r.Attributes would both race with a concurrent
 // reader and leave the synthesized value behind in stored telemetry.
-func eventIDAttributes(r *spanRecord) map[string]string {
+func eventIDAttributes(r *spanRecord) map[string]any {
 	// Empty rather than nil: a nil map marshals to JSON null, which the UI's
 	// object schema rejects.
-	attributes := make(map[string]string, len(r.Attributes)+1)
+	attributes := make(map[string]any, len(r.Attributes)+1)
 	maps.Copy(attributes, r.Attributes)
 	if _, ok := attributes[eventIDAttribute]; !ok && strings.HasPrefix(r.Name, generateContentSpanPrefix) {
 		attributes[eventIDAttribute] = r.Context.SpanID().String()
@@ -521,7 +527,7 @@ func (s *spanStore) updateSpanIndexes(span *spanRecord) {
 	traceIDStr := span.Context.TraceID().String()
 	// Update session id -> trace id mapping.
 	sessionIDKey := string(semconv.GenAIConversationIDKey)
-	if sessionID, ok := span.Attributes[sessionIDKey]; ok {
+	if sessionID, ok := span.Attributes[sessionIDKey].(string); ok {
 		traces, ok := s.traceIDsBySessionID[sessionID]
 		if !ok {
 			traces = make(map[string]struct{})
@@ -530,7 +536,7 @@ func (s *spanStore) updateSpanIndexes(span *spanRecord) {
 		traces[traceIDStr] = struct{}{}
 	}
 	// Update event id -> span id mapping.
-	if eventID, ok := span.Attributes[eventIDKey]; ok {
+	if eventID, ok := span.Attributes[eventIDKey].(string); ok {
 		s.recordsByEventID[eventID] = append(s.recordsByEventID[eventID], span)
 	}
 
@@ -544,11 +550,11 @@ func (s *spanStore) evict(traceID string, spans []*spanRecord) {
 		if span.Context.TraceID().IsValid() {
 			delete(s.recordsBySpanID, span.Context.SpanID().String())
 
-			if eventID, ok := span.Attributes[eventIDKey]; ok {
+			if eventID, ok := span.Attributes[eventIDKey].(string); ok {
 				s.evictRecordsByEventID(eventID, span)
 			}
 
-			if sessionID, ok := span.Attributes[string(semconv.GenAIConversationIDKey)]; ok {
+			if sessionID, ok := span.Attributes[string(semconv.GenAIConversationIDKey)].(string); ok {
 				s.evictTraceIDsBySessionID(sessionID, traceID)
 			}
 		}

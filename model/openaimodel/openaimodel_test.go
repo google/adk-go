@@ -65,7 +65,7 @@ func TestNewModel_SelectsAPI(t *testing.T) {
 			req := &model.LLMRequest{Contents: []*genai.Content{
 				genai.NewContentFromText("hi", genai.RoleUser),
 			}}
-			for range llm.GenerateContent(t.Context(), req, false) {
+			for range llm.GenerateContent(t.Context(), req, false) { //nolint:errcheck // the server answers 500; the test asserts the request path
 			}
 			if got != tt.wantPath {
 				t.Errorf("path = %q, want %q", got, tt.wantPath)

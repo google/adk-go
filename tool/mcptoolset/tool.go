@@ -33,10 +33,11 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (*mcpTool, error) {
 	mcp := &mcpTool{
-		name:        t.Name,
-		description: t.Description,
+		name:         t.Name,
+		originalName: t.Name,
+		description:  t.Description,
 		funcDeclaration: &genai.FunctionDeclaration{
 			Name:        t.Name,
 			Description: t.Description,
@@ -58,6 +59,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 
 type mcpTool struct {
 	name            string
+	originalName    string
 	description     string
 	funcDeclaration *genai.FunctionDeclaration
 
@@ -120,7 +122,7 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	params := &mcp.CallToolParams{
-		Name:      t.name,
+		Name:      t.originalName,
 		Arguments: args,
 	}
 	if t.metadataProvider != nil {

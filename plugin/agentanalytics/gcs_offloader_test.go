@@ -17,10 +17,12 @@ package agentanalytics
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -37,6 +39,7 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	bq "cloud.google.com/go/bigquery"
@@ -48,8 +51,11 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
@@ -57,7 +63,7 @@ import (
 
 // resolveUploads calls resolveUploadsForBatch with canDefer enabled for unit
 // tests that exercise upload resolution directly.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+func (b *batchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
 	b.resolveUploadsForBatch(ctx, uploadResolveOptions{
 		pauseOnCallerDeadline: pauseOnCallerDeadline,
 		canDefer:              true,
@@ -397,12 +403,68 @@ func TestGCSObjectPath(t *testing.T) {
 			want: "2026-03-04/trace/span_event_c12_p345.jpg",
 		},
 		{
-			// The three runes of "é?*" each become one underscore. Between
-			// "x_y" and "c0" are the separator, those three and the
-			// underscore that introduces the content ordinal.
+			// Unsafe runes are replaced with underscores and disambiguated with
+			// a deterministic SHA-256 suffix of the raw identifier.
 			name: "unsafe characters are replaced", ts: ts, traceID: "a/b c", spanID: "x\ny", eventID: "é?*",
+			ext: ".txt",
+			want: fmt.Sprintf("2026-03-04/a_b_c%s/x_y%s____%s_c0_p0.txt",
+				pathSegmentHashSuffix("a/b c"),
+				pathSegmentHashSuffix("x\ny"),
+				pathSegmentHashSuffix("é?*")),
+		},
+		{
+			name:   "dot-relative and empty inner prefix segments are preserved",
+			prefix: "../a/../b/./c//", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: "2026-03-04/a_b_c/x_y_____c0_p0.txt",
+			want: "../a/../b/./c/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "dot-only prefix is preserved after slash trim",
+			prefix: "./..", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "./../2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "backslashes in prefix are preserved",
+			prefix: `team\prod/v1`, ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: `team\prod/v1/2026-03-04/trace/span_event_c0_p0.txt`,
+		},
+		{
+			name:   "tildes in prefix are rewritten with hash suffix",
+			prefix: `~team\prod/v~1`, ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: `_team\prod/v_1` + pathSegmentHashSuffix(`~team\prod/v~1`) + `/2026-03-04/trace/span_event_c0_p0.txt`,
+		},
+		{
+			name:   "non-matching .well-known prefix is preserved",
+			prefix: ".well-known/acme-challenge-x", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: ".well-known/acme-challenge-x/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "triple-dot prefix segment is preserved",
+			prefix: "a/.../b", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "a/.../b/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "valid prefixes with spaces, equals, and unicode are preserved",
+			prefix: "tenant=acme/logs v1/テナント", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "tenant=acme/logs v1/テナント/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "reserved acme-challenge prefix is rewritten",
+			prefix: ".well-known/acme-challenge/x", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: fmt.Sprintf("_well-known/acme-challenge/x%s/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix(".well-known/acme-challenge/x")),
+		},
+		{
+			name:   "control characters in prefix are rewritten",
+			prefix: "logs\nx", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: fmt.Sprintf("logs_x%s/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix("logs\nx")),
 		},
 	}
 	for _, tt := range tests {
@@ -580,7 +642,7 @@ func TestResolveUploads_RewritesTheEntries(t *testing.T) {
 			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1, 2, 3}}},
 		}})
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -609,6 +671,12 @@ func TestResolveUploads_RewritesTheEntries(t *testing.T) {
 	}
 	if _, ok := row[rawPartsKey]; ok {
 		t.Errorf("the row still has %q; it is not a column", rawPartsKey)
+	}
+	// On a successful resolution with no deferred uploads left, resolveUploads
+	// cleans up the deferredUploadsKey from the row before the caller settles
+	// the batch (releaseBatchUploads / clearDeferredUploads).
+	if _, ok := row[deferredUploadsKey]; ok {
+		t.Errorf("the row still has %q after resolveUploads; empty deferred state must be cleaned up", deferredUploadsKey)
 	}
 	wantCalls := []uploadAttempt{
 		{Path: "logs/2026-03-04/trace1/span1_event1_c0_p0.txt", ContentType: "text/plain; charset=utf-8", Data: []byte(text)},
@@ -645,7 +713,7 @@ func TestResolveUploads_Authorizer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(7))
-			bp := &BatchProcessor{config: Config{GCSOffloader: &fakeOffloader{}, ConnectionID: tt.connectionID}}
+			bp := &batchProcessor{config: Config{GCSOffloader: &fakeOffloader{}, ConnectionID: tt.connectionID}}
 
 			bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -736,7 +804,7 @@ func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
 			opts.offload = true
 			off := &fakeOffloader{hook: tt.hook, uri: tt.uri}
 			logger := &recordingLogger{}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: logger}, uploadTimeout: tt.timeout}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: logger}, uploadTimeout: tt.timeout}
 			ctx := tt.ctx
 			if ctx == nil {
 				ctx = context.Background()
@@ -777,7 +845,7 @@ func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -793,7 +861,7 @@ func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
 func TestResolveUploads_UploadsHaveADeadline(t *testing.T) {
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(1))
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -837,7 +905,7 @@ func TestResolveUploads_ConcurrencyIsBounded(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				return nil
 			}}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSMaxConcurrentUploads: tt.limit, Logger: &recordingLogger{}}}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, GCSMaxConcurrentUploads: tt.limit, Logger: &recordingLogger{}}}
 
 			bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -861,7 +929,7 @@ func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
 	opts := partsOptions{maxLen: 1000}
 	want := queuedRow(opts, imageContent(1))[columnContentParts]
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{config: Config{Logger: logger}}
+	bp := &batchProcessor{config: Config{Logger: logger}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -870,6 +938,12 @@ func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
 	}
 	if _, ok := row[rawPartsKey]; ok {
 		t.Errorf("the row still has %q; it is not a column", rawPartsKey)
+	}
+	// On a successful resolution with no deferred uploads left, resolveUploads
+	// cleans up the deferredUploadsKey from the row before the caller settles
+	// the batch (releaseBatchUploads / clearDeferredUploads).
+	if _, ok := row[deferredUploadsKey]; ok {
+		t.Errorf("the row still has %q after resolveUploads; empty deferred state must be cleaned up", deferredUploadsKey)
 	}
 	// No upload is attempted, so none fails.
 	if got := logger.String(); got != "" {
@@ -886,7 +960,7 @@ func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
 	}
 	noParts := map[string]any{rawPartsKey: []pendingUpload{{slot: 0, mimeType: "image/png", data: []byte{1}}}}
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{plain, outOfRange, noParts})
 
@@ -904,7 +978,7 @@ func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
 }
 
 func TestBatchProcessor_ObjectPath(t *testing.T) {
-	bp := &BatchProcessor{config: Config{GCSPathPrefix: "p"}}
+	bp := &batchProcessor{config: Config{GCSPathPrefix: "p"}}
 	u := pendingUpload{contentOrd: 2, partIdx: 3, mimeType: "image/jpeg"}
 
 	t.Run("from the row", func(t *testing.T) {
@@ -1404,7 +1478,7 @@ func TestGCSOffloading_ManyCallersAndFlushes(t *testing.T) {
 		if !strings.HasPrefix(textPath, wantPrefix) || !strings.HasPrefix(imagePath, wantPrefix) {
 			t.Errorf("the objects of the row are %q and %q, want names that start with %q", textPath, imagePath, wantPrefix)
 		}
-		marker := strings.SplitN(parts[0]["text"].(string), ".", 2)[0]
+		marker, _, _ := strings.Cut(parts[0]["text"].(string), ".")
 		var g, i int
 		if _, err := fmt.Sscanf(marker, "g%d-i%d", &g, &i); err != nil {
 			t.Errorf("the preview %q of a row does not start with a marker", parts[0]["text"])
@@ -1662,25 +1736,116 @@ func TestPathSegment(t *testing.T) {
 		{"a trace id", "4bf92f3577b34da6a3ce929d0e0e4736", "4bf92f3577b34da6a3ce929d0e0e4736"},
 		{"all the safe characters", "aZ09-_.x", "aZ09-_.x"},
 		{"empty", "", "fallback"},
-		{"a slash", "a/b", "a_b"},
-		{"a path", "../x", ".._x"},
-		{"blanks and control characters", "a b\tc\nd", "a_b_c_d"},
-		{"one underscore per rune", "é?*", "___"},
-		{"only unsafe characters", "///", "___"},
-		{"the current directory", ".", "fallback"},
-		{"the parent directory", "..", "fallback"},
-		{"only dots", "....", "fallback"},
+		{"a slash", "a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+		{"a path", "../x", ".._x" + pathSegmentHashSuffix("../x")},
+		{"blanks and control characters", "a b\tc\nd", "a_b_c_d" + pathSegmentHashSuffix("a b\tc\nd")},
+		{"one underscore per rune", "é?*", "___" + pathSegmentHashSuffix("é?*")},
+		{"only unsafe characters", "///", "___" + pathSegmentHashSuffix("///")},
+		{"the current directory", ".", "fallback" + pathSegmentHashSuffix(".")},
+		{"the parent directory", "..", "fallback" + pathSegmentHashSuffix("..")},
+		{"only dots", "....", "fallback" + pathSegmentHashSuffix("....")},
 		{"dots next to a name", "a..", "a.."},
 		{"a dot name that is not a path element", ".x", ".x"},
 		{"the edges of the character classes", "azAZ09", "azAZ09"},
-		{"just outside the character classes", "`{@[/:", "______"},
+		{"just outside the character classes", "`{@[/: ", "_______" + pathSegmentHashSuffix("`{@[/: ")},
+		{"exactly 128 safe ASCII bytes", strings.Repeat("a", 128), strings.Repeat("a", 128)},
+		{"129 safe ASCII bytes is truncated with hash", strings.Repeat("a", 129), strings.Repeat("a", maxPathSegmentBytes-pathSegmentHashSuffixLen) + pathSegmentHashSuffix(strings.Repeat("a", 129))},
+		{"tilde is outside the unchanged safe alphabet", "a~b", "a_b" + pathSegmentHashSuffix("a~b")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := pathSegment(tt.id, "fallback"); got != tt.want {
 				t.Errorf("pathSegment(%q, \"fallback\") = %q, want %q", tt.id, got, tt.want)
 			}
+			if len(tt.id) > 0 && len(pathSegment(tt.id, "fallback")) > maxPathSegmentBytes {
+				t.Errorf("len(pathSegment(%q, \"fallback\")) = %d, exceeds %d", tt.id, len(pathSegment(tt.id, "fallback")), maxPathSegmentBytes)
+			}
 		})
+	}
+}
+
+func TestCleanGCSPrefix(t *testing.T) {
+	// "aa" and 260 three-byte runes (782 bytes): the cut at 402 bytes falls
+	// inside the 134th rune and backs up to 401 bytes.
+	cjk := "aa" + strings.Repeat("日", 260)
+	tests := []struct {
+		name, prefix, want string
+	}{
+		{"empty", "", ""},
+		{"only slashes", "///", ""},
+		{"leading and trailing slashes are trimmed", "/logs/tenant/", "logs/tenant"},
+		{"spaces, equals signs and Unicode are kept", "tenant=acme/logs v1/テナント", "tenant=acme/logs v1/テナント"},
+		{"three dots are a name", "a/.../b", "a/.../b"},
+		{"an empty inner segment is kept", "logs//tenant", "logs//tenant"},
+		{"a dot segment is kept", "a/./b", "a/./b"},
+		{"a dot-dot segment is kept", "logs/../tenant", "logs/../tenant"},
+		{"only dot segments are kept after trimming slashes", "/./../", "./.."},
+		{"a backslash is kept", `logs\prod`, `logs\prod`},
+		{"a tilde is reserved and rewritten", "~team/logs~v1", "_team/logs_v1" + pathSegmentHashSuffix("~team/logs~v1")},
+		{"an ACME path that does not lead is kept", "logs/.well-known/acme-challenge", "logs/.well-known/acme-challenge"},
+		{"a .well-known without acme-challenge is kept", ".well-known/x", ".well-known/x"},
+		{"a .well-known/acme-challenge-x lookalike segment is kept", ".well-known/acme-challenge-x", ".well-known/acme-challenge-x"},
+		{"a .well-known//acme-challenge with empty second segment is kept", ".well-known//acme-challenge", ".well-known//acme-challenge"},
+		{"402 bytes with tilde keeps all 402 sanitized bytes", strings.Repeat("a", 401) + "~", strings.Repeat("a", 401) + "_" + pathSegmentHashSuffix(strings.Repeat("a", 401)+"~")},
+		{"403 bytes with tilde cuts readable base to 402 bytes", strings.Repeat("a", 402) + "~", strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 402)+"~")},
+		{"467 bytes with tilde cuts readable base to 402 bytes", strings.Repeat("a", 466) + "~", strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 466)+"~")},
+		{"513 bytes (kept under 750-byte cap)", strings.Repeat("a", 513), strings.Repeat("a", 513)},
+		{"exactly 750 bytes", strings.Repeat("a", 750), strings.Repeat("a", 750)},
+		{"751 bytes", strings.Repeat("a", 751), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 751))},
+		{"900 bytes", strings.Repeat("a", 900), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 900))},
+		{"the cut backs up to a rune boundary", cjk, "aa" + strings.Repeat("日", 133) + pathSegmentHashSuffix(cjk)},
+		{"a tab", "logs\tx", "logs_x" + pathSegmentHashSuffix("logs\tx")},
+		{"a newline", "logs\nx", "logs_x" + pathSegmentHashSuffix("logs\nx")},
+		{"a carriage return", "logs\rx", "logs_x" + pathSegmentHashSuffix("logs\rx")},
+		{"DEL", "logs\x7fx", "logs_x" + pathSegmentHashSuffix("logs\x7fx")},
+		{"a C1 control character", "logs\u009bx", "logs_x" + pathSegmentHashSuffix("logs\u009bx")},
+		{"next line", "logs\u0085x", "logs_x" + pathSegmentHashSuffix("logs\u0085x")},
+		{"line separator", "logs\u2028x", "logs_x" + pathSegmentHashSuffix("logs\u2028x")},
+		{"paragraph separator", "logs\u2029x", "logs_x" + pathSegmentHashSuffix("logs\u2029x")},
+		{"a byte that is not UTF-8", "logs/\xff", "logs/_" + pathSegmentHashSuffix("logs/\xff")},
+		{"the reserved ACME path", ".well-known/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-known/acme-challenge/x")},
+		{"the reserved ACME path in upper case", ".WELL-KNOWN/ACME-CHALLENGE", "_well-known/ACME-CHALLENGE" + pathSegmentHashSuffix(".WELL-KNOWN/ACME-CHALLENGE")},
+		{"the reserved ACME path with leading and trailing slashes", "//.well-known/acme-challenge//", "_well-known/acme-challenge" + pathSegmentHashSuffix(".well-known/acme-challenge")},
+		{"the reserved ACME path with Kelvin sign", ".well-\u212anown/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-\u212anown/acme-challenge/x")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cleanGCSPrefix(tt.prefix)
+			if got != tt.want {
+				t.Errorf("cleanGCSPrefix(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+			if len(got) > maxGCSPrefixBytes || !utf8.ValidString(got) {
+				t.Errorf("cleanGCSPrefix(%q) = %q (%d bytes), want valid UTF-8 of at most %d bytes", tt.prefix, got, len(got), maxGCSPrefixBytes)
+			}
+			trimmed := strings.Trim(tt.prefix, "/")
+			if got == trimmed {
+				if strings.Contains(got, "~") {
+					t.Errorf("cleanGCSPrefix(%q) = %q kept '~' verbatim; '~' must be reserved for rewritten prefixes", tt.prefix, got)
+				}
+				if again := cleanGCSPrefix(got); again != got {
+					t.Errorf("cleanGCSPrefix(%q) = %q was rewritten on second pass to %q", got, got, again)
+				}
+			} else {
+				if len(got) > maxGCSRewrittenPrefixBytes {
+					t.Errorf("cleanGCSPrefix(%q) = %q (%d bytes), want rewritten prefix of at most %d bytes", tt.prefix, got, len(got), maxGCSRewrittenPrefixBytes)
+				}
+				suffix := pathSegmentHashSuffix(trimmed)
+				if !strings.HasSuffix(got, suffix) {
+					t.Errorf("cleanGCSPrefix(%q) = %q, rewritten without the hash suffix of %q", tt.prefix, got, trimmed)
+				}
+				if base := strings.TrimSuffix(got, suffix); strings.Contains(base, "~") {
+					t.Errorf("cleanGCSPrefix(%q) = %q contains '~' before its trailing hash suffix", tt.prefix, got)
+				}
+				if again := cleanGCSPrefix(got); again == got {
+					t.Errorf("cleanGCSPrefix(%q) = %q collided with literal cleanGCSPrefix(%q) = %q; raw and rewritten prefix namespaces must be disjoint", tt.prefix, got, got, again)
+				}
+			}
+		})
+	}
+	// Every byte that is not UTF-8 becomes '_', so only the hash tells such
+	// prefixes apart.
+	if a, b := cleanGCSPrefix("\xff"), cleanGCSPrefix("\xfe"); a == b {
+		t.Errorf("cleanGCSPrefix(%q) and cleanGCSPrefix(%q) are both %q", "\xff", "\xfe", a)
 	}
 }
 
@@ -1949,27 +2114,48 @@ func TestLLMRequestContent_Redaction(t *testing.T) {
 }
 
 // TestGCSOffloading_CloseReportsTheCloseErrors checks that Close returns what
-// went wrong while it closed the clients of the plugin. Nothing fails the first
-// time; closing the plugin again finds its BigQuery write client closed, which
-// fails.
+// went wrong while it closed the clients of the plugin, and preserves that
+// close result on subsequent idempotent Close calls.
 func TestGCSOffloading_CloseReportsTheCloseErrors(t *testing.T) {
 	fs := newFakeStorage(t)
 	opts, _ := storageClientOptions(fs)
-	p, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
-		c.GCSBucketName = "test-bucket"
-		c.ClientOptions = opts
-	})
+	ctx := context.Background()
+	conn, err := grpc.NewClient("passthrough:///unused", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient() error: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test_table"
+	cfg.DisableCreateViews = true
+	cfg.GCSBucketName = "test-bucket"
+	cfg.ClientOptions = opts
 
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error: %v", err)
+	}
+	// Pre-closing writeClient causes p.Close() to encounter an error when
+	// closing the underlying BigQuery write client.
+	if err := writeClient.Close(); err != nil {
+		t.Fatalf("writeClient.Close() error: %v", err)
 	}
 
-	err := p.Close()
+	err = p.Close()
 	if err == nil {
-		t.Fatal("closing the plugin again succeeded, want the error of closing the write client again")
+		t.Fatal("p.Close() succeeded, want error from closing pre-closed write client")
 	}
 	if want := "failed to close BigQuery write client"; !strings.Contains(err.Error(), want) {
-		t.Errorf("closing the plugin again returned %q, want an error that contains %q", err, want)
+		t.Errorf("p.Close() returned %q, want an error that contains %q", err, want)
+	}
+	if secondErr := p.Close(); secondErr != err {
+		t.Errorf("second p.Close() returned %v, want cached first error %v", secondErr, err)
 	}
 }
 
@@ -2087,7 +2273,7 @@ func TestResolveUploads_DefaultConcurrencyIsEight(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -2466,7 +2652,7 @@ func TestResolveUploads_BatchLevelUploadTimeout(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 2,
@@ -2493,7 +2679,7 @@ func TestResolveUploads_BatchLevelUploadTimeout(t *testing.T) {
 
 func TestGCSOffloading_PendingUploadBytesCap(t *testing.T) {
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config:                Config{GCSOffloader: &fakeOffloader{}, BatchSize: 100, Logger: logger},
 		queue:                 make(chan map[string]any, 2),
 		maxPendingUploadBytes: 100,
@@ -2689,7 +2875,7 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 				cfg.BatchSize = 2
 				cfg.Logger = &recordingLogger{}
 				cfg.GCSOffloader = off
-				bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+				bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2762,7 +2948,7 @@ func TestGCSOffloading_RunEndOwnDeadlineErrorBeforeTheDeadlineDoesNotPause(t *te
 		cfg.BatchSize = 2
 		cfg.Logger = &recordingLogger{}
 		cfg.GCSOffloader = off
-		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3012,7 +3198,7 @@ func TestResolveUploads_BatchTimeoutCooldown(t *testing.T) {
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 2,
@@ -3130,8 +3316,10 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			name:                  "a fresh deadline of the caller runs out before the upload timeout",
 			uploadTimeout:         time.Minute,
 			pauseOnCallerDeadline: true,
-			// The upload counts as stalled only if it starts within a quarter
-			// of the deadline, so the deadline leaves room for a late start.
+			// No upload of the batch succeeds, so its deadline pauses the
+			// uploads, whether or not the upload that it cut short had run
+			// long enough to count as stalled; the deadline is long enough
+			// to leave room for a late start.
 			newCtx: func(t *testing.T) context.Context {
 				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 				t.Cleanup(cancel)
@@ -3435,8 +3623,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 					}
 					call := callCount.Add(1)
 					if call == 1 {
-						path := req.Path
-						firstCallPath.Store(&path)
+						firstCallPath.Store(&req.Path)
 					}
 					if tt.partialSuccess && call == 1 {
 						time.Sleep(tt.firstUploadTakes)
@@ -3475,7 +3662,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 				},
 			}
 			logger := &recordingLogger{}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, GCSMaxConcurrentUploads: tt.maxConcurrent, Logger: logger}}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, GCSMaxConcurrentUploads: tt.maxConcurrent, Logger: logger}}
 			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}
 
 			firstContents := []*genai.Content{imageContent(1)}
@@ -3548,7 +3735,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 }
 
 func TestGCSOffloading_ConfigurablePendingUploadBytesCap(t *testing.T) {
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             &fakeOffloader{},
 			GCSMaxPendingUploadBytes: 80,
@@ -3591,7 +3778,7 @@ func (l *panicOnBudgetLogger) Printf(format string, v ...any) {
 
 func TestGCSOffloading_BuildRowPanicReleasesReservedBytes(t *testing.T) {
 	logger := &panicOnBudgetLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             &fakeOffloader{},
 			GCSMaxPendingUploadBytes: 100,
@@ -3671,9 +3858,9 @@ func TestGCSOffloading_RunEndDeadlineDoesNotPauseHealthyStorage(t *testing.T) {
 	cfg.Logger = logger
 	cfg.GCSOffloader = off
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -3771,9 +3958,9 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 	cfg.Logger = logger
 	cfg.GCSOffloader = off
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -3791,9 +3978,7 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 
 	stopFeeder := make(chan struct{})
 	var feederWG sync.WaitGroup
-	feederWG.Add(1)
-	go func() {
-		defer feederWG.Done()
+	feederWG.Go(func() {
 		select {
 		case <-firstUploadStarted:
 		case <-stopFeeder:
@@ -3809,7 +3994,7 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 				bp.Append(newImageRow())
 			}
 		}
-	}()
+	})
 
 	bp.flushRunEnd()
 	close(stopFeeder)
@@ -3854,9 +4039,9 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -3924,9 +4109,9 @@ func TestGCSOffloading_FlushRunEndPausesBatchStartingWithThirtyPercentBudget(t *
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -4028,9 +4213,9 @@ func TestGCSOffloading_FlushRunEndBatchAfterEmptyBatchPausesStalledStorage(t *te
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 	defer bp.Close()
@@ -4096,7 +4281,7 @@ func TestGCSOffloading_DeferredTextRetryTruncationFlag(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
 	long := strings.Repeat("x", 200)
 
 	control := probeRow(t, textContent("user", long))
@@ -4139,7 +4324,7 @@ func TestGCSOffloading_BinaryOnlyDeferralKeepsFailedTextSummary(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
 	long := strings.Repeat("y", 200)
 	mk := func() map[string]any {
 		return probeRow(t, &genai.Content{Role: "user", Parts: []*genai.Part{
@@ -4183,7 +4368,7 @@ func TestResolveUploads_PartialOutageBrownoutPausesUploads(t *testing.T) {
 		return ctx.Err()
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 4,
@@ -4230,7 +4415,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -4355,7 +4540,7 @@ func TestResolveUploads_ConcurrencyLimitedBrownoutPausesUploads(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 1,
@@ -4375,7 +4560,7 @@ func TestGCSOffloading_FailedMultiAttributeUploadTruncatedFlag(t *testing.T) {
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		return errors.New("gcs failure")
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:     off,
 			GCSUploadTimeout: time.Minute,
@@ -4400,8 +4585,7 @@ func TestGCSOffloading_FailedMultiAttributeUploadTruncatedFlag(t *testing.T) {
 }
 
 func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -4440,9 +4624,9 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4476,33 +4660,158 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 	}
 }
 
+// TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes checks that
+// Close's early-drop branch releases the pending upload reservations before
+// logging the warning, so that a Logger that panics on the warning cannot leak
+// them. It queues three 16-byte pending uploads in a single batch that hits
+// the rotation-cooldown early-drop branch, uses an always-panicking Logger,
+// calls Close, recovers the panic, and asserts that pendingUploadBytes is 0.
+func TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes(t *testing.T) {
+	ctx := context.Background()
+	off := &fakeOffloader{}
+	quietLogger := &recordingLogger{}
+	cfg := exactlyOnceTestConfig()
+	cfg.BatchFlushIntv = time.Hour
+	cfg.BatchSize = 100
+	cfg.GCSOffloader = off
+	cfg.Logger = quietLogger
+	cfg.ShutdownTimeout = 5 * time.Second
+	srv := &scriptedCommittedStreamServer{
+		onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+			return nil, status.Error(codes.OutOfRange, "offset beyond end")
+		},
+	}
+	bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor() error = %v", err)
+	}
+
+	// Establish rotation cooldown before Close so the 3 upload rows form
+	// a batch that hits the cooldown early-drop branch immediately.
+	if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "B1"}}); err == nil {
+		t.Fatal("writeBatch(B1) error = nil, want an offset error")
+	}
+	if !bp.streamWriter.isRotationInCooldown() {
+		t.Fatal("rotation is not paused after the freshly rotated stream rejected the batch")
+	}
+
+	// Switch to the panicking Logger for Close.
+	bp.config.Logger = alwaysPanicLogger{}
+
+	batch := uploadRows(bp, 3)
+	for _, row := range batch {
+		bp.queue <- row
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes before Close = %d, want 48", got)
+	}
+
+	// Close's early-drop branch logs a warning that the panicking Logger
+	// turns into a panic; the panic is recovered, and the reservations
+	// must already have been released.
+	r := panicValue(func() { bp.Close() })
+	if r == nil {
+		t.Fatal("Close did not panic on the logger's warning")
+	}
+	if msg := fmt.Sprint(r); !strings.Contains(msg, "committed write stream rotation in cooldown") {
+		t.Errorf("panic = %q, want it to contain the cooldown warning", msg)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after Close panicked on the early-drop warning = %d, want 0", got)
+	}
+}
+
+func TestGCSOffloading_CloseLogsFinalFailureOfBackgroundFlushUploadItCancels(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 8)
+	wc := newScriptedWriteClient(t, &fakeBigQueryWriteServer{requests: requests})
+
+	started := make(chan struct{})
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &recordingLogger{}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.GCSUploadTimeout = 5 * time.Second
+	cfg.GCSOffloader = off
+	cfg.Logger = logger
+	bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor: %v", err)
+	}
+	bp.Start()
+
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
+	row["event_type"] = EventLLMRequest
+	row[eventIDField] = "ev-bg"
+	bp.Append(row) // reaches BatchSize, so a background flush starts uploading
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload did not start")
+	}
+	bp.Close() // cancels the in-flight upload of the background flush
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 1 })
+	if got := contentPartsOf(t, rows[0])[0]["text"]; got != uploadFailedText {
+		t.Errorf("part text = %v, want %q", got, uploadFailedText)
+	}
+	var lines []string
+	for _, l := range uploadFailureLines(logger) {
+		if strings.Contains(l, "ev-bg") {
+			lines = append(lines, l)
+		}
+	}
+	want := "agentanalytics: GCS upload failed for event ev-bg part 0 (3 bytes): context canceled; keeping the part inline"
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("upload failure lines = %q, want [%q]", lines, want)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes = %d, want 0", got)
+	}
+}
+
 func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
+	logger := &recordingLogger{}
+	// loggedDuringResolve records whether the failure of row 2's upload was
+	// already logged when row 2's write reached BigQuery, which is after
+	// resolveUploadsForBatch returned and before the write returns and
+	// clearDeferredUploads settles the deferred upload.
+	var loggedDuringResolve atomic.Bool
 	requests := make(chan *storagepb.AppendRowsRequest, 16)
-	storagepb.RegisterBigQueryWriteServer(srv, &delayedBigQueryWriteServer{
-		delay:    50 * time.Millisecond,
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
 		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				return 0, nil
+			case 2:
+				// Row 1's 1.6s write leaves at most 400ms, less than a
+				// quarter (500ms) of the 2s ShutdownTimeout, so row 2's
+				// run-end deadline does not pause the uploads
+				// (pauseOnCallerDeadline is false) and its stalled upload is
+				// deferred by resolveUploadsForBatch, then logged as a final
+				// failure by clearDeferredUploads once row 2's write
+				// succeeds.
+				return 1600 * time.Millisecond, nil
+			case 3:
+				loggedDuringResolve.Store(logger.contains("ev-hang"))
+				return 50 * time.Millisecond, nil
+			default:
+				return 50 * time.Millisecond, nil
+			}
+		},
 	})
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writeClient.Close() })
 
 	var uploadCount atomic.Int32
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
@@ -4512,20 +4821,29 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	logger := &recordingLogger{}
 	cfg := DefaultConfig()
 	cfg.BatchSize = 1
 	cfg.BatchFlushIntv = time.Hour
-	cfg.ShutdownTimeout = 400 * time.Millisecond
+	cfg.ShutdownTimeout = 2 * time.Second
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventUserMessageReceived}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
 	bp.Start()
 
 	row1 := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
@@ -4553,6 +4871,19 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 	if !logger.contains("GCS upload failed for event ev-hang") {
 		t.Errorf("expected GCS upload failure logged for second batch, got:\n%s", logger)
 	}
+	if loggedDuringResolve.Load() {
+		t.Error("the failure of row 2's upload was logged before row 2's write, want it deferred")
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil = %d, want 0: row 2's run-end deadline must not pause the uploads", got)
+	}
+	if got := len(bp.deferredBatch); got != 0 {
+		t.Errorf("deferredBatch length = %d, want 0: row 2 was written", got)
+	}
+	// The second batch was written, so its upload is not retried.
+	if logger.contains("pending retry on next flush") {
+		t.Errorf("flushRunEnd logged a retry of an upload of a written batch, got:\n%s", logger)
+	}
 }
 
 type reproPanicLogger struct{}
@@ -4565,83 +4896,112 @@ func (reproPanicLogger) Printf(format string, _ ...any) {
 func (reproPanicLogger) Println(...any) {}
 
 func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T) {
-	// The first part waits out the caller deadline and is deferred. The second
-	// returns a non-gs URI, which is logged from applyUpload. That log panics
-	// inside resolveUploads, after the deferred reservation is recorded.
-	secondStarted := make(chan struct{})
-	off := &fakeOffloader{
-		hook: func(ctx context.Context, req GCSUploadRequest) error {
-			if strings.Contains(req.Path, "_c1_p0") {
-				close(secondStarted)
-				return nil
-			}
-			<-ctx.Done()
-			return ctx.Err()
-		},
-		uri: func(req GCSUploadRequest) string {
-			if strings.Contains(req.Path, "_c1_p0") {
-				return "https://example.com/not-gs"
-			}
-			return "gs://fake-bucket/" + req.Path
-		},
+	newProcessor := func(off GCSContentOffloader, capBytes int64) *batchProcessor {
+		return &batchProcessor{
+			config: applyDefaults(Config{
+				GCSOffloader:             off,
+				GCSUploadTimeout:         time.Minute,
+				GCSMaxConcurrentUploads:  2,
+				GCSMaxPendingUploadBytes: capBytes,
+				Logger:                   reproPanicLogger{},
+			}),
+			queue:                 make(chan map[string]any, 4),
+			maxPendingUploadBytes: capBytes,
+		}
 	}
-	bp := &BatchProcessor{
-		config: applyDefaults(Config{
-			GCSOffloader:             off,
-			GCSUploadTimeout:         time.Minute,
-			GCSMaxConcurrentUploads:  2,
-			GCSMaxPendingUploadBytes: 128,
-			Logger:                   reproPanicLogger{},
-		}),
-		queue:                 make(chan map[string]any, 4),
-		maxPendingUploadBytes: 128,
-	}
-	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
-	row := queuedRow(opts, imageContent(bytes.Repeat([]byte{1}, 64)...), imageContent(bytes.Repeat([]byte{2}, 64)...))
-	if got := bp.pendingUploadBytes.Load(); got != 128 {
-		t.Fatalf("pendingUploadBytes after reservation = %d, want 128", got)
-	}
-	panicked := false
-	func() {
-		defer func() {
-			if recover() != nil {
-				panicked = true
-			}
-		}()
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() {
-			select {
-			case <-secondStarted:
-			case <-time.After(2 * time.Second):
-			}
-			cancel()
-		}()
-		bp.resolveUploads(ctx, false, []map[string]any{row})
-	}()
-	if !panicked {
-		t.Fatal("resolveUploads did not panic")
-	}
-	// The panic leaves flushRunEnd before the batch is requeued, so the deferred
-	// row is gone too. Unwind must release those bytes as well.
-	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Fatalf("pendingUploadBytes = %d, want 0", got)
-	}
+
+	t.Run("an in-flight log panic after deferring an earlier part", func(t *testing.T) {
+		// The first part waits out the caller deadline and is deferred. The second
+		// returns a non-gs URI, which is logged from applyUpload. That log panics
+		// inside resolveUploads, after the deferred reservation is recorded.
+		secondStarted := make(chan struct{})
+		off := &fakeOffloader{
+			hook: func(ctx context.Context, req GCSUploadRequest) error {
+				if strings.Contains(req.Path, "_c1_p0") {
+					close(secondStarted)
+					return nil
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			uri: func(req GCSUploadRequest) string {
+				if strings.Contains(req.Path, "_c1_p0") {
+					return "https://example.com/not-gs"
+				}
+				return "gs://fake-bucket/" + req.Path
+			},
+		}
+		bp := newProcessor(off, 128)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(bytes.Repeat([]byte{1}, 64)...), imageContent(bytes.Repeat([]byte{2}, 64)...))
+		if got := bp.pendingUploadBytes.Load(); got != 128 {
+			t.Fatalf("pendingUploadBytes after reservation = %d, want 128", got)
+		}
+		if r := panicValue(func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				select {
+				case <-secondStarted:
+				case <-time.After(2 * time.Second):
+				}
+				cancel()
+			}()
+			bp.resolveUploads(ctx, false, []map[string]any{row})
+		}); r == nil {
+			t.Fatal("resolveUploads did not panic")
+		}
+		// The panic leaves flushRunEnd before the batch is requeued, so the deferred
+		// row is gone too. Unwind must release those bytes as well.
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Fatalf("pendingUploadBytes = %d, want 0", got)
+		}
+		if _, ok := row[deferredUploadsKey]; ok {
+			t.Fatal("row still holds deferredUploadsKey after resolveUploads panicked")
+		}
+	})
+
+	t.Run("a deferred upload that is dropped", func(t *testing.T) {
+		var stalled atomic.Bool
+		stalled.Store(true)
+		bp := newProcessor(stallingOffloader(&stalled), 64)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(make([]byte, 64)...))
+		// The deferred upload keeps its reservation, and its failure is not
+		// logged, until it is dropped or requeued.
+		deferUploads(t, bp, []map[string]any{row})
+		if got := bp.pendingUploadBytes.Load(); got != 64 {
+			t.Fatalf("pendingUploadBytes while the upload is deferred = %d, want 64", got)
+		}
+		if r := panicValue(func() { bp.clearDeferredUploads([]map[string]any{row}) }); r == nil {
+			t.Fatal("clearDeferredUploads did not log the failure of the upload that it dropped")
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pendingUploadBytes = %d, want 0", got)
+		}
+	})
+
+	t.Run("a failed upload that is logged at once", func(t *testing.T) {
+		bp := newProcessor(&fakeOffloader{hook: func(context.Context, GCSUploadRequest) error {
+			return errors.New("upload failed")
+		}}, 64)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(make([]byte, 64)...))
+		if r := panicValue(func() { bp.resolveUploads(context.Background(), false, []map[string]any{row}) }); r == nil {
+			t.Fatal("resolveUploads did not log the failed upload")
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pendingUploadBytes = %d, want 0", got)
+		}
+	})
 }
 
 func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		if stalled.Load() {
-			<-ctx.Done()
-			return ctx.Err()
-		}
-		return nil
-	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
-			GCSOffloader:             off,
+			GCSOffloader:             stallingOffloader(&stalled),
 			GCSUploadTimeout:         time.Minute,
 			GCSMaxPendingUploadBytes: 64,
 			Logger:                   reproPanicLogger{},
@@ -4658,17 +5018,10 @@ func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
 	}
-	panicked := false
-	func() {
-		defer func() {
-			if recover() != nil {
-				panicked = true
-			}
-		}()
-		bp.requeueDeferredUploads([]map[string]any{row})
-	}()
-	if !panicked {
-		t.Fatal("requeueDeferredUploads did not panic")
+	if r := panicValue(func() {
+		bp.writeRunEndBatchLocked(expiredCtx, false, []map[string]any{row})
+	}); r == nil {
+		t.Fatal("writeRunEndBatchLocked did not panic on requeue log")
 	}
 	if len(bp.deferredBatch) != 1 {
 		t.Fatalf("deferredBatch len = %d, want 1", len(bp.deferredBatch))
@@ -4686,60 +5039,18 @@ func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 	}
 }
 
-func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
-	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}}
-	bp := &BatchProcessor{
-		config: applyDefaults(Config{
-			GCSOffloader:             off,
-			GCSUploadTimeout:         time.Minute,
-			GCSMaxPendingUploadBytes: 128,
-			Logger:                   reproPanicLogger{},
-		}),
-		queue:                 make(chan map[string]any, 4),
-		maxPendingUploadBytes: 128,
-	}
-	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
-	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
-	row1[eventIDField] = "ev-drop-1"
-	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
-	row2[eventIDField] = "ev-drop-2"
-	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	bp.resolveUploads(expiredCtx, false, []map[string]any{row1, row2})
-	cancel()
-	if got := bp.pendingUploadBytes.Load(); got != 128 {
-		t.Fatalf("pendingUploadBytes while uploads are deferred = %d, want 128", got)
-	}
-	panicked := false
-	func() {
-		defer func() {
-			if recover() != nil {
-				panicked = true
-			}
-		}()
-		bp.clearDeferredUploads([]map[string]any{row1, row2})
-	}()
-	if !panicked {
-		t.Fatal("clearDeferredUploads did not panic")
-	}
-	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Fatalf("pendingUploadBytes = %d, want 0", got)
-	}
-}
-
 func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
-	// flushRunEnd drops a failed write by calling releaseRowUploads once per
-	// row and only then logging. A panic on the first row's line must not
-	// keep the later rows' bytes.
-	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}}
-	bp := &BatchProcessor{
+	// resolveUploads consumed rawPartsKey (releasing the queued payload
+	// reservations) but the deferred upload (deferredUploadsKey) still holds
+	// its 64-byte reservation per row. releaseRowUploads drops a row via
+	// releaseBatchUploads, which releases the deferred reservation before
+	// logging. A panic on the first row's line must not keep the second row's
+	// bytes when it is released separately.
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
-			GCSOffloader:             off,
+			GCSOffloader:             stallingOffloader(&stalled),
 			GCSUploadTimeout:         time.Minute,
 			GCSMaxPendingUploadBytes: 128,
 			Logger:                   reproPanicLogger{},
@@ -4758,25 +5069,22 @@ func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
 	if got := bp.pendingUploadBytes.Load(); got != 128 {
 		t.Fatalf("pendingUploadBytes while uploads are deferred = %d, want 128", got)
 	}
-	panicked := false
-	func() {
-		defer func() {
-			if recover() != nil {
-				panicked = true
-			}
-		}()
-		batch := []map[string]any{row1, row2}
-		for _, row := range batch {
-			bp.releaseRowUploads(row)
-		}
+	if r := panicValue(func() {
+		bp.releaseRowUploads(row1)
 		bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
-		bp.clearDeferredUploads(batch)
-	}()
-	if !panicked {
+	}); r == nil {
 		t.Fatal("logger did not panic")
 	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after releasing row1 = %d, want 64", got)
+	}
+	if r := panicValue(func() {
+		bp.releaseRowUploads(row2)
+	}); r == nil {
+		t.Fatal("logger did not panic on row2")
+	}
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Fatalf("pendingUploadBytes = %d, want 0", got)
+		t.Fatalf("pendingUploadBytes after releasing row2 = %d, want 0", got)
 	}
 }
 
@@ -4793,7 +5101,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 		return ctx.Err()
 	}}
 	logger := &callbackRaceLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -4815,9 +5123,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -4828,7 +5134,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 				bp.Append(map[string]any{eventIDField: "drop"})
 			}
 		}
-	}()
+	})
 	for range 8 {
 		runtime.Gosched()
 	}
@@ -4844,8 +5150,8 @@ func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testi
 		return ctx.Err()
 	}}
 	logger := &recordingLogger{}
-	newProcessor := func() *BatchProcessor {
-		return &BatchProcessor{
+	newProcessor := func() *batchProcessor {
+		return &batchProcessor{
 			config: applyDefaults(Config{
 				GCSOffloader:             off,
 				GCSUploadTimeout:         time.Minute,
@@ -4864,18 +5170,15 @@ func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testi
 	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
 	cancel()
 
+	other.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("other processor"))
 	bp.releaseRowUploads(row)
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Fatalf("pendingUploadBytes after releaseRowUploads = %d, want 0", got)
 	}
-	other.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("other processor"))
-	if logger.contains("ev-shared-logger") {
-		t.Fatalf("another processor logged this processor's drop line:\n%s", logger)
-	}
 	bp.clearDeferredUploads([]map[string]any{row})
-	const want = "GCS upload failed for event ev-shared-logger part 0 (64 bytes)"
-	if !logger.contains(want) || logger.contains("pending retry") {
-		t.Fatalf("log = %q, want the plain drop line for ev-shared-logger", logger)
+	const want = "agentanalytics: GCS upload failed for event ev-shared-logger part 0 (64 bytes): context deadline exceeded; keeping the part inline"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Fatalf("upload failure lines mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -4884,7 +5187,7 @@ func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T
 		<-ctx.Done()
 		return errors.New("custom offloader failure")
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -4909,5 +5212,1730 @@ func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T
 	pending, ok := row[rawPartsKey].([]pendingUpload)
 	if !ok || len(pending) != 1 {
 		t.Fatalf("requeued uploads = %v, want the deferred part", row[rawPartsKey])
+	}
+}
+
+// panicValue calls f and returns the value that it panics with, or nil.
+func panicValue(f func()) (r any) {
+	defer func() { r = recover() }()
+	f()
+	return nil
+}
+
+// stallingOffloader returns an offloader whose uploads wait until their
+// context is done while stalled is set, and succeed otherwise.
+func stallingOffloader(stalled *atomic.Bool) *fakeOffloader {
+	return &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if stalled.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+}
+
+// uploadRows returns n rows, ev-0 to ev-<n-1>, that each queue a 16-byte
+// image for upload and reserve its bytes in bp.
+func uploadRows(bp *batchProcessor, n int) []map[string]any {
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	batch := make([]map[string]any, n)
+	for i := range batch {
+		batch[i] = queuedRow(opts, imageContent(make([]byte, 16)...))
+		batch[i][eventIDField] = fmt.Sprintf("ev-%d", i)
+	}
+	return batch
+}
+
+// deferUploads resolves batch under a caller deadline that runs out while the
+// uploads stall, as a run-end flush with a depleted budget does, and checks
+// that every row has its upload deferred and that nothing about the deferred
+// uploads was logged.
+func deferUploads(t *testing.T, bp *batchProcessor, batch []map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if r := panicValue(func() { bp.resolveUploads(ctx, false, batch) }); r != nil {
+		t.Fatalf("resolveUploads logged the failure of a deferred upload: the logger panicked with %v", r)
+	}
+	for i, row := range batch {
+		if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) == 0 {
+			t.Fatalf("row %d has no deferred upload", i)
+		}
+	}
+}
+
+// uploadFailureLines returns the lines of l that report a failed upload.
+func uploadFailureLines(l *recordingLogger) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.Contains(line, "GCS upload failed") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued checks that the
+// failure of an upload that a depleted caller deadline cut short is logged
+// once it is known whether the upload is retried, and only then: as pending a
+// retry if the upload is requeued for the next flush, and as final if it is
+// dropped.
+func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
+	const failure = "agentanalytics: GCS upload failed for event ev-deferred part 0 (3 bytes): context deadline exceeded; keeping the part inline"
+	tests := []struct {
+		name    string
+		settle  func(bp *batchProcessor, batch []map[string]any)
+		wantLog string
+	}{
+		{
+			name:    "the upload is requeued",
+			settle:  (*batchProcessor).requeueDeferredUploads,
+			wantLog: failure + " pending retry on next flush",
+		},
+		{
+			name:    "the upload is dropped",
+			settle:  (*batchProcessor).clearDeferredUploads,
+			wantLog: failure,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stalled atomic.Bool
+			stalled.Store(true)
+			logger := &recordingLogger{}
+			bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: logger}}
+			row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+			row[eventIDField] = "ev-deferred"
+			batch := []map[string]any{row}
+
+			deferUploads(t, bp, batch)
+			if got := uploadFailureLines(logger); len(got) != 0 {
+				t.Errorf("resolveUploads logged %q before it was known whether the deferred upload is retried", got)
+			}
+			tt.settle(bp, batch)
+			if diff := cmp.Diff([]string{tt.wantLog}, uploadFailureLines(logger)); diff != "" {
+				t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred checks
+// that an offloader error that does not wrap context.DeadlineExceeded, returned
+// once a depleted caller deadline has ended the uploads, defers the upload as a
+// deadline error does, so that a requeued batch retries it.
+func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if stalled.Load() {
+			<-ctx.Done()
+			return errors.New("custom timeout error")
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+	row[eventIDField] = "ev-custom"
+	batch := []map[string]any{row}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(ctx, false, batch)
+	cancel()
+	if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) != 1 {
+		t.Fatalf("the upload that failed with a custom error after the caller deadline ran out was not deferred; log:\n%s", logger)
+	}
+
+	bp.requeueDeferredUploads(batch)
+	if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+		t.Fatalf("the row has %d uploads queued after requeueDeferredUploads, want 1", len(pending))
+	}
+	want := "agentanalytics: GCS upload failed for event ev-custom part 0 (3 bytes): error type *errors.errorString; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+
+	stalled.Store(false)
+	bp.resolveUploads(context.Background(), false, batch)
+	if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("storage_mode after the retry = %v, want GCS_REFERENCE", got)
+	}
+	if got := len(off.uploads()); got != 2 {
+		t.Errorf("the offloader was called %d times, want 2: the cut-short upload and its retry", got)
+	}
+}
+
+// TestClearDeferredUploads_PanickingLoggerReleasesEveryRow checks that the
+// reservations of the deferred uploads of every row of a batch are released
+// before any of their failures is logged, so that a Logger that panics on the
+// first of them leaks none.
+func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	deferUploads(t, bp, batch)
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes while the uploads are deferred = %d, want 48", got)
+	}
+
+	if r := panicValue(func() { bp.clearDeferredUploads(batch) }); r == nil {
+		t.Fatal("clearDeferredUploads did not log the failures of the uploads that it dropped")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 0", got)
+	}
+	for i, row := range batch {
+		if _, ok := row[deferredUploadsKey]; ok {
+			t.Errorf("row %d still holds its deferred uploads", i)
+		}
+	}
+}
+
+// TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow checks that every
+// row of a batch is requeued, keeping the reservations of its uploads, before
+// the failures of the deferred uploads are logged, so that a Logger that
+// panics on the first of them leaves no row without its uploads.
+func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	deferUploads(t, bp, batch)
+
+	if r := panicValue(func() { bp.requeueDeferredUploads(batch) }); r == nil {
+		t.Fatal("requeueDeferredUploads did not log the failures of the uploads that it requeued")
+	}
+	for i, row := range batch {
+		if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+			t.Errorf("row %d has %d uploads queued after the logger panicked, want 1", i, len(pending))
+		}
+		if got := contentPartsOf(t, row)[0]["text"]; got != inlineDataText {
+			t.Errorf("row %d part text = %v, want %q until the upload is retried", i, got, inlineDataText)
+		}
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 48, kept for the retry", got)
+	}
+
+	// The next flush retries every upload and releases the reservations.
+	stalled.Store(false)
+	bp.resolveUploads(context.Background(), false, batch)
+	for i, row := range batch {
+		if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+			t.Errorf("row %d storage_mode after the retry = %v, want GCS_REFERENCE", i, got)
+		}
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the retry = %d, want 0", got)
+	}
+}
+
+// TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow checks that dropping
+// a batch releases the reservations of the payloads still queued on its rows,
+// and of its deferred uploads, before the failures of the deferred uploads are
+// logged, so that a Logger that panics on the first of them leaks nothing.
+func TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	// The first two rows have deferred uploads; the last still has its
+	// payload queued.
+	deferUploads(t, bp, batch[:2])
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes before the batch is dropped = %d, want 48", got)
+	}
+
+	if r := panicValue(func() { bp.releaseBatchUploads(batch) }); r == nil {
+		t.Fatal("releaseBatchUploads did not log the failures of the deferred uploads that it dropped")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 0", got)
+	}
+	for i, row := range batch {
+		for _, key := range []string{rawPartsKey, deferredUploadsKey} {
+			if _, ok := row[key]; ok {
+				t.Errorf("row %d still has %s", i, key)
+			}
+		}
+	}
+}
+
+// TestGCSOffloading_FlushRunEndKeepsDeferredBatchWhenLoggerPanics checks that a
+// run-end flush whose BigQuery write runs out of its budget keeps the batch in
+// deferredBatch before it logs that the batch's deferred uploads are pending a
+// retry, so that a Logger that panics on that line loses neither the batch nor
+// the reservations of its uploads.
+func TestGCSOffloading_FlushRunEndKeepsDeferredBatchWhenLoggerPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	var serverDelay atomic.Int64
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(int32) (time.Duration, error) {
+			return time.Duration(serverDelay.Load()), nil
+		},
+	})
+
+	var stalled atomic.Bool
+	stalled.Store(true)
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = stallingOffloader(&stalled)
+	cfg.Logger = reproPanicLogger{}
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		stalled.Store(false)
+		serverDelay.Store(0)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	serverDelay.Store(int64(800 * time.Millisecond))
+
+	// Batch 0 has no uploads, and its 800ms write leaves ~200ms, less than a
+	// quarter (250ms) of the 1s ShutdownTimeout: batch 1 starts with
+	// pauseOnCallerDeadline false, so its stalled upload is deferred without
+	// pausing uploads, and its 800ms write runs out of the budget, keeping
+	// batch 1 for the next flush.
+	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
+	row["event_type"] = EventLLMRequest
+	bp.queue <- row
+
+	if r := panicValue(bp.flushRunEnd); r == nil {
+		t.Fatal("flushRunEnd did not log the failure of the requeued upload")
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil = %d, want 0: the deferred upload must not pause the uploads", got)
+	}
+	if len(bp.deferredBatch) != 1 {
+		t.Fatalf("deferredBatch length after the logger panicked = %d, want 1", len(bp.deferredBatch))
+	}
+	if got := bp.deferredBatch[0]["event_type"]; got != EventLLMRequest {
+		t.Fatalf("deferredBatch[0] event_type = %v, want %s", got, EventLLMRequest)
+	}
+	if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+		t.Errorf("the kept row has %d uploads queued, want its deferred upload", len(pending))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 64, kept for the retry", got)
+	}
+
+	// Once Cloud Storage and BigQuery recover, the next flush writes the kept
+	// batch, retrying its upload.
+	stalled.Store(false)
+	serverDelay.Store(0)
+	bp.flush()
+	if len(bp.deferredBatch) != 0 {
+		t.Fatalf("deferredBatch length after flush = %d, want 0", len(bp.deferredBatch))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after flush = %d, want 0", got)
+	}
+
+	// Under at-least-once delivery, the timed-out INLINE attempt for batch 1
+	// may also be recorded before the retried GCS_REFERENCE write.
+	rows := collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rows) >= 2
+	})
+	if contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"] == "INLINE" {
+		select {
+		case req := <-requests:
+			rows = append(rows, decodeArrowRows(t, req)...)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if len(rows) != 2 && len(rows) != 3 {
+		t.Fatalf("persisted rows = %d, want 2 or 3", len(rows))
+	}
+	if got := rows[0]["event_type"]; got != EventUserMessageReceived {
+		t.Errorf("rows[0] event_type = %v, want %s", got, EventUserMessageReceived)
+	}
+	if len(rows) == 3 {
+		if got := rows[1]["event_type"]; got != EventLLMRequest {
+			t.Errorf("rows[1] event_type = %v, want %s", got, EventLLMRequest)
+		}
+	}
+	if got := rows[len(rows)-1]["event_type"]; got != EventLLMRequest {
+		t.Errorf("last row event_type = %v, want %s", got, EventLLMRequest)
+	}
+	if got := contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("the retried part has storage_mode %v, want GCS_REFERENCE", got)
+	}
+}
+
+// scriptedWriteServer answers each AppendRows request as script says for its
+// number, counting from 1: after a delay, unless the stream ends first, or
+// with an error that ends the stream. If respond is set, the answer is what
+// respond returns for the number, if not nil. It records the requests that it
+// answers.
+type scriptedWriteServer struct {
+	storagepb.UnimplementedBigQueryWriteServer
+	script   func(n int32) (time.Duration, error)
+	respond  func(n int32) *storagepb.AppendRowsResponse
+	count    atomic.Int32
+	requests chan *storagepb.AppendRowsRequest
+}
+
+func (s *scriptedWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		n := s.count.Add(1)
+		delay, err := s.script(n)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-time.After(delay):
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+		s.requests <- req
+		resp := &storagepb.AppendRowsResponse{}
+		if s.respond != nil {
+			if r := s.respond(n); r != nil {
+				resp = r
+			}
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}
+
+// TestResolveUploads_CanceledCallerContextDefersUploads checks that an upload
+// that a canceled caller context cuts short without pausing uploads across
+// flushes is deferred, as one that a depleted deadline cuts short is, so that
+// a requeued batch retries it.
+func TestResolveUploads_CanceledCallerContextDefersUploads(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+	row[eventIDField] = "ev-canceled"
+	batch := []map[string]any{row}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+	bp.resolveUploads(ctx, false, batch)
+	if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) != 1 {
+		t.Fatalf("the upload that a canceled caller context cut short was not deferred; log:\n%s", logger)
+	}
+
+	bp.requeueDeferredUploads(batch)
+	want := "agentanalytics: GCS upload failed for event ev-canceled part 0 (3 bytes): context canceled; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+	bp.resolveUploads(context.Background(), false, batch)
+	if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("storage_mode after the retry = %v, want GCS_REFERENCE", got)
+	}
+}
+
+// TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush checks that
+// an upload that Close cancels while a run-end flush is uploading is deferred:
+// when the BigQuery write of its batch then runs out of the budget of the
+// flush, the flush requeues the upload, logs it once as pending a retry, and
+// keeps the batch, and Close retries the upload when it writes the batch.
+func TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				// The write of row A leaves ~1.2s of the 3s budget (~600ms
+				// for row B's upload window), leaving margin for Close to
+				// cancel row B's in-flight upload before its upload deadline
+				// expires; because Close's cancellation rather than the
+				// upload deadline ends the upload, it does not pause uploads
+				// and is deferred.
+				return 1800 * time.Millisecond, nil
+			case 2:
+				// The write of the batch of row B outlasts the budget.
+				return time.Minute, nil
+			default:
+				return 0, nil
+			}
+		},
+	})
+	bStarted := make(chan struct{})
+	var bCalls atomic.Int32
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if strings.Contains(req.Path, "_ev-b_") && bCalls.Add(1) == 1 {
+			close(bStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 3 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = logger
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor: %v", err)
+	}
+	t.Cleanup(bp.Close)
+
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a", "ev-b"} {
+		row := queuedRow(opts, imageContent(1, 2, 3))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	// Close cancels the uploads of the run-end flush while the upload of row
+	// B is in flight, and then waits for the flush to finish.
+	closed := make(chan struct{})
+	go func() {
+		<-bStarted
+		bp.Close()
+		close(closed)
+	}()
+	bp.flushRunEnd()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return")
+	}
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 2 })
+	var rowB map[string]any
+	for _, row := range rows {
+		if row[eventIDField] == "ev-b" {
+			rowB = row
+		}
+	}
+	if rowB == nil {
+		t.Fatalf("row B was not written; event ids: %v, %v", rows[0][eventIDField], rows[1][eventIDField])
+	}
+	if got := contentPartsOf(t, rowB)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("row B storage_mode = %v, want GCS_REFERENCE: Close retries the upload that it canceled", got)
+	}
+	if got := len(off.uploads()); got != 3 {
+		t.Errorf("the offloader was called %d times, want 3: row A, row B, and the retry of row B", got)
+	}
+	want := "agentanalytics: GCS upload failed for event ev-b part 0 (3 bytes): context canceled; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after Close = %d, want 0", got)
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil after Close = %d, want 0: canceling an upload must not pause the uploads", got)
+	}
+}
+
+// TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics
+// checks that when BigQuery rejects the write of a run-end batch whose uploads
+// were deferred, flushRunEnd releases the reservations of the deferred uploads
+// of every row of the batch before it logs their failures, so that a Logger
+// that panics on the first of them leaks none.
+func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				return 0, nil
+			case 2:
+				// Batch A's 1.6s write leaves less than a quarter (500ms) of
+				// the 2s budget, so batch B's run-end deadline cannot pause
+				// the uploads and its stalled uploads are deferred, while
+				// leaving time for batch B's rejected write.
+				return 1600 * time.Millisecond, nil
+			default:
+				return 0, status.Error(codes.InvalidArgument, "rejected")
+			}
+		},
+	})
+	var closing atomic.Bool
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if !closing.Load() && strings.Contains(req.Path, "_ev-b") {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 3
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = reproPanicLogger{}
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		closing.Store(true)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	// Batch A uploads its rows; batch B has its uploads deferred and its
+	// write rejected, which drops it.
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a0", "ev-a1", "ev-a2", "ev-b0", "ev-b1", "ev-b2"} {
+		row := queuedRow(opts, imageContent(make([]byte, 16)...))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	if r := panicValue(bp.flushRunEnd); r == nil {
+		t.Fatal("flushRunEnd did not log the failures of the deferred uploads of the rejected batch")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked on the drop path = %d, want 0", got)
+	}
+	if got := len(bp.deferredBatch); got != 0 {
+		t.Errorf("deferredBatch length = %d, want 0: a rejected batch is dropped", got)
+	}
+	if got := bp.dropStats().AppendFailureDrops; got != 3 {
+		t.Errorf("AppendFailureDrops = %d, want 3, the rows of the rejected batch", got)
+	}
+}
+
+// TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics
+// checks that resolveUploads drops the deferred uploads that a caller left
+// unsettled before it takes over the reservations of the payloads queued on
+// the batch, so that a Logger that panics on their failures leaves every
+// reservation with a row that holds it.
+func TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 2)
+	// The upload of the second row is deferred and left unsettled, while the
+	// first row still has its payload queued.
+	deferUploads(t, bp, batch[1:])
+	if got := bp.pendingUploadBytes.Load(); got != 32 {
+		t.Fatalf("pendingUploadBytes before the batch is resolved = %d, want 32", got)
+	}
+
+	stalled.Store(false)
+	if r := panicValue(func() { bp.resolveUploads(context.Background(), false, batch) }); r == nil {
+		t.Fatal("resolveUploads did not log the failure of the unsettled deferred upload that it dropped")
+	}
+	// Right after the recovered panic, before the batch is released, the
+	// first row's still-queued payload holds 16 bytes; the second row's
+	// 16-byte stale deferred reservation was released by clearDeferredUploads
+	// inside resolveUploads, so 16 bytes remain reserved, not 32.
+	if got := bp.pendingUploadBytes.Load(); got != 16 {
+		t.Errorf("pendingUploadBytes after the logger panicked, before releaseBatchUploads = %d, want 16", got)
+	}
+	// Dropping the batch releases what its rows still hold, which must be
+	// every reservation that is left.
+	bp.releaseBatchUploads(batch)
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked and the batch was dropped = %d, want 0", got)
+	}
+}
+
+// alwaysPanicLogger panics on every line that it is asked to log.
+type alwaysPanicLogger struct{}
+
+func (alwaysPanicLogger) Printf(format string, _ ...any) { panic("logger boom: " + format) }
+func (alwaysPanicLogger) Println(...any)                 { panic("logger boom") }
+
+// TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics
+// checks that when the BigQuery write of a run-end batch whose uploads were
+// deferred panics, as it does when BigQuery answers with an in-band error and
+// the Logger panics on the "BigQuery response" line, the reservations of the
+// deferred uploads are released although they were never settled.
+func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			if n == 2 {
+				// Batch A's 1.6s write leaves less than a quarter (500ms) of
+				// the 2s budget, so batch B's run-end deadline cannot pause
+				// the uploads and its stalled uploads are deferred, while
+				// leaving time for batch B's rejected write.
+				return 1600 * time.Millisecond, nil
+			}
+			return 0, nil
+		},
+		respond: func(n int32) *storagepb.AppendRowsResponse {
+			if n <= 2 {
+				return nil
+			}
+			return &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_Error{
+					Error: &statuspb.Status{Code: int32(codes.InvalidArgument), Message: "rejected"},
+				},
+			}
+		},
+	})
+	var closing atomic.Bool
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if !closing.Load() && strings.Contains(req.Path, "_ev-b") {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 3
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = alwaysPanicLogger{}
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("newBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		closing.Store(true)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	// Batch A uploads its rows; batch B has its three 16-byte uploads
+	// deferred, and its write is answered with an in-band error, whose log
+	// line panics before the deferred uploads are settled.
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a0", "ev-a1", "ev-a2", "ev-b0", "ev-b1", "ev-b2"} {
+		row := queuedRow(opts, imageContent(make([]byte, 16)...))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	r := panicValue(bp.flushRunEnd)
+	if s, _ := r.(string); !strings.Contains(s, "BigQuery response") {
+		t.Fatalf("flushRunEnd panicked with %v, want the panic of the BigQuery response log line", r)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the append panicked = %d, want 0", got)
+	}
+}
+
+func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
+	// Pin Cloud Storage's external 1,024-byte object-name limit and 65-byte
+	// "~<sha256>" suffix length independently of production constants so any
+	// drift in maxGCSObjectNameBytes or pathSegmentHashSuffixLen fails tests.
+	const (
+		wantObjectLimit   = 1024
+		wantHashSuffixLen = 65
+	)
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	t.Run("non-ASCII and sanitized ids do not collide", func(t *testing.T) {
+		pairs := [][2]string{
+			{"é", "ü"},
+			{"é", "__4a99557e"},
+			{"é", "_" + pathSegmentHashSuffix("é")},
+			{"session-日本", "session-韓国"},
+			{"日本", "韓国"},
+			{"日本", "__"},
+			{".", ".."},
+			{".", ""},
+			{"..", ""},
+			{"é?*", "///"},
+			{"é?*", "___"},
+			{"a/b", "a_b"},
+			{"a/b", "a_b_c14cddc0"},
+			{"a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+			{strings.Repeat("a", 128) + "5606", strings.Repeat("a", 128) + "91879"},
+			{"\uac01\uac01\uac02\uac05\uac09", "\uac01\uac05\uac0f\uac08\uac07"},
+		}
+		for _, pair := range pairs {
+			p0 := gcsObjectPath("logs", ts, "trace-1", "span-1", pair[0], 0, 0, ".txt")
+			p1 := gcsObjectPath("logs", ts, "trace-1", "span-1", pair[1], 0, 0, ".txt")
+			if p0 == p1 {
+				t.Errorf("eventID %q and %q collided on GCS object path %q", pair[0], pair[1], p0)
+			}
+		}
+	})
+
+	t.Run("distinct non-ASCII event ids upload both payloads", func(t *testing.T) {
+		ctx := context.Background()
+		pairs := [][2]string{
+			{"session-日本", "session-韓国"},
+			{"é", "__4a99557e"},
+			{"é", "_" + pathSegmentHashSuffix("é")},
+			{"a/b", "a_b_c14cddc0"},
+			{"a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+			{strings.Repeat("a", 128) + "5606", strings.Repeat("a", 128) + "91879"},
+			{"\uac01\uac01\uac02\uac05\uac09", "\uac01\uac05\uac0f\uac08\uac07"},
+		}
+		for _, pair := range pairs {
+			fs := newFakeStorage(t)
+			offloader, err := newGCSOffloader(ctx, "test-bucket", fs.clientOptions()...)
+			if err != nil {
+				t.Fatalf("newGCSOffloader() error: %v", err)
+			}
+			t.Cleanup(func() { _ = offloader.Close() })
+
+			bp := &batchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
+			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
+			row0 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-first-123456"}}})
+			row0[timestampField] = ts
+			row0["trace_id"] = "trace-1"
+			row0["span_id"] = "span-1"
+			row0[eventIDField] = pair[0]
+
+			row1 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-second-654321"}}})
+			row1[timestampField] = ts
+			row1["trace_id"] = "trace-1"
+			row1["span_id"] = "span-1"
+			row1[eventIDField] = pair[1]
+
+			bp.resolveUploads(ctx, false, []map[string]any{row0, row1})
+
+			uri0, _ := row0[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			uri1, _ := row1[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			if uri0 == "" || uri1 == "" || uri0 == uri1 {
+				t.Fatalf("pair %q vs %q got URIs %q and %q, want two distinct non-empty gs:// URIs", pair[0], pair[1], uri0, uri1)
+			}
+			obj0, ok0 := fs.object("test-bucket", strings.TrimPrefix(uri0, "gs://test-bucket/"))
+			obj1, ok1 := fs.object("test-bucket", strings.TrimPrefix(uri1, "gs://test-bucket/"))
+			if !ok0 || !ok1 || string(obj0.data) != "payload-first-123456" || string(obj1.data) != "payload-second-654321" {
+				t.Errorf("pair %q vs %q stored (%v:%q, %v:%q), want both payloads stored distinctly",
+					pair[0], pair[1], ok0, obj0.data, ok1, obj1.data)
+			}
+		}
+	})
+
+	t.Run("long ids and prefixes stay within 1024 bytes without colliding", func(t *testing.T) {
+		longA := strings.Repeat("a", 1100)
+		longB := strings.Repeat("a", 1000) + "-b-" + strings.Repeat("z", 100)
+		longMultiSegPrefix := strings.Repeat("segment123/", 120)
+		longUTF8 := strings.Repeat("日本", 600)
+
+		cases := []struct {
+			name                     string
+			prefix                   string
+			traceID, spanID, eventID string
+			ext                      string
+		}{
+			{"long_event_id", "logs", "trace", "span", longA, ".txt"},
+			{"long_trace_id", "logs", longA, "span", "event", ".txt"},
+			{"long_span_id", "logs", "trace", longA, "event", ".txt"},
+			{"long_single_segment_prefix", longA, "trace", "span", "event", ".txt"},
+			{"long_multi_segment_prefix", longMultiSegPrefix, "trace", "span", "event", ".txt"},
+			{"all_long_ascii", longMultiSegPrefix, longA, longA, longA, ".json"},
+			{"all_long_utf8", longUTF8, longUTF8, longUTF8, longUTF8, ".bin"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := gcsObjectPath(tc.prefix, ts, tc.traceID, tc.spanID, tc.eventID, 0, 0, tc.ext)
+				if len(got) > wantObjectLimit {
+					t.Errorf("len(gcsObjectPath) = %d, exceeds %d: %q", len(got), wantObjectLimit, got)
+				}
+				if !strings.HasSuffix(got, tc.ext) {
+					t.Errorf("gcsObjectPath = %q, want suffix %q", got, tc.ext)
+				}
+			})
+		}
+
+		pA := gcsObjectPath("logs", ts, "trace", "span", longA, 0, 0, ".txt")
+		pB := gcsObjectPath("logs", ts, "trace", "span", longB, 0, 0, ".txt")
+		if pA == pB {
+			t.Errorf("distinct 1100-byte event IDs sharing 1000-byte prefix collided on %q", pA)
+		}
+
+		// With plugin-length hex identifiers (32, 16, and 32 bytes), the longest
+		// int ordinals, and a 17-byte extension from extensionForMIME, a 750-byte
+		// prefix stays at most 905 bytes (905 on 64-bit int targets, 887 on 32-bit)
+		// without hitting the whole-name cap. A direct call with 128-byte
+		// identifiers hits the 1024-byte cap while preserving a safe extension.
+		safeExt := ".abcdefghijklmnop"
+		maxPrefix := strings.Repeat("p", 750)
+		wantPluginMax := 865 + 2*len(strconv.Itoa(math.MinInt))
+		gotPluginMax := gcsObjectPath(maxPrefix, ts, strings.Repeat("a", 32), strings.Repeat("b", 16), strings.Repeat("c", 32), math.MinInt, math.MinInt, safeExt)
+		if len(gotPluginMax) != wantPluginMax || len(gotPluginMax) > 905 || !strings.HasPrefix(gotPluginMax, maxPrefix+"/") || !strings.HasSuffix(gotPluginMax, safeExt) {
+			t.Errorf("gcsObjectPath with 750-byte prefix and plugin hex IDs = %q (%d bytes), want %d bytes (<= 905) starting with prefix and ending in %q", gotPluginMax, len(gotPluginMax), wantPluginMax, safeExt)
+		}
+		if got := gcsObjectPath(maxPrefix, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantObjectLimit || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with the longest unchanged prefix, direct-call parts, and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), wantObjectLimit, safeExt)
+		}
+		wantRewrittenDirectMax := 886 + 2*len(strconv.Itoa(math.MinInt))
+		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantRewrittenDirectMax || len(got) > 926 || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with a rewritten prefix, direct-call parts, and a safe extension = %q (%d bytes), want %d bytes (<= 926) ending in %q", got, len(got), wantRewrittenDirectMax, safeExt)
+		}
+		// Focused exact-1,024-byte cap check across safe, empty, and oversized
+		// extensions so changing maxGCSObjectNameBytes away from 1,024 fails
+		// immediately on both truncation branches.
+		trace128 := strings.Repeat("t", 128)
+		span128 := strings.Repeat("s", 128)
+		event128 := strings.Repeat("e", 128)
+		for _, ext := range []string{".txt", safeExt, "", strings.Repeat("x", 1100), "." + strings.Repeat("x", 1100)} {
+			got := gcsObjectPath(maxPrefix, ts, trace128, span128, event128, 0, 0, ext)
+			if len(got) != wantObjectLimit {
+				t.Errorf("ext len %d: len(gcsObjectPath) = %d, want exact %d", len(ext), len(got), wantObjectLimit)
+			}
+		}
+		// Two safe-extension direct-call names that overflow 1,024 bytes and
+		// differ only after the truncation cut must preserve their safe
+		// extension, stay at 1,024 bytes, remain distinct, and embed the full
+		// SHA-256 digest of each entire uncapped object name.
+		event128A := strings.Repeat("e", 127) + "a"
+		event128B := strings.Repeat("e", 127) + "b"
+		for _, ext := range []string{".txt", safeExt} {
+			uncappedA := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128A, ext)
+			uncappedB := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128B, ext)
+			cut := wantObjectLimit - wantHashSuffixLen - len(ext)
+			if uncappedA[:cut] != uncappedB[:cut] {
+				t.Fatalf("ext %q: uncapped inputs already differ before cut %d", ext, cut)
+			}
+			sumA := sha256.Sum256([]byte(uncappedA))
+			sumB := sha256.Sum256([]byte(uncappedB))
+			wantA := fmt.Sprintf("%s~%x%s", uncappedA[:cut], sumA, ext)
+			wantB := fmt.Sprintf("%s~%x%s", uncappedB[:cut], sumB, ext)
+			gotA := gcsObjectPath(maxPrefix, ts, trace128, span128, event128A, 0, 0, ext)
+			gotB := gcsObjectPath(maxPrefix, ts, trace128, span128, event128B, 0, 0, ext)
+			if len(gotA) != wantObjectLimit || !strings.HasSuffix(gotA, ext) {
+				t.Errorf("ext %q: gotA = %q (%d bytes), want %d bytes ending in %q", ext, gotA, len(gotA), wantObjectLimit, ext)
+			}
+			if len(gotB) != wantObjectLimit || !strings.HasSuffix(gotB, ext) {
+				t.Errorf("ext %q: gotB = %q (%d bytes), want %d bytes ending in %q", ext, gotB, len(gotB), wantObjectLimit, ext)
+			}
+			if gotA == gotB {
+				t.Errorf("ext %q: distinct safe-extension overflow names differing after cut collided on %q", ext, gotA)
+			}
+			if gotA != wantA {
+				t.Errorf("ext %q: gotA = %q, want %q (full SHA-256 of uncapped name)", ext, gotA, wantA)
+			}
+			if gotB != wantB {
+				t.Errorf("ext %q: gotB = %q, want %q (full SHA-256 of uncapped name)", ext, gotB, wantB)
+			}
+		}
+		// An oversized extension passed in directly reaches the cap on the
+		// whole name even with a short prefix and short identifiers. The
+		// capped name ends in the hash of the whole uncapped name, so names
+		// that differ only after the cut stay apart.
+		for _, ext := range []string{"." + strings.Repeat("x", 1100), "." + strings.Repeat("x", 1099) + "y"} {
+			uncapped := "logs/2026-03-04/trace/span_event_c0_p0" + ext
+			want := uncapped[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(uncapped)
+			if got := gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext); got != want || len(got) != wantObjectLimit {
+				t.Errorf("gcsObjectPath with a %d-byte extension = %q (%d bytes), want %q (%d bytes)", len(ext), got, len(got), want, wantObjectLimit)
+			}
+		}
+	})
+
+	t.Run("an extension cannot make a name equal to a hashed one", func(t *testing.T) {
+		// '~' marks a name that was rewritten to end in the hash of the
+		// whole name, so an extension passed in directly must not be able
+		// to make a name equal to a rewritten one.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		// An oversized extension makes p1, which ends in the hash of the
+		// whole uncapped name. What follows base in p1 is an extension of
+		// its own, and the name that it makes is as long as p1: if a name
+		// that fits were returned as is, that would be p1 itself.
+		p1 := pathWith("." + strings.Repeat("x", 1100))
+		if !strings.HasPrefix(p1, base) || len(p1) != wantObjectLimit {
+			t.Fatalf("name with an oversized extension = %q (%d bytes), want %d bytes starting with %q", p1, len(p1), wantObjectLimit, base)
+		}
+		ext2 := strings.TrimPrefix(p1, base)
+		p2 := pathWith(ext2)
+		if p2 == p1 {
+			t.Errorf("name with extension %q = %q, the name that an oversized extension makes", ext2, p2)
+		}
+		if len(p2) > wantObjectLimit {
+			t.Errorf("len(name with extension %q) = %d, exceeds %d", ext2, len(p2), wantObjectLimit)
+		}
+		if !utf8.ValidString(p2) {
+			t.Errorf("name with extension %q = %q, want valid UTF-8", ext2, p2)
+		}
+		if want := p1[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(p1); p2 != want {
+			t.Errorf("name with extension %q = %q, want %q: the hash of the whole name p1", ext2, p2, want)
+		}
+
+		// A name that fits is hashed too if its extension is not safe, and
+		// the extension that the hashed name ends in makes another name
+		// again. '~' and '/' in the extension read as '_' in the name, and
+		// the hash is that of the extension as it was.
+		for _, tc := range []struct{ ext, readable string }{
+			{".a~b", ".a_b"},
+			{"~", "_"},
+			{pathSegmentHashSuffix(base), "_" + strings.TrimPrefix(pathSegmentHashSuffix(base), "~")},
+			{".a b", ".a b"},
+			{"png", "png"},
+			{".png/..", ".png_.."},
+			{".", "."},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("name with extension %q = %q, want %q", tc.ext, got, want)
+			}
+			if again := pathWith(strings.TrimPrefix(got, base)); again == got {
+				t.Errorf("names with extensions %q and %q both = %q", tc.ext, strings.TrimPrefix(got, base), got)
+			}
+		}
+		// An empty or safe extension is kept as is.
+		for _, ext := range []string{"", ".txt", ".abcdefghijklmnop"} {
+			if got, want := pathWith(ext), base+ext; got != want {
+				t.Errorf("name with extension %q = %q, want %q", ext, got, want)
+			}
+		}
+	})
+
+	t.Run("an invalid UTF-8 extension gives a valid name", func(t *testing.T) {
+		// The prefix and the ids are valid UTF-8, so the extension is the one
+		// part of a direct call that can make a name invalid. The readable
+		// part of the name has each run of invalid bytes replaced with '_',
+		// and the hash is that of the name with the extension as it was, so
+		// extensions that share a readable part are told apart by the hash.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		names := map[string]string{}
+		check := func(desc, name string) {
+			t.Helper()
+			if !utf8.ValidString(name) {
+				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
+			}
+			if len(name) > wantObjectLimit {
+				t.Errorf("%s: len(name) = %d, exceeds %d", desc, len(name), wantObjectLimit)
+			}
+			if prev, ok := names[name]; ok {
+				t.Errorf("%s and %s both give the name %q", prev, desc, name)
+			}
+			names[name] = desc
+		}
+
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is what follows base ahead of the hash suffix.
+			readable string
+		}{
+			{"0xff after the dot", string([]byte{'.', 0xff}), "._"},
+			{"0xfe after the dot", string([]byte{'.', 0xfe}), "._"},
+			{"the replacement as it is", "._", "._"},
+			{"0xff alone", string([]byte{0xff}), "_"},
+			{"the start of a two-byte rune", ".\xc3", "._"},
+			{"two bytes of a three-byte rune", ".\xe6\x97", "._"},
+			{"three bytes of a four-byte rune", ".\xf0\x9f\x98", "._"},
+			{"valid runes and an invalid byte", ".日本語\xff", ".日本語_"},
+			{"a long run of invalid bytes", "." + strings.Repeat("\xff", 1100), "._"},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("%s: name = %q, want %q", tc.name, got, want)
+			}
+			check(tc.name, got)
+		}
+
+		// An oversized extension is cut in the readable part, which is ASCII
+		// here, and the hash is still that of the whole raw name.
+		long := "." + strings.Repeat("\xffa", 600)
+		readable := base + "." + strings.Repeat("_a", 600)
+		want := readable[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(base+long)
+		got := pathWith(long)
+		if got != want {
+			t.Errorf("name with an oversized extension of ASCII and invalid bytes = %q, want %q", got, want)
+		}
+		check("an oversized extension of ASCII and invalid bytes", got)
+
+		// Multi-byte runes between invalid bytes, cut by the byte limit.
+		for _, tc := range []struct{ name, ext string }{
+			{"three-byte runes between invalid bytes", "." + strings.Repeat("日\xff", 400)},
+			{"four-byte runes between invalid bytes", "." + strings.Repeat("😀\xff", 300)},
+		} {
+			check(tc.name, pathWith(tc.ext))
+		}
+	})
+
+	t.Run("an unsafe extension cannot put a line break or control character in the name", func(t *testing.T) {
+		// Cloud Storage rejects CR and LF in an object name. The prefix and the
+		// ids never hold a control character, so the extension of a direct
+		// call is the one part that can. The readable part of the name has
+		// each such rune, each other rune that cleanGCSPrefix replaces, and
+		// each '/', '\', and '~', replaced with '_', and the hash is that of
+		// the name with the extension as it was, so extensions that read the
+		// same are told apart by the hash.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		names := map[string]string{}
+		check := func(desc, name string) {
+			t.Helper()
+			if !utf8.ValidString(name) {
+				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
+			}
+			if len(name) > wantObjectLimit {
+				t.Errorf("%s: len(name) = %d, exceeds %d", desc, len(name), wantObjectLimit)
+			}
+			for i, r := range name {
+				if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\\' {
+					t.Errorf("%s: name has %U at byte %d, want no control character, line or paragraph separator or backslash", desc, r, i)
+					break
+				}
+			}
+			if prev, ok := names[name]; ok {
+				t.Errorf("%s and %s both give the name %q", prev, desc, name)
+			}
+			names[name] = desc
+		}
+
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is what follows base ahead of the hash suffix.
+			readable string
+		}{
+			{"a carriage return", ".png\r", ".png_"},
+			{"a line feed", ".png\n", ".png_"},
+			{"a carriage return and a line feed", ".png\r\n", ".png__"},
+			{"a line feed and a carriage return", ".png\n\r", ".png__"},
+			{"a line feed alone", "\n", "_"},
+			{"a line feed in the middle", ".p\nng", ".p_ng"},
+			{"NUL", ".png\x00", ".png_"},
+			{"a tab", ".png\t", ".png_"},
+			{"the last C0 control character", ".png\x1f", ".png_"},
+			{"DEL", ".png\x7f", ".png_"},
+			{"the first C1 control character", ".png\u0080", ".png_"},
+			{"next line", ".png\u0085", ".png_"},
+			{"the last C1 control character", ".png\u009f", ".png_"},
+			{"line separator", ".png\u2028", ".png_"},
+			{"paragraph separator", ".png\u2029", ".png_"},
+			{"a backslash", `.png\`, ".png_"},
+			{"a tilde", ".png~", ".png_"},
+			{"a slash", ".png/", ".png_"},
+			{"a slash before a dot-dot", ".png/..", ".png_.."},
+			{"a slash alone", "/", "_"},
+			{"line breaks around an invalid byte", ".png\r\xff\n", ".png___"},
+			{"the replacement as it is", ".png_", ".png_"},
+			{"two replacements as they are", ".png__", ".png__"},
+			{"a literal U+FFFD", ".png\uFFFD", ".png\uFFFD"},
+			{"spaces and Unicode", ".a b日本é", ".a b日本é"},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("%s: name = %q, want %q", tc.name, got, want)
+			}
+			check(tc.name, got)
+		}
+
+		// An oversized extension is cut in the readable part, after the
+		// replacements, and the hash is still that of the whole raw name.
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is the name before the cut: the base name and the
+			// extension as the name shows it.
+			readable string
+		}{
+			{"line breaks", "." + strings.Repeat("\r\n", 600), base + "." + strings.Repeat("__", 600)},
+			{"line separators between letters", "." + strings.Repeat("\u2028a", 500), base + "." + strings.Repeat("_a", 500)},
+		} {
+			want := tc.readable[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(base+tc.ext)
+			got := pathWith(tc.ext)
+			if got != want {
+				t.Errorf("name with an oversized extension of %s = %q, want %q", tc.name, got, want)
+			}
+			check("an oversized extension of "+tc.name, got)
+		}
+
+		// The cut backs up to a rune boundary of the readable part: 959 bytes
+		// fall inside the 231st three-byte rune, so the name keeps 230 of them.
+		multi := strings.Repeat("日\r", 400)
+		wantMulti := base + strings.Repeat("日_", 230) + pathSegmentHashSuffix(base+multi)
+		gotMulti := pathWith(multi)
+		if gotMulti != wantMulti {
+			t.Errorf("name with an oversized extension of three-byte runes and carriage returns = %q, want %q", gotMulti, wantMulti)
+		}
+		check("an oversized extension of three-byte runes and carriage returns", gotMulti)
+	})
+
+	t.Run("prefix sanitization and reserved paths", func(t *testing.T) {
+		prefixes := []struct {
+			prefix   string
+			wantLead string
+		}{
+			{"tenant=acme", "tenant=acme/2026-03-04/"},
+			{"logs v1", "logs v1/2026-03-04/"},
+			{"logs/テナント", "logs/テナント/2026-03-04/"},
+			{"logs/.../tenant", "logs/.../tenant/2026-03-04/"},
+			{"a/.../b", "a/.../b/2026-03-04/"},
+			{"../x", "../x/2026-03-04/"},
+			{"a/../b", "a/../b/2026-03-04/"},
+			{"a//b", "a//b/2026-03-04/"},
+			{".", "./2026-03-04/"},
+			{"..", "../2026-03-04/"},
+			{"a/./b", "a/./b/2026-03-04/"},
+			{`team\prod/v1`, `team\prod/v1/2026-03-04/`},
+			{`~team\prod/v~1`, `_team\prod/v_1` + pathSegmentHashSuffix(`~team\prod/v~1`) + `/2026-03-04/`},
+			{".well-known/acme-challenge-x", ".well-known/acme-challenge-x/2026-03-04/"},
+			{strings.Repeat("a", 750), strings.Repeat("a", 750) + "/2026-03-04/"},
+			{strings.Repeat("a", 751), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 751)) + "/2026-03-04/"},
+			{".well-known/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-known/acme-challenge/x") + "/2026-03-04/"},
+			{"/.well-known/ACME-CHALLENGE/x", "_well-known/ACME-CHALLENGE/x" + pathSegmentHashSuffix(".well-known/ACME-CHALLENGE/x") + "/2026-03-04/"},
+			{"logs\ninjected/part\r\n2\x00", "logs_injected/part__2_" + pathSegmentHashSuffix("logs\ninjected/part\r\n2\x00") + "/2026-03-04/"},
+			{"logs\u2028sep\u2029", "logs_sep_" + pathSegmentHashSuffix("logs\u2028sep\u2029") + "/2026-03-04/"},
+			{"logs/\xff", "logs/_" + pathSegmentHashSuffix("logs/\xff") + "/2026-03-04/"},
+		}
+		for _, tc := range prefixes {
+			got := gcsObjectPath(tc.prefix, ts, "trace", "span", "event", 0, 0, ".txt")
+			if tc.wantLead != "" && !strings.HasPrefix(got, tc.wantLead) {
+				t.Errorf("gcsObjectPath(prefix=%q) = %q, want prefix %q", tc.prefix, got, tc.wantLead)
+			}
+			if !utf8.ValidString(got) || len(got) > wantObjectLimit {
+				t.Errorf("gcsObjectPath(prefix=%q) = %q (%d bytes), want valid UTF-8 <= %d bytes", tc.prefix, got, len(got), wantObjectLimit)
+			}
+			if seg0, rest, ok := strings.Cut(got, "/"); ok && strings.EqualFold(seg0, ".well-known") {
+				if seg1, _, _ := strings.Cut(rest, "/"); strings.EqualFold(seg1, "acme-challenge") {
+					t.Errorf("gcsObjectPath(prefix=%q) = %q begins with reserved .well-known/acme-challenge segment pair", tc.prefix, got)
+				}
+			}
+			for _, r := range got {
+				if isUnsafeGCSPrefixRune(r) {
+					t.Errorf("gcsObjectPath(prefix=%q) = %q contains unsafe rune %U", tc.prefix, got, r)
+				}
+			}
+		}
+
+		// Distinct configured prefixes (after leading/trailing '/' trim), including
+		// rewritten prefixes and their generated "<base>~<sha256>" outputs reused as
+		// literal Config.GCSPathPrefix values, must never collapse onto the same
+		// object path or lose create-only uploads in a shared bucket.
+		overLimitRaw := strings.Repeat("a", maxGCSPrefixBytes+1)
+		distinctPrefixes := []string{
+			"",
+			".",
+			"..",
+			"./..",
+			"...",
+			"logs/tenant",
+			"logs/.../tenant",
+			"logs/../tenant",
+			"logs/./tenant",
+			"logs//tenant",
+			`team\prod`,
+			`~team\prod`,
+			cleanGCSPrefix(`~team\prod`),
+			`_team\prod`,
+			".well-known/acme-challenge-x",
+			".well-known/acme-challenge/x",
+			cleanGCSPrefix(".well-known/acme-challenge/x"),
+			"_well-known/acme-challenge/x",
+			"logs\tx",
+			"logs\nx",
+			cleanGCSPrefix("logs\nx"),
+			"logs_x",
+			"\xff",
+			cleanGCSPrefix("\xff"),
+			"_",
+			overLimitRaw,
+			cleanGCSPrefix(overLimitRaw),
+		}
+		seenPrefixPaths := make(map[string]string, len(distinctPrefixes))
+		type storedCheck struct {
+			prefix      string
+			objectPath  string
+			wantPayload string
+		}
+		storedChecks := make([]storedCheck, 0, len(distinctPrefixes))
+		fs := newFakeStorage(t)
+		offloader, err := newGCSOffloader(context.Background(), "test-bucket", fs.clientOptions()...)
+		if err != nil {
+			t.Fatalf("newGCSOffloader() error: %v", err)
+		}
+		t.Cleanup(func() { _ = offloader.Close() })
+
+		for i, p := range distinctPrefixes {
+			got := gcsObjectPath(p, ts, "trace", "span", "event", 0, 0, ".txt")
+			if prev, exists := seenPrefixPaths[got]; exists {
+				t.Errorf("distinct prefixes %q and %q collided on GCS object path %q", prev, p, got)
+			}
+			seenPrefixPaths[got] = p
+
+			wantPayload := fmt.Sprintf("prefix-payload-%d-%s", i, p)
+			bpCfg := DefaultConfig()
+			bpCfg.GCSOffloader = offloader
+			bpCfg.GCSPathPrefix = p
+			bpCfg.ConnectionID = "us.conn"
+			bpCfg.Logger = &recordingLogger{}
+			bp, err := newBatchProcessor(context.Background(), nil, "test_stream", bpCfg)
+			if err != nil {
+				t.Fatalf("newBatchProcessor(prefix=%q) error: %v", p, err)
+			}
+			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
+			row := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: wantPayload}}})
+			row[timestampField] = ts
+			row["trace_id"] = "trace"
+			row["span_id"] = "span"
+			row[eventIDField] = "event"
+			bp.resolveUploads(context.Background(), false, []map[string]any{row})
+			bp.Close()
+
+			uri, _ := row[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			wantURI := "gs://test-bucket/" + got
+			if uri != wantURI {
+				t.Errorf("prefix %q uploaded to %q, want %q", p, uri, wantURI)
+			}
+			objPath := strings.TrimPrefix(uri, "gs://test-bucket/")
+			obj, ok := fs.object("test-bucket", objPath)
+			if !ok || string(obj.data) != wantPayload {
+				t.Errorf("prefix %q stored (%v, %q), want %q at %q", p, ok, obj.data, wantPayload, uri)
+			}
+			storedChecks = append(storedChecks, storedCheck{prefix: p, objectPath: objPath, wantPayload: wantPayload})
+		}
+		for _, sc := range storedChecks {
+			obj, ok := fs.object("test-bucket", sc.objectPath)
+			if !ok || string(obj.data) != sc.wantPayload {
+				t.Errorf("after all uploads, prefix %q object %q holds (%v, %q), want %q", sc.prefix, sc.objectPath, ok, obj.data, sc.wantPayload)
+			}
+		}
+	})
+}
+
+func TestGCSPathPrefix_RewriteWarningAndDisjointNamespace(t *testing.T) {
+	countWarnings := func(l *recordingLogger) int {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		n := 0
+		for _, line := range l.lines {
+			if strings.Contains(line, "WARNING: Config.GCSPathPrefix") {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("valid prefixes log no warning and pass verbatim to custom offloader", func(t *testing.T) {
+		for _, prefix := range []string{
+			"",
+			"/logs/tenant/",
+			`logs\prod`,
+			"a//b",
+			"a/./b",
+			"../a/../b",
+			".well-known/acme-challenge-x",
+			strings.Repeat("a", maxGCSPrefixBytes),
+		} {
+			off := &fakeOffloader{}
+			log := &recordingLogger{}
+			p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
+				c.GCSPathPrefix = prefix
+				c.MaxInlineTextSize = 5
+				c.Logger = log
+			})
+			if got := countWarnings(log); got != 0 {
+				t.Errorf("prefix %q logged %d warnings (%s), want 0", prefix, got, log.String())
+			}
+
+			row := logRequest(t, p, requests, mCtx, &model.LLMRequest{
+				Model:    "gemini-2.5-flash",
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "offloaded text payload"}}}},
+			})
+			uploads := off.uploads()
+			if len(uploads) != 1 {
+				t.Fatalf("prefix %q: len(uploads) = %d, want 1", prefix, len(uploads))
+			}
+			wantLead := rowDate(row) + "/"
+			if trimmed := strings.Trim(prefix, "/"); trimmed != "" {
+				wantLead = trimmed + "/" + wantLead
+			}
+			if !strings.HasPrefix(uploads[0].Path, wantLead) {
+				t.Errorf("prefix %q: GCSUploadRequest.Path = %q, want prefix %q", prefix, uploads[0].Path, wantLead)
+			}
+		}
+	})
+
+	t.Run("rewritten prefixes log constant privacy-safe warning and stay disjoint when reused", func(t *testing.T) {
+		const secretSentinel = "PrivateCustomerSecretMarker98765"
+		for _, tc := range []struct {
+			name       string
+			prefix     string
+			wantReason string
+		}{
+			{"reserved acme-challenge", ".well-known/acme-challenge/" + secretSentinel, "starts with reserved .well-known/acme-challenge prefix"},
+			{"control character", "tenant-" + secretSentinel + "\ninjected", "contains control or line-separator character"},
+			{"reserved tilde", "tenant-" + secretSentinel + "~v1", "contains reserved '~'"},
+			{"invalid UTF-8", "tenant-" + secretSentinel + "/\xff", "contains invalid UTF-8"},
+			{"over 750 bytes", secretSentinel + strings.Repeat("a", maxGCSPrefixBytes+1-len(secretSentinel)), "exceeds 750 bytes"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				trimmed := strings.Trim(tc.prefix, "/")
+				wantEffective := cleanGCSPrefix(tc.prefix)
+				off := &fakeOffloader{}
+				log := &recordingLogger{}
+				p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
+					c.GCSPathPrefix = tc.prefix
+					c.MaxInlineTextSize = 5
+					c.Logger = log
+				})
+				if got := countWarnings(log); got != 1 {
+					t.Fatalf("logged %d warnings (%s), want exactly 1", got, log.String())
+				}
+				if log.contains(secretSentinel) {
+					t.Errorf("warning %q leaked private sentinel %q", log.String(), secretSentinel)
+				}
+				if log.contains(tc.prefix) || log.contains(wantEffective) {
+					t.Errorf("warning %q logged raw or rewritten prefix text", log.String())
+				}
+				digestHex := strings.TrimPrefix(pathSegmentHashSuffix(trimmed), "~")
+				if log.contains(digestHex) {
+					t.Errorf("warning %q logged prefix SHA-256 digest %q", log.String(), digestHex)
+				}
+				wantCounts := fmt.Sprintf("(%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes)", len(tc.prefix), len(trimmed), len(wantEffective))
+				if !log.contains(wantCounts) {
+					t.Errorf("warning %q missing byte counts %q", log.String(), wantCounts)
+				}
+				if !log.contains(tc.wantReason) {
+					t.Errorf("warning %q missing reason %q", log.String(), tc.wantReason)
+				}
+
+				row := logRequest(t, p, requests, mCtx, &model.LLMRequest{
+					Model:    "gemini-2.5-flash",
+					Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "offloaded text payload"}}}},
+				})
+				uploads := off.uploads()
+				if len(uploads) != 1 {
+					t.Fatalf("len(uploads) = %d, want 1", len(uploads))
+				}
+				wantLead := wantEffective + "/" + rowDate(row) + "/"
+				if !strings.HasPrefix(uploads[0].Path, wantLead) {
+					t.Errorf("GCSUploadRequest.Path = %q, want prefix %q", uploads[0].Path, wantLead)
+				}
+
+				// Passing a generated "<base>~<sha256>" output back into
+				// Config.GCSPathPrefix must rewrite it again (never alias the
+				// original rewritten prefix) and log a privacy-safe '~' warning.
+				wantReusedEffective := cleanGCSPrefix(wantEffective)
+				if wantReusedEffective == wantEffective {
+					t.Fatalf("cleanGCSPrefix(%q) = %q, want disjoint rewritten prefix", wantEffective, wantReusedEffective)
+				}
+				offReuse := &fakeOffloader{}
+				logReuse := &recordingLogger{}
+				pReuse, reqReuse, mCtxReuse := offloadingPlugin(t, offReuse, func(c *Config) {
+					c.GCSPathPrefix = wantEffective
+					c.MaxInlineTextSize = 5
+					c.Logger = logReuse
+				})
+				if got := countWarnings(logReuse); got != 1 {
+					t.Errorf("reusing effective prefix logged %d warnings (%s), want 1", got, logReuse.String())
+				}
+				if logReuse.contains(secretSentinel) || logReuse.contains(wantEffective) || logReuse.contains(wantReusedEffective) {
+					t.Errorf("reuse warning %q leaked prefix text or sentinel", logReuse.String())
+				}
+				if !logReuse.contains("contains reserved '~'") {
+					t.Errorf("reuse warning %q missing reserved '~' reason", logReuse.String())
+				}
+				rowReuse := logRequest(t, pReuse, reqReuse, mCtxReuse, &model.LLMRequest{
+					Model:    "gemini-2.5-flash",
+					Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "offloaded text payload"}}}},
+				})
+				uploadsReuse := offReuse.uploads()
+				wantReuseLead := wantReusedEffective + "/" + rowDate(rowReuse) + "/"
+				if len(uploadsReuse) != 1 || !strings.HasPrefix(uploadsReuse[0].Path, wantReuseLead) {
+					t.Errorf("reusing effective prefix uploaded %+v, want prefix %q", uploadsReuse, wantReuseLead)
+				}
+				if strings.HasPrefix(uploadsReuse[0].Path, wantEffective+"/") {
+					t.Errorf("reused effective prefix aliased original rewritten prefix %q in path %q", wantEffective, uploadsReuse[0].Path)
+				}
+			})
+		}
+	})
+
+	t.Run("direct newBatchProcessor warns once without leaking prefix and disabled plugin stays quiet", func(t *testing.T) {
+		ctx := context.Background()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("net.Listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("grpc.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		wc, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+		t.Cleanup(func() { _ = wc.Close() })
+
+		const directSentinel = "DirectCustomerSecret42"
+		warnLog := &recordingLogger{}
+		cfgWarn := DefaultConfig()
+		cfgWarn.ProjectID = "test-project"
+		cfgWarn.DatasetID = "test_dataset"
+		cfgWarn.TableName = "test-table"
+		cfgWarn.GCSPathPrefix = "/.well-known/acme-challenge/" + directSentinel + "/"
+		cfgWarn.Logger = warnLog
+		bpWarn, err := newBatchProcessor(ctx, wc, "", cfgWarn)
+		if err != nil {
+			t.Fatalf("newBatchProcessor(rewrite) error: %v", err)
+		}
+		bpWarn.Close()
+		wantWarnEffective := cleanGCSPrefix(cfgWarn.GCSPathPrefix)
+		wantDirectCounts := fmt.Sprintf("(%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes)",
+			len(cfgWarn.GCSPathPrefix), len(strings.Trim(cfgWarn.GCSPathPrefix, "/")), len(wantWarnEffective))
+		if got := countWarnings(warnLog); got != 1 {
+			t.Errorf("direct newBatchProcessor(rewrite) warnings = %d (%s), want 1", got, warnLog.String())
+		}
+		if warnLog.contains(directSentinel) || warnLog.contains(wantWarnEffective) {
+			t.Errorf("direct newBatchProcessor(rewrite) warning %q leaked prefix text", warnLog.String())
+		}
+		if !warnLog.contains(wantDirectCounts) || !warnLog.contains("starts with reserved .well-known/acme-challenge prefix") {
+			t.Errorf("direct newBatchProcessor(rewrite) warning %q missing counts %q or reason", warnLog.String(), wantDirectCounts)
+		}
+
+		okLog := &recordingLogger{}
+		cfgOK := cfgWarn
+		cfgOK.GCSPathPrefix = `team\logs`
+		cfgOK.Logger = okLog
+		bpOK, err := newBatchProcessor(ctx, wc, "", cfgOK)
+		if err != nil {
+			t.Fatalf("newBatchProcessor(valid) error: %v", err)
+		}
+		bpOK.Close()
+		if got := countWarnings(okLog); got != 0 {
+			t.Errorf("direct newBatchProcessor(valid) warnings = %d (%s), want 0", got, okLog.String())
+		}
+
+		disabledLog := &recordingLogger{}
+		cfgDisabled := DefaultConfig()
+		cfgDisabled.Enabled = false
+		cfgDisabled.GCSPathPrefix = "logs\ninjected-" + directSentinel
+		cfgDisabled.Logger = disabledLog
+		pDisabled, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfgDisabled, nil, nil)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(disabled) error: %v", err)
+		}
+		_ = pDisabled.Close()
+		if got := countWarnings(disabledLog); got != 0 {
+			t.Errorf("disabled plugin warnings = %d (%s), want 0", got, disabledLog.String())
+		}
+	})
+}
+
+func TestBatchProcessor_ObjectPathCachesEffectivePrefix(t *testing.T) {
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	row := map[string]any{
+		timestampField: ts,
+		"trace_id":     "trace-1",
+		"span_id":      "span-1",
+		eventIDField:   "event-1",
+	}
+	upload := pendingUpload{contentOrd: 0, partIdx: 0, mimeType: textUploadContentType}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"4MiB_raw_prefix", "tenant/" + strings.Repeat("a", 4<<20)},
+		{"control_char_prefix", "logs\nx"},
+		{"slash_only_4MiB_prefix", strings.Repeat("/", 4<<20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &recordingLogger{}
+			cfg := DefaultConfig()
+			cfg.GCSPathPrefix = tc.prefix
+			cfg.Logger = log
+
+			bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
+			if err != nil {
+				t.Fatalf("newBatchProcessor() error: %v", err)
+			}
+			t.Cleanup(bp.Close)
+
+			if bp.config.GCSPathPrefix != tc.prefix {
+				t.Fatalf("len(bp.config.GCSPathPrefix) = %d, want raw %d-byte prefix preserved unmutated", len(bp.config.GCSPathPrefix), len(tc.prefix))
+			}
+
+			wantClean := cleanGCSPrefix(tc.prefix)
+			wantPath := gcsObjectPath(tc.prefix, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
+			doubleNormalizedPath := gcsObjectPath(wantClean, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
+
+			// objectPath must keep using the prefix that newBatchProcessor
+			// resolved, even an empty one, instead of cleaning
+			// Config.GCSPathPrefix again. The path and allocation checks below
+			// cannot tell for the slash-only prefix: cleaning it again scans the
+			// whole prefix but allocates nothing and yields the same path. So
+			// replace the raw prefix with a distinct one and expect the same path.
+			const sentinel = "must-not-re-read-after-construction"
+			if gcsObjectPath(sentinel, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt") == wantPath {
+				t.Fatalf("sentinel prefix %q gives wantPath %q, so replacing the raw prefix with it proves nothing", sentinel, wantPath)
+			}
+			bp.config.GCSPathPrefix = sentinel
+			if got := bp.objectPath(row, upload); got != wantPath {
+				t.Errorf("bp.objectPath() after replacing Config.GCSPathPrefix with %q = %q, want %q from the prefix resolved at construction", sentinel, got, wantPath)
+			}
+			// Restore the raw prefix, which the allocation checks below measure.
+			bp.config.GCSPathPrefix = tc.prefix
+
+			for i := range 3 {
+				got := bp.objectPath(row, upload)
+				if got != wantPath {
+					t.Fatalf("call %d: bp.objectPath() = %q, want %q", i, got, wantPath)
+				}
+				if wantClean != "" && got == doubleNormalizedPath {
+					t.Fatalf("call %d: bp.objectPath() double-normalized effective prefix to %q", i, got)
+				}
+			}
+
+			var sink string
+			sink = bp.objectPath(row, upload)
+			runtime.GC()
+			var m0, m1 runtime.MemStats
+			runtime.ReadMemStats(&m0)
+			const runs = 200
+			for range runs {
+				sink = bp.objectPath(row, upload)
+			}
+			runtime.ReadMemStats(&m1)
+			_ = sink
+
+			bytesPerCall := (m1.TotalAlloc - m0.TotalAlloc) / runs
+			if bytesPerCall >= 16*1024 {
+				t.Errorf("bp.objectPath() allocated %d bytes/call for %d-byte raw prefix, want < 16384 bytes/call", bytesPerCall, len(tc.prefix))
+			}
+			if allocs := testing.AllocsPerRun(100, func() { sink = bp.objectPath(row, upload) }); allocs > 20 {
+				t.Errorf("bp.objectPath() allocs/op = %v, want <= 20", allocs)
+			}
+		})
+	}
+}
+
+func TestGCSOffload_RewrittenPrefixFitsHierarchicalNamespaceFolderLimit(t *testing.T) {
+	for _, n := range []int{402, 403, 467} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			prefix := strings.Repeat("a", n-1) + "~"
+			off := &fakeOffloader{
+				hook: func(_ context.Context, req GCSUploadRequest) error {
+					folderLen := strings.LastIndexByte(req.Path, '/') + 1
+					baseLen := len(req.Path[folderLen:])
+					if folderLen > 512 || baseLen > 512 {
+						return fmt.Errorf("HNS limit exceeded: folder=%dB base=%dB path=%q", folderLen, baseLen, req.Path)
+					}
+					return nil
+				},
+			}
+			p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
+				c.GCSPathPrefix = prefix
+				c.Logger = &recordingLogger{}
+			})
+			row := logRequest(t, p, requests, mCtx, &model.LLMRequest{
+				Contents: []*genai.Content{imageContent(1, 2, 3)},
+			})
+			parts := contentPartsOf(t, row)
+			if len(parts) != 1 || parts[0]["storage_mode"] != "GCS_REFERENCE" {
+				t.Fatalf("prefix len %d: content_parts = %v, want 1 GCS_REFERENCE part", n, parts)
+			}
+		})
+	}
+}
+
+func BenchmarkBatchProcessorObjectPath(b *testing.B) {
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	row := map[string]any{
+		timestampField: ts,
+		"trace_id":     "trace-1",
+		"span_id":      "span-1",
+		eventIDField:   "event-1",
+	}
+	upload := pendingUpload{contentOrd: 0, partIdx: 0, mimeType: textUploadContentType}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"751B", strings.Repeat("a", 751)},
+		{"4MiB", strings.Repeat("a", 4<<20)},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			cfg := DefaultConfig()
+			cfg.GCSPathPrefix = tc.prefix
+			cfg.Logger = &recordingLogger{}
+			bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
+			if err != nil {
+				b.Fatalf("newBatchProcessor() error: %v", err)
+			}
+			b.Cleanup(bp.Close)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			var sink string
+			for range b.N {
+				sink = bp.objectPath(row, upload)
+			}
+			_ = sink
+		})
 	}
 }

@@ -1,5 +1,5 @@
 httprr trace v1
-1079 2015
+1079 2062
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -7,10 +7,11 @@ Content-Length: 847
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:34 GMT
+Date: Tue, 03 Nov 2026 18:07:55 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1137
+Server-Timing: gfet4t7; dur=1724
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -30,9 +31,9 @@ X-Xss-Protection: 0
               "args": {
                 "request": "Translate 'hello' to Spanish"
               },
-              "id": "8oyvnqk0"
+              "id": "call_200903"
             },
-            "thoughtSignature": "EqAECp0EAQw51sd9QXXsjkLz0fpJ0HvXQuc8jHVvMTIH4/UHHf5xEWhBLR12TSxU3VJR0/rFQ2BgFfr+2s25oE9DQ5b063HbjqxUlIhuk2BnPOfLCzmSu2zf1WKHKw+EP21YAnQEGfuMiIMOWVheOhrEPqWWdhnUCw1GoRrQfVqK6cIddYwjShbSaMeEIluTo2Z4IS7SztsCBGZ3M2XhpglBl9czWTC4hBsVWO7Ypl6FKmOEvM2uYLuH1nlMwDcLDU40z18pXSWjXsGQSocAI7bE1NQItsEopuBZYEvFZNal/6+n+QzaBcOd2b6OFhhInnQApCkApK2wU9C1VSGj+cMRkDyk+IgiarhWTelSWHVA52yQAJHj3KtFemgJNfrUJfn50CXMUTjtlMgC2y3wTviwkj3f1S2hXC76L6NbT2C7Y54rmFGKycp+vCNAJzxOQSqo69pBcI9e7QAKX3KyAHJSAuiSjrQb1pkSic0AjqAKTmFQ8XwHK+JxRZ2m9+vB1iisrSB5qclYx3xLs8m3sKiPi0l0z3aQgg79lejjvWxdJ5M5u2+gqbWk30fc2AEK9VAWRyPRHbCsgTU7kKK2KJnOlMVgC967BKWibWo0AV6flE3RkWSlUUHGBn+Dmcb9/OhYVScwtHnk/L+HEpeKVN89VtMBGFicrR2P2+QaTZuaE8zjy4kEJQC4moNTbj3ilhM/5ZH2A7FC5OEjSOlir/J3/g=="
+            "thoughtSignature": "EtoECtcEAWkUfRNAAtPzgNlOiHR53yPidgQpFT2odfEIdSRdNLEGyozElQOZSp68HBPUuuxvAgWy7ShQBJ/KKY2M/QOsoiKDNQHvPRZg9zy64xuA4UDvpxrX6KjGQoCayynvnE7pHEjcUoil6lQYWRh4+9Kb9OF3W9znxd9Ik3dtQqGmfo5Dxreq1byuyElObXvWEcOuTRrXoKbxl4nwhpaeIZeR4+T5YD+ltJE3857RW/yjL6a1fkDvmANYirB3OZ8g8XhXlXi/Q0TxDpP0XiUyZoj38Ci/+ERP5sN4KElRdfj1cNSTzWJ3mdxqEHVGnsZUIG5EDrGTL/g+Jrb1YJVntounRKuRiHGMRIC4gJsPVsNWwd6Yh/l+Q3xCFv1lE6FDceLTTp4KkF473aB0BQJAdRzUj9+pbXD3EU9oR0dbIJQjq3HijhQ4I3qB5EZyzzzYdDh15owZDgLeFxaqqJpt//MTSIxlzbnIPZTj86BhkReMQTgBISys1VCTCJoTKWIDe3BVtQmA+uPw8/hZgmF0/cGuoGUlacrgWfpjz1EpBMnsrT6H3+rHbpsW2+TL6Xy7FEnisfUhRZH8Lp/FI9J82GR3+wEKXR7xmTcKfO/o/7OIuUMiiAEmp/L24XMBVC/g/8za/4JkcmZ4iqiS3wY4UCFDBwkBtN4HusHZiQSOlsKAKvmnGlbrIq9bofvwkPWL16kJyGbUv+lTpm9kNKuuS+f+zYMZUqHhUJ+EwCsvdS1I8N6Ms16Zg/hb0HEqSALghqPCZj2hHtnxedeljdCvGoQWDjlicm/RNoQ="
           }
         ],
         "role": "model"
@@ -45,21 +46,20 @@ X-Xss-Protection: 0
   "usageMetadata": {
     "promptTokenCount": 151,
     "candidatesTokenCount": 19,
-    "totalTokenCount": 287,
+    "totalTokenCount": 286,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 151
       }
     ],
-    "thoughtsTokenCount": 117,
+    "thoughtsTokenCount": 116,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "4VE4as7YIqv_nsEPqO6Y-Ak",
-  "turnToken": "v1_Chc0VkU0YXM3WUlxdl9uc0VQcU82WS1BaxIXNFZFNGFzN1lJcXZfbnNFUHFPNlktQWs"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "-iLqauruBJ7v694PifTi4QQ"
 }
-1127 1897
+1127 2102
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -67,10 +67,11 @@ Content-Length: 895
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"{\"request\":\"Translate 'hello' to Spanish\"}"}],"role":"user"}],"generationConfig":{"responseMimeType":"application/json","responseSchema":{"properties":{"translation":{"type":"STRING"}},"required":["translation"],"type":"OBJECT"}},"systemInstruction":{"parts":[{"text":"You translate one phrase. Read the request, then output ONLY\na JSON object of the form {\"translation\":\"...\"}. Output nothing else.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:36 GMT
+Date: Tue, 03 Nov 2026 18:07:58 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1437
+Server-Timing: gfet4t7; dur=2995
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -85,8 +86,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "{\n  \"translation\": \"hola\"\n}",
-            "thoughtSignature": "EukECuYEAQw51se5/B9ALQngOlyi8H8pMa5LzYyNyodDSrbHH3xVgHRf1/2KfH4pBAQ5unLcc8vpgGxS5+iy5R1SUVSdrgTfXJi1M6ByMUFDpbNNK7OoDnT1lrxYD+sW5/xUFmCXdqZxo9m2UfLExXEIdT89hC1BaWseK4J/+heL1e1CeDQoBrUmlhK2K/Lrj+5ww2fdJH15XjPEjEBanC1FkQT1TSW1BJnygrSREcU1pgJsBfbZLz1Vu6Q4tTpA7bNLaqJXdWdpgLfmgfRPy91R5RyWtGu0k7/EEUG+D/Gko4unYeOooDRDKVI1dPtcYQ4r38o7lUqPN73+VJ+KQEVPitIjdr7L1aTr8v9aiB2e1BygJT0RUZz+1vMQ1+vlMm7azzHVF5s6jeVoawqL44/Vclpv3yUeTHTJkm5hq632o8h01GNmYSp6JXYl3Yv8XyirFXOuxMq7l8XXhCyRrjPgIMrz5BwXnzN4xAP73ucPiX20rTz79N5H4poISkNeesVnxKtjQ+cfBz+wJvEmZPXThfOciPHMe1edLdGrALB65KcV4iL3ImG5gyPmBs8kKJ418OWiMbvLJr4Nr6P0D60sCIEi85Dzn8Fzo42xu4S0gJ+TMj24uqbh+W4zbvh44+Hx44FfIO+StdoEBNq3pyoQA92+LArUM29s8FV+h6bhejTuWiPrNK5saqhE+V91nDm3MpHjw38RnUXU0KlyFJuE/3SbikGenqpLOAeJRkgZhXQ/8X3Wj0l7hw0N3H0XXajIPDQ+9+alGn7+49TtIdmjXIyGU8YIIhBN84BiZ+w07H6v4eMlIJt32kI="
+            "text": "{\"translation\":\"Hola\"} ",
+            "thoughtSignature": "Ep8GCpwGAWkUfRPGaYqUFMvAqZ5HNeqnnP9DgF1lJU3vTTRvRzSOEB7De8NGgZLDLpTzwxFjIVMb9iwyxQHEtlQLNUdvIsflz5CJ6ZYv+n27lBzFES8DTmg3P9RmREdYyTFIV2WVB4XLuk92VB03idnPHWEFM343keoaeMG5bD/1HVPykBjppSfkXPLGClpxyK8PdiD38+a66huvnhERvBF3ahBWB7jlnWjl01dfLt72aDElgv0nUlU7zsW8P2WIftjxOb/EbDJHxTBmm4fu79WHPiI4+XC6JIq0PPBiLF1YcSUQ0eYGtn9VhVJttnQ8qIErN52V2rlT5i4MheYdVritioPNFjQI6XJEnXXgIppq/OOR/URahqNfftyI6CHpumVEvrNk7Esc1B2LN0IvGV647QsouiYHnWKVQpr7PGVZ9aDuVHFNS4fdaBL+s6YJZjLVeEI/X2Z9GbJzhmFDT39c9QedyBS42K2CojsXyMTwtZzBvmg3KlixkH2WoRFvkS2wxUS/p2TWailoZeIVtUqzdRbZmmnzj/uXIKHN5VW1FzhCal8VcUjVzqj2r7UGzdwzzKirgRnol9vWYvF3MUjauB6KS6SVbO4VHVPdoCJ4wKhnP7kiTtmDpu6M+UllDJnionp8K+Zw77vmCEQEIG83+4fLsCBX1Llo/+EoNhF08o+dhaTC8RQQb9nz9H+EJHP+249M6ETxYExY7uBmqeJRaxFl8J+GtRU+NkbA2ULDPAxtXS4D3CYVpEY4uRuey4GQDC2H9gA0At+VjkdGYSUiuc7RWbgn/bVZNECT0G4x9OwHwYBYiE67eWjhNmCRJV5KAER4E4zri/qXLTebLKv4bhODeYWEv7jME+it9MaWQfNciZ9my8L2rl1yS4t5ElM9ftyURLltwwMDGURVMVyULiRSKRUcyxLwHVYciZB0dHQsEWlPXl+rdmWaMiaLRKRG+xQBMwsdCc6mbFBIFolLM7x6h7dagUs070BStK0MQ39oEdqmtirkcyE3bb/oYFjBHYuXYvTo+hJuZ5MDNrylHRObm7p17Gs2rBvMA3BC3g=="
           }
         ],
         "role": "model"
@@ -97,33 +98,33 @@ X-Xss-Protection: 0
   ],
   "usageMetadata": {
     "promptTokenCount": 138,
-    "candidatesTokenCount": 11,
-    "totalTokenCount": 277,
+    "candidatesTokenCount": 6,
+    "totalTokenCount": 306,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 138
       }
     ],
-    "thoughtsTokenCount": 128,
+    "thoughtsTokenCount": 162,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "4lE4areqK4zk7M8P55-4-Ag",
-  "turnToken": "v1_Chc0bEU0YXJlcUs0ems3TThQNTUtNC1BZxIXNGxFNGFyZXFLNHprN004UDU1LTQtQWc"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "-yLqaqK8NLiM694P1oyKmQw"
 }
-2096 1404
+2178 1350
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 1863
+Content-Length: 1945
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"8oyvnqk0","name":"translator"},"thoughtSignature":"EqAECp0EAQw51sd9QXXsjkLz0fpJ0HvXQuc8jHVvMTIH4/UHHf5xEWhBLR12TSxU3VJR0/rFQ2BgFfr+2s25oE9DQ5b063HbjqxUlIhuk2BnPOfLCzmSu2zf1WKHKw+EP21YAnQEGfuMiIMOWVheOhrEPqWWdhnUCw1GoRrQfVqK6cIddYwjShbSaMeEIluTo2Z4IS7SztsCBGZ3M2XhpglBl9czWTC4hBsVWO7Ypl6FKmOEvM2uYLuH1nlMwDcLDU40z18pXSWjXsGQSocAI7bE1NQItsEopuBZYEvFZNal/6+n+QzaBcOd2b6OFhhInnQApCkApK2wU9C1VSGj+cMRkDyk+IgiarhWTelSWHVA52yQAJHj3KtFemgJNfrUJfn50CXMUTjtlMgC2y3wTviwkj3f1S2hXC76L6NbT2C7Y54rmFGKycp+vCNAJzxOQSqo69pBcI9e7QAKX3KyAHJSAuiSjrQb1pkSic0AjqAKTmFQ8XwHK+JxRZ2m9+vB1iisrSB5qclYx3xLs8m3sKiPi0l0z3aQgg79lejjvWxdJ5M5u2+gqbWk30fc2AEK9VAWRyPRHbCsgTU7kKK2KJnOlMVgC967BKWibWo0AV6flE3RkWSlUUHGBn+Dmcb9/OhYVScwtHnk/L+HEpeKVN89VtMBGFicrR2P2+QaTZuaE8zjy4kEJQC4moNTbj3ilhM/5ZH2A7FC5OEjSOlir/J3/g=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"8oyvnqk0","name":"translator","response":{"result":{"translation":"hola"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"call_200903","name":"translator"},"thoughtSignature":"EtoECtcEAWkUfRNAAtPzgNlOiHR53yPidgQpFT2odfEIdSRdNLEGyozElQOZSp68HBPUuuxvAgWy7ShQBJ/KKY2M/QOsoiKDNQHvPRZg9zy64xuA4UDvpxrX6KjGQoCayynvnE7pHEjcUoil6lQYWRh4+9Kb9OF3W9znxd9Ik3dtQqGmfo5Dxreq1byuyElObXvWEcOuTRrXoKbxl4nwhpaeIZeR4+T5YD+ltJE3857RW/yjL6a1fkDvmANYirB3OZ8g8XhXlXi/Q0TxDpP0XiUyZoj38Ci/+ERP5sN4KElRdfj1cNSTzWJ3mdxqEHVGnsZUIG5EDrGTL/g+Jrb1YJVntounRKuRiHGMRIC4gJsPVsNWwd6Yh/l+Q3xCFv1lE6FDceLTTp4KkF473aB0BQJAdRzUj9+pbXD3EU9oR0dbIJQjq3HijhQ4I3qB5EZyzzzYdDh15owZDgLeFxaqqJpt//MTSIxlzbnIPZTj86BhkReMQTgBISys1VCTCJoTKWIDe3BVtQmA+uPw8/hZgmF0/cGuoGUlacrgWfpjz1EpBMnsrT6H3+rHbpsW2+TL6Xy7FEnisfUhRZH8Lp/FI9J82GR3+wEKXR7xmTcKfO/o/7OIuUMiiAEmp/L24XMBVC/g/8za/4JkcmZ4iqiS3wY4UCFDBwkBtN4HusHZiQSOlsKAKvmnGlbrIq9bofvwkPWL16kJyGbUv+lTpm9kNKuuS+f+zYMZUqHhUJ+EwCsvdS1I8N6Ms16Zg/hb0HEqSALghqPCZj2hHtnxedeljdCvGoQWDjlicm/RNoQ="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_200903","name":"translator","response":{"result":{"translation":"Hola"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:36 GMT
+Date: Tue, 03 Nov 2026 18:07:59 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=830
+Server-Timing: gfet4t7; dur=1227
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -138,8 +139,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "The translation of \"hello\" into Spanish is \"hola\".",
-            "thoughtSignature": "EukBCuYBAQw51sfnhhLVX06frRygActOqF+4SskBUQCV0TORGuZPqksLU/yb2DljOkeRpDNTDOCcb/xih2r5X+yVTg219TBiuFslNqqad5/TnMPYyOYTEz/Oq2Ck7vTf3hKPwwZmB7/Z45+IY9DyxbkLFVdjD479mmFxi+w1ipDGDnsgQ5RgGuVCbiEu4nmvbX5o7axoZxOGwxjWrXzFO75Co95I/cBGViAwaWVXOeG0hdwsamNl9ghoq6QipAn2GMri/dORoepFpab0nCiEcf8SyYT2aXhUxOXsuOt2n/9nvy9XmVOg4+gkvmY="
+            "text": "The translation of \"hello\" in Spanish is \"Hola\".",
+            "thoughtSignature": "EtoBCtcBAWkUfRPHIVf1RjzGRfw3jzVPuQRH63af+tOVr1ehLVhcXjOUBd5MhV+/shka1BIizgAVLdfysVgeKG1etgS6Ea6OapVnJr3H5q5jJMV5YC8s5nxUYQfWGMpBKb4x+kwlhyTlfRO/J+IvnlrihibXUobnJFr+lo2b+z0YpqKBYt1CqvUc8LiUM+2XpMs20czFOoohRE7dEflT/c3qrXhREV5ruI01hyWMDHQId1VDMszeEyW2oGwSKqem3ZiBYBb8cp85xe22jULmu2RkwWNiCyhJVXob7zg="
           }
         ],
         "role": "model"
@@ -149,34 +150,34 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 301,
+    "promptTokenCount": 300,
     "candidatesTokenCount": 12,
-    "totalTokenCount": 351,
+    "totalTokenCount": 333,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 301
+        "tokenCount": 300
       }
     ],
-    "thoughtsTokenCount": 38,
+    "thoughtsTokenCount": 21,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "5FE4as77CLaK7M8P69CT-A4",
-  "turnToken": "v1_Chc1RkU0YXM3N0NMYUs3TThQNjlDVC1BNBIXNUZFNGFzNzdDTGFLN004UDY5Q1QtQTQ"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "_iLqarfBMp6z694PnIvMSQ"
 }
-2717 1664
+2663 1904
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 2484
+Content-Length: 2430
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"8oyvnqk0","name":"translator"},"thoughtSignature":"EqAECp0EAQw51sd9QXXsjkLz0fpJ0HvXQuc8jHVvMTIH4/UHHf5xEWhBLR12TSxU3VJR0/rFQ2BgFfr+2s25oE9DQ5b063HbjqxUlIhuk2BnPOfLCzmSu2zf1WKHKw+EP21YAnQEGfuMiIMOWVheOhrEPqWWdhnUCw1GoRrQfVqK6cIddYwjShbSaMeEIluTo2Z4IS7SztsCBGZ3M2XhpglBl9czWTC4hBsVWO7Ypl6FKmOEvM2uYLuH1nlMwDcLDU40z18pXSWjXsGQSocAI7bE1NQItsEopuBZYEvFZNal/6+n+QzaBcOd2b6OFhhInnQApCkApK2wU9C1VSGj+cMRkDyk+IgiarhWTelSWHVA52yQAJHj3KtFemgJNfrUJfn50CXMUTjtlMgC2y3wTviwkj3f1S2hXC76L6NbT2C7Y54rmFGKycp+vCNAJzxOQSqo69pBcI9e7QAKX3KyAHJSAuiSjrQb1pkSic0AjqAKTmFQ8XwHK+JxRZ2m9+vB1iisrSB5qclYx3xLs8m3sKiPi0l0z3aQgg79lejjvWxdJ5M5u2+gqbWk30fc2AEK9VAWRyPRHbCsgTU7kKK2KJnOlMVgC967BKWibWo0AV6flE3RkWSlUUHGBn+Dmcb9/OhYVScwtHnk/L+HEpeKVN89VtMBGFicrR2P2+QaTZuaE8zjy4kEJQC4moNTbj3ilhM/5ZH2A7FC5OEjSOlir/J3/g=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"8oyvnqk0","name":"translator","response":{"result":{"translation":"hola"}}}}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[translator] said: {\n  \"translation\": \"hola\"\n}"}],"role":"user"},{"parts":[{"text":"The translation of \"hello\" into Spanish is \"hola\".","thoughtSignature":"EukBCuYBAQw51sfnhhLVX06frRygActOqF+4SskBUQCV0TORGuZPqksLU/yb2DljOkeRpDNTDOCcb/xih2r5X+yVTg219TBiuFslNqqad5/TnMPYyOYTEz/Oq2Ck7vTf3hKPwwZmB7/Z45+IY9DyxbkLFVdjD479mmFxi+w1ipDGDnsgQ5RgGuVCbiEu4nmvbX5o7axoZxOGwxjWrXzFO75Co95I/cBGViAwaWVXOeG0hdwsamNl9ghoq6QipAn2GMri/dORoepFpab0nCiEcf8SyYT2aXhUxOXsuOt2n/9nvy9XmVOg4+gkvmY="}],"role":"model"},{"parts":[{"text":"Now translate the same word to French."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"call_200903","name":"translator"},"thoughtSignature":"EtoECtcEAWkUfRNAAtPzgNlOiHR53yPidgQpFT2odfEIdSRdNLEGyozElQOZSp68HBPUuuxvAgWy7ShQBJ/KKY2M/QOsoiKDNQHvPRZg9zy64xuA4UDvpxrX6KjGQoCayynvnE7pHEjcUoil6lQYWRh4+9Kb9OF3W9znxd9Ik3dtQqGmfo5Dxreq1byuyElObXvWEcOuTRrXoKbxl4nwhpaeIZeR4+T5YD+ltJE3857RW/yjL6a1fkDvmANYirB3OZ8g8XhXlXi/Q0TxDpP0XiUyZoj38Ci/+ERP5sN4KElRdfj1cNSTzWJ3mdxqEHVGnsZUIG5EDrGTL/g+Jrb1YJVntounRKuRiHGMRIC4gJsPVsNWwd6Yh/l+Q3xCFv1lE6FDceLTTp4KkF473aB0BQJAdRzUj9+pbXD3EU9oR0dbIJQjq3HijhQ4I3qB5EZyzzzYdDh15owZDgLeFxaqqJpt//MTSIxlzbnIPZTj86BhkReMQTgBISys1VCTCJoTKWIDe3BVtQmA+uPw8/hZgmF0/cGuoGUlacrgWfpjz1EpBMnsrT6H3+rHbpsW2+TL6Xy7FEnisfUhRZH8Lp/FI9J82GR3+wEKXR7xmTcKfO/o/7OIuUMiiAEmp/L24XMBVC/g/8za/4JkcmZ4iqiS3wY4UCFDBwkBtN4HusHZiQSOlsKAKvmnGlbrIq9bofvwkPWL16kJyGbUv+lTpm9kNKuuS+f+zYMZUqHhUJ+EwCsvdS1I8N6Ms16Zg/hb0HEqSALghqPCZj2hHtnxedeljdCvGoQWDjlicm/RNoQ="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_200903","name":"translator","response":{"result":{"translation":"Hola"}}}}],"role":"user"},{"parts":[{"text":"The translation of \"hello\" in Spanish is \"Hola\".","thoughtSignature":"EtoBCtcBAWkUfRPHIVf1RjzGRfw3jzVPuQRH63af+tOVr1ehLVhcXjOUBd5MhV+/shka1BIizgAVLdfysVgeKG1etgS6Ea6OapVnJr3H5q5jJMV5YC8s5nxUYQfWGMpBKb4x+kwlhyTlfRO/J+IvnlrihibXUobnJFr+lo2b+z0YpqKBYt1CqvUc8LiUM+2XpMs20czFOoohRE7dEflT/c3qrXhREV5ruI01hyWMDHQId1VDMszeEyW2oGwSKqem3ZiBYBb8cp85xe22jULmu2RkwWNiCyhJVXob7zg="}],"role":"model"},{"parts":[{"text":"Now translate the same word to French."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:37 GMT
+Date: Tue, 03 Nov 2026 18:08:01 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=689
+Server-Timing: gfet4t7; dur=1501
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -196,9 +197,9 @@ X-Xss-Protection: 0
               "args": {
                 "request": "Translate 'hello' to French"
               },
-              "id": "vplqmufs"
+              "id": "call_143049"
             },
-            "thoughtSignature": "EpwCCpkCAQw51sfDhzb1k1dgqLsW7LDGzU+d/JoYREZ1UvNB1FTejv+O4Gwmc+KSme8pKR7DuOOB3okHGH4dtdQ3Ftu2wRok1tRehxSLDjGmLrS5kqcRrHKcZq5DeLMq6Ylpqu6CIRnfMEOpTcXx07eDe8fXzZcJ/oGTAOom+vW6U77YUkIImwvmoaNHLoL8Pesc7vD/Wt7orc3X1o8KtuSVEA3FYw1vAxTEuYOSzzoFYjAD5ZYsH/iSMFMrYLYzWqit3BYQ3DSMvIMtO2jSj8yAw8sZYYloA0ysOplp7KyT2j7fC2kSPktNIxzRLp3J56P24OT5Q+3Ua0m0QVYdOOVczbGFzmKi8TeSIVzdziL1yHzXtXqB6YziLeSnq04="
+            "thoughtSignature": "EuQDCuEDAWkUfRMV/TMVTX4VkJ2RL+Ukhk8P70TLgzmstdVueCMXHK1XsGmbdCEVRXSB6Nw/63R/DvCoCp6oDNXG1fB1Bn9UUvqaVfwRgKi819YBmOiuuN5Gaeo5JWXBs8QekXi1hARtpq4VDfuEvvPxmBFt3xrFxGLgryAMkqZHj7srgCKclhR43hyQEt006XGKPid+43iuoJuEAFyKtKOEUjKOXXzMz6TaTtCXDeoKUo12nzFDM5nr38dpoA3YcNUgj7FFnzABEgMliQPYoiljx4zFEUToRcZJ4/QbVCyCkqFBo8zKOMqXPsuC96yAhpu1ps5KAiK2TXjkflH9eXE/Ztdw+u9LYRwpBvvGL0NbwHA6Jx9+XmpWglMCqFGU0tjuyh9xaq1UsiZZ47fUEv7+HmY6sBZRWsb8vK9ZrwjDbHgxqWWygmz5Ia/CmB+VvqUJG2bq88Ni1zjPgt8se5Axuz2iDdlrN8D+XH5oYl0r+kSow5TzMB82qmD+Hl4CSAvjuBiSl1r4hiQUskVSwpfJVOYoKKgCeGfJgkGgRzfde47rRPu0qwfG3P8qbVu3xIVvIbF8fTs9xltSEZ+AS/hId5GRZwCFu7SXUao9xx4j0Cl2FHfvSV5JPuunyXKioTI0nSAguA=="
           }
         ],
         "role": "model"
@@ -209,23 +210,22 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 381,
+    "promptTokenCount": 343,
     "candidatesTokenCount": 19,
-    "totalTokenCount": 448,
+    "totalTokenCount": 456,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 381
+        "tokenCount": 343
       }
     ],
-    "thoughtsTokenCount": 48,
+    "thoughtsTokenCount": 94,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "5FE4avK3PPflnsEPt7fZiQg",
-  "turnToken": "v1_Chc1RkU0YXZLM1BQZmxuc0VQdDdmWmlRZxIXNUZFNGF2SzNQUGZsbnNFUHQ3ZlppUWc"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "ACPqauyMA87t694Phbin2QM"
 }
-1126 1444
+1126 1644
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
@@ -233,10 +233,11 @@ Content-Length: 894
 Content-Type: application/json
 
 {"contents":[{"parts":[{"text":"{\"request\":\"Translate 'hello' to French\"}"}],"role":"user"}],"generationConfig":{"responseMimeType":"application/json","responseSchema":{"properties":{"translation":{"type":"STRING"}},"required":["translation"],"type":"OBJECT"}},"systemInstruction":{"parts":[{"text":"You translate one phrase. Read the request, then output ONLY\na JSON object of the form {\"translation\":\"...\"}. Output nothing else.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:38 GMT
+Date: Tue, 03 Nov 2026 18:08:02 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=1304
+Server-Timing: gfet4t7; dur=1547
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -251,8 +252,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "{\n  \"translation\": \"bonjour\"\n} ",
-            "thoughtSignature": "EpQCCpECAQw51sfG+0y89L9HMFCQB1Kr/+3t96Tfu25uy5hpCB8Qr8gsvfzKYTBhl6kU3VIGEsjXIwmLBtnmJ/4mftzkkbkwklgHFa4B5yueCaRDmmInODMCc5QRYuO1KYMsegn/XCPh4XrukP7W4bnPz0GUjMA3wwXwqMdsIko9WgJ/StBhr3DWcUEEVE9+ubzHUw6Ihdm8oUsrCOAXvIXYW9WPf2V1q17Gj9IWKXtJKqpjVTIuqOoMRhEyLHU1+OZCEREzzgZh2eIPktz0iHC7ktrtDEMwnN3PCWxCBTYze0JUjFZFcwTcapKXarl6J3J9b7UKbPaxtolq25/J3Y+CIjkfhYT4QkSzBh3eMVyc0wuI68Hw"
+            "text": "{\"translation\":\"bonjour\"} ",
+            "thoughtSignature": "EsYDCsMDAWkUfRNTuuoeJUwexiWKp8LP9pKBmeVF86+DZNkleuXhDlClJiPpVwoECKYUOPrDi3JJPc8oDx10fH5hj0VxRyDzFimicQvSpIxDPkhmA02HGsIH1dl286U8mX4gkQNgJQ5hidrLrSo9v/VH3S7rJ7mqs2nTJjTt1Oh1L/dJgxge/NZ16rJo3kDW8SeyEaUQ5Kkd8G00wUuCTttmdRrQVShZlvckOwttC/DJ2vtWlEDpLhGl+cH5bvAvofrWgoPCFiglhRaeFtwP+G8zyRSWuVkh3GVSqtSDY22/90aKReThufnJSq1MbhteJWgI3qqPzbg9gca09r23Q33i9UHEWHEGEOrhqJSqBm2zyE8bmpuw+YWpfskzvIcm0nkiuh8a15yiMnXO9kld1srb5ChXtLT4k8mfhK1X1iQ0xK0ujPkRvMp8yAgXOQb48A+GhiwatmOc0Ldkmr8W8h7JObTKb10Y9iOGsragvVb3AX/uEdZcGtghma2s6fmVgl5sbsv5hdFSIEzhz9aWl3KVAQkp7QnQSVtgbsInXPUlYUguT3X/rktun0Df1kjMzuUmP4m7jQ20BpPNYcBfYrgtUdiDHWMS+w=="
           }
         ],
         "role": "model"
@@ -263,33 +264,33 @@ X-Xss-Protection: 0
   ],
   "usageMetadata": {
     "promptTokenCount": 138,
-    "candidatesTokenCount": 13,
-    "totalTokenCount": 210,
+    "candidatesTokenCount": 6,
+    "totalTokenCount": 221,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
         "tokenCount": 138
       }
     ],
-    "thoughtsTokenCount": 59,
+    "thoughtsTokenCount": 77,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "5VE4aq2GKpOE7M8PvPic4Ac",
-  "turnToken": "v1_Chc1VkU0YXEyR0twT0U3TThQdlBpYzRBYxIXNVZFNGFxMkdLcE9FN004UHZQaWM0QWM"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "ASPqaundJYqx0r4Px5j_yAQ"
 }
-3387 1414
+3607 1337
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 3154
+Content-Length: 3374
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"8oyvnqk0","name":"translator"},"thoughtSignature":"EqAECp0EAQw51sd9QXXsjkLz0fpJ0HvXQuc8jHVvMTIH4/UHHf5xEWhBLR12TSxU3VJR0/rFQ2BgFfr+2s25oE9DQ5b063HbjqxUlIhuk2BnPOfLCzmSu2zf1WKHKw+EP21YAnQEGfuMiIMOWVheOhrEPqWWdhnUCw1GoRrQfVqK6cIddYwjShbSaMeEIluTo2Z4IS7SztsCBGZ3M2XhpglBl9czWTC4hBsVWO7Ypl6FKmOEvM2uYLuH1nlMwDcLDU40z18pXSWjXsGQSocAI7bE1NQItsEopuBZYEvFZNal/6+n+QzaBcOd2b6OFhhInnQApCkApK2wU9C1VSGj+cMRkDyk+IgiarhWTelSWHVA52yQAJHj3KtFemgJNfrUJfn50CXMUTjtlMgC2y3wTviwkj3f1S2hXC76L6NbT2C7Y54rmFGKycp+vCNAJzxOQSqo69pBcI9e7QAKX3KyAHJSAuiSjrQb1pkSic0AjqAKTmFQ8XwHK+JxRZ2m9+vB1iisrSB5qclYx3xLs8m3sKiPi0l0z3aQgg79lejjvWxdJ5M5u2+gqbWk30fc2AEK9VAWRyPRHbCsgTU7kKK2KJnOlMVgC967BKWibWo0AV6flE3RkWSlUUHGBn+Dmcb9/OhYVScwtHnk/L+HEpeKVN89VtMBGFicrR2P2+QaTZuaE8zjy4kEJQC4moNTbj3ilhM/5ZH2A7FC5OEjSOlir/J3/g=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"8oyvnqk0","name":"translator","response":{"result":{"translation":"hola"}}}}],"role":"user"},{"parts":[{"text":"For context:"},{"text":"[translator] said: {\n  \"translation\": \"hola\"\n}"}],"role":"user"},{"parts":[{"text":"The translation of \"hello\" into Spanish is \"hola\".","thoughtSignature":"EukBCuYBAQw51sfnhhLVX06frRygActOqF+4SskBUQCV0TORGuZPqksLU/yb2DljOkeRpDNTDOCcb/xih2r5X+yVTg219TBiuFslNqqad5/TnMPYyOYTEz/Oq2Ck7vTf3hKPwwZmB7/Z45+IY9DyxbkLFVdjD479mmFxi+w1ipDGDnsgQ5RgGuVCbiEu4nmvbX5o7axoZxOGwxjWrXzFO75Co95I/cBGViAwaWVXOeG0hdwsamNl9ghoq6QipAn2GMri/dORoepFpab0nCiEcf8SyYT2aXhUxOXsuOt2n/9nvy9XmVOg4+gkvmY="}],"role":"model"},{"parts":[{"text":"Now translate the same word to French."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to French"},"id":"vplqmufs","name":"translator"},"thoughtSignature":"EpwCCpkCAQw51sfDhzb1k1dgqLsW7LDGzU+d/JoYREZ1UvNB1FTejv+O4Gwmc+KSme8pKR7DuOOB3okHGH4dtdQ3Ftu2wRok1tRehxSLDjGmLrS5kqcRrHKcZq5DeLMq6Ylpqu6CIRnfMEOpTcXx07eDe8fXzZcJ/oGTAOom+vW6U77YUkIImwvmoaNHLoL8Pesc7vD/Wt7orc3X1o8KtuSVEA3FYw1vAxTEuYOSzzoFYjAD5ZYsH/iSMFMrYLYzWqit3BYQ3DSMvIMtO2jSj8yAw8sZYYloA0ysOplp7KyT2j7fC2kSPktNIxzRLp3J56P24OT5Q+3Ua0m0QVYdOOVczbGFzmKi8TeSIVzdziL1yHzXtXqB6YziLeSnq04="}],"role":"model"},{"parts":[{"functionResponse":{"id":"vplqmufs","name":"translator","response":{"result":{"translation":"bonjour"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"Translate 'hello' to Spanish."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to Spanish"},"id":"call_200903","name":"translator"},"thoughtSignature":"EtoECtcEAWkUfRNAAtPzgNlOiHR53yPidgQpFT2odfEIdSRdNLEGyozElQOZSp68HBPUuuxvAgWy7ShQBJ/KKY2M/QOsoiKDNQHvPRZg9zy64xuA4UDvpxrX6KjGQoCayynvnE7pHEjcUoil6lQYWRh4+9Kb9OF3W9znxd9Ik3dtQqGmfo5Dxreq1byuyElObXvWEcOuTRrXoKbxl4nwhpaeIZeR4+T5YD+ltJE3857RW/yjL6a1fkDvmANYirB3OZ8g8XhXlXi/Q0TxDpP0XiUyZoj38Ci/+ERP5sN4KElRdfj1cNSTzWJ3mdxqEHVGnsZUIG5EDrGTL/g+Jrb1YJVntounRKuRiHGMRIC4gJsPVsNWwd6Yh/l+Q3xCFv1lE6FDceLTTp4KkF473aB0BQJAdRzUj9+pbXD3EU9oR0dbIJQjq3HijhQ4I3qB5EZyzzzYdDh15owZDgLeFxaqqJpt//MTSIxlzbnIPZTj86BhkReMQTgBISys1VCTCJoTKWIDe3BVtQmA+uPw8/hZgmF0/cGuoGUlacrgWfpjz1EpBMnsrT6H3+rHbpsW2+TL6Xy7FEnisfUhRZH8Lp/FI9J82GR3+wEKXR7xmTcKfO/o/7OIuUMiiAEmp/L24XMBVC/g/8za/4JkcmZ4iqiS3wY4UCFDBwkBtN4HusHZiQSOlsKAKvmnGlbrIq9bofvwkPWL16kJyGbUv+lTpm9kNKuuS+f+zYMZUqHhUJ+EwCsvdS1I8N6Ms16Zg/hb0HEqSALghqPCZj2hHtnxedeljdCvGoQWDjlicm/RNoQ="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_200903","name":"translator","response":{"result":{"translation":"Hola"}}}}],"role":"user"},{"parts":[{"text":"The translation of \"hello\" in Spanish is \"Hola\".","thoughtSignature":"EtoBCtcBAWkUfRPHIVf1RjzGRfw3jzVPuQRH63af+tOVr1ehLVhcXjOUBd5MhV+/shka1BIizgAVLdfysVgeKG1etgS6Ea6OapVnJr3H5q5jJMV5YC8s5nxUYQfWGMpBKb4x+kwlhyTlfRO/J+IvnlrihibXUobnJFr+lo2b+z0YpqKBYt1CqvUc8LiUM+2XpMs20czFOoohRE7dEflT/c3qrXhREV5ruI01hyWMDHQId1VDMszeEyW2oGwSKqem3ZiBYBb8cp85xe22jULmu2RkwWNiCyhJVXob7zg="}],"role":"model"},{"parts":[{"text":"Now translate the same word to French."}],"role":"user"},{"parts":[{"functionCall":{"args":{"request":"Translate 'hello' to French"},"id":"call_143049","name":"translator"},"thoughtSignature":"EuQDCuEDAWkUfRMV/TMVTX4VkJ2RL+Ukhk8P70TLgzmstdVueCMXHK1XsGmbdCEVRXSB6Nw/63R/DvCoCp6oDNXG1fB1Bn9UUvqaVfwRgKi819YBmOiuuN5Gaeo5JWXBs8QekXi1hARtpq4VDfuEvvPxmBFt3xrFxGLgryAMkqZHj7srgCKclhR43hyQEt006XGKPid+43iuoJuEAFyKtKOEUjKOXXzMz6TaTtCXDeoKUo12nzFDM5nr38dpoA3YcNUgj7FFnzABEgMliQPYoiljx4zFEUToRcZJ4/QbVCyCkqFBo8zKOMqXPsuC96yAhpu1ps5KAiK2TXjkflH9eXE/Ztdw+u9LYRwpBvvGL0NbwHA6Jx9+XmpWglMCqFGU0tjuyh9xaq1UsiZZ47fUEv7+HmY6sBZRWsb8vK9ZrwjDbHgxqWWygmz5Ia/CmB+VvqUJG2bq88Ni1zjPgt8se5Axuz2iDdlrN8D+XH5oYl0r+kSow5TzMB82qmD+Hl4CSAvjuBiSl1r4hiQUskVSwpfJVOYoKKgCeGfJgkGgRzfde47rRPu0qwfG3P8qbVu3xIVvIbF8fTs9xltSEZ+AS/hId5GRZwCFu7SXUao9xx4j0Cl2FHfvSV5JPuunyXKioTI0nSAguA=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_143049","name":"translator","response":{"result":{"translation":"bonjour"}}}}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"For any user request asking for a translation, call the\ntranslator sub-agent EXACTLY ONCE with a request describing the\nphrase and target language. After the sub-agent returns, reply with\none concise English sentence reporting the translation. Do NOT call\nthe sub-agent more than once. Do NOT ask the user follow-up questions.\n\nYou are an agent. Your internal name is \"coordinator\". The description about you is \"Calls translator and reports the result.\"."}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Translates a single phrase to a target language.","name":"translator","parameters":{"properties":{"request":{"type":"STRING"}},"required":["request"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
 Content-Type: application/json; charset=UTF-8
-Date: Sun, 21 Jun 2026 21:04:39 GMT
+Date: Tue, 03 Nov 2026 18:08:03 GMT
 Server: scaffolding on HTTPServer2
-Server-Timing: gfet4t7; dur=976
+Server-Timing: gfet4t7; dur=1007
 Vary: Origin
 Vary: X-Origin
 Vary: Referer
@@ -304,8 +305,8 @@ X-Xss-Protection: 0
       "content": {
         "parts": [
           {
-            "text": "The translation of \"hello\" into French is \"bonjour\".",
-            "thoughtSignature": "Eu4BCusBAQw51seaqsCCXja/xO4tPpLNAG6S1P36CkH/WgZHdMp+3plb8qaSg8/7C9Ak/YkkkhKoig6yXXB3+4nZl6v/g0VYD95Zx07TDQ0KkN3vJXjsUQDaBrBi+J6gOBrAaMeVM/2z7Sq8xyUiYiCmQhJAGmZV1OKF0PU4AVGL1mLh/xFPCiEHFCyoFO7ds1yUpOizHfPha9YMGnaM27egmQKewbLki35Ar+B7Sxhgj6XOKqmMnWQmrWRlMRQ2nUw5oPbGi/y5WBFrodRDpK6x0u12NCHmmWlAsWDCQL2Pwg6oL9/8lfnS75R5CCFxCA=="
+            "text": "The translation of \"hello\" in French is \"Bonjour\".",
+            "thoughtSignature": "Es0BCsoBAWkUfRNS+LxQLY+gM9Zpb6fal1FanCJ2I6j+tH8bNf5mq3OV3WKQsZ+Wi/X5g6WPrkJP3/H2MViFQrDb1VhfS+kklcg2KkIrT/Jghul28jn12ta7lvSpDJJL7MoYfAF2xQ4v2Ic+C914Vcn+A2+U7sase7mSTxtRqfGXdRPWrPG9gxdv9M+EwiQmKEC1pmEr7aEysoUIpB5AdGZXXRrxxKciTWECVb8ALFSNEl4mVXwcM5o+OUDjontOsR/3AekeSEOKjvjSZ/vjiw=="
           }
         ],
         "role": "model"
@@ -315,19 +316,18 @@ X-Xss-Protection: 0
     }
   ],
   "usageMetadata": {
-    "promptTokenCount": 463,
-    "candidatesTokenCount": 13,
-    "totalTokenCount": 516,
+    "promptTokenCount": 471,
+    "candidatesTokenCount": 12,
+    "totalTokenCount": 502,
     "promptTokensDetails": [
       {
         "modality": "TEXT",
-        "tokenCount": 463
+        "tokenCount": 471
       }
     ],
-    "thoughtsTokenCount": 40,
+    "thoughtsTokenCount": 19,
     "serviceTier": "standard"
   },
-  "modelVersion": "gemini-3.5-flash",
-  "responseId": "5lE4as7DPI_7nsEPi4XUoA4",
-  "turnToken": "v1_Chc1bEU0YXM3RFBJXzduc0VQaTRYVW9BNBIXNWxFNGFzN0RQSV83bnNFUGk0WFVvQTQ"
+  "modelVersion": "gemini-3.6-flash",
+  "responseId": "AyPqapnXCfTt694P5O3UuAc"
 }

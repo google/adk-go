@@ -55,6 +55,7 @@ func Test_vertexaiService(t *testing.T) {
 	opts := sessiontestsuite.SuiteOptions{
 		SupportsUserProvidedSessionID: true,
 		ProvidesServerAssignedEventID: true,
+		ChecksRequestedAuthConfigs:    true,
 		AppName:                       EngineID,
 	} // VertexAI forbids custom IDs
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
@@ -83,6 +84,16 @@ var casesWithoutReplay = map[string]string{
 	// TestAppendEvent_stripsTempKeysBeforePersist until a maintainer re-records
 	// with UPDATE_REPLAYS=true.
 	"Test_vertexaiService_StateManagement_temp_state_is_not_persisted": "append_event_temp_state_test.go",
+	// Pinned offline against the in-process fake backend, in both directions
+	// and against adk-python's wire value, by
+	// TestVertexAiClientRequestedAuthConfigsMatchPython in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_configs_round_trip": "vertexai_test.go",
+	// Pinned offline against the in-process fake backends, with the same
+	// configs, by TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode
+	// and, for the caller's session, by
+	// TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched,
+	// both in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_config_that_does_not_decode_is_refused": "vertexai_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {

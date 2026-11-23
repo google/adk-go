@@ -25,12 +25,14 @@ import (
 	"log"
 	"maps"
 	"net"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -47,6 +49,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -96,6 +99,10 @@ var (
 		// appends is reflected in the history assembled for this very request.
 		CompactionRequestProcessor,
 		ContentsRequestProcessor,
+		// The same position as in adk-python's single flow. The model fingerprints
+		// the finished request when it is called, so processors after this one
+		// still count towards the cached prefix.
+		ContextCacheRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
 		nlPlanningRequestProcessor,
@@ -209,6 +216,27 @@ type liveSessionImpl struct {
 	audioMgr    *AudioCacheManager
 	mu          sync.Mutex
 	activeTools map[string][]activeTask
+	// finalErr buffers one terminal error for recvIter to deliver after
+	// done is closed: the iterator cannot rely on outputCh (unbuffered)
+	// once Close has been called, because the consumer may be parked in Send.
+	finalMu  sync.Mutex
+	finalErr error
+}
+
+func (s *liveSessionImpl) setFinalError(err error) {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	if s.finalErr == nil {
+		s.finalErr = err
+	}
+}
+
+func (s *liveSessionImpl) takeFinalError() error {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	err := s.finalErr
+	s.finalErr = nil
+	return err
 }
 
 func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
@@ -281,12 +309,23 @@ func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
 func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for {
+			if err := s.takeFinalError(); err != nil {
+				// Deliver the buffered terminal error; no more events follow.
+				_ = yield(nil, err)
+				return
+			}
 			select {
 			case res := <-s.outputCh:
 				if !yield(res.event, res.err) {
 					return
 				}
 			case <-s.done:
+				// done closing and finalErr being set are not ordered with
+				// the iterator's first check, so drain the terminal error
+				// here too instead of dropping it.
+				if err := s.takeFinalError(); err != nil {
+					_ = yield(nil, err)
+				}
 				return
 			}
 		}
@@ -388,8 +427,7 @@ func isResumable(err error) bool {
 	// A failed read or write on the underlying socket of an already-established
 	// connection. The dial lives on a different path, which handles its own
 	// errors, so reaching here means a live connection dropped.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 	// Match the close code rather than the text: gorilla puts the socket
@@ -403,6 +441,32 @@ func isResumable(err error) bool {
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "EOF") ||
 		strings.Contains(errStr, "GoAway")
+}
+
+// hasRealtimeInput reports whether v should be passed to SendRealtime. A nil
+// pointer of one of the types LiveRequest.RealtimeInput documents carries no
+// input, as a None field in adk-python does.
+func hasRealtimeInput(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case *genai.Blob:
+		return v != nil
+	case *genai.ActivityStart:
+		return v != nil
+	case *genai.ActivityEnd:
+		return v != nil
+	}
+	return true
+}
+
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -441,14 +505,34 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 		}
 
+		// The reconnect loop writes the resumption handle into this config, so
+		// it needs its own copy: the caller may reuse its LiveRunConfig.
+		sessionResumption := runCfg.Live.SessionResumption
+		if sessionResumption != nil {
+			sessionResumption = new(*sessionResumption)
+		}
+
 		liveConnectConfig := &genai.LiveConnectConfig{
 			ResponseModalities:       runCfg.Live.ResponseModalities,
 			SpeechConfig:             runCfg.Live.SpeechConfig,
 			SystemInstruction:        nreq.Config.SystemInstruction,
 			Tools:                    nreq.Config.Tools,
-			SessionResumption:        runCfg.Live.SessionResumption,
+			SessionResumption:        sessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
+			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
+		}
+		// Leave affective dialog and proactivity unset for the models
+		// IsGemini3xLive matches. Affective dialog is not supported on them,
+		// and proactive audio is either always on (Gemini 3.8 Live, where
+		// sending proactive_audio: false is an error) or not supported
+		// (Gemini 3.1 Flash Live). Live Translate is excluded by
+		// IsGemini3xLive and still gets both.
+		if !googlellm.IsGemini3xLive(f.Model.Name()) {
+			if runCfg.Live.EnableAffectiveDialog {
+				liveConnectConfig.EnableAffectiveDialog = new(true)
+			}
+			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
@@ -546,7 +630,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			connectedAt := time.Now()
-			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name())
 
 			cleanup := func() {
 				cancelConn()
@@ -559,8 +643,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// what unblocks them (issue #1152).
 			errChan := make(chan liveConnError)
 
-			// Send preprocessed content directly to model if any exists after early preprocessing
-			if len(nreq.Contents) > 0 {
+			// Send preprocessed content directly to model if any exists after
+			// early preprocessing, unless this connection resumes a session: the
+			// server restores that session's history from the handle, so
+			// replaying it would put the conversation in twice and, when it ends
+			// on a user turn, have the model answer that turn again. This
+			// matches adk-python, which skips send_history while it holds a
+			// resumption handle (live/_live_llm_flow.py).
+			resuming := liveConnectConfig.SessionResumption != nil && liveConnectConfig.SessionResumption.Handle != ""
+			if len(nreq.Contents) > 0 && !resuming {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
 					sess.pushError(err)
@@ -599,6 +690,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								}
 							}
 						}
+						if isEmptyLiveResponse(resp) {
+							continue
+						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
 						ev.LLMResponse = *resp
@@ -630,7 +724,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								return
 							}
 						}
-						if req.RealtimeInput != nil {
+						if hasRealtimeInput(req.RealtimeInput) {
 							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
@@ -646,10 +740,32 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}()
 
+			// pendingSend holds a function response awaiting delivery to the
+			// model, queued on sess.inputCh so the sender goroutine is the
+			// connection's only writer; a direct write from this loop races
+			// it and panics (#1819). It is declared inside the per-connection
+			// loop, so a response pending when the connection drops is
+			// discarded with the socket: carrying one across needs the value
+			// to survive until the write is confirmed, which stays open on
+			// #1819.
+			var pendingSend *genai.Content
+
 			reconnect := false
 			for !reconnect {
+				// Arm the inputCh send only while a response is pending, and
+				// hold further events until it is delivered, so a second tool
+				// response cannot overwrite the first (nil channel cases never
+				// fire in a select).
+				eventCase := eventsChan
+				var inputCase chan agent.LiveRequest
+				var inputReq agent.LiveRequest
+				if pendingSend != nil {
+					inputCase = sess.inputCh
+					inputReq = agent.LiveRequest{Content: pendingSend}
+					eventCase = nil
+				}
 				select {
-				case ev := <-eventsChan:
+				case ev := <-eventCase:
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -723,14 +839,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
-							// Send function response back to model
-							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
-								sess.pushError(err)
-								cleanup()
-								return
-							}
+							// Queue the function response for the sender
+							// goroutine, the connection's only writer.
+							pendingSend = respEv.LLMResponse.Content
 						}
 					}
+				case inputCase <- inputReq:
+					pendingSend = nil
 				case ce := <-errChan:
 					if isResumable(ce.err) {
 						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
@@ -753,7 +868,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						reconnect = true
 						break // Break the select
 					}
-					sess.pushError(ce.err)
+					// pushError would park here until the consumer pulls from
+					// outputCh, but the consumer may already be blocked in Send,
+					// which only Close can release. Buffer the terminal error so
+					// the iterator can deliver it; the deferred Close above ends
+					// waits in Send and recvIter when this goroutine returns.
+					sess.setFinalError(ce.err)
 					cleanup()
 					return
 				case <-sess.done:
@@ -794,18 +914,28 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 
 		// Preprocess before calling the LLM.
+		preprocessYieldedFinalResponse := false
 		for ev, err := range f.preprocess(ctx, req) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 			if ev != nil {
+				if len(utils.FunctionResponses(ev.Content)) > 0 && ev.IsFinalResponse() {
+					preprocessYieldedFinalResponse = true
+				}
 				if !yield(ev, nil) {
 					return
 				}
 			}
 		}
-		if ctx.Ended() {
+		// A preprocessor can run a tool itself, such as a call resumed after
+		// confirmation. When that tool's response is final, because the tool
+		// set SkipSummarization, the turn ends there, as it does when the tool
+		// runs after a model call; calling the model now would summarize what
+		// the tool asked to be the answer. adk-python stops on the same
+		// condition (base_llm_flow.py).
+		if ctx.Ended() || preprocessYieldedFinalResponse {
 			return
 		}
 		// Create event to pass to callback state delta
@@ -821,10 +951,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			// Skip the model response event if there is no content and no error code.
+			// Skip the model response event if it carries no content, error code,
+			// interruption or grounding metadata.
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
 				continue
 			}
 
@@ -846,7 +977,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			// TODO: generate and yield an auth event if needed.
 
 			if resp.Partial {
 				continue
@@ -865,9 +995,10 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
 
-			// Yield function responses before confirmation requests so consumers that
-			// pause for user approval still persist completed tool results.
-			if !yield(ev, nil) {
+			// Yield function responses before confirmation and credential requests
+			// so consumers that pause for the user still persist completed tool
+			// results.
+			if !yieldWithAuthRequest(ctx, ev, yield) {
 				return
 			}
 
@@ -928,8 +1059,8 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 					yield(nil, err)
 					return
 				}
-				if ev != nil {
-					yield(ev, nil)
+				if ev != nil && !yield(ev, nil) {
+					return
 				}
 			}
 		}
@@ -1058,7 +1189,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 			if callbackResp != nil {
 				resp := &responseWithEventID{
-					LLMResponse: callbackResp,
+					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
 					eventID:     resp.eventID,
 				}
 				if !yield(resp, nil) {
@@ -1080,6 +1211,57 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 	}
 }
 
+// inheritModelFields carries fields that describe the model call, rather than
+// the response content, from a response onto the after-model callback's
+// replacement for it.
+//
+// A callback that rebuilds the response, for example to scrub its text, is
+// still answering the same model call. If the replacement drops Partial, every
+// streamed delta looks final: SSE clients render each delta as a complete
+// turn and the runner persists each one as a separate session event. If it
+// drops TurnComplete, clients never see the turn end. If it drops
+// UsageMetadata, the call disappears from token accounting, and context
+// caching, which sizes a cache from the previous prompt's token count, never
+// creates one. If it drops CacheMetadata, the session loses track of the cache
+// the call used: the next turn creates another instead of reusing it.
+//
+// Partial and TurnComplete are plain bools, so an unset value cannot be told
+// apart from an explicit false; a delta is never final while the stream
+// continues, so a partial original keeps its replacement partial, and a
+// response that ended the turn keeps its replacement ending it. UsageMetadata
+// and CacheMetadata set on the replacement are respected. The replacement is
+// copied rather than modified, and returned as is when nothing needs filling.
+//
+// adk-python carries the first three fields but not the cache state
+// (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
+// callback that replaces every reply leaves it caching nothing.
+func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
+	if original == nil {
+		return replacement
+	}
+	inheritPartial := original.Partial && !replacement.Partial
+	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
+	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
+	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage && !inheritCache {
+		return replacement
+	}
+	merged := *replacement
+	if inheritPartial {
+		merged.Partial = true
+	}
+	if inheritTurnComplete {
+		merged.TurnComplete = true
+	}
+	if inheritUsage {
+		merged.UsageMetadata = original.UsageMetadata
+	}
+	if inheritCache {
+		merged.CacheMetadata = original.CacheMetadata
+	}
+	return &merged
+}
+
 type responseWithEventID struct {
 	*model.LLMResponse
 	eventID string
@@ -1099,13 +1281,26 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
 		ctx := ctx.WithContext(spanCtx)
 		return func(yield func(*responseWithEventID, error) bool) {
+			// The partial chunks of a streamed response share one event id with
+			// the response that completes them. A complete response ends the id,
+			// and so does an error, because an on-model-error callback may turn
+			// it into a saved event. A new id is drawn when the next response
+			// arrives, never ahead of one.
+			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
 					// Third-party model implementations may yield an empty response.
 					continue
 				}
-				if !yield(newResponseWithEventID(ctx, resp), err) {
+				if eventID == "" {
+					eventID = platform.NewUUID(ctx)
+				}
+				if !yield(&responseWithEventID{resp, eventID}, err) {
 					return
+				}
+				// resp is non-nil whenever err is nil; the empty case is skipped above.
+				if err != nil || !resp.Partial {
+					eventID = ""
 				}
 			}
 		}
@@ -1243,6 +1438,18 @@ Suggested fixes:
   - Check for typos in function name`, toolName, joinedTools)
 }
 
+// toolNotFoundResponse is the function response the model gets for a call to
+// toolName when no tool of that name is available and no callback answers
+// it. The text is adk-python's, and it tells the model which tools it can
+// call instead.
+func toolNotFoundResponse(toolName string, availableTools []string) map[string]any {
+	available := strings.Join(availableTools, ", ")
+	if available == "" {
+		available = "none"
+	}
+	return map[string]any{"error": fmt.Sprintf("Invoking `%s()` failed as no tool with that name is available. The tools you can call are: %s. You could retry, but it is IMPORTANT that you only call a tool from that list.", toolName, available)}
+}
+
 type cancelledToolContext struct {
 	agent.Context
 	// Marker: this is one of ADK's own context types, so the identity procedure
@@ -1329,7 +1536,9 @@ func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
 // TODO: check feasibility of running tool.Run concurrently.
 func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
-	toolNames := slices.Collect(maps.Keys(toolsDict))
+	// adk-python lists tools in declaration order; toolsDict is a map, so the
+	// names are sorted to keep the not-found error text deterministic.
+	toolNames := slices.Sorted(maps.Keys(toolsDict))
 
 	// Merged span for parallel tool calls - create only if there is more than one tool call.
 	if len(fnCalls) > 1 {
@@ -1359,6 +1568,11 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
+			// The callbacks and the tool may edit the arguments; the function
+			// call event keeps the ones the model sent. A call without args
+			// reaches them as an empty map, so a tool that returns its args, as
+			// set_model_response does, returns an object rather than nil.
+			args := cloneArgs(fnCall.Args)
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1375,10 +1589,26 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				var found bool
 				curTool, found = toolsDict[fnCall.Name]
 				if !found {
-					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
-					if err != nil {
-						result = map[string]any{"error": err.Error()}
+					// Before-tool callbacks may answer a call to a tool that does not
+					// exist. Their answer then goes through the on-tool-error and
+					// after-tool callbacks, as for a tool that exists.
+					missing := &fakeTool{name: fnCall.Name}
+					var err error
+					result, err = f.runBeforeToolCallbacks(toolCtx, missing, args)
+					if result != nil || err != nil {
+						result = f.finishToolCall(toolCtx, missing, args, result, err)
+					} else {
+						// Nothing answered and no tool runs, so the after-tool
+						// callbacks are skipped.
+						lookupErr := newToolNotFoundError(fnCall.Name, toolNames)
+						result, err = f.runOnToolErrorCallbacks(toolCtx, missing, args, lookupErr)
+						switch {
+						case err == lookupErr: // No on-tool-error callback answered.
+							result = toolNotFoundResponse(fnCall.Name, toolNames)
+						case err != nil:
+							errText, _ := toolinternal.ModelErrorText(fnCall.Name, err)
+							result = map[string]any{"error": errText}
+						}
 					}
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
@@ -1398,7 +1628,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+							for chunk, err := range recoverStreamPanic(streamTool, cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1424,9 +1654,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}()
 					} else {
 						var sb strings.Builder
-						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+						for chunk, err := range recoverStreamPanic(streamTool, toolCtx, args) {
 							if err != nil {
-								result = map[string]any{"error": err.Error()}
+								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
+								result = map[string]any{"error": errText}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1437,12 +1668,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
-						result = map[string]any{"error": err.Error()}
+						errText, _ := toolinternal.ModelErrorText(fnCall.Name, err)
+						result = map[string]any{"error": errText}
 					}
 				} else {
-					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+					result = f.callTool(toolCtx, funcTool, args)
 				}
 			}
 
@@ -1453,6 +1685,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
+				result = map[string]any{"result": nil}
 			}
 
 			parts := []*genai.Part{
@@ -1531,38 +1764,103 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 }
 
 func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any, err error) (map[string]any, error) {
-	pluginManager := pluginManagerFromContext(toolCtx)
-	if pluginManager != nil {
-		result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-		if result != nil || err != nil {
-			return result, err
+	return recoverToolPanic(toolCtx, tool.Name(), "OnToolError", func() (map[string]any, error) {
+		pluginManager := pluginManagerFromContext(toolCtx)
+		if pluginManager != nil {
+			result, err := pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
+			if result != nil || err != nil {
+				return result, err
+			}
 		}
+		return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	})
+}
+
+// recoverToolPanic runs one step of a tool call and turns a panic in it into
+// the error a panicking function tool returns, so that the step fails the call
+// instead of ending the process. callback is the kind of callback the step
+// runs, or empty when it runs the tool itself.
+//
+// adk-python ends the run when one of these steps raises, unless the step runs
+// the tool and an on_tool_error callback answers, and cancels the calls of the
+// turn that are still running. ADK Go fails only this call, because an error
+// from a tool callback already becomes the call's function response.
+//
+// The error is also recorded on the tool's span when content capture on spans
+// is enabled, because callbacks are optional. A panic recovered inside a tool
+// built with functiontool, or inside recoverStreamPanic, does not reach this
+// function and is not recorded here.
+func recoverToolPanic(toolCtx agent.Context, toolName, callback string, step func() (map[string]any, error)) (result map[string]any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			var panicErr *toolinternal.PanicError
+			if callback == "" {
+				panicErr = toolinternal.NewPanicError(toolName, r, stack)
+			} else {
+				panicErr = toolinternal.NewCallbackPanicError(callback, toolName, r, stack)
+			}
+			telemetry.RecordPanic(trace.SpanFromContext(toolCtx), panicErr)
+			result, err = nil, panicErr
+		}
+	}()
+	return step()
+}
+
+// recoverStreamPanic returns the stream of streamTool with a panic in it turned
+// into the error a panicking streaming function tool yields.
+func recoverStreamPanic(streamTool toolinternal.StreamingFunctionTool, toolCtx agent.Context, args any) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		// Consumer panics must propagate, and a stopped consumer cannot receive errors.
+		canYield := true
+		callerYield := yield
+		yield = func(chunk string, err error) bool {
+			canYield = false
+			canYield = callerYield(chunk, err)
+			return canYield
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				if !canYield {
+					panic(r)
+				}
+				yield("", toolinternal.NewPanicError(streamTool.Name(), r, debug.Stack()))
+			}
+		}()
+		streamTool.RunStream(toolCtx, args)(yield)
 	}
-	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+}
+
+func (f *Flow) runBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
+	return recoverToolPanic(toolCtx, tool.Name(), "BeforeTool", func() (map[string]any, error) {
+		if pluginManager := pluginManagerFromContext(toolCtx); pluginManager != nil {
+			if result, err := pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs); result != nil || err != nil {
+				return result, err
+			}
+		}
+		return f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+	})
 }
 
 func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
-	var response map[string]any
-	var err error
+	response, err := f.runBeforeToolCallbacks(toolCtx, tool, fArgs)
+	if response == nil && err == nil {
+		response, err = recoverToolPanic(toolCtx, tool.Name(), "", func() (map[string]any, error) {
+			return tool.Run(toolCtx, fArgs)
+		})
+	}
+	return f.finishToolCall(toolCtx, tool, fArgs, response, err)
+}
+
+// finishToolCall passes the error of a tool call to the on-tool-error
+// callbacks and its outcome to the after-tool callbacks, and returns the
+// function response for the model.
+func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, response map[string]any, err error) map[string]any {
 	pluginManager := pluginManagerFromContext(toolCtx)
-	if pluginManager != nil {
-		response, err = pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs)
-	}
-	if response == nil && err == nil {
-		response, err = f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
-	}
-
-	if response == nil && err == nil {
-		response, err = tool.Run(toolCtx, fArgs)
-	}
-
 	var errorResponse map[string]any
 	var cbErr error
-	if err != nil && pluginManager != nil {
-		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-	}
-	if err != nil && errorResponse == nil && cbErr == nil {
-		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
+	if err != nil {
+		errorResponse, cbErr = f.runOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 	}
 	if errorResponse != nil || cbErr != nil {
 		response = errorResponse
@@ -1572,10 +1870,14 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	var alteredResponse map[string]any
 	var alteredErr error
 	if pluginManager != nil {
-		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = recoverToolPanic(toolCtx, tool.Name(), "AfterTool", func() (map[string]any, error) {
+			return pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		})
 	}
 	if alteredResponse == nil && alteredErr == nil {
-		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+		alteredResponse, alteredErr = recoverToolPanic(toolCtx, tool.Name(), "AfterTool", func() (map[string]any, error) {
+			return f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+		})
 	}
 	if alteredResponse != nil || alteredErr != nil {
 		response = alteredResponse
@@ -1583,9 +1885,43 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
+		return map[string]any{"error": errText}
 	}
 	return response
+}
+
+// cloneArgs returns a copy of a function call's arguments for the callbacks
+// and the tool to edit. Nested map[string]any and []any values, the shapes
+// decoded JSON arguments hold, are copied too; other values are shared. A nil
+// map becomes an empty one, so a callback can add an argument to a call that
+// had none.
+func cloneArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArgValue(v)
+	}
+	return out
+}
+
+func cloneArgValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return t
+		}
+		return cloneArgs(t)
+	case []any:
+		if t == nil {
+			return t
+		}
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneArgValue(e)
+		}
+		return out
+	}
+	return v
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
@@ -1603,7 +1939,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, 
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
@@ -1697,6 +2033,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
 		}
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
+	}
+	if other.RequestedAuthConfigs != nil {
+		if base.RequestedAuthConfigs == nil {
+			base.RequestedAuthConfigs = make(map[string]toolauth.Config)
+		}
+		maps.Copy(base.RequestedAuthConfigs, other.RequestedAuthConfigs)
 	}
 	return base
 }

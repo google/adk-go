@@ -134,7 +134,7 @@ func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partC
 			return nil, nil
 		}
 		event.TurnComplete = false
-		if len(event.Content.Parts) == 0 {
+		if event.Content == nil || len(event.Content.Parts) == 0 {
 			return nil, nil
 		}
 		if err := processA2AMeta(v, event); err != nil {
@@ -281,6 +281,19 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task, partConverter A2AP
 	}
 	if err := processA2AMeta(task, event); err != nil {
 		return nil, fmt.Errorf("metadata processing failed: %w", err)
+	}
+	// A completed, failed or canceled task is the remote agent's final response,
+	// even when its artifacts replay the peer's tool calls, as an ADK peer's do.
+	// Those function call and response parts would otherwise make
+	// IsFinalResponse report false. These are the three states adk-python's
+	// convert_a2a_task_to_event checks (to_adk_event.py). a2a-go also treats
+	// rejected as terminal, but it is left out here to match Python, so this is
+	// not task.Status.State.Terminal().
+	switch task.Status.State {
+	case a2a.TaskStateCompleted, a2a.TaskStateFailed, a2a.TaskStateCanceled:
+		if len(parts) > 0 {
+			event.Actions.SkipSummarization = true
+		}
 	}
 	event.TurnComplete = isTerminal
 	return event, nil

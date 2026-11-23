@@ -217,7 +217,7 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 		if streamResponsesCount == 0 {
 			streamResponsesCount = 1
 		}
-		for i := 0; i < streamResponsesCount; i++ {
+		for i := range streamResponsesCount {
 			if len(m.Responses) == 0 {
 				break
 			}
