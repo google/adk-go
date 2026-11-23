@@ -54,6 +54,22 @@ type LLMResponse struct {
 	// The Runner fully processes only the final non-partial event, partial
 	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool `json:"partial,omitempty"`
+	// PartialSet reports whether Partial was set explicitly on this response.
+	//
+	// adk-python has no such field: its LlmResponse.partial is an
+	// Optional[bool], so an unset partial (None) and an explicit False differ
+	// there. Partial here is a plain bool whose zero value is false, so a
+	// response that leaves Partial unset cannot otherwise be told apart from
+	// one that sets Partial: false. An AfterModelCallback replacement with
+	// Partial: false and PartialSet: true for a partial model response
+	// therefore produces a non-partial event, instead of inheriting
+	// Partial: true from the response it replaces.
+	//
+	// When Partial is true, the response is always treated as explicitly
+	// partial regardless of PartialSet. The zero value (Partial: false,
+	// PartialSet: false) means Partial was left unset. PartialSet is never
+	// written to JSON.
+	PartialSet bool `json:"-"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
 	TurnComplete bool `json:"turnComplete,omitempty"`

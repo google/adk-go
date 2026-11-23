@@ -1209,17 +1209,22 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // drops TurnComplete, clients never see the turn end. If it drops
 // UsageMetadata, the call disappears from token accounting.
 //
-// Partial and TurnComplete are plain bools, so an unset value cannot be told
-// apart from an explicit false; a delta is never final while the stream
-// continues, so a partial original keeps its replacement partial, and a
-// response that ended the turn keeps its replacement ending it. UsageMetadata
-// set on the replacement is respected. The replacement is copied rather than
-// modified, and returned as is when nothing needs filling.
+// A delta is never final while the stream continues, so a replacement that
+// leaves Partial unset takes Partial and PartialSet from the original. Partial
+// counts as set when it is true or PartialSet is true, so a replacement with
+// Partial: false and PartialSet: true keeps its explicit false and becomes a
+// non-partial event, while later chunks of the stream still follow.
+// TurnComplete is a plain bool, so an unset value cannot be told apart from an
+// explicit false; a response that ended the turn keeps its replacement ending
+// it. UsageMetadata set on the replacement is respected. The replacement is
+// copied rather than modified, and returned as is when nothing needs filling.
 func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
 	if original == nil {
 		return replacement
 	}
-	inheritPartial := original.Partial && !replacement.Partial
+	replacementHasPartial := replacement.Partial || replacement.PartialSet
+	originalHasPartial := original.Partial || original.PartialSet
+	inheritPartial := originalHasPartial && !replacementHasPartial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
 	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
@@ -1227,7 +1232,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	merged := *replacement
 	if inheritPartial {
-		merged.Partial = true
+		merged.Partial = original.Partial
+		merged.PartialSet = original.PartialSet
 	}
 	if inheritTurnComplete {
 		merged.TurnComplete = true
