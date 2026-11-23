@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
@@ -1173,6 +1174,16 @@ func TestIsThoughtOnlyTurn(t *testing.T) {
 			Content:   &genai.Content{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "t"}}},
 			ErrorCode: "MODEL_RETURNED_NO_CONTENT",
 		}}, false},
+		{"thought_stop_with_other_error_code", &session.Event{LLMResponse: model.LLMResponse{
+			Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "t"}}},
+			ErrorCode:    "SAFETY",
+			FinishReason: genai.FinishReasonStop,
+		}}, false},
+		{"thought_max_tokens_with_error_code", &session.Event{LLMResponse: model.LLMResponse{
+			Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "t"}}},
+			ErrorCode:    "MAX_TOKENS",
+			FinishReason: genai.FinishReasonMaxTokens,
+		}}, true},
 		{"empty_content", event(false), false},
 		{"nil_event", nil, false},
 	}
@@ -1900,10 +1911,9 @@ func errorsOf(events []*session.Event) []eventError {
 	return got
 }
 
-// TestHasMeaningfulContent follows adk-python's has_meaningful_content tests
-// (flows/llm_flows/core/test_finalizer.py), among them
-// test_has_meaningful_content_thought_only and
-// test_has_meaningful_content_multiple_thoughts_only.
+// TestHasMeaningfulContent pins which parts count as content a caller can act
+// on: thoughts and whitespace-only text do not; text, function calls and
+// responses, code, code results and inline or file data do.
 func TestHasMeaningfulContent(t *testing.T) {
 	content := func(parts ...*genai.Part) *model.LLMResponse {
 		return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
@@ -1961,10 +1971,9 @@ func TestEmptyResponsePolicy_MeaningfulContentParts(t *testing.T) {
 	})
 }
 
-// TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun follows adk-python's
-// test_apply_empty_response_policy_marks_thought_only_stop[StreamingMode.NONE]
-// (flows/llm_flows/core/test_model_call.py): a completed STOP turn that holds
-// only thoughts becomes an error event, and the model is not called again.
+// TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun pins that a completed STOP
+// turn that holds only thoughts becomes an error event, and that the model is
+// not called again.
 func TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun(t *testing.T) {
 	events, calls := runScriptedFlow(t, &Flow{}, nil,
 		stopTurn(&genai.Part{Text: "thinking...", Thought: true}),
@@ -1979,11 +1988,9 @@ func TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun(t *testing.T) {
 	}
 }
 
-// TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE follows adk-python's
-// test_thought_only_stop_in_sse_streaming_surfaces_error_event
-// (flows/llm_flows/test_base_llm_flow.py): under SSE, the partial thought
-// chunk carries no error, and the aggregated thought-only STOP response
-// becomes the one error event.
+// TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE pins that under SSE the
+// partial thought chunk carries no error, and that the aggregated
+// thought-only STOP response becomes the one error event.
 func TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE(t *testing.T) {
 	thought := func() *genai.Content {
 		return &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Thinking step 1...", Thought: true}}}
@@ -2035,9 +2042,138 @@ func TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE(t *testing.T) {
 	}
 }
 
-// TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators pins Python's
-// str.strip whitespace, which also strips U+001C to U+001F; unicode.IsSpace
-// does not.
+// TestRun_ThoughtOnlyMaxTokensTurnIsRetried pins that the model is called again
+// after a thought-only turn that finished with MAX_TOKENS, in both streaming
+// modes. Under SSE the turn's last chunk has no parts, so the aggregated
+// response carries MAX_TOKENS as its error code; received in one response, the
+// turn carries none. The model double converts responses the way model/gemini
+// does.
+func TestRun_ThoughtOnlyMaxTokensTurnIsRetried(t *testing.T) {
+	thinking := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "thinking", Thought: true}}}
+	answer := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+		Content:      genai.NewContentFromText("the answer", genai.RoleModel),
+		FinishReason: genai.FinishReasonStop,
+	}}}
+	type completeEvent struct {
+		ErrorCode string
+		Content   *genai.Content
+	}
+	tests := []struct {
+		name  string
+		mode  agent.StreamingMode
+		turns [][]*genai.GenerateContentResponse
+		want  []completeEvent
+	}{
+		{
+			name: "one_response",
+			mode: agent.StreamingModeNone,
+			turns: [][]*genai.GenerateContentResponse{
+				{{Candidates: []*genai.Candidate{{Content: thinking, FinishReason: genai.FinishReasonMaxTokens}}}},
+				{answer},
+			},
+			want: []completeEvent{
+				{Content: thinking},
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel)},
+			},
+		},
+		{
+			name: "sse_last_chunk_without_parts",
+			mode: agent.StreamingModeSSE,
+			turns: [][]*genai.GenerateContentResponse{
+				{
+					{Candidates: []*genai.Candidate{{Content: thinking}}},
+					{Candidates: []*genai.Candidate{{FinishReason: genai.FinishReasonMaxTokens}}},
+				},
+				{answer},
+			},
+			want: []completeEvent{
+				{ErrorCode: "MAX_TOKENS", Content: thinking},
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel)},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			f := &Flow{Model: &mockModelForTest{
+				name: "gemini-shaped",
+				generateContent: func(ctx context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						if calls == len(tc.turns) {
+							t.Fatalf("model called %d times, want at most %d", calls+1, len(tc.turns))
+						}
+						chunks := tc.turns[calls]
+						calls++
+						if !stream {
+							yield(converters.Genai2LLMResponse(chunks[0]), nil)
+							return
+						}
+						aggregator := NewStreamingResponseAggregator()
+						for _, chunk := range chunks {
+							for resp, err := range aggregator.ProcessResponse(ctx, chunk) {
+								if !yield(resp, err) {
+									return
+								}
+							}
+						}
+						yield(aggregator.Close(), nil)
+					}
+				},
+			}}
+			ctx := icontext.NewInvocationContext(
+				runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+				icontext.InvocationContextParams{
+					InvocationID: "inv_1",
+					Agent:        &mockAgent{name: "agent_1"},
+					RunConfig:    &agent.RunConfig{StreamingMode: tc.mode},
+				},
+			)
+
+			var got []completeEvent
+			for ev, err := range f.Run(ctx) {
+				if err != nil {
+					t.Fatalf("Run() yielded error: %v", err)
+				}
+				if !ev.Partial {
+					got = append(got, completeEvent{ev.ErrorCode, ev.Content})
+				}
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("complete events mismatch (-want +got):\n%s", diff)
+			}
+			if calls != 2 {
+				t.Errorf("model called %d times, want 2", calls)
+			}
+		})
+	}
+}
+
+// TestRun_ThoughtOnlyStopTurnWithErrorCodeEndsRun pins that a thought-only
+// turn that finished with STOP ends the run even when it reached the flow with
+// an error code already set, for example by a callback, and that its event
+// keeps that error code.
+func TestRun_ThoughtOnlyStopTurnWithErrorCodeEndsRun(t *testing.T) {
+	events, calls := runScriptedFlow(t, &Flow{}, nil,
+		&model.LLMResponse{
+			Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "thinking", Thought: true}}},
+			ErrorCode:    "SAFETY",
+			ErrorMessage: "blocked",
+			FinishReason: genai.FinishReasonStop,
+		},
+		stopTurn(&genai.Part{Text: "answer"}),
+	)
+	if calls != 1 {
+		t.Errorf("model called %d times, want 1", calls)
+	}
+	if diff := cmp.Diff([]eventError{{"SAFETY", "blocked"}}, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators pins that the
+// file, group, record and unit separators U+001C to U+001F count as
+// whitespace, although unicode.IsSpace does not report them.
 func TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators(t *testing.T) {
 	events, _ := runScriptedFlow(t, &Flow{}, nil, stopTurn(&genai.Part{Text: "\x1c\x1d\x1e\x1f"}))
 	want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}

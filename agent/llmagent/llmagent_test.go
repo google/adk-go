@@ -650,11 +650,10 @@ func TestEmptyResponsePolicy_AppliesToCallbacksAndAfterAfterModelCallback(t *tes
 	})
 }
 
-// TestThoughtOnlyStopAfterToolCallSurfacesErrorEvent follows adk-python's
-// test_thought_only_stop_after_tool_call_surfaces_error_event
-// (flows/llm_flows/test_base_llm_flow.py): the tool from the first turn runs,
-// and a second turn that finishes with STOP holding only a thought becomes the
-// run's last event, with error code MODEL_RETURNED_NO_CONTENT.
+// TestThoughtOnlyStopAfterToolCallSurfacesErrorEvent pins that the tool from
+// the first turn runs, and that a second turn that finishes with STOP holding
+// only a thought becomes the run's last event, with error code
+// MODEL_RETURNED_NO_CONTENT.
 func TestThoughtOnlyStopAfterToolCallSurfacesErrorEvent(t *testing.T) {
 	type args struct {
 		X int `json:"x"`
@@ -1711,11 +1710,10 @@ func (m *mockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	return &cp
 }
 
-// TestThoughtOnlyStopTurnEndsInvocation pins adk-python's behavior for a
-// model turn that finishes with STOP holding only thought parts: it becomes an
-// error event with code MODEL_RETURNED_NO_CONTENT that ends the run, and the
-// model is not called again (flows/llm_flows/core/_model_call.py,
-// apply_empty_response_policy).
+// TestThoughtOnlyStopTurnEndsInvocation pins that a model turn that finishes
+// with STOP holding only thought parts becomes an error event with code
+// MODEL_RETURNED_NO_CONTENT that ends the run, and that the model is not
+// called again.
 func TestThoughtOnlyStopTurnEndsInvocation(t *testing.T) {
 	m := &testutil.MockModel{Responses: []*genai.Content{
 		// Turn 1: the model is "thinking" — a thought-only part, no answer.
@@ -1743,5 +1741,61 @@ func TestThoughtOnlyStopTurnEndsInvocation(t *testing.T) {
 	}
 	if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}, errorsOf(events)); diff != "" {
 		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestThoughtOnlyNoContentErrorFromSubAgentEndsInvocation pins that a
+// thought-only event with error code MODEL_RETURNED_NO_CONTENT ends the run
+// when it carries no finish reason, as when a remote agent relays one after a
+// transfer, and that the root model is not called again.
+func TestThoughtOnlyNoContentErrorFromSubAgentEndsInvocation(t *testing.T) {
+	m := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "remote"}, genai.RoleModel),
+		// Never requested.
+		genai.NewContentFromText("the answer", genai.RoleModel),
+	}}
+	remoteRuns := 0
+	remote, err := agent.New(agent.Config{
+		Name:        "remote",
+		Description: "Relays a remote agent's events.",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				remoteRuns++
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "remote"
+				ev.LLMResponse = model.LLMResponse{
+					Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "thinking", Thought: true}}},
+					ErrorCode:    "MODEL_RETURNED_NO_CONTENT",
+					TurnComplete: true,
+				}
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	root := newTestAgent(t, llmagent.Config{Name: "root", Model: m, SubAgents: []agent.Agent{remote}})
+	runner := testutil.NewTestAgentRunner(t, root)
+
+	var last *session.Event
+	for ev, err := range runner.Run(t, "session_id", "hi") {
+		if err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+		last = ev
+	}
+
+	if n := len(m.Requests); n != 1 {
+		t.Errorf("root model called %d time(s), want 1", n)
+	}
+	if remoteRuns != 1 {
+		t.Errorf("remote agent ran %d time(s), want 1", remoteRuns)
+	}
+	if last == nil {
+		t.Fatal("run yielded no events")
+	}
+	if last.Author != "remote" || last.ErrorCode != "MODEL_RETURNED_NO_CONTENT" {
+		t.Errorf("last event author = %q, error code = %q; want %q, %q", last.Author, last.ErrorCode, "remote", "MODEL_RETURNED_NO_CONTENT")
 	}
 }

@@ -433,8 +433,6 @@ func TestAgentTool_Run_FiltersThoughtParts(t *testing.T) {
 // A sub-agent turn that finishes with STOP holding only thought parts is an
 // error event with code MODEL_RETURNED_NO_CONTENT, and AgentTool reports a
 // sub-agent's error event as an error, with or without an output schema.
-// adk-python's AgentTool returns the event's error message as the tool result
-// instead (tools/agent_tool.py).
 func TestAgentTool_Run_AllThoughtPartsStopTurnIsAnError(t *testing.T) {
 	outputSchema := &genai.Schema{
 		Type:       "OBJECT",
