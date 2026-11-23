@@ -281,6 +281,17 @@ type RequestInput struct {
 
 // IsFinalResponse returns whether the event is the final response of an agent.
 //
+// The first of these rules that applies decides:
+//   - A compaction event (Actions.Compaction set) is not final.
+//   - An event with Actions.SkipSummarization set or with LongRunningToolIDs
+//     is final.
+//   - An error event is final: ErrorCode is non-empty, Partial is false and
+//     the content holds no function call, whatever else the content holds.
+//     ErrorMessage alone does not make an error event.
+//   - Otherwise the event is final when Partial is false and its content
+//     holds no function call, no function response and does not end with a
+//     code execution result.
+//
 // Note: when multiple agents participate in one invocation, there could be
 // multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
@@ -294,13 +305,11 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
-	// A complete error event ends the turn even when it carries a function
-	// response or a code execution result; only a function call keeps it open.
-	if e.LLMResponse.ErrorCode != "" && !e.LLMResponse.Partial && !hasFunctionCalls(&e.LLMResponse) {
+	hasCalls := len(e.FunctionCalls()) > 0
+	if e.ErrorCode != "" && !e.Partial && !hasCalls {
 		return true
 	}
-
-	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+	return !hasCalls && len(e.FunctionResponses()) == 0 && !e.Partial && !e.HasTrailingCodeExecutionResult()
 }
 
 // NewEvent creates a new event defining now as the timestamp.
@@ -518,46 +527,6 @@ const (
 
 // ErrStateKeyNotExist is the error thrown when key does not exist.
 var ErrStateKeyNotExist = errors.New("state key does not exist")
-
-func hasFunctionCalls(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part != nil && part.FunctionCall != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasFunctionResponses(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part != nil && part.FunctionResponse != nil {
-			return true
-		}
-	}
-	return false
-}
-
-// Returns whether the event has a trailing code execution result. Nil Parts
-// entries are skipped the way hasFunctionCalls and hasFunctionResponses skip
-// them: the trailing part is the last non-nil one, so a stray nil after a
-// code execution result does not change the classification.
-func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range slices.Backward(resp.Content.Parts) {
-		if part != nil {
-			return part.CodeExecutionResult != nil
-		}
-	}
-	return false
-}
 
 // Bounds on a decoded numeric event timestamp, in microseconds: years 1 and
 // 9999. Wide enough for any real event time, narrow enough that a value in the
