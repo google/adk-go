@@ -2318,6 +2318,264 @@ func TestModel_GenerateStream_ErrorsEndTheTurn(t *testing.T) {
 	}
 }
 
+// TestModel_GenerateStream_MissingItemID pins what a turn reports when a
+// function call's argument events carry no item_id. An output_index the call
+// was announced at resolves it. Otherwise a completed terminal event stating
+// every call rebuilds them, and anything else fails the turn, where the call
+// used to vanish and the turn end as a clean stop.
+func TestModel_GenerateStream_MissingItemID(t *testing.T) {
+	const (
+		added     = `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search"}}`
+		delta1    = `{"type":"response.function_call_arguments.delta","item_id":"","delta":"{\"query\":\""}`
+		delta2    = `{"type":"response.function_call_arguments.delta","item_id":"","delta":"cats\"}"}`
+		done      = `{"type":"response.function_call_arguments.done","item_id":"","arguments":""}`
+		doneArgs  = `{"type":"response.function_call_arguments.done","item_id":"","arguments":"{\"query\":\"cats\"}"}`
+		stateCall = `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":"{\"query\":\"cats\"}"}`
+
+		added2 = `{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"lookup"}}`
+		done2  = `{"type":"response.function_call_arguments.done","item_id":"fc_2","arguments":"{\"city\":\"SF\"}"}`
+		state2 = `{"type":"function_call","id":"fc_2","call_id":"call_2","name":"lookup","arguments":"{\"city\":\"SF\"}"}`
+	)
+	completed := func(output string) string {
+		return `{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"completed","output":[` + output + `]}}`
+	}
+	incomplete := `{"type":"response.incomplete","response":{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[` + stateCall + `]}}`
+	failed := `{"type":"response.completed","response":` + bodyFailedEmpty + `}`
+	search := &genai.FunctionCall{Name: "search", ID: "call_1", Args: map[string]any{"query": "cats"}}
+	lookup := &genai.FunctionCall{Name: "lookup", ID: "call_2", Args: map[string]any{"city": "SF"}}
+
+	tests := []struct {
+		name        string
+		events      []string
+		wantErr     error
+		wantErrText string
+		wantCalls   []*genai.FunctionCall
+	}{
+		{
+			name:    "completed event states no calls",
+			events:  []string{evCreated, added, delta1, delta2, done, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states only a message",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"message","content":[{"type":"output_text","text":"hello"}]}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "no terminal event",
+			events:  []string{evCreated, added, delta1, delta2, done},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			// An incomplete event states only part of the output, so it cannot
+			// vouch for the call that streamed without an item_id.
+			name:    "incomplete event states the call",
+			events:  []string{evCreated, added, delta1, delta2, done, incomplete},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "done with inline arguments only",
+			events:  []string{evCreated, added, doneArgs, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "no call announced",
+			events:  []string{evCreated, doneArgs, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "after streamed text",
+			events:  []string{evCreated, evDelta1, added, delta1, delta2, done, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "server-reported failure takes precedence",
+			events:  []string{evCreated, added, delta1, delta2, done, failed},
+			wantErr: shared.ErrResponseFailed,
+		},
+		{
+			name:      "completed event states the call",
+			events:    []string{evCreated, added, delta1, delta2, done, completed(stateCall)},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			name:      "completed event states both calls",
+			events:    []string{evCreated, added2, done2, added, delta1, delta2, done, completed(state2 + "," + stateCall)},
+			wantCalls: []*genai.FunctionCall{lookup, search},
+		},
+		{
+			// Two calls were announced and one is stated: the other cannot be
+			// told apart from a call the event left out.
+			name:    "completed event states only the other call",
+			events:  []string{evCreated, added2, done2, added, delta1, delta2, done, completed(state2)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states the call without arguments",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search"}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states the call with empty arguments",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":""}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states the call without a name",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","call_id":"call_1","arguments":"{\"query\":\"cats\"}"}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "no event carries a response",
+			events:  []string{added, delta1, delta2, done},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states the call without a call ID",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","name":"search","arguments":"{\"query\":\"cats\"}"}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "completed event states unparseable arguments",
+			events:  []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":"{"}`)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "unclaimed deltas and no done event",
+			events:  []string{evCreated, added, delta1, delta2, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:    "unclaimed deltas, no announcement and no done event",
+			events:  []string{evCreated, delta1, delta2, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			// The done event states the arguments, so the deltas lost nothing.
+			name:      "unclaimed deltas, then done with item_id and arguments",
+			events:    []string{evCreated, added, delta1, delta2, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\"query\":\"cats\"}"}`, completed("")},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			// The deltas may be the arguments of the call that never finished.
+			name:    "unclaimed deltas beside an announced call that never finished",
+			events:  []string{evCreated, added, added2, delta1, delta2, done2, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:      "completed event states arguments as an object",
+			events:    []string{evCreated, added, delta1, delta2, done, completed(`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":{"query":"cats"}}`)},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			// The id-less done was never announced, so only the done events
+			// show the turn made two calls.
+			name:    "unannounced call beside a stated one",
+			events:  []string{evCreated, added2, done2, doneArgs, completed(state2)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			// Two calls were announced and only one finished streaming, so
+			// only the announcements show the turn made two calls.
+			name:    "announced call that never finished, beside a stated one",
+			events:  []string{evCreated, added, delta1, delta2, done, added2, completed(stateCall)},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			// Two calls to one tool: the held-back first must not take the
+			// second's ID or arguments when the event rebuilds both.
+			name: "held-back call beside a call to the same tool",
+			events: []string{
+				evCreated, added, delta1, delta2,
+				`{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`,
+				`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_3","call_id":"call_3","name":"search"}}`,
+				`{"type":"response.function_call_arguments.done","item_id":"fc_3","arguments":"{\"query\":\"dogs\"}"}`,
+				completed(stateCall + `,{"type":"function_call","id":"fc_3","call_id":"call_3","name":"search","arguments":"{\"query\":\"dogs\"}"}`),
+			},
+			wantCalls: []*genai.FunctionCall{search, {Name: "search", ID: "call_3", Args: map[string]any{"query": "dogs"}}},
+		},
+		{
+			// Only function calls count against what the event states.
+			name: "a message announced beside the call",
+			events: []string{
+				evCreated,
+				`{"type":"response.output_item.added","item":{"type":"message","id":"msg_1"}}`,
+				added, delta1, delta2, done, completed(stateCall),
+			},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			name: "completed event whose payload reports truncation",
+			events: []string{
+				evCreated, added, delta1, delta2, done,
+				`{"type":"response.completed","response":{"id":"resp_1","model":"stream-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[` + stateCall + `]}}`,
+			},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name:        "a broken stream reports its own error",
+			events:      []string{evCreated, added, delta1, delta2, done, evTruncated},
+			wantErrText: "unexpected end of JSON input",
+		},
+		{
+			name:    "unclaimed deltas, then done naming the call without arguments",
+			events:  []string{evCreated, added, delta1, delta2, `{"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":""}`, completed("")},
+			wantErr: errFunctionCallMissingItemID,
+		},
+		{
+			name: "output_index resolves the call",
+			events: []string{
+				evCreated,
+				`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search"}}`,
+				`{"type":"response.function_call_arguments.delta","item_id":"","output_index":0,"delta":"{\"query\":\""}`,
+				`{"type":"response.function_call_arguments.delta","item_id":"","output_index":0,"delta":"cats\"}"}`,
+				`{"type":"response.function_call_arguments.done","item_id":"","output_index":0,"arguments":""}`,
+				completed(""),
+			},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := runStream(t, tc.events...)
+			// A partial may report a call only as the model made it: a
+			// nameless call, or one missing its arguments, is the bug.
+			made := append([]*genai.FunctionCall{search, lookup}, tc.wantCalls...)
+			for i, resp := range got {
+				if !resp.Partial {
+					continue
+				}
+				for _, call := range functionCalls(resp) {
+					if !slices.ContainsFunc(made, func(want *genai.FunctionCall) bool { return cmp.Equal(call, want) }) {
+						t.Errorf("partial response %d carries a call (name %q, %d args) the model did not make", i, call.Name, len(call.Args))
+					}
+				}
+			}
+			if tc.wantErr != nil || tc.wantErrText != "" {
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+					t.Fatalf("streaming err = %v, want errors.Is(err, %v)", err, tc.wantErr)
+				}
+				if tc.wantErrText != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrText)) {
+					t.Fatalf("streaming err = %v, want it to name %q", err, tc.wantErrText)
+				}
+				for i, resp := range got {
+					if resp.TurnComplete {
+						t.Errorf("response %d has TurnComplete = true, want the error to end the turn", i)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("streaming err = %v, want nil", err)
+			}
+			final := assertTurnShape(t, got)
+			if diff := cmp.Diff(tc.wantCalls, functionCalls(final)); diff != "" {
+				t.Errorf("final function calls mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestModel_GenerateStream_FunctionCall pins that a streamed tool call closes its
 // turn the way a streamed message does.
 func TestModel_GenerateStream_FunctionCall(t *testing.T) {

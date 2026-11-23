@@ -20,7 +20,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	oairesponses "github.com/openai/openai-go/v3/responses"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
 
@@ -128,6 +130,121 @@ func TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent(t *testing.T) {
 	}
 	if part.FunctionCall.Name != "" {
 		t.Errorf("FunctionCall.Name = %q, want empty: the done event is not a name source", part.FunctionCall.Name)
+	}
+}
+
+// TestStreamTranslator_MissingItemID pins how argument events without an
+// item_id are tied to their call: by the output_index
+// "response.output_item.added" announced the item at, and otherwise not at all.
+// A call that cannot be tied to its arguments is not emitted, since it would
+// otherwise reach the tool with none of them, and is recorded for
+// generateStream to decide on.
+func TestStreamTranslator_MissingItemID(t *testing.T) {
+	const (
+		added    = `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search"}}`
+		addedTwo = `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"lookup"}}`
+	)
+	argsEvent := func(kind, idField, extra string) string {
+		return `{"type":"response.function_call_arguments.` + kind + `"` + idField + extra + `}`
+	}
+	delta := func(idField, d string) string { return argsEvent("delta", idField, `,"delta":`+d) }
+	done := func(idField, args string) string { return argsEvent("done", idField, `,"arguments":`+args) }
+	search := &genai.FunctionCall{Name: "search", ID: "call_1", Args: map[string]any{"query": "cats"}}
+
+	tests := []struct {
+		name        string
+		events      []string
+		wantCalls   []*genai.FunctionCall
+		wantMissing bool
+	}{
+		{
+			name:      "empty item_id resolved by output_index",
+			events:    []string{added, delta(`,"item_id":"","output_index":0`, `"{\"query\":\""`), delta(`,"item_id":"","output_index":0`, `"cats\"}"`), done(`,"item_id":"","output_index":0`, `""`)},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			name:      "null item_id resolved by output_index",
+			events:    []string{added, delta(`,"item_id":null,"output_index":0`, `"{\"query\":\"cats\"}"`), done(`,"output_index":0`, `""`)},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			name: "output_index picks the matching call",
+			events: []string{
+				added, addedTwo,
+				delta(`,"item_id":"","output_index":1`, `"{\"city\":\"SF\"}"`), done(`,"item_id":"","output_index":1`, `""`),
+				delta(`,"item_id":"","output_index":0`, `"{\"query\":\"cats\"}"`), done(`,"item_id":"","output_index":0`, `""`),
+			},
+			wantCalls: []*genai.FunctionCall{{Name: "lookup", ID: "call_2", Args: map[string]any{"city": "SF"}}, search},
+		},
+		{
+			// The deltas were not needed: the done event states the arguments.
+			name:      "unclaimed delta then done with item_id and arguments",
+			events:    []string{added, delta(`,"item_id":""`, `"{\"query\":\""`), done(`,"item_id":"fc_1"`, `"{\"query\":\"cats\"}"`)},
+			wantCalls: []*genai.FunctionCall{search},
+		},
+		{
+			name:      "empty unclaimed delta does not hold back a call without arguments",
+			events:    []string{added, delta(`,"item_id":""`, `""`), done(`,"item_id":"fc_1"`, `""`)},
+			wantCalls: []*genai.FunctionCall{{Name: "search", ID: "call_1", Args: map[string]any{}}},
+		},
+		{
+			name:        "unclaimed delta then done with item_id and no arguments",
+			events:      []string{added, delta(`,"item_id":""`, `"{\"query\":\"cats\"}"`), done(`,"item_id":"fc_1"`, `""`)},
+			wantMissing: true,
+		},
+		{
+			name:        "done with empty item_id and no output_index",
+			events:      []string{added, done(`,"item_id":""`, `"{\"query\":\"cats\"}"`)},
+			wantMissing: true,
+		},
+		{
+			name:        "done without item_id",
+			events:      []string{added, done(``, `""`)},
+			wantMissing: true,
+		},
+		{
+			name:        "output_index no item was announced at",
+			events:      []string{added, delta(`,"item_id":"","output_index":3`, `"{\"query\":\"cats\"}"`), done(`,"item_id":"","output_index":3`, `""`)},
+			wantMissing: true,
+		},
+		{
+			// An omitted output_index decodes as 0, which must not claim index 0.
+			name: "announcement without output_index",
+			events: []string{
+				`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search"}}`,
+				delta(`,"item_id":"","output_index":0`, `"{\"query\":\"cats\"}"`), done(`,"item_id":"","output_index":0`, `""`),
+			},
+			wantMissing: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newStreamTranslator()
+			var calls []*genai.FunctionCall
+			for i, body := range tc.events {
+				resp, err := tr.process(decodeEvent(t, body))
+				if err != nil {
+					t.Fatalf("process(event %d) err = %v, want nil", i, err)
+				}
+				if resp == nil {
+					continue
+				}
+				for _, part := range resp.Candidates[0].Content.Parts {
+					if part.FunctionCall != nil {
+						calls = append(calls, part.FunctionCall)
+					}
+				}
+			}
+			if diff := cmp.Diff(tc.wantCalls, calls); diff != "" {
+				t.Errorf("emitted function calls mismatch (-want +got):\n%s", diff)
+			}
+			if tr.missingItemID != tc.wantMissing {
+				t.Errorf("missingItemID = %v, want %v", tr.missingItemID, tc.wantMissing)
+			}
+			if len(tr.functionArgs) != 0 {
+				t.Errorf("arguments still buffered for %d items, want none", len(tr.functionArgs))
+			}
+		})
 	}
 }
 
