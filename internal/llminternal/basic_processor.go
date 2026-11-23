@@ -17,7 +17,10 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"maps"
+	"net/http"
 	"reflect"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -43,6 +46,18 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 			req.Config = &genai.GenerateContentConfig{}
 		}
 
+		if rc := ctx.RunConfig(); rc != nil {
+			if runHTTP := runHTTPOptionsFor(state.Model, rc.HTTPOptions); runHTTP != nil {
+				mergeRunConfigHTTPOptions(req.Config, runHTTP)
+			}
+			if labels := runLabelsFor(state.Model, rc.Labels); len(labels) > 0 {
+				if req.Config.Labels == nil {
+					req.Config.Labels = make(map[string]string, len(labels))
+				}
+				maps.Copy(req.Config.Labels, labels)
+			}
+		}
+
 		// Set OutputSchema directly if no tools are present or native combo support exists.
 		// Otherwise, OutputSchemaRequestProcessor will be used to provide a tool-based workaround.
 		//
@@ -60,6 +75,109 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// TODO: missing features
 		//  populate LLMRequest LiveConnectConfig setting
 	}
+}
+
+// RunHTTPOptionsFilter is implemented by a model connector that cannot send
+// every field of genai.HTTPOptions. Before merging RunConfig.HTTPOptions into
+// a request for such a model, basicRequestProcessor replaces them with what
+// RunHTTPOptions returns, so that options set for every agent of a run do not
+// make this connector refuse the request; adk-python's connectors ignore
+// options they do not use. HTTP options from the agent's own
+// GenerateContentConfig are not filtered, and the connector still validates
+// them.
+//
+// RunHTTPOptions must not modify opts, and returns nil when nothing of opts
+// is left. It may return values that share maps and pointers with opts.
+type RunHTTPOptionsFilter interface {
+	RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions
+}
+
+// runHTTPOptionsFor returns the part of the run's HTTP options opts to merge
+// into a request for llm: all of opts, or what llm's RunHTTPOptions keeps.
+func runHTTPOptionsFor(llm model.LLM, opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts == nil {
+		return nil
+	}
+	if f, ok := llm.(RunHTTPOptionsFilter); ok {
+		return f.RunHTTPOptions(opts)
+	}
+	return opts
+}
+
+// RunLabelsFilter is implemented by a model connector that cannot send every
+// request label. Before merging RunConfig.Labels into a request for such a
+// model, basicRequestProcessor replaces them with what RunLabels returns, so
+// that labels set for every agent of a run do not make this connector refuse
+// the request; adk-python's connectors ignore labels they do not send. Labels
+// from the agent's own GenerateContentConfig are not filtered, and the
+// connector still validates them.
+//
+// RunLabels must not modify labels. It may return labels itself, or nil when
+// none is left.
+type RunLabelsFilter interface {
+	RunLabels(labels map[string]string) map[string]string
+}
+
+// runLabelsFor returns the run's labels to merge into a request for llm: all
+// of *labels, or what llm's RunLabels keeps. It returns nil for nil labels.
+func runLabelsFor(llm model.LLM, labels *map[string]string) map[string]string {
+	if labels == nil {
+		return nil
+	}
+	if f, ok := llm.(RunLabelsFilter); ok {
+		return f.RunLabels(*labels)
+	}
+	return *labels
+}
+
+// mergeRunConfigHTTPOptions merges the invocation's RunConfig.HTTPOptions into
+// cfg.HTTPOptions, following adk-python's _merge_run_config_http_options
+// (flows/llm_flows/basic.py:36-60). cfg must be a per-request copy; runHTTP is
+// never written, and nothing mutable from it is shared with cfg.
+//
+// When the agent sets no HTTPOptions, the request gets a copy of runHTTP,
+// BaseURL and APIVersion included. Otherwise only the request-time fields
+// (Headers, Timeout, RetryOptions, ExtraBody) are merged, and the agent's
+// BaseURL and APIVersion stay: adk-python drops runHTTP's BaseURL and
+// APIVersion in that case, and ADK keeps that behavior.
+func mergeRunConfigHTTPOptions(cfg *genai.GenerateContentConfig, runHTTP *genai.HTTPOptions) {
+	if cfg.HTTPOptions == nil {
+		cfg.HTTPOptions = clone(runHTTP)
+		cfg.HTTPOptions.Headers = canonicalizeHeaders(cfg.HTTPOptions.Headers)
+		return
+	}
+	cfg.HTTPOptions.Headers = canonicalizeHeaders(cfg.HTTPOptions.Headers)
+	if len(runHTTP.Headers) > 0 {
+		if cfg.HTTPOptions.Headers == nil {
+			cfg.HTTPOptions.Headers = make(http.Header, len(runHTTP.Headers))
+		}
+		for k, vals := range runHTTP.Headers {
+			cfg.HTTPOptions.Headers[http.CanonicalHeaderKey(k)] = slices.Clone(vals)
+		}
+	}
+	if runHTTP.Timeout != nil {
+		cfg.HTTPOptions.Timeout = clone(runHTTP.Timeout)
+	}
+	if runHTTP.RetryOptions != nil {
+		cfg.HTTPOptions.RetryOptions = clone(runHTTP.RetryOptions)
+	}
+	if runHTTP.ExtraBody != nil {
+		cfg.HTTPOptions.ExtraBody = clone(runHTTP.ExtraBody)
+	}
+}
+
+// canonicalizeHeaders returns a copy of h with every name in
+// http.CanonicalHeaderKey form, so names that differ only in case collapse to
+// one header. It returns nil for nil.
+func canonicalizeHeaders(h http.Header) http.Header {
+	if h == nil {
+		return nil
+	}
+	out := make(http.Header, len(h))
+	for k, vals := range h {
+		out[http.CanonicalHeaderKey(k)] = slices.Clone(vals)
+	}
+	return out
 }
 
 // CloneGenerateContentConfig returns a copy of cfg, or nil for nil, so callers

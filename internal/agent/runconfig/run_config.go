@@ -18,6 +18,8 @@ import (
 	"context"
 	"sync/atomic"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
 )
 
@@ -40,6 +42,16 @@ type RunConfig struct {
 	// MaxLLMCalls is the resolved model-call budget for this invocation. See
 	// ResolveMaxLLMCalls. Non-positive means no limit.
 	MaxLLMCalls int
+
+	// HTTPOptions is the invocation's agent.RunConfig.HTTPOptions. The flow
+	// reads it from the invocation context; it is kept here for
+	// tool/agenttool, whose tool context has no run config, to forward to the
+	// nested run.
+	HTTPOptions *genai.HTTPOptions
+
+	// Labels is the invocation's agent.RunConfig.Labels, kept here for
+	// tool/agenttool to forward to the nested run, as HTTPOptions is.
+	Labels *map[string]string
 
 	// llmCalls counts model calls made during this invocation, across every
 	// agent it runs, so one budget covers the whole invocation rather than one
