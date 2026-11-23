@@ -1210,6 +1210,14 @@ func encodeEventData(event *session.Event) (any, error) {
 			return nil, fmt.Errorf("firestore: encoding compaction of event %q: %w", event.ID, err)
 		}
 	}
+	// A nil part is not stored, as session/vertexai does: adk-python rejects a
+	// null in a content's parts, and then cannot load the session.
+	dropNilParts(out["content"])
+	if actions, ok := out["actions"].(map[string]any); ok {
+		if comp, ok := actions["compaction"].(map[string]any); ok {
+			dropNilParts(comp["compacted_content"])
+		}
+	}
 	if m := measureFirestoreValue(out); m.ok && m.size <= maxFirestorePayloadBytes && m.values <= maxFirestoreIndexedValues {
 		return out, nil
 	}
@@ -1720,3 +1728,15 @@ func parseRevision(raw any) int64 {
 }
 
 var _ session.Service = (*firestoreService)(nil)
+
+// dropNilParts removes the null entries from the parts of content, an
+// event_data content map.
+func dropNilParts(content any) {
+	cm, ok := content.(map[string]any)
+	if !ok {
+		return
+	}
+	if parts, ok := cm["parts"].([]any); ok {
+		cm["parts"] = slices.DeleteFunc(parts, func(p any) bool { return p == nil })
+	}
+}

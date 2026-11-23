@@ -2218,6 +2218,64 @@ func TestEncodeEventData_KeepsRequestedAuthConfigsVerbatim(t *testing.T) {
 	}
 }
 
+// TestFirestoreService_AppendEvent_SkipsNilParts guards that a nil part is not
+// stored. adk-python rejects a null in a content's parts, and one such event
+// makes the whole session fail to load there.
+func TestFirestoreService_AppendEvent_SkipsNilParts(t *testing.T) {
+	ctx := t.Context()
+	svc, _ := newTestService(t, Config{})
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	event := &session.Event{
+		ID:        "nil-parts",
+		Author:    "agent",
+		Timestamp: time.Unix(1733040002, 0),
+		Actions: session.EventActions{Compaction: &session.EventCompaction{
+			StartTimestamp:   time.Unix(1733040000, 0),
+			EndTimestamp:     time.Unix(1733040001, 0),
+			CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "summary"}, nil}},
+		}},
+	}
+	event.Content = &genai.Content{Role: "model", Parts: []*genai.Part{nil, {Text: "hi"}, nil}}
+	if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	snap, err := svc.client.Doc("adk-session/app/users/user/sessions/s1/events/nil-parts").Get(ctx)
+	if err != nil {
+		t.Fatalf("reading event document: %v", err)
+	}
+	stored, ok := snap.Data()["event_data"].(map[string]any)
+	if !ok {
+		t.Fatal("event_data is not stored as a map")
+	}
+	wantParts := map[string]any{
+		"content":           []any{map[string]any{"text": "hi"}},
+		"compacted_content": []any{map[string]any{"text": "summary"}},
+	}
+	gotParts := map[string]any{
+		"content":           stored["content"].(map[string]any)["parts"],
+		"compacted_content": stored["actions"].(map[string]any)["compaction"].(map[string]any)["compacted_content"].(map[string]any)["parts"],
+	}
+	if diff := cmp.Diff(wantParts, gotParts); diff != "" {
+		t.Errorf("stored parts mismatch (-want +got):\n%s", diff)
+	}
+
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	ev := got.Session.Events().At(0)
+	if diff := cmp.Diff([]*genai.Part{{Text: "hi"}}, ev.Content.Parts); diff != "" {
+		t.Errorf("Content.Parts after Get mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]*genai.Part{{Text: "summary"}}, ev.Actions.Compaction.CompactedContent.Parts); diff != "" {
+		t.Errorf("CompactedContent.Parts after Get mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestFirestoreService_AppendEvent_CacheMetadataRoundTrip guards that context
 // cache state survives storage in adk-python's shape. Without it the next
 // invocation cannot find the cache the last one created, and creates another.
