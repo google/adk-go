@@ -94,9 +94,7 @@ func TestGoldensHaveCases(t *testing.T) {
 // error type: some of each, or none of either. Under the default schema, where
 // spans carry an error type too, the two must also report the same set of
 // error types, counting no error type as one. A metric data point aggregates
-// calls, so the check compares sets rather than calls. It is a narrower form
-// of adk-python's tests/unittests/telemetry/test_semconv_conformance.py, which
-// checks every attribute a span and its metrics share.
+// calls, so the check compares sets rather than calls.
 func checkInferenceErrorTypes(t *testing.T, tc testcasedata.Case, d *telemetrytest.Digest) {
 	t.Helper()
 	spanFailed, spanTypes := map[bool]bool{}, map[any]bool{}

@@ -24,8 +24,6 @@ import (
 	"google.golang.org/adk/v2/model/anthropicmodel"
 )
 
-// Cases from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_token_usage.py
-// that apply to genai Go, where an unreported count is zero.
 func TestFromMetadata(t *testing.T) {
 	text := func(n int32) []*genai.ModalityTokenCount {
 		return []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}}
@@ -119,7 +117,7 @@ func TestFromResponses(t *testing.T) {
 		},
 		{
 			// The newest report decides, even when it counts nothing and an
-			// older one did, as in ADK Python. Its other counts are dropped.
+			// older one did. Its other counts are dropped.
 			"newest report counting no tokens",
 			[]*model.LLMResponse{{UsageMetadata: usage(10, 4)}, {UsageMetadata: &genai.GenerateContentResponseUsageMetadata{CachedContentTokenCount: 3}}},
 			Usage{},

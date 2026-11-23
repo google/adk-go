@@ -376,8 +376,6 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			input: unknown(10), output: unknown(1),
 		},
 		{
-			// Ported from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_metrics.py#L558-L603
-			// without its cache write count, and with unspecified as unknown.
 			name:   "modality split",
 			params: notStreamed,
 			steps: []modelStep{{resp: &model.LLMResponse{
@@ -617,9 +615,8 @@ func TestInstrumentGenerateContent_ChunkTiming(t *testing.T) {
 			wantFirst: 1, wantPer: 2,
 		},
 		{
-			// A model whose aggregate carries the finish reason, such as
-			// adk-python's LiteLLM integration: the aggregate ends the span
-			// untimed.
+			// A model whose aggregate carries the finish reason: the
+			// aggregate ends the span untimed.
 			name:      "aggregate ends the call",
 			steps:     []modelStep{partial(model.LLMResponse{}), partial(model.LLMResponse{}), whole(stop)},
 			wantFirst: 1, wantPer: 1,

@@ -45,8 +45,7 @@ type clientInference struct {
 	err error
 	// lastChunk is when the previous timed chunk arrived, or the zero time
 	// before the first one.
-	lastChunk time.Time
-	// sawPartial reports whether any response so far was marked partial.
+	lastChunk  time.Time
 	sawPartial bool
 }
 
@@ -70,8 +69,8 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 	// ADK's stream aggregator marks each chunk partial, then yields the
 	// answer it assembled from them unmarked. Nothing waited for that
 	// aggregate, so it is not timed. A model that never marks a response
-	// partial has every response timed. Chunks are not checked for new output,
-	// as in adk-python, though the conventions exclude events that carry none.
+	// partial has every response timed. Chunks without new output are timed
+	// too, though the conventions exclude them.
 	aggregate := c.sawPartial && !resp.Partial
 	c.sawPartial = c.sawPartial || resp.Partial
 	if !c.params.Stream || !spanOpen || err != nil || aggregate {

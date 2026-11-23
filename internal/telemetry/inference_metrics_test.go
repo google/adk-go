@@ -21,9 +21,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// Cases from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_metrics.py#L613-L653
-// plus corner cases it lacks. Expectations follow the conventions where they
-// differ from the source.
 func TestSplitByModality(t *testing.T) {
 	details := func(counts ...any) []*genai.ModalityTokenCount {
 		var out []*genai.ModalityTokenCount
