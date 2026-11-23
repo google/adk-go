@@ -208,7 +208,6 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-	recording := false
 	transport, recording := newGeminiTestClientConfig(t, trace)
 	if recording { // if we are recording httprr trace, don't use the fakeKey.
 		apiKey = ""

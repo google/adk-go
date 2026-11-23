@@ -86,6 +86,22 @@ type Config struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// ContextCache enables explicit context caching for the model requests of
+	// every LLM agent this runner drives, so the system instruction, tools and
+	// stable conversation prefix are not resent in full on every turn. Nil, the
+	// default, disables it. It does not apply to [Runner.RunLive].
+	//
+	// When an invocation ends, the runner deletes the caches its model calls
+	// created or stopped using, except those the latest stored record of an
+	// agent still names. It reads the stored session to tell, so an invocation
+	// that only reused a cache reads nothing extra.
+	//
+	// See [model.ContextCacheConfig] for when a cache is created and reused,
+	// and which models and session services support it.
+	//
+	// optional
+	ContextCache *model.ContextCacheConfig
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -147,6 +163,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 
+	if err := cfg.ContextCache.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid ContextCache: %w", err)
+	}
+	// A copy of the caller's config, its HTTP options included, so that a
+	// later change to the caller's headers, timeout or the maps in its extra
+	// body neither reaches running invocations nor races with them.
+	contextCache := llminternal.CloneContextCacheConfig(cfg.ContextCache)
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -157,6 +181,7 @@ func New(cfg Config) (*Runner, error) {
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
+		contextCache:      contextCache,
 	}, nil
 }
 
@@ -247,6 +272,10 @@ type Runner struct {
 	// validated copy of Config.Compaction with the summarizer
 	// resolved.
 	compactionConfig *compaction.Config
+
+	// contextCache is nil when context caching is disabled. Otherwise it is
+	// a validated copy of Config.ContextCache.
+	contextCache *model.ContextCacheConfig
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -533,8 +562,56 @@ func (r *Runner) compactionRuntime() *compactionctx.Runtime {
 	return compactionctx.New(r.compactionConfig, r.sessionService)
 }
 
-// reloadSession re-fetches a session so compaction works against current state
-// rather than the snapshot the invocation began with.
+// withContextCache returns ctx carrying this runner's context cache config and
+// a ledger of its own for the invocation. Both are set even when caching is
+// off, so an invocation never sees the config or ledger of a run it is nested
+// in, such as an agent tool's caller.
+func (r *Runner) withContextCache(ctx context.Context) context.Context {
+	ctx = llminternal.WithContextCacheConfig(ctx, r.contextCache)
+	var ledger *llminternal.ContextCacheLedger
+	if r.contextCache != nil {
+		ledger = llminternal.NewContextCacheLedger()
+	}
+	return llminternal.WithContextCacheLedger(ctx, ledger)
+}
+
+// contextCacheSettleTimeout bounds reading the stored session once an
+// invocation has ended, which a hung store would otherwise hold open. A var so
+// a test can shorten it rather than waiting for the bound to pass.
+var contextCacheSettleTimeout = 30 * time.Second
+
+// settleContextCaches deletes the context caches the invocation's model calls
+// created or stopped using, except those the latest stored record of an agent
+// names. It runs once the invocation has ended, however it ended. A canceled
+// invocation still settles, or its caches would stay on the provider until
+// their TTL runs out.
+//
+// It judges against the session as the session service holds it, not against
+// the invocation's own handle. A service may add an event to the handle before
+// it writes the event, and leave it there when the write fails, as the
+// database service does, so the handle can name a cache the store never
+// recorded. Compaction re-reads the session for the same reason. The read
+// happens only when a cache was created or stopped being used, so most
+// invocations make none.
+func (r *Runner) settleContextCaches(ctx context.Context, sess session.Session) {
+	ledger := llminternal.ContextCacheLedgerFromContext(ctx)
+	if ledger == nil || sess == nil {
+		return
+	}
+	ledger.Settle(context.WithoutCancel(ctx), func(ctx context.Context) (session.Events, error) {
+		ctx, cancel := context.WithTimeout(ctx, contextCacheSettleTimeout)
+		defer cancel()
+		stored, err := r.reloadSession(ctx, sess)
+		if err != nil {
+			return nil, err
+		}
+		return stored.Events(), nil
+	})
+}
+
+// reloadSession re-fetches a session so that compaction and context cache
+// cleanup work against current state rather than the snapshot the invocation
+// began with.
 func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.Session, error) {
 	resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   s.AppName(),
@@ -545,7 +622,7 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 		return nil, fmt.Errorf("failed to re-read the session: %w", err)
 	}
 	if resp == nil || resp.Session == nil {
-		return nil, fmt.Errorf("session %q disappeared while compacting", s.ID())
+		return nil, fmt.Errorf("session %q disappeared before it could be re-read", s.ID())
 	}
 	return resp.Session, nil
 }
@@ -618,6 +695,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
+		telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
@@ -693,6 +771,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+		ctx = r.withContextCache(ctx)
+		defer r.settleContextCaches(ctx, storedSession)
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
@@ -730,7 +810,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		var memoryImpl agent.Memory = nil
+		var memoryImpl agent.Memory
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
@@ -989,7 +1069,21 @@ func (s *closedLiveSession) Close() error {
 
 // RunLive starts a live, bidirectional agent session, returning the session
 // and a stream of events from the agents.
-func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+// Consume the event stream to finish the invocation and its plugin callbacks,
+// including after closing the live session.
+// Closing the session alone does not end or export the invocation span.
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (_ agent.LiveSession, _ iter.Seq2[*session.Event, error], err error) {
+	// Unlike Python's live generator, Go starts callbacks before returning
+	// the session and iterator, so the span must start here too.
+	ctx, span := telemetry.StartInvocationSpan(ctx, r.rootAgent, sessionID)
+	ownedByIterator := false
+	defer func() {
+		if !ownedByIterator {
+			telemetry.RecordError(span, err)
+			span.End()
+		}
+	}()
+
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -999,6 +1093,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if err != nil {
 		return nil, nil, err
 	}
+	telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 	// msg is nil for Live run as it's streaming
 	agentToRun, err := r.findAgentToRun(storedSession, nil)
@@ -1032,7 +1127,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
-	var memoryImpl agent.Memory = nil
+	var memoryImpl agent.Memory
 	if r.memoryService != nil {
 		memoryImpl = &imemory.Memory{
 			Service:   r.memoryService,
@@ -1060,9 +1155,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer span.End()
 				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
+			ownedByIterator = true
 			return &closedLiveSession{}, earlyExitIter, nil
 		}
 	}
@@ -1073,6 +1170,21 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		// Close can precede iteration; keep the span open through the
+		// remaining events and AfterRunCallback.
+		var firstErr error
+		defer func() {
+			telemetry.RecordError(span, firstErr)
+			span.End()
+		}()
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			return emit(ev, err)
+		}
+
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
@@ -1212,6 +1324,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
+	ownedByIterator = true
 	return &runnerLiveSession{
 		sess:          agentSess,
 		r:             r,

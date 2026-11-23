@@ -37,6 +37,11 @@
 //	}
 //	defer bqPlugin.Close()
 //
+// Calling Close on the returned plugin is idempotent across concurrent and
+// repeated calls: shutdown runs once, recovers any panic on the calling
+// goroutine in an individual cleanup step as an error so subsequent cleanup
+// steps still run, and returns the cached error result on every call.
+//
 // Register this plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results, or agent content. ADK invokes plugin
 // callbacks in registration order and stops at the first non-nil replacement or
@@ -54,7 +59,13 @@
 // [Config.DisableSchemaUpgrade] is set, and creates 25 per-event SQL views
 // (such as v_llm_request, v_llm_response, and v_tool_completed; see
 // [Config.ViewDefinitions]) in the background unless [Config.DisableCreateViews]
-// is set. Pre-provisioned append-only deployments that lack table-read
+// is set. Table setup failures invoke [Config.OnSchemaError] before construction
+// returns the error; once table setup (and startup view creation when enabled)
+// succeeds, [Config.OnSchemaReady] is invoked, whereas a failed startup view
+// logs a warning (through a non-default [Config.Logger]) and returns without
+// invoking either [Config.OnSchemaReady] or [Config.OnSchemaError]
+// ([BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly).
+// Pre-provisioned append-only deployments that lack table-read
 // permissions can pass a nil BigQuery client to
 // [NewBigQueryAgentAnalyticsPluginWithClients].
 //
@@ -125,6 +136,42 @@
 //     TestSessionEvents_EmitRichLifecycleTypes in events_test.go, and
 //     TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows in
 //     doc_test.go).
+//   - Reflect-and-retry recovery answers and [Config.ToolResultClassifier]:
+//     Like adk-python, Go records plugin/retryandreflect recovery maps
+//     (response_type "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") as
+//     [EventToolError] before calling [Config.ToolResultClassifier], and
+//     records top-level boolean "isError" or "is_error" maps as
+//     [EventToolError] when the classifier is nil, abstains, panics, or
+//     returns an undefined decision. Unlike adk-python, which copies
+//     error_details or error_type from a reflect-and-retry map into
+//     error_message unconditionally, Go writes the fixed fallback diagnostic
+//     when [Config.ContentFormatter] is set or "content" is in
+//     [Config.PayloadColumnDenylist]; when plugin/retryandreflect is
+//     registered before this plugin, calls to a non-FunctionTool or an
+//     unanswered missing tool skip AfterToolCallback in ADK Go and write no
+//     outcome row; and classifier panic or invalid-verdict warnings omit the
+//     tool name, panic value, and result. (Pinned by
+//     TestDocParity_ToolResultClassifierBuiltInRules in
+//     schema_callbacks_test.go,
+//     TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect
+//     and TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls in
+//     bigquery_agent_analytics_plugin_test.go, and
+//     TestPlugin_ToolResultClassifier_FailuresAreSkipped in
+//     tool_result_classifier_test.go).
+//   - [Config.OnSchemaReady] and [Config.OnSchemaError] run at most once per
+//     plugin: Unlike adk-python, which runs schema and view setup lazily on
+//     events and may retry across events, Go runs table setup eagerly and
+//     synchronously at plugin construction followed by a single background view
+//     sync when views are enabled. Only table setup failures invoke
+//     [Config.OnSchemaError]; a failed startup view logs a warning (through a
+//     non-default [Config.Logger]) and returns without invoking either
+//     [Config.OnSchemaReady] or [Config.OnSchemaError] (while
+//     [BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly),
+//     [Config.OnSchemaReady] runs once when table setup (and startup view
+//     creation when enabled) succeeds, and both callback references are
+//     released once startup settles. (Pinned by
+//     TestDocParity_SchemaCallbacksAtMostOnce and
+//     TestPlugin_SchemaCallbacks_ClosuresReleased in schema_callbacks_test.go).
 //   - [EventAgentResponse] on final events carrying function responses: Go's
 //     final-response check excludes FunctionCall parts, LongRunningToolIDs, and
 //     compaction events, and accepts final events (including events with
