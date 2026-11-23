@@ -4072,8 +4072,6 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 		reqOpts    []option.RequestOption
 		wantHost   string
 		wantSuffix string
-		// wantUA is the User-Agent, when it is not the ADK labels.
-		wantUA string
 	}{
 		{name: "regional endpoint", location: "us-east5", wantHost: regional, wantSuffix: withSuffix},
 		{name: "global endpoint", location: "global", wantHost: "aiplatform.googleapis.com", wantSuffix: withSuffix},
@@ -4088,7 +4086,6 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 		{name: "middleware that leaves the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
 		{name: "middleware that changes the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(proxyHost)}, wantHost: proxyHost, wantSuffix: noSuffix},
 		{name: "middleware that changes the host back", location: "us-east5", baseURL: proxy, reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
-		{name: "caller's User-Agent", location: "us-east5", reqOpts: []option.RequestOption{option.WithHeader("User-Agent", "caller-app/1.0")}, wantHost: regional, wantSuffix: withSuffix, wantUA: "caller-app/1.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4134,12 +4131,6 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 					if len(got) != 1 {
 						t.Fatalf("attempt %d: %s = %q, want one value", i, name, got)
 					}
-					if name == "User-Agent" && tt.wantUA != "" {
-						if got[0] != tt.wantUA {
-							t.Errorf("attempt %d: User-Agent = %q, want %q", i, got[0], tt.wantUA)
-						}
-						continue
-					}
 					adk, rest, _ := strings.Cut(got[0], " ")
 					label, suffix, _ := strings.Cut(adk, "+")
 					if !strings.HasPrefix(label, "google-adk/") || !strings.HasPrefix(rest, "gl-go/") {
@@ -4149,6 +4140,79 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 						t.Errorf("attempt %d: %s = %q, want runtime suffix %q", i, name, got[0], tt.wantSuffix)
 					}
 				}
+			}
+		})
+	}
+}
+
+// A tracking header that RequestOptions replaced, extended or removed is the
+// caller's: it is sent as the caller left it, and the other one still names
+// the hosting runtime.
+func TestNewModel_VertexRuntimeSuffixKeepsCallerHeaders(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("K_SERVICE", "svc")
+
+	// send returns the headers of a request made with reqOpts.
+	send := func(t *testing.T, reqOpts ...option.RequestOption) http.Header {
+		t.Helper()
+		var sent *http.Request
+		m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+			Backend:        anthropicmodel.BackendVertex,
+			Project:        "proj",
+			Location:       "us-east5",
+			TokenSource:    staticTokenSource{token: "vertex-token"},
+			RequestOptions: reqOpts,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				sent = r
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"msg_v","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":4,"output_tokens":1}}`)),
+					Request:    r,
+				}, nil
+			})},
+		})
+		if err != nil {
+			t.Fatalf("NewModel() error = %v", err)
+		}
+		for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("ping")}, false) {
+			if err != nil {
+				t.Fatalf("GenerateContent() error = %v", err)
+			}
+		}
+		if sent == nil {
+			t.Fatal("no request was sent")
+		}
+		return sent.Header
+	}
+	// The labels with and without the runtime suffix, read off a request no
+	// option touched.
+	tagged := send(t).Get("X-Goog-Api-Client")
+	if !strings.Contains(tagged, "+cloud_run ") {
+		t.Fatalf("X-Goog-Api-Client = %q, want the runtime suffix when no option touches it", tagged)
+	}
+	plain := strings.Replace(tagged, "+cloud_run", "", 1)
+
+	tests := []struct {
+		name    string
+		reqOpt  option.RequestOption
+		wantUA  []string
+		wantAPI []string
+	}{
+		{name: "replaced", reqOpt: option.WithHeader("User-Agent", "caller-app/1.0"), wantUA: []string{"caller-app/1.0"}, wantAPI: []string{tagged}},
+		{name: "extended", reqOpt: option.WithHeaderAdd("X-Goog-Api-Client", "caller-lib/2.0"), wantUA: []string{tagged}, wantAPI: []string{plain, "caller-lib/2.0"}},
+		{name: "removed", reqOpt: option.WithHeaderDel("User-Agent"), wantUA: nil, wantAPI: []string{tagged}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := send(t, tt.reqOpt)
+			if diff := cmp.Diff(tt.wantUA, got.Values("User-Agent")); diff != "" {
+				t.Errorf("User-Agent mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantAPI, got.Values("X-Goog-Api-Client")); diff != "" {
+				t.Errorf("X-Goog-Api-Client mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
