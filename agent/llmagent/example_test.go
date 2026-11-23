@@ -78,16 +78,19 @@ func runAndPrint(a agent.Agent, cfg agent.RunConfig) {
 // An AfterModelCallback that replaces a streamed response keeps the
 // response's Partial flag unless it sets Partial itself. Partial: false alone
 // does not count as set, so the replacement of a partial chunk stays partial.
-// Adding PartialSet: true makes the explicit false count, and the replacement
-// becomes a non-partial event.
+// Adding PartialSet: true makes the explicit false count: the replacement of
+// the chunk becomes a complete event of its own, which the runner saves, and
+// the final response of the stream follows as a separate event.
 func ExampleAfterModelCallback() {
 	newAgent := func(explicit bool) agent.Agent {
 		llm := &scriptedResponses{responses: []*model.LLMResponse{
 			{Content: genai.NewContentFromText("secret ", genai.RoleModel), Partial: true},
 			{Content: genai.NewContentFromText("secret plan", genai.RoleModel), FinishReason: genai.FinishReasonStop},
 		}}
+		// redact replaces the streamed chunk and the final response alike, so
+		// the secret reaches neither the client nor the session.
 		redact := func(_ agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
-			if err != nil || resp == nil || !resp.Partial {
+			if err != nil || resp == nil {
 				return nil, err
 			}
 			return &model.LLMResponse{
@@ -115,8 +118,8 @@ func ExampleAfterModelCallback() {
 	// Output:
 	// Partial: false
 	// partial=true error="" text="[redacted]"
-	// partial=false error="" text="secret plan"
+	// partial=false error="" text="[redacted]"
 	// Partial: false, PartialSet: true
 	// partial=false error="" text="[redacted]"
-	// partial=false error="" text="secret plan"
+	// partial=false error="" text="[redacted]"
 }

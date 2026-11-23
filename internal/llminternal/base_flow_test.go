@@ -1837,3 +1837,98 @@ func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
 		})
 	}
 }
+
+// The response callLLM yields, after any after-model replacement, decides where
+// a streamed event ends: a new id is drawn after each complete response it
+// yields. Session services store events by id, so a replacement that completes
+// a partial chunk must not share its id with the response that follows it.
+func TestCallLLMEventIDFollowsAfterModelReplacement(t *testing.T) {
+	text := func(s string) *genai.Content { return genai.NewContentFromText(s, genai.RoleModel) }
+	for _, tc := range []struct {
+		name      string
+		responses []*model.LLMResponse
+		// replacement is what the after-model callback returns for the first
+		// response; it leaves the others alone.
+		replacement *model.LLMResponse
+		wantIDs     []string
+		wantPartial []bool
+	}{
+		{
+			name: "a replacement that completes a partial chunk ends the id",
+			responses: []*model.LLMResponse{
+				{Content: text("a"), Partial: true},
+				{Content: text("ab")},
+			},
+			replacement: &model.LLMResponse{Content: text("x"), PartialSet: true},
+			wantIDs:     []string{"id-1", "id-2"},
+			wantPartial: []bool{false, false},
+		},
+		{
+			name: "a replacement that leaves Partial unset keeps the id",
+			responses: []*model.LLMResponse{
+				{Content: text("a"), Partial: true},
+				{Content: text("ab")},
+			},
+			replacement: &model.LLMResponse{Content: text("x")},
+			wantIDs:     []string{"id-1", "id-1"},
+			wantPartial: []bool{true, false},
+		},
+		{
+			name: "a replacement that marks a complete response partial keeps the id",
+			responses: []*model.LLMResponse{
+				{Content: text("first")},
+				{Content: text("second")},
+			},
+			replacement: &model.LLMResponse{Content: text("x"), Partial: true},
+			wantIDs:     []string{"id-1", "id-1"},
+			wantPartial: []bool{true, false},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draws := 0
+			ctx := platform.WithUUIDProvider(t.Context(), func() string {
+				draws++
+				return fmt.Sprintf("id-%d", draws)
+			})
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{InvocationID: "inv-1"})
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.responses {
+							if !yield(r, nil) {
+								return
+							}
+						}
+					}
+				},
+			}
+			first := tc.responses[0]
+			f := &Flow{Model: m, AfterModelCallbacks: []AfterModelCallback{
+				func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+					if resp != first {
+						return nil, nil
+					}
+					return tc.replacement, nil
+				},
+			}}
+
+			var gotIDs []string
+			var gotPartial []bool
+			for resp, err := range f.callLLM(invCtx, &model.LLMRequest{}, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() returned unexpected error: %v", err)
+				}
+				gotIDs = append(gotIDs, resp.eventID)
+				gotPartial = append(gotPartial, resp.Partial)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, gotIDs); diff != "" {
+				t.Errorf("event ids mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantPartial, gotPartial); diff != "" {
+				t.Errorf("Partial flags mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

@@ -1175,10 +1175,9 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 
 			if callbackResp != nil {
-				resp := &responseWithEventID{
-					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
-					eventID:     resp.eventID,
-				}
+				// generateContent decides whether the event id ends from this
+				// value once the yield returns, so it holds the emitted response.
+				resp.LLMResponse = inheritModelFields(resp.LLMResponse, callbackResp)
 				if !yield(resp, nil) {
 					return
 				}
@@ -1244,6 +1243,10 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	return &merged
 }
 
+// responseWithEventID pairs a response with the id of the event it belongs to.
+// callLLM sets LLMResponse to an after-model callback's replacement before
+// passing the value on, and generateContent reads it back to decide whether
+// the event id ends.
 type responseWithEventID struct {
 	*model.LLMResponse
 	eventID string
@@ -1268,6 +1271,11 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			// and so does an error, because an on-model-error callback may turn
 			// it into a saved event. A new id is drawn when the next response
 			// arrives, never ahead of one.
+			//
+			// Whether a response is complete is read after the yield returns,
+			// from the response the flow emitted, because an after-model
+			// replacement can complete a partial chunk or mark a complete
+			// response partial.
 			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
@@ -1277,11 +1285,13 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 				if eventID == "" {
 					eventID = platform.NewUUID(ctx)
 				}
-				if !yield(&responseWithEventID{resp, eventID}, err) {
+				emitted := &responseWithEventID{resp, eventID}
+				if !yield(emitted, err) {
 					return
 				}
-				// resp is non-nil whenever err is nil; the empty case is skipped above.
-				if err != nil || !resp.Partial {
+				// emitted holds a non-nil response whenever err is nil; the empty
+				// case is skipped above.
+				if err != nil || !emitted.Partial {
 					eventID = ""
 				}
 			}

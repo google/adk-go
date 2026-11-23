@@ -56,14 +56,12 @@ type LLMResponse struct {
 	Partial bool `json:"partial,omitempty"`
 	// PartialSet reports whether Partial was set explicitly on this response.
 	//
-	// adk-python has no such field: its LlmResponse.partial is an
-	// Optional[bool], so an unset partial (None) and an explicit False differ
-	// there. Partial here is a plain bool whose zero value is false, so a
-	// response that leaves Partial unset cannot otherwise be told apart from
-	// one that sets Partial: false. An AfterModelCallback replacement with
-	// Partial: false and PartialSet: true for a partial model response
-	// therefore produces a non-partial event, instead of inheriting
-	// Partial: true from the response it replaces.
+	// Partial is a plain bool, so on its own a response that leaves Partial
+	// unset cannot be told apart from one that sets Partial: false. When an
+	// AfterModelCallback replaces a partial model response, the replacement
+	// inherits Partial: true unless it sets Partial: true or PartialSet: true,
+	// so a replacement with Partial: false and PartialSet: true produces a
+	// non-partial event.
 	//
 	// When Partial is true, the response is always treated as explicitly
 	// partial regardless of PartialSet. The zero value (Partial: false,
