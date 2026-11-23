@@ -280,7 +280,8 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 // nameHostingRuntime is a middleware that makes ADK's tracking labels name the
 // hosting runtime on a request to a Google API endpoint (see
 // [version.TrackingHeader]). A header that no longer holds exactly the labels
-// NewModel set, because RequestOptions replaced or extended it, is left alone.
+// NewModel set, because RequestOptions replaced, extended or removed it, is
+// left alone.
 func nameHostingRuntime(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
 	plain := version.TrackingHeader(nil)
 	if labels := version.TrackingHeader(r.URL); labels != plain {

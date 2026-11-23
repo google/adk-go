@@ -201,7 +201,7 @@ func TestTrackingHeaderDestinationBuiltByHand(t *testing.T) {
 		{dest: &url.URL{Scheme: "https", Host: "bigquery.googleapis.com", Opaque: "//evil.com/mcp"}, wantSuffix: true},
 		{dest: &url.URL{Scheme: "https", Host: "evil.com", Opaque: "//bigquery.googleapis.com/mcp"}},
 		{dest: &url.URL{Scheme: "https", Host: "evil.com", Path: "//bigquery.googleapis.com/mcp"}},
-		// net/http sends only "http" and "https", spelled so.
+		// http.Transport refuses a scheme spelled "HTTPS".
 		{dest: &url.URL{Scheme: "HTTPS", Host: "bigquery.googleapis.com"}},
 		{dest: &url.URL{Host: "bigquery.googleapis.com"}},
 		{dest: &url.URL{}},
