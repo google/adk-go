@@ -288,23 +288,24 @@ func TestTrackingHeaderDestinationIsDialed(t *testing.T) {
 
 	for _, mode := range []struct {
 		name, godebug string
+		// only is a destination that url.Parse takes only with godebug.
+		only string
 	}{
 		{name: "default"},
 		// Go 1.26 added the setting: without it, url.Parse takes a host that
 		// holds more than one colon.
-		{name: "colons in the host", godebug: "urlstrictcolons=0"},
+		{name: "colons in the host", godebug: "urlstrictcolons=0", only: "https://evil.com:443,foo.googleapis.com:443/v1"},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			clearRuntimeEnv(t)
 			t.Setenv("K_SERVICE", "svc")
 			if mode.godebug != "" {
 				t.Setenv("GODEBUG", mode.godebug)
-				const reported = "https://evil.com:443,foo.googleapis.com:443/v1"
-				if _, err := url.Parse(reported); err != nil {
+				if _, err := url.Parse(mode.only); err != nil {
 					t.Skipf("GODEBUG=%s has no effect: %v", mode.godebug, err)
 				}
-				if check(t, reported) {
-					t.Errorf("%q gets the runtime suffix", reported)
+				if check(t, mode.only) {
+					t.Errorf("%q gets the runtime suffix", mode.only)
 				}
 			}
 			connects = 0
