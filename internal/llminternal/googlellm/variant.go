@@ -84,35 +84,22 @@ func IsGemini2OrAbove(model string) bool {
 	return version >= 2.0
 }
 
-// CanUseOutputSchemaWithTools returns true if the model supports an output
-// schema together with tools natively. Mirrors adk-python's
-// can_use_output_schema_with_tools: only Vertex AI for Gemini 2.0+. The
-// Gemini API does not support the combination, so callers must fall back
-// to the set_model_response tool workaround there.
-func CanUseOutputSchemaWithTools(llm model.LLM) bool {
+// GeminiOutputSchemaAndTools reports whether a Gemini model on the Vertex AI
+// backend can pair an output schema with tools natively. Mirrors adk-python's
+// gemini_output_schema_and_tools (src/google/adk/models/_capabilities.py:30-51),
+// which is shared by Gemini.capabilities and the fallback for models that do
+// not implement model.CapabilitiesProvider.
+func GeminiOutputSchemaAndTools(llm model.LLM) bool {
 	if llm == nil {
 		return false
 	}
 	return IsGeminiModel(llm.Name()) &&
-		GetGoogleLLMVariant(llm) == genai.BackendVertexAI &&
-		IsGemini2OrAbove(llm.Name())
+		GetGoogleLLMVariant(llm) == genai.BackendVertexAI
 }
 
 // IsGeminiAPIVariant returns true if the model is a Gemini API model (not Vertex AI).
 func IsGeminiAPIVariant(llm model.LLM) bool {
 	return GetGoogleLLMVariant(llm) == genai.BackendGeminiAPI
-}
-
-// NeedsOutputSchemaProcessor returns true if the Gemini model doesn't
-// support output schema with tools natively and requires the
-// set_model_response tool workaround. Native support is Vertex AI only
-// (Gemini 2.0+); the Gemini API never supports the combination, so every
-// Gemini-API model needs the processor.
-func NeedsOutputSchemaProcessor(llm model.LLM) bool {
-	if llm == nil {
-		return false
-	}
-	return IsGeminiModel(llm.Name()) && !CanUseOutputSchemaWithTools(llm)
 }
 
 // IsGemini3xLive returns true for Gemini 3.x Live models other than Live

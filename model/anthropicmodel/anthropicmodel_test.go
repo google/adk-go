@@ -3952,3 +3952,24 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"ExaAISearch":           true,
 	})
 }
+
+// TestNewModel_DeclaresNoOutputSchemaWithTools checks that an Anthropic model
+// declares it cannot take an output schema next to tools, so an agent with
+// both gets the set_model_response tool, as adk-python's AnthropicLlm does
+// through the base fallback (models/base_llm.py:92-124).
+func TestNewModel_DeclaresNoOutputSchemaWithTools(t *testing.T) {
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-3-7-sonnet-latest", anthropicmodel.ClientConfig{
+		Backend: anthropicmodel.BackendAnthropic,
+		APIKey:  "test-anthropic-key",
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	cp, ok := m.(model.CapabilitiesProvider)
+	if !ok {
+		t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", m)
+	}
+	if cp.Capabilities().OutputSchemaAndTools {
+		t.Error("Capabilities().OutputSchemaAndTools = true, want false")
+	}
+}

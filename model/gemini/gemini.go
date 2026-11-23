@@ -274,4 +274,20 @@ func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
 
-var _ googlellm.GoogleLLM = &geminiModel{}
+// Capabilities returns the resolved capabilities of the Gemini model.
+//
+// OutputSchemaAndTools is true for a Gemini model name whose client uses the
+// Vertex AI backend. The backend comes from the model's own client, not from
+// the GOOGLE_GENAI_USE_VERTEXAI or GOOGLE_GENAI_USE_ENTERPRISE environment
+// variables that adk-python's Gemini.capabilities reads, so a client
+// configured explicitly for one backend is never reported as the other.
+func (m *geminiModel) Capabilities() model.Capabilities {
+	return model.Capabilities{
+		OutputSchemaAndTools: googlellm.GeminiOutputSchemaAndTools(m),
+	}
+}
+
+var (
+	_ googlellm.GoogleLLM        = &geminiModel{}
+	_ model.CapabilitiesProvider = &geminiModel{}
+)
