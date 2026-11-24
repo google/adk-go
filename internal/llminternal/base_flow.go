@@ -1648,6 +1648,16 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							break
 						}
 						result = response
+						// A stop_streaming call in the same batch can run while
+						// the after-tool callbacks do. It finds this tool
+						// registered, cancels it and reports success, so the
+						// stream must not start once they return.
+						if cancelCtx.Err() != nil {
+							if liveImpl != nil {
+								liveImpl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+							}
+							break
+						}
 						go func() {
 							defer func() {
 								if liveImpl != nil {

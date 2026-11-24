@@ -22,6 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
@@ -904,8 +905,15 @@ func TestHandleFunctionCalls_LiveStreamingToolAfterCallback(t *testing.T) {
 		t.Helper()
 		sess := newLiveSessionImpl()
 		sess.activeTools = make(map[string][]activeTask)
+		// Close leaves inputCh open, so the drain exits on done.
+		t.Cleanup(func() { _ = sess.Close() })
 		go func() {
-			for range sess.inputCh {
+			for {
+				select {
+				case <-sess.inputCh:
+				case <-sess.done:
+					return
+				}
 			}
 		}()
 		return sess
@@ -959,6 +967,50 @@ func TestHandleFunctionCalls_LiveStreamingToolAfterCallback(t *testing.T) {
 		if !registered {
 			t.Error("streaming tool was not registered while the after-tool callback ran")
 		}
+	})
+
+	t.Run("stopped while the after-tool callbacks run, the stream does not start", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var ran atomic.Bool
+			streamTool, err := functiontool.NewStreaming(functiontool.Config{
+				Name:        "test_stream",
+				Description: "streams chunks",
+			}, func(_ agent.Context, args Args) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) {
+					ran.Store(true)
+					yield(args.Msg, nil)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess := newLive(t)
+			var stopped bool
+			flow := &Flow{AfterToolCallbacks: []AfterToolCallback{
+				func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+					// What a stop_streaming call from the same batch does when
+					// it runs while this callback is still running.
+					stopped = sess.CancelAllStreamingTools("test_stream")
+					return nil, nil
+				},
+			}}
+
+			run(t, flow, streamTool, sess)
+			synctest.Wait()
+
+			if !stopped {
+				t.Fatal("stop found no registered streaming tool")
+			}
+			if ran.Load() {
+				t.Error("streaming tool started after it was stopped")
+			}
+			sess.mu.Lock()
+			left := len(sess.activeTools["test_stream"])
+			sess.mu.Unlock()
+			if left != 0 {
+				t.Errorf("%d streaming tools still registered, want 0", left)
+			}
+		})
 	})
 
 	t.Run("after-tool callback failure keeps the stream from starting", func(t *testing.T) {
