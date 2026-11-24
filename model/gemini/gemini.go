@@ -39,17 +39,19 @@
 //
 // A request that already names a cache in its own config is sent as it is.
 //
-// Each request with a CacheConfig gets a handle_context_caching span, a child
-// of the generate_content span when an agent makes the call. Its cache_action
-// attribute is active_cache, with the cache in cache_name, when the request is
-// sent through a cache, and fingerprint_only when it is sent without one. A
-// request that names its own cache carries no cache_action. A create_cache
-// child span covers each call that creates a cache, and a delete_cache span
-// each call that deletes one. A create or delete the provider refused leaves
-// its span failed, with the provider's error. A request resent without a
-// missing cache gets a second handle_context_caching span, marked
-// fingerprint_only. The span names and attributes are adk-python's, apart from
-// delete_cache, which adk-python does not have.
+// Each request with a CacheConfig gets one handle_context_caching span, a
+// child of the generate_content span when an agent makes the call. Its
+// cache_action attribute is active_cache, with the cache in cache_name, when
+// the request is sent through a cache, its own included, and fingerprint_only
+// when it is sent without one. A create_cache child span covers each call that
+// creates a cache, and a delete_cache span each call that deletes one. A create
+// or delete that fails, whether the provider refuses it, it times out or it is
+// canceled, leaves its span failed with the error. Deleting a cache the
+// provider no longer holds is not a failure. A request resent without a missing
+// cache adds a context_cache_missing event, with the cache's name and the
+// provider's error, to the span the call was made under. The span names and
+// attributes are adk-python's, apart from delete_cache and
+// context_cache_missing, which adk-python does not have.
 package gemini
 
 import (
@@ -169,7 +171,7 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
 		spanCtx, span := telemetry.StartHandleContextCachingSpan(ctx)
 		plan := cache.prepare(spanCtx, req)
-		telemetry.TraceContextCacheAction(span, plan.metadata)
+		telemetry.TraceContextCacheAction(span, plan.req.Config.CachedContent)
 		span.End()
 
 		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
@@ -217,7 +219,7 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		// The prefix is unchanged, so the next request can create a cache for
 		// it straight away.
 		plan = cachePlan{req: req, metadata: fingerprintOnly(plan.metadata), stale: plan.stale}
-		telemetry.TraceContextCacheRetry(ctx, missing, missingErr)
+		telemetry.TraceContextCacheMissing(ctx, missing, missingErr)
 		attempt(plan.req)
 	}
 }

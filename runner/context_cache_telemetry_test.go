@@ -60,8 +60,17 @@ func TestRunner_ContextCacheSpans(t *testing.T) {
 		name string
 		api  *cachingGeminiAPI
 		cfg  *model.ContextCacheConfig
-		want []string
+		// afterTurn, when set, runs after each turn, numbered from 1.
+		afterTurn func(api *cachingGeminiAPI, turn int)
+		want      []string
+		// wantMissing counts the context_cache_missing events expected on
+		// generate_content spans.
+		wantMissing int
 	}{
+		{
+			name: "caching off emits no span",
+			api:  &cachingGeminiAPI{},
+		},
 		{
 			name: "caches created and reused",
 			api:  &cachingGeminiAPI{},
@@ -87,6 +96,26 @@ func TestRunner_ContextCacheSpans(t *testing.T) {
 			},
 		},
 		{
+			// The runner deletes the missing cache once the invocation ends,
+			// and the provider answers 404 for it.
+			name: "a cache the provider dropped",
+			api:  &cachingGeminiAPI{},
+			cfg:  &model.ContextCacheConfig{},
+			afterTurn: func(api *cachingGeminiAPI, turn int) {
+				if turn == 2 {
+					api.forget("cachedContents/1")
+				}
+			},
+			want: []string{
+				"handle_context_caching fingerprint_only",
+				"create_cache cachedContents/1",
+				"handle_context_caching active_cache",
+				"handle_context_caching active_cache",
+				"delete_cache cachedContents/1",
+			},
+			wantMissing: 1,
+		},
+		{
 			name: "deletion of a replaced cache refused",
 			api:  &cachingGeminiAPI{deleteStatus: http.StatusInternalServerError},
 			cfg:  &model.ContextCacheConfig{CacheIntervals: 1},
@@ -110,6 +139,9 @@ func TestRunner_ContextCacheSpans(t *testing.T) {
 				if err := runTurn(t, r, turn); err != nil {
 					t.Fatalf("turn %d failed: %v", turn, err)
 				}
+				if tt.afterTurn != nil {
+					tt.afterTurn(tt.api, turn)
+				}
 			}
 
 			if diff := cmp.Diff(tt.want, cacheSpanSummary(exp)); diff != "" {
@@ -117,10 +149,19 @@ func TestRunner_ContextCacheSpans(t *testing.T) {
 			}
 			// Each decision belongs to the model call it was made for.
 			calls := map[string]bool{}
+			missing := 0
 			for _, s := range exp.GetSpans() {
 				if strings.HasPrefix(s.Name, "generate_content") {
 					calls[s.SpanContext.SpanID().String()] = true
+					for _, e := range s.Events {
+						if e.Name == "context_cache_missing" {
+							missing++
+						}
+					}
 				}
+			}
+			if missing != tt.wantMissing {
+				t.Errorf("context_cache_missing events on generate_content spans = %d, want %d", missing, tt.wantMissing)
 			}
 			for _, s := range exp.GetSpans() {
 				if s.Name == "handle_context_caching" && !calls[s.Parent.SpanID().String()] {
@@ -128,26 +169,5 @@ func TestRunner_ContextCacheSpans(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestRunner_ContextCacheOffEmitsNoSpans checks that a runner without a
-// ContextCache config emits no context cache span.
-func TestRunner_ContextCacheOffEmitsNoSpans(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
-	r, _ := newCachingRunner(t, cachingAgent(t, &cachingGeminiAPI{}, llmagent.Config{}), nil)
-
-	for turn := 1; turn <= 3; turn++ {
-		if err := runTurn(t, r, turn); err != nil {
-			t.Fatalf("turn %d failed: %v", turn, err)
-		}
-	}
-
-	if got := cacheSpanSummary(exp); len(got) != 0 {
-		t.Errorf("context cache spans = %q, want none", got)
-	}
-	if len(exp.GetSpans()) == 0 {
-		t.Fatal("no spans recorded at all, so this test checks nothing")
 	}
 }

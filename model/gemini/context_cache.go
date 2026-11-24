@@ -90,10 +90,10 @@ const cacheCleanupTimeout = 30 * time.Second
 //     adk-python passes the caller's config on, with the TTL capped at five
 //     minutes (tools/agent_tool.py).
 //   - A cache that cannot be created or deleted is reported on the
-//     create_cache or delete_cache span, which records the provider's error,
-//     rather than in a warning log, since ADK Go library code has no logger.
-//     adk-python has no delete_cache span. The request goes ahead uncached,
-//     as in adk-python.
+//     create_cache or delete_cache span, which records the error, rather than
+//     in a warning log, since ADK Go library code has no logger. adk-python
+//     has no delete_cache span. The request goes ahead uncached, as in
+//     adk-python.
 type contextCache struct {
 	client *genai.Client
 	// model is the name the request is sent to, which explicit caches are
@@ -229,7 +229,8 @@ func (c *contextCache) finish(ctx context.Context, plan cachePlan, responded boo
 // deleteCache deletes the named cache. It runs once the request that decided
 // to delete it has ended, possibly by cancellation, so it uses a context that
 // outlives one. A failure is recorded on its delete_cache span and otherwise
-// ignored: the cache expires on its own when its TTL runs out.
+// ignored: the cache expires on its own when its TTL runs out. A cache the
+// provider no longer holds is not a failure, since the delete wanted it gone.
 func (c *contextCache) deleteCache(ctx context.Context, name string) {
 	if name == "" {
 		return
@@ -239,6 +240,11 @@ func (c *contextCache) deleteCache(ctx context.Context, name string) {
 	ctx, cancel := context.WithTimeout(ctx, cacheCleanupTimeout)
 	defer cancel()
 	_, err := c.client.Caches.Delete(ctx, name, &genai.DeleteCachedContentConfig{HTTPOptions: c.httpOptions(nil)})
+	if isMissingCacheError(err) {
+		// Expired, deleted elsewhere, or the cache a request just found
+		// missing.
+		return
+	}
 	telemetry.RecordError(span, err)
 }
 
@@ -384,7 +390,7 @@ func declarationName(d *genai.FunctionDeclaration) string {
 // with fingerprint as the prefix's. It returns nil, creating nothing, when no
 // earlier prompt size is known, when that prompt was below MinTokens, when the
 // prefix is estimated to fall below the model's minimum cache size, or when
-// the provider refuses, which its create_cache span records.
+// the call fails, which its create_cache span records.
 func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, count int, fingerprint string) *model.CacheMetadata {
 	if req.PreviousPromptTokenCount <= 0 || fingerprint == "" {
 		return nil

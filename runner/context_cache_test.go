@@ -114,6 +114,11 @@ func (f *cachingGeminiAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.live[name] = true
 		_, _ = fmt.Fprintf(w, `{"name": %q, "expireTime": %q}`, name, time.Now().Add(time.Hour).Format(time.RFC3339))
 	case r.Method == http.MethodDelete:
+		if name := r.URL.Path[strings.Index(r.URL.Path, "cachedContents/"):]; !f.live[name] {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"error": {"code": 404, "message": "CachedContent not found (or permission denied)", "status": "NOT_FOUND"}}`)
+			return
+		}
 		if f.deleteStatus != 0 {
 			w.WriteHeader(f.deleteStatus)
 			_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "INTERNAL"}}`, f.deleteStatus)

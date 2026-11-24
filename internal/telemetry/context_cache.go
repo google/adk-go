@@ -19,20 +19,20 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
-
-	"google.golang.org/adk/v2/model"
 )
 
 // Span names and attribute keys of context caching. The first two spans and
 // every key match adk-python (models/google_llm.py and
 // models/gemini_context_cache_manager.py), so treat them as fixed. adk-python
-// has no delete_cache span: it logs a failed deletion instead, and ADK Go
-// library code has no logger.
+// has no delete_cache span or context_cache_missing event: it logs a failed
+// deletion, and fails a request naming a missing cache.
 const (
 	handleContextCachingName = "handle_context_caching"
 	createCacheName          = "create_cache"
 	deleteCacheName          = "delete_cache"
+	contextCacheMissingName  = "context_cache_missing"
 )
 
 // Values of the cache_action attribute.
@@ -58,17 +58,16 @@ func StartHandleContextCachingSpan(ctx context.Context) (context.Context, trace.
 	return tracer().Start(ctx, handleContextCachingName)
 }
 
-// TraceContextCacheAction records on span which cache action m describes: an
-// active cache and its name, or a request sent without a cache. A nil m, a
-// request caching does not apply to, records nothing, as in adk-python.
-func TraceContextCacheAction(span trace.Span, m *model.CacheMetadata) {
-	switch {
-	case m == nil:
-	case m.Active():
-		span.SetAttributes(contextCacheAction.String(ContextCacheActionActive), contextCacheName.String(m.CacheName))
-	default:
+// TraceContextCacheAction records on span the cache action of a request that
+// is sent naming the cache name: active_cache and the name, or
+// fingerprint_only when name is empty. A request that names its own cache is
+// active_cache too, as adk-python records a pre-created cache.
+func TraceContextCacheAction(span trace.Span, name string) {
+	if name == "" {
 		span.SetAttributes(contextCacheAction.String(ContextCacheActionFingerprintOnly))
+		return
 	}
+	span.SetAttributes(contextCacheAction.String(ContextCacheActionActive), contextCacheName.String(name))
 }
 
 // StartCreateCacheSpanParams contains parameters for [StartCreateCacheSpan].
@@ -103,19 +102,20 @@ func TraceCreateCacheResult(span trace.Span, name string, err error) {
 }
 
 // StartDeleteCacheSpan starts the span covering one call that deletes the
-// named context cache. Record its outcome with [RecordError].
+// named context cache. Record a failure with [RecordError].
 func StartDeleteCacheSpan(ctx context.Context, name string) (context.Context, trace.Span) {
 	return tracer().Start(ctx, deleteCacheName, trace.WithAttributes(contextCacheName.String(name)))
 }
 
-// TraceContextCacheRetry records a request that named the cache name, which
-// the provider no longer holds, and is being sent again without it. It opens
-// a second handle_context_caching span, marked fingerprint_only and carrying
-// err as an event, so the request's last cache action is the one that stands.
-// The span is not marked failed: the request goes on.
-func TraceContextCacheRetry(ctx context.Context, name string, err error) {
-	_, span := StartHandleContextCachingSpan(ctx)
-	defer span.End()
-	span.SetAttributes(contextCacheAction.String(ContextCacheActionFingerprintOnly))
-	span.RecordError(err, trace.WithAttributes(contextCacheName.String(name)))
+// TraceContextCacheMissing records, on the span in ctx, that a request named
+// the cache name, which the provider no longer holds, and is being sent again
+// without it. Under an agent that span is the request's generate_content span.
+// It is an event rather than a second handle_context_caching span, so a
+// request has one cache action, as in adk-python, and it leaves the span's
+// status alone: the request goes on.
+func TraceContextCacheMissing(ctx context.Context, name string, err error) {
+	trace.SpanFromContext(ctx).AddEvent(contextCacheMissingName, trace.WithAttributes(
+		contextCacheName.String(name),
+		semconv.ExceptionMessage(err.Error()),
+	))
 }

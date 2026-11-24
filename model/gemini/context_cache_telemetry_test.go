@@ -105,12 +105,27 @@ func TestGenerateContent_ContextCacheSpans(t *testing.T) {
 		createStatus int
 		deleteStatus int
 		createNoName bool
-		metadata     func(fp string) *model.CacheMetadata
-		want         []cacheSpan
+		// gone names caches the provider no longer holds.
+		gone map[string]bool
+		// off sends the request with caching off.
+		off bool
+		// ownCache is a cache the request names in its own config.
+		ownCache string
+		metadata func(fp string) *model.CacheMetadata
+		want     []cacheSpan
 	}{
+		{
+			name: "caching off emits no span",
+			off:  true,
+		},
 		{
 			name: "first request is sent without a cache",
 			want: []cacheSpan{handle("fingerprint_only", "")},
+		},
+		{
+			name:     "a request naming its own cache",
+			ownCache: "cachedContents/mine",
+			want:     []cacheSpan{handle("active_cache", "cachedContents/mine")},
 		},
 		{
 			name:     "a created cache",
@@ -150,6 +165,17 @@ func TestGenerateContent_ContextCacheSpans(t *testing.T) {
 			},
 		},
 		{
+			// Typical of a cache that expired: the provider dropped it first.
+			name:     "deleting a cache the provider already dropped is not a failure",
+			gone:     map[string]bool{"cachedContents/old": true},
+			metadata: func(fp string) *model.CacheMetadata { return active(fp, cacheTestNow) },
+			want: []cacheSpan{
+				created,
+				handle("active_cache", "cachedContents/1"),
+				{Name: "delete_cache", Attrs: map[string]any{"cache_name": "cachedContents/old"}},
+			},
+		},
+		{
 			name:         "a refused deletion records the provider's error",
 			deleteStatus: http.StatusInternalServerError,
 			metadata:     func(fp string) *model.CacheMetadata { return active(fp, cacheTestNow) },
@@ -174,9 +200,13 @@ func TestGenerateContent_ContextCacheSpans(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			spans := recordCacheSpans(t)
-			api := &fakeCacheAPI{createStatus: tt.createStatus, deleteStatus: tt.deleteStatus, createNoName: tt.createNoName, expireTime: expire}
+			api := &fakeCacheAPI{createStatus: tt.createStatus, deleteStatus: tt.deleteStatus, createNoName: tt.createNoName, gone: tt.gone, expireTime: expire}
 			m := newCacheTestModel(t, api, "test-model")
 			req := cacheTestRequest(cfg)
+			if tt.off {
+				req.CacheConfig = nil
+			}
+			req.Config.CachedContent = tt.ownCache
 			req.PreviousPromptTokenCount = 5000
 			if tt.metadata != nil {
 				req.CacheMetadata = tt.metadata(fingerprintOf(m, cacheTestRequest(nil), 2))
@@ -257,54 +287,59 @@ func TestGenerateContent_ContextCacheSpanLedgerDeletion(t *testing.T) {
 }
 
 // TestGenerateContent_ContextCacheSpanMissingCache checks that a request
-// resent without a cache the provider no longer holds is traced as uncached,
-// with the provider's error, after the span that named the cache.
+// resent without a cache the provider no longer holds keeps one cache action,
+// adds an event naming the missing cache to the span the call was made under,
+// and does not count deleting that cache as a failure.
 func TestGenerateContent_ContextCacheSpanMissingCache(t *testing.T) {
-	spans := recordCacheSpans(t)
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	telemetry.OverrideTracerForTesting(t, tp)
 	api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/gone": true}}
 	m := newCacheTestModel(t, api, "test-model")
 	req := cacheTestRequest(&model.ContextCacheConfig{})
 	req.CacheMetadata = &model.CacheMetadata{CacheName: "cachedContents/gone", ExpireTime: cacheTestNow.Add(time.Hour), InvocationsUsed: 1, Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+	// Stands in for the generate_content span the flow opens.
+	ctx, call := tp.Tracer("test").Start(cacheTestContext(t), "call")
 
-	generateOnce(t, cacheTestContext(t), m, req)
+	generateOnce(t, ctx, m, req)
+	call.End()
 
-	want := []cacheSpan{
-		{Name: "handle_context_caching", Attrs: map[string]any{"cache_action": "active_cache", "cache_name": "cachedContents/gone"}},
-		{Name: "delete_cache", Attrs: map[string]any{"cache_name": "cachedContents/gone"}},
-		{Name: "handle_context_caching", Attrs: map[string]any{"cache_action": "fingerprint_only"}, Error: "failed to call model: Error 404, Message: CachedContent not found (or permission denied)"},
+	var got []string
+	var events []map[string]string
+	for _, s := range exp.GetSpans() {
+		switch s.Name {
+		case "call":
+			for _, e := range s.Events {
+				attrs := map[string]string{"name": e.Name}
+				for _, a := range e.Attributes {
+					attrs[string(a.Key)] = a.Value.AsString()
+				}
+				events = append(events, attrs)
+			}
+		case "handle_context_caching", "delete_cache":
+			line := s.Name
+			for _, a := range s.Attributes {
+				line += " " + string(a.Key) + "=" + a.Value.AsString()
+			}
+			if s.Status.Code == codes.Error {
+				line += " failed"
+			}
+			got = append(got, line)
+		}
 	}
-	if diff := cmp.Diff(want, trimErrors(spans())); diff != "" {
+	wantSpans := []string{
+		"handle_context_caching cache_action=active_cache cache_name=cachedContents/gone",
+		"delete_cache cache_name=cachedContents/gone",
+	}
+	if diff := cmp.Diff(wantSpans, got); diff != "" {
 		t.Errorf("context cache spans mismatch (-want +got):\n%s", diff)
 	}
-}
-
-// TestGenerateContent_ContextCacheSpanExplicitCache checks that a request
-// naming its own cache records no cache action, since none was decided.
-func TestGenerateContent_ContextCacheSpanExplicitCache(t *testing.T) {
-	spans := recordCacheSpans(t)
-	m := newCacheTestModel(t, &fakeCacheAPI{}, "test-model")
-	req := cacheTestRequest(&model.ContextCacheConfig{})
-	req.Config.CachedContent = "cachedContents/mine"
-
-	generateOnce(t, cacheTestContext(t), m, req)
-
-	want := []cacheSpan{{Name: "handle_context_caching", Attrs: map[string]any{}}}
-	if diff := cmp.Diff(want, spans()); diff != "" {
-		t.Errorf("context cache spans mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// TestGenerateContent_NoContextCacheSpans checks that a request without a
-// cache config emits no context cache span.
-func TestGenerateContent_NoContextCacheSpans(t *testing.T) {
-	spans := recordCacheSpans(t)
-	m := newCacheTestModel(t, &fakeCacheAPI{}, "test-model")
-	req := cacheTestRequest(nil)
-	req.PreviousPromptTokenCount = 5000
-
-	generateOnce(t, cacheTestContext(t), m, req)
-
-	if got := spans(); len(got) != 0 {
-		t.Errorf("context cache spans = %+v, want none", got)
+	wantEvents := []map[string]string{{
+		"name":              "context_cache_missing",
+		"cache_name":        "cachedContents/gone",
+		"exception.message": "failed to call model: Error 404, Message: CachedContent not found (or permission denied), Status: NOT_FOUND, Details: []",
+	}}
+	if diff := cmp.Diff(wantEvents, events); diff != "" {
+		t.Errorf("events on the calling span mismatch (-want +got):\n%s", diff)
 	}
 }
