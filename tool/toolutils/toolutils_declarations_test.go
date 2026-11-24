@@ -24,9 +24,11 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-// A genai.Tool with an empty declaration list is not a function tool, so
-// PackTool does not add declarations to it.
-func TestPackTool_SkipsGenaiToolWithEmptyDeclarations(t *testing.T) {
+// PackTool prefers the first genai.Tool that already holds declarations, falls
+// back to the first bare genai.Tool placeholder (nil or empty declaration list
+// and no other field set), and skips non-function tools even when their
+// declaration list is an empty slice.
+func TestPackTool_EmptyDeclarationsSelection(t *testing.T) {
 	decls := func(names ...string) []*genai.FunctionDeclaration {
 		out := []*genai.FunctionDeclaration{}
 		for _, n := range names {
@@ -40,9 +42,32 @@ func TestPackTool_SkipsGenaiToolWithEmptyDeclarations(t *testing.T) {
 		want  [][]string
 	}{
 		{
-			name:  "only an empty genai.Tool",
+			name:  "bare genai.Tool with empty declarations",
 			tools: []*genai.Tool{{FunctionDeclarations: decls()}},
-			want:  [][]string{{}, {"new"}},
+			want:  [][]string{{"new"}},
+		},
+		{
+			name:  "two bare genai.Tools fills the first",
+			tools: []*genai.Tool{{FunctionDeclarations: decls()}, {FunctionDeclarations: decls()}},
+			want:  [][]string{{"new"}, {}},
+		},
+		{
+			name:  "zero genai.Tool with nil declarations",
+			tools: []*genai.Tool{{}},
+			want:  [][]string{{"new"}},
+		},
+		{
+			name:  "nil entry before bare genai.Tool",
+			tools: []*genai.Tool{nil, {FunctionDeclarations: decls()}},
+			want:  [][]string{nil, {"new"}},
+		},
+		{
+			name: "genai.Tool with GoogleSearch and empty declarations",
+			tools: []*genai.Tool{{
+				GoogleSearch:         &genai.GoogleSearch{},
+				FunctionDeclarations: decls(),
+			}},
+			want: [][]string{{}, {"new"}},
 		},
 		{
 			name: "empty genai.Tool before two with declarations",
@@ -64,6 +89,10 @@ func TestPackTool_SkipsGenaiToolWithEmptyDeclarations(t *testing.T) {
 
 			got := [][]string{}
 			for _, gt := range req.Config.Tools {
+				if gt == nil {
+					got = append(got, nil)
+					continue
+				}
 				names := []string{}
 				for _, d := range gt.FunctionDeclarations {
 					names = append(names, d.Name)

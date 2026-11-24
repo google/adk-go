@@ -37,10 +37,10 @@ func (t declaredTool) Name() string                            { return t.name }
 func (t declaredTool) Declaration() *genai.FunctionDeclaration { return t.decl }
 
 // PackTool adds each declaration to the first genai.Tool that already holds
-// function declarations, skipping tools such as Google Search and a
-// genai.Tool whose declaration list is empty, and adds a new genai.Tool when
-// none qualifies. A tool without a declaration is registered in req.Tools and
-// adds nothing to req.Config.Tools; the LLM flow deletes that entry before
+// function declarations, or to the first bare genai.Tool placeholder when none
+// does, skipping non-function tools such as Google Search, and appends a new
+// genai.Tool otherwise. A tool without a declaration is registered in req.Tools
+// and adds nothing to req.Config.Tools; the LLM flow deletes that entry before
 // the model sees the request.
 func ExamplePackTool() {
 	req := &model.LLMRequest{Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{
@@ -66,7 +66,6 @@ func ExamplePackTool() {
 	fmt.Println("registered:", slices.Sorted(maps.Keys(req.Tools)))
 	// Output:
 	// Config.Tools[0]: google search true, declarations []
-	// Config.Tools[1]: google search false, declarations []
-	// Config.Tools[2]: google search false, declarations [get_weather get_time]
+	// Config.Tools[1]: google search false, declarations [get_weather get_time]
 	// registered: [audit_log get_time get_weather]
 }

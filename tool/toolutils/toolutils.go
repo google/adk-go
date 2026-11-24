@@ -20,6 +20,7 @@ package toolutils
 
 import (
 	"fmt"
+	"reflect"
 
 	"google.golang.org/genai"
 
@@ -35,8 +36,10 @@ type Tool interface {
 
 // PackTool registers t in req.Tools under t.Name() and appends t's function
 // declaration to the first genai.Tool of req.Config.Tools whose
-// FunctionDeclarations list is not empty, or to a new genai.Tool when there is
-// none, so successive calls share one genai.Tool.
+// FunctionDeclarations list is not empty, or, when there is none, to the first
+// bare genai.Tool (one with a nil or empty FunctionDeclarations slice and no
+// other field set), or to a new genai.Tool appended to req.Config.Tools, so
+// successive calls share one genai.Tool.
 //
 // A tool whose Declaration returns nil is registered and adds no declaration.
 // The LLM flow does not offer such a tool to the model, and a function call to
@@ -61,13 +64,23 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 	if decl := t.Declaration(); decl == nil {
 		return nil
 	}
-	// Find an existing genai.Tool with FunctionDeclarations
-	var funcTool *genai.Tool
+	// Prefer the first genai.Tool that already has function declarations; fall
+	// back to the first bare genai.Tool placeholder.
+	var funcTool, placeholder *genai.Tool
 	for _, tool := range req.Config.Tools {
-		if tool != nil && len(tool.FunctionDeclarations) > 0 {
+		if tool == nil {
+			continue
+		}
+		if len(tool.FunctionDeclarations) > 0 {
 			funcTool = tool
 			break
 		}
+		if placeholder == nil && isBareTool(*tool) {
+			placeholder = tool
+		}
+	}
+	if funcTool == nil {
+		funcTool = placeholder
 	}
 	if funcTool == nil {
 		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
@@ -77,4 +90,10 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
 	}
 	return nil
+}
+
+// isBareTool reports whether t has no field other than FunctionDeclarations set.
+func isBareTool(t genai.Tool) bool {
+	t.FunctionDeclarations = nil
+	return reflect.ValueOf(t).IsZero()
 }
