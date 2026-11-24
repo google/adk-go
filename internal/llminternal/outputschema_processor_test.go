@@ -347,4 +347,3 @@ func TestSetModelResponseTool(t *testing.T) {
 		}
 	})
 }
-

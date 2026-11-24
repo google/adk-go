@@ -121,7 +121,7 @@ func needOutputSchemaProcessor(state *State) bool {
 	}
 	// Unlike Python's combo-only capability, this opt-in also covers endpoints
 	// without native structured output when no other tools are configured.
-	if m, ok := state.Model.(interface{ UseOutputSchemaTool() bool }); ok && m.UseOutputSchemaTool() {
+	if m, ok := state.Model.(model.OutputSchemaTool); ok && m.UseOutputSchemaTool() {
 		return true
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
