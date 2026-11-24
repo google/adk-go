@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -52,7 +54,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 
 	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
-			for i := 0; i < args.Count; i++ {
+			for i := range args.Count {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
 					return
 				}
@@ -222,6 +224,155 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 				t.Errorf("FunctionResponse error = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// customStreamTool is a streaming tool that is not built with
+// functiontool.NewStreaming, so nothing recovers its panic before the flow.
+type customStreamTool struct {
+	stream iter.Seq2[string, error]
+}
+
+func (customStreamTool) Name() string                            { return "custom_stream" }
+func (customStreamTool) Description() string                     { return "custom stream" }
+func (customStreamTool) IsLongRunning() bool                     { return false }
+func (customStreamTool) Declaration() *genai.FunctionDeclaration { return nil }
+
+func (c customStreamTool) RunStream(agent.Context, any) iter.Seq2[string, error] {
+	return c.stream
+}
+
+func TestHandleFunctionCalls_CustomStreamingToolPanic(t *testing.T) {
+	toolsDict := map[string]tool.Tool{"custom_stream": customStreamTool{
+		stream: func(func(string, error) bool) { _ = any(12345.0).(string) },
+	}}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "custom_stream", Args: map[string]any{}},
+	}}}}
+	newInvCtx := func(t *testing.T) agent.InvocationContext {
+		return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		})
+	}
+
+	t.Run("non-live", func(t *testing.T) {
+		mergedEvent, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Invoking `custom_stream()` failed with an internal error."
+		if got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response["error"]; got != want {
+			t.Errorf("FunctionResponse error = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("live", func(t *testing.T) {
+		liveSess := newLiveSessionImpl()
+		liveSess.activeTools = make(map[string][]activeTask)
+		if _, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, liveSess); err != nil {
+			t.Fatal(err)
+		}
+		// Wait for the goroutine that runs the tool to finish. An unrecovered
+		// panic in it ends the test process.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			liveSess.mu.Lock()
+			running := len(liveSess.activeTools["custom_stream"])
+			liveSess.mu.Unlock()
+			if running == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the streaming tool is still registered after it panicked")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+}
+
+// A panic in the loop that reads the stream is the reader's own, so it is not
+// turned into a tool error.
+func TestRecoverStreamPanicPropagatesConsumerPanic(t *testing.T) {
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) { yield("chunk", nil) },
+	}
+	original := errors.New("consumer panic")
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the body panics on the first chunk; the test asserts the recovered value
+			panic(original)
+		}
+	}()
+	if got != original {
+		t.Errorf("recovered panic has type %T, want the original consumer panic value", got)
+	}
+}
+
+// A consumer that stops reading stops the stream it reads.
+func TestRecoverStreamPanicStopsStreamWhenConsumerStops(t *testing.T) {
+	var stopped bool
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) { stopped = !yield("first", nil) },
+	}
+	for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the consumer stops at the first chunk; the test asserts that the stream is told
+		break
+	}
+	if !stopped {
+		t.Error("the stream was not told that its consumer stopped")
+	}
+}
+
+// A panic after the stream has yielded is recovered like one before it.
+func TestRecoverStreamPanicRecoversPanicAfterAYield(t *testing.T) {
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) {
+			if !yield("chunk", nil) {
+				return
+			}
+			panic("boom")
+		},
+	}
+	var chunks int
+	var errs []error
+	for _, err := range recoverStreamPanic(streamTool, nil, nil) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		chunks++
+	}
+	if chunks != 1 || len(errs) != 1 {
+		t.Fatalf("stream yielded %d chunks and %d errors, want one chunk and one error", chunks, len(errs))
+	}
+	if _, ok := errs[0].(*toolinternal.PanicError); !ok {
+		t.Errorf("stream yielded an error of type %T, want *toolinternal.PanicError", errs[0])
+	}
+	if text := errs[0].Error(); !strings.HasPrefix(text, `panic in tool "custom_stream": boom`) || !strings.Contains(text, "\nstack: ") || !strings.Contains(text, "runtime/debug.Stack") {
+		t.Error("the stream error does not carry the tool name, the panic value and the stack")
+	}
+}
+
+// A panic the stream raises after its consumer stopped cannot be yielded, so it
+// propagates, as it does for a streaming function tool.
+func TestRecoverStreamPanicPropagatesCleanupPanicAfterStop(t *testing.T) {
+	original := errors.New("cleanup panic")
+	streamTool := customStreamTool{
+		stream: func(yield func(string, error) bool) {
+			defer func() { panic(original) }()
+			yield("chunk", nil)
+		},
+	}
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		for range recoverStreamPanic(streamTool, nil, nil) { //nolint:errcheck // the consumer stops at the first chunk; the test asserts the recovered value
+			break
+		}
+	}()
+	if got != original {
+		t.Errorf("recovered panic has type %T, want the original cleanup panic value", got)
 	}
 }
 

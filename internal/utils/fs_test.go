@@ -15,6 +15,7 @@
 package utils
 
 import (
+	"errors"
 	"io/fs"
 	"path/filepath"
 	"runtime"
@@ -206,6 +207,56 @@ func TestSafeSubpath_NonWindows(t *testing.T) {
 	}...)
 
 	runTests(t, base, cases)
+}
+
+func TestSafeRelPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		rel     string
+		want    string
+		wantErr bool
+	}{
+		// Accepted, cleaned and slash-separated.
+		{name: "simple_file", rel: "file.txt", want: "file.txt"},
+		{name: "nested", rel: "assets/nested/pic.png", want: "assets/nested/pic.png"},
+		{name: "leading_dot_slash", rel: "./file.txt", want: "file.txt"},
+		{name: "interior_dot", rel: "assets/./a.txt", want: "assets/a.txt"},
+		{name: "interior_dotdot_stays_inside", rel: "sub/../file.txt", want: "file.txt"},
+		{name: "trailing_slash", rel: "sub/", want: "sub"},
+		{name: "collapsed_double_slash", rel: "sub//double.txt", want: "sub/double.txt"},
+
+		// Rejected.
+		{name: "empty", rel: "", wantErr: true},
+		{name: "dot", rel: ".", wantErr: true},
+		{name: "root_slash", rel: "/", wantErr: true},
+		{name: "absolute", rel: "/etc/passwd", wantErr: true},
+		{name: "bare_dotdot", rel: "..", wantErr: true},
+		{name: "parent_escape", rel: "../x", wantErr: true},
+		{name: "interior_escape", rel: "sub/../../x", wantErr: true},
+		{name: "deep_escape", rel: "../../../../etc/secret", wantErr: true},
+		{name: "null_byte", rel: "a\x00.txt", wantErr: true},
+		{name: "null_byte_with_traversal", rel: "foo\x00/../../etc/passwd", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SafeRelPath(tc.rel)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("SafeRelPath(%q) = %q, nil; want ErrNotValidRelativePath", tc.rel, got)
+				}
+				if !errors.Is(err, ErrNotValidRelativePath) {
+					t.Fatalf("SafeRelPath(%q) error = %v, want errors.Is %v", tc.rel, err, ErrNotValidRelativePath)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SafeRelPath(%q) error = %v, want success", tc.rel, err)
+			}
+			if got != tc.want {
+				t.Fatalf("SafeRelPath(%q) = %q, want %q", tc.rel, got, tc.want)
+			}
+		})
+	}
 }
 
 // TestIsLinkLike pins the mode predicate followLinks uses to decide which

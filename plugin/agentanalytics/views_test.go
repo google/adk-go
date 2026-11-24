@@ -786,7 +786,7 @@ func splitJSONPathSegments(s string) []string {
 	var segs []string
 	var cur strings.Builder
 	inQuotes := false
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		ch := s[i]
 		switch {
 		case ch == '"':
@@ -1588,9 +1588,9 @@ func TestViews_JSONPathsMatchEmittedPayloads(t *testing.T) {
 		cfg := applyDefaults(DefaultConfig())
 		cfg.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 		bp.streamWriter.stream = mStream
@@ -2194,6 +2194,41 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 							}, nil
 						}
 					}
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/tables/v_user_message_received") && jobIdx.Load() >= 1 {
+						defs, err := (Config{
+							ProjectID: "test-project",
+							DatasetID: "test_dataset",
+							TableName: "test-table",
+						}).ViewDefinitions()
+						if err != nil {
+							return nil, err
+						}
+						var selectBody string
+						for _, def := range defs {
+							if def.Name == "v_user_message_received" {
+								_, selectBody, _ = strings.Cut(def.Query, " AS\n")
+								break
+							}
+						}
+						respBody, err := json.Marshal(map[string]any{
+							"tableReference": map[string]string{
+								"projectId": "test-project",
+								"datasetId": "test_dataset",
+								"tableId":   "v_user_message_received",
+							},
+							"type": "VIEW",
+							"view": map[string]string{
+								"query": selectBody,
+							},
+						})
+						if err != nil {
+							return nil, err
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(bytes.NewReader(respBody)),
+						}, nil
+					}
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader("{}")),
@@ -2222,9 +2257,8 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 		// Wait for the pass to log its summary, the last thing it does, then
 		// close. Closing once the last job is sent instead could cancel the
 		// pass before the summary, which a canceled pass does not log.
-		deadline := time.Now().Add(5 * time.Second)
-		for !logger.contains("view creation finished") && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
+		if !logger.waitContains("view creation finished", 5*time.Second) {
+			t.Fatalf("timed out waiting for view creation summary; got:\n%s", logger.String())
 		}
 		if err := p.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -2343,7 +2377,7 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 			// garbage before every view.
 			client := newJobCountingBQClient(t, &jobs)
 			bqaap.runner = collectingRunner{inner: bqViewRunner{client: weak.Make(client), projectID: "test-project", datasetID: "test_dataset"}}
-			bqaap.startAsyncViewCreation(ctx, defs, logger.Printf, client)
+			bqaap.startAsyncViewCreation(ctx, defs, logger.Printf, client, nil)
 		}()
 		bqaap.viewsMu.Lock()
 		done := bqaap.asyncViewsDone
@@ -2756,7 +2790,7 @@ func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
 		if err != nil {
 			t.Fatalf("viewDefinitionsWithDenied: %v", err)
 		}
-		bqaapA.startAsyncViewCreation(ctx, defs, nil, nil)
+		bqaapA.startAsyncViewCreation(ctx, defs, nil, nil, nil)
 		<-bgEntered
 
 		syncErrCh := make(chan error, 1)
@@ -3040,7 +3074,7 @@ func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ViewDefinitions: %v", err)
 		}
-		bqaap.startAsyncViewCreation(ctx, defs, nil, nil)
+		bqaap.startAsyncViewCreation(ctx, defs, nil, nil, nil)
 		bqaap.viewsMu.Lock()
 		bgDone := bqaap.asyncViewsDone
 		bqaap.viewsMu.Unlock()
@@ -3099,7 +3133,7 @@ func TestPluginState_ReleasesViewPassAndRunner(t *testing.T) {
 		t.Fatalf("viewDefinitionsWithDenied() error = %v", err)
 	}
 
-	bqaap.startAsyncViewCreation(context.Background(), defs, nil, nil)
+	bqaap.startAsyncViewCreation(context.Background(), defs, nil, nil, nil)
 	bqaap.viewsMu.Lock()
 	done := bqaap.asyncViewsDone
 	bqaap.viewsMu.Unlock()

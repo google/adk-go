@@ -120,13 +120,12 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		subAgents = selected
 	}
 	subAgentNames := make(map[string]bool, len(subAgents))
-	for _, sa := range subAgents {
-		subAgentNames[sa.Name()] = true
-		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
+	for _, subAgent := range subAgents {
+		subAgentNames[subAgent.Name()] = true
+		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
-		subAgent := sa
 		errGroup.Go(func() error {
 			wrap := func(err error) error {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)

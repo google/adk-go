@@ -38,6 +38,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestAiplatformToGenaiContent_FunctionCallMapping(t *testing.T) {
@@ -627,6 +628,8 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 		name        string
 		event       *session.Event
 		expectError bool
+		wantParts   int
+		wantText    string
 	}{
 		{
 			name: "simple function call args",
@@ -734,12 +737,46 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "nil part skipped",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							nil,
+							genai.NewPartFromText("hi"),
+						},
+						Role: genai.RoleUser,
+					},
+				},
+			},
+			expectError: false,
+			wantParts:   1,
+			wantText:    "hi",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := createAiplatformpbContent(tt.event)
+			got, err := createAiplatformpbContent(tt.event)
 			if (err != nil) != tt.expectError {
-				t.Errorf("createAiplatformpbContent() error = %v, expectError %v", err, tt.expectError)
+				t.Fatalf("createAiplatformpbContent() error = %v, expectError %v", err, tt.expectError)
+			}
+			if tt.wantParts > 0 {
+				if got == nil || len(got.Parts) != tt.wantParts {
+					t.Fatalf("createAiplatformpbContent() got %d parts, want %d", len(got.GetParts()), tt.wantParts)
+				}
+			}
+			if tt.wantText != "" {
+				if got == nil || len(got.Parts) == 0 {
+					t.Fatalf("createAiplatformpbContent() returned no parts")
+				}
+				textPart, ok := got.Parts[0].Data.(*aiplatformpb.Part_Text)
+				if !ok {
+					t.Fatalf("createAiplatformpbContent() part 0 is %T, want *aiplatformpb.Part_Text", got.Parts[0].Data)
+				}
+				if textPart.Text != tt.wantText {
+					t.Errorf("createAiplatformpbContent() part text = %q, want %q", textPart.Text, tt.wantText)
+				}
 			}
 		})
 	}
@@ -1260,6 +1297,14 @@ func TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched
 type fakeVertexAiSessionService struct {
 	aiplatformpb.UnimplementedSessionServiceServer
 	events []*aiplatformpb.SessionEvent
+}
+
+func (s *fakeVertexAiSessionService) GetSession(ctx context.Context, req *aiplatformpb.GetSessionRequest) (*aiplatformpb.Session, error) {
+	return &aiplatformpb.Session{
+		Name:       req.GetName(),
+		UserId:     "user1",
+		UpdateTime: timestamppb.Now(),
+	}, nil
 }
 
 func (s *fakeVertexAiSessionService) AppendEvent(ctx context.Context, req *aiplatformpb.AppendEventRequest) (*aiplatformpb.AppendEventResponse, error) {

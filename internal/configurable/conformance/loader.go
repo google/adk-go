@@ -16,7 +16,8 @@ package conformance
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 
 	"google.golang.org/adk/v2/agent"
 )
@@ -29,14 +30,13 @@ type conformanceAgentLoader struct {
 // NewConformanceAgentLoader returns a new AgentLoader with the given root Agent and other agents.
 // Returns an error if more than one agent (including root) shares the same name
 func NewConformanceAgentLoader(agentMap map[string]agent.Agent) (agent.Loader, error) {
-	agentsNames := make([]string, 0, len(agentMap))
-	for name := range agentMap {
-		agentsNames = append(agentsNames, name)
-	}
-	sort.Strings(agentsNames)
+	// ListAgents is served as JSON, so an empty agentMap must still yield
+	// a non-nil slice ("[]" instead of "null").
+	names := slices.AppendSeq(make([]string, 0, len(agentMap)), maps.Keys(agentMap))
+	slices.Sort(names)
 	return &conformanceAgentLoader{
 		agentMap:    agentMap,
-		agentsNames: agentsNames,
+		agentsNames: names,
 	}, nil
 }
 

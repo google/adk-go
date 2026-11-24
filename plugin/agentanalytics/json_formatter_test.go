@@ -187,13 +187,13 @@ func TestFormatContentParts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FormatContentParts(tt.content, tt.maxLength)
+			got, _ := formatContentParts(tt.content, tt.maxLength, true)
 			if len(got) != len(tt.want) {
-				t.Fatalf("FormatContentParts() len = %v, want %v", len(got), len(tt.want))
+				t.Fatalf("formatContentParts() len = %v, want %v", len(got), len(tt.want))
 			}
 			for i := range got {
 				if !reflect.DeepEqual(got[i], tt.want[i]) {
-					t.Errorf("FormatContentParts() got[%d] = %v, want %v", i, got[i], tt.want[i])
+					t.Errorf("formatContentParts() got[%d] = %v, want %v", i, got[i], tt.want[i])
 				}
 			}
 		})
@@ -307,12 +307,12 @@ func TestSmartTruncate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotBytes, truncated, err := SmartTruncate(tt.obj, tt.maxLength)
+			gotBytes, truncated, err := smartTruncate(tt.obj, tt.maxLength, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate() error = %v", err)
+				t.Fatalf("smartTruncate() error = %v", err)
 			}
 			if truncated != tt.wantTrunc {
-				t.Errorf("SmartTruncate() truncated = %v, want %v", truncated, tt.wantTrunc)
+				t.Errorf("smartTruncate() truncated = %v, want %v", truncated, tt.wantTrunc)
 			}
 
 			// We use json.Unmarshal to canonicalize the JSON before comparison because map key order is non-deterministic
@@ -327,7 +327,7 @@ func TestSmartTruncate(t *testing.T) {
 				}
 
 				if gotObj == nil || wantObj == nil || !reflect.DeepEqual(gotObj, wantObj) {
-					t.Errorf("SmartTruncate() = %s, want %s", string(gotBytes), tt.wantStr)
+					t.Errorf("smartTruncate() = %s, want %s", string(gotBytes), tt.wantStr)
 				}
 			}
 		})
@@ -399,15 +399,15 @@ func TestSmartTruncate_Guards(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated, err := SmartTruncate(tt.obj, 100)
+			got, truncated, err := smartTruncate(tt.obj, 100, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate() error: %v", err)
+				t.Fatalf("smartTruncate() error: %v", err)
 			}
 			if string(got) != tt.want {
-				t.Errorf("SmartTruncate() = %s, want %s", got, tt.want)
+				t.Errorf("smartTruncate() = %s, want %s", got, tt.want)
 			}
 			if truncated != tt.wantTrunc {
-				t.Errorf("SmartTruncate() truncated = %v, want %v", truncated, tt.wantTrunc)
+				t.Errorf("smartTruncate() truncated = %v, want %v", truncated, tt.wantTrunc)
 			}
 		})
 	}
@@ -424,18 +424,18 @@ func TestSmartTruncate_DepthLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated, err := SmartTruncate(nested(tt.depth), 100)
+			got, truncated, err := smartTruncate(nested(tt.depth), 100, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate() error: %v", err)
+				t.Fatalf("smartTruncate() error: %v", err)
 			}
 			if hasLeaf := bytes.Contains(got, []byte(`"leaf"`)); hasLeaf != tt.wantLeaf {
-				t.Errorf("SmartTruncate() kept the leaf = %v, want %v", hasLeaf, tt.wantLeaf)
+				t.Errorf("smartTruncate() kept the leaf = %v, want %v", hasLeaf, tt.wantLeaf)
 			}
 			if hasMarker := bytes.Contains(got, []byte(maxDepthPlaceholder)); hasMarker == tt.wantLeaf {
-				t.Errorf("SmartTruncate() wrote %s = %v, want %v", maxDepthPlaceholder, hasMarker, !tt.wantLeaf)
+				t.Errorf("smartTruncate() wrote %s = %v, want %v", maxDepthPlaceholder, hasMarker, !tt.wantLeaf)
 			}
 			if truncated == tt.wantLeaf {
-				t.Errorf("SmartTruncate() truncated = %v, want %v", truncated, !tt.wantLeaf)
+				t.Errorf("smartTruncate() truncated = %v, want %v", truncated, !tt.wantLeaf)
 			}
 		})
 	}
@@ -639,29 +639,29 @@ func TestRedactJSONText_FailClosed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated, err := SmartTruncate(tt.obj, 200)
+			got, truncated, err := smartTruncate(tt.obj, 200, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate() error: %v", err)
+				t.Fatalf("smartTruncate() error: %v", err)
 			}
 			if string(got) != tt.want {
-				t.Errorf("SmartTruncate() = %s, want %s", got, tt.want)
+				t.Errorf("smartTruncate() = %s, want %s", got, tt.want)
 			}
 			if !truncated {
-				t.Error("SmartTruncate() truncated = false, want true when failing closed")
+				t.Error("smartTruncate() truncated = false, want true when failing closed")
 			}
 		})
 	}
 
 	t.Run("deeply nested JSON string fails closed", func(t *testing.T) {
-		got, truncated, err := SmartTruncate(map[string]any{"payload": deepJSON}, 10000)
+		got, truncated, err := smartTruncate(map[string]any{"payload": deepJSON}, 10000, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate() error: %v", err)
+			t.Fatalf("smartTruncate() error: %v", err)
 		}
 		if bytes.Contains(got, []byte("secret")) {
-			t.Errorf("SmartTruncate() leaked secret in deep JSON: %s", got)
+			t.Errorf("smartTruncate() leaked secret in deep JSON: %s", got)
 		}
 		if !truncated {
-			t.Error("SmartTruncate() truncated = false, want true for deep JSON")
+			t.Error("smartTruncate() truncated = false, want true for deep JSON")
 		}
 	})
 }
@@ -676,19 +676,19 @@ func TestWalkStruct_OmitEmptyShadowsEmbeddedField(t *testing.T) {
 		X string `json:"x,omitempty"`
 	}
 	v := Outer{Embedded: Embedded{X: "inner-x", Y: "inner-y"}, X: ""}
-	got, truncated, err := SmartTruncate(v, 100)
+	got, truncated, err := smartTruncate(v, 100, true)
 	if err != nil {
-		t.Fatalf("SmartTruncate() error: %v", err)
+		t.Fatalf("smartTruncate() error: %v", err)
 	}
 	if truncated {
-		t.Error("SmartTruncate() truncated = true, want false")
+		t.Error("smartTruncate() truncated = true, want false")
 	}
 	wantBytes, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("json.Marshal() error: %v", err)
 	}
 	if string(got) != string(wantBytes) {
-		t.Errorf("SmartTruncate() = %s, want %s (matching encoding/json)", got, wantBytes)
+		t.Errorf("smartTruncate() = %s, want %s (matching encoding/json)", got, wantBytes)
 	}
 }
 
@@ -717,12 +717,12 @@ func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name+" matches encoding/json", func(t *testing.T) {
-			got, truncated, err := SmartTruncate(tt.v, 1000)
+			got, truncated, err := smartTruncate(tt.v, 1000, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate() error: %v", err)
+				t.Fatalf("smartTruncate() error: %v", err)
 			}
 			if truncated {
-				t.Error("SmartTruncate() truncated = true, want false")
+				t.Error("smartTruncate() truncated = true, want false")
 			}
 			wantBytes, err := json.Marshal(tt.v)
 			if err != nil {
@@ -730,13 +730,13 @@ func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
 			}
 			var gotV, wantV any
 			if err := json.Unmarshal(got, &gotV); err != nil {
-				t.Fatalf("SmartTruncate() output %s is not JSON: %v", got, err)
+				t.Fatalf("smartTruncate() output %s is not JSON: %v", got, err)
 			}
 			if err := json.Unmarshal(wantBytes, &wantV); err != nil {
 				t.Fatalf("json.Unmarshal(%s) error: %v", wantBytes, err)
 			}
 			if !reflect.DeepEqual(gotV, wantV) {
-				t.Errorf("SmartTruncate() = %s, want %s (matching encoding/json)", got, wantBytes)
+				t.Errorf("smartTruncate() = %s, want %s (matching encoding/json)", got, wantBytes)
 			}
 		})
 	}
@@ -746,20 +746,20 @@ func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
 			promotedInner: &promotedInner{Name: "inner-name", Token: "r14-promoted-token-secret"},
 			Extra:         "outer-extra",
 		}
-		got, _, err := SmartTruncate(v, 1000)
+		got, _, err := smartTruncate(v, 1000, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate() error: %v", err)
+			t.Fatalf("smartTruncate() error: %v", err)
 		}
 		if bytes.Contains(got, []byte("r14-promoted-token-secret")) {
-			t.Errorf("SmartTruncate() leaked the promoted token: %s", got)
+			t.Errorf("smartTruncate() leaked the promoted token: %s", got)
 		}
 		var m map[string]any
 		if err := json.Unmarshal(got, &m); err != nil {
-			t.Fatalf("SmartTruncate() output %s is not a JSON object: %v", got, err)
+			t.Fatalf("smartTruncate() output %s is not a JSON object: %v", got, err)
 		}
 		want := map[string]any{"name": "inner-name", "token": redactedValue, "extra": "outer-extra"}
 		if !reflect.DeepEqual(m, want) {
-			t.Errorf("SmartTruncate() = %v, want %v", m, want)
+			t.Errorf("smartTruncate() = %v, want %v", m, want)
 		}
 	})
 }
@@ -2569,9 +2569,9 @@ func TestSanitizeRawText(t *testing.T) {
 			"document": strings.Repeat("A", 100*1024),
 			"api_key":  "secret_key_val",
 		}
-		got, truncated, err := SmartTruncate(largeObj, 500*1024)
+		got, truncated, err := smartTruncate(largeObj, 500*1024, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate: %v", err)
+			t.Fatalf("smartTruncate: %v", err)
 		}
 		if truncated {
 			t.Errorf("expected truncated=false for large JSON under max limit")
@@ -2845,10 +2845,10 @@ func TestSanitizeRawText(t *testing.T) {
 			if got != tt.want || !lost {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tt.raw, got, lost, tt.want)
 			}
-			truncJSON, truncated, err := SmartTruncate(tt.raw, 4096)
+			truncJSON, truncated, err := smartTruncate(tt.raw, 4096, true)
 			var trunc string
 			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != tt.want || !truncated {
-				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%q, true, nil)", tt.raw, truncJSON, truncated, err, tt.want)
+				t.Errorf("smartTruncate(%q) = (%s, %v, %v), want (%q, true, nil)", tt.raw, truncJSON, truncated, err, tt.want)
 			}
 		}
 		for _, depth := range []int{5, 9} {
@@ -2872,10 +2872,10 @@ func TestSanitizeRawText(t *testing.T) {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
 		// Scrubbing the text of the valid JSON value takes its closing quote
-		// with the redacted value. sanitizeRawText and SmartTruncate return
+		// with the redacted value. sanitizeRawText and smartTruncate return
 		// that malformed text, as main did. A second call reads it as any
 		// other malformed JSON text: sanitizeRawText keeps it as prose, and
-		// SmartTruncate, which keeps none, fails it closed, as on main.
+		// smartTruncate, which keeps none, fails it closed, as on main.
 		const scrubbedPair = `{"msg":"password=[REDACTED]}`
 		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != scrubbedPair || !lost {
 			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, scrubbedPair)
@@ -2884,12 +2884,12 @@ func TestSanitizeRawText(t *testing.T) {
 			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", scrubbedPair, got, lost)
 		}
 		wantPair := `"{\"msg\":\"password=[REDACTED]}"`
-		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantPair {
-			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantPair)
+		if raw, truncated, err := smartTruncate(`{"msg":"password=SECRET123"}`, 4096, true); err != nil || !truncated || string(raw) != wantPair {
+			t.Errorf("smartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantPair)
 		}
 		wantClosed := `"` + unparseableJSONPlaceholder + `"`
-		if raw, truncated, err := SmartTruncate(scrubbedPair, 4096); err != nil || !truncated || string(raw) != wantClosed {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", scrubbedPair, raw, truncated, err, wantClosed)
+		if raw, truncated, err := smartTruncate(scrubbedPair, 4096, true); err != nil || !truncated || string(raw) != wantClosed {
+			t.Errorf("smartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", scrubbedPair, raw, truncated, err, wantClosed)
 		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,
@@ -3056,7 +3056,7 @@ func TestSanitizeRawText(t *testing.T) {
 			name string
 			raw  string
 			// want is the result of sanitizeRawText, redactErrorMessage and
-			// SmartTruncate. scrubErrorText returns
+			// smartTruncate. scrubErrorText returns
 			// redactedSensitiveTextPlaceholder for every raw.
 			want string
 		}{
@@ -3091,10 +3091,10 @@ func TestSanitizeRawText(t *testing.T) {
 			if got := scrubErrorText(tt.raw); got != redactedSensitiveTextPlaceholder {
 				t.Errorf("%s: scrubErrorText = %.80q, want %q", tt.name, got, redactedSensitiveTextPlaceholder)
 			}
-			truncJSON, _, err := SmartTruncate(tt.raw, 1<<20)
+			truncJSON, _, err := smartTruncate(tt.raw, 1<<20, true)
 			var trunc string
 			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != tt.want {
-				t.Errorf("%s: SmartTruncate = (%.80s, %v), want %q", tt.name, truncJSON, err, tt.want)
+				t.Errorf("%s: smartTruncate = (%.80s, %v), want %q", tt.name, truncJSON, err, tt.want)
 			}
 		}
 	})
@@ -3174,15 +3174,15 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 		for i := range items {
 			items[i] = "x"
 		}
-		got, truncated, err := SmartTruncate(items, 100)
+		got, truncated, err := smartTruncate(items, 100, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate() error: %v", err)
+			t.Fatalf("smartTruncate() error: %v", err)
 		}
 		if !truncated {
-			t.Error("SmartTruncate() truncated = false, want true when node budget is exceeded")
+			t.Error("smartTruncate() truncated = false, want true when node budget is exceeded")
 		}
 		if count := bytes.Count(got, []byte(sanitizeBudgetPlaceholder)); count != 1 {
-			t.Errorf("SmartTruncate() emitted %s %d times, want 1", sanitizeBudgetPlaceholder, count)
+			t.Errorf("smartTruncate() emitted %s %d times, want 1", sanitizeBudgetPlaceholder, count)
 		}
 		var parsed []any
 		if err := json.Unmarshal(got, &parsed); err != nil {
@@ -3201,15 +3201,15 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 		for i := range maxSanitizeNodes + 500 {
 			m["temp:k_"+strconv.Itoa(i)] = "secret"
 		}
-		got, truncated, err := SmartTruncate(m, 100)
+		got, truncated, err := smartTruncate(m, 100, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate() error: %v", err)
+			t.Fatalf("smartTruncate() error: %v", err)
 		}
 		if !truncated {
-			t.Error("SmartTruncate() truncated = false, want true when temp map exceeds node budget")
+			t.Error("smartTruncate() truncated = false, want true when temp map exceeds node budget")
 		}
 		if !bytes.Contains(got, []byte(sanitizeBudgetPlaceholder)) {
-			t.Errorf("SmartTruncate() did not emit %s when temp map exceeded node budget", sanitizeBudgetPlaceholder)
+			t.Errorf("smartTruncate() did not emit %s when temp map exceeded node budget", sanitizeBudgetPlaceholder)
 		}
 		var parsed map[string]any
 		if err := json.Unmarshal(got, &parsed); err != nil {
@@ -3226,15 +3226,15 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 			items[i] = "x"
 		}
 		items = append(items, `[1,2,3,4,5,6,7,8,9,10]`)
-		got, truncated, err := SmartTruncate(items, 100)
+		got, truncated, err := smartTruncate(items, 100, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate() error: %v", err)
+			t.Fatalf("smartTruncate() error: %v", err)
 		}
 		if !truncated {
-			t.Error("SmartTruncate() truncated = false, want true when JSON text exhausts shared node budget")
+			t.Error("smartTruncate() truncated = false, want true when JSON text exhausts shared node budget")
 		}
 		if !bytes.Contains(got, []byte(sanitizeBudgetPlaceholder)) {
-			t.Errorf("SmartTruncate() did not emit %s when JSON text exhausted shared node budget", sanitizeBudgetPlaceholder)
+			t.Errorf("smartTruncate() did not emit %s when JSON text exhausted shared node budget", sanitizeBudgetPlaceholder)
 		}
 	})
 }
@@ -3946,7 +3946,7 @@ func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
 			},
 		}
 
-		parts := FormatContentParts(content, 1000)
+		parts, _ := formatContentParts(content, 1000, true)
 		if len(parts) != 1 {
 			t.Fatalf("len(parts) = %d, want 1", len(parts))
 		}
@@ -3984,7 +3984,7 @@ func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
 			},
 		}
 
-		parts := FormatContentParts(content, 1000)
+		parts, _ := formatContentParts(content, 1000, true)
 		if len(parts) != 1 {
 			t.Fatalf("len(parts) = %d, want 1", len(parts))
 		}
@@ -4168,7 +4168,7 @@ func TestPartsCollector_TruncatedFlag(t *testing.T) {
 func TestFormatContentParts_EmptyParts(t *testing.T) {
 	content := &genai.Content{Parts: []*genai.Part{nil, {}, {Text: ""}, {InlineData: nil}}}
 
-	got := FormatContentParts(content, 100)
+	got, _ := formatContentParts(content, 100, true)
 
 	// Every part keeps its index, whether or not there is anything to log.
 	want := []map[string]any{
@@ -4178,7 +4178,7 @@ func TestFormatContentParts_EmptyParts(t *testing.T) {
 		{"mime_type": "text/plain", "part_attributes": "{}", "part_index": 3, "storage_mode": "INLINE"},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("FormatContentParts() mismatch (-want +got):\n%s", diff)
+		t.Errorf("formatContentParts() mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -4194,9 +4194,10 @@ func TestPartsCollector_InlineDataWithoutMIMEType(t *testing.T) {
 		"part_index": 0, "storage_mode": "INLINE", "mime_type": "application/octet-stream", "text": "[BINARY DATA]",
 	}}
 
-	t.Run("exported function", func(t *testing.T) {
-		if diff := cmp.Diff(want, FormatContentParts(content, 100)); diff != "" {
-			t.Errorf("FormatContentParts() mismatch (-want +got):\n%s", diff)
+	t.Run("formatContentParts", func(t *testing.T) {
+		got, _ := formatContentParts(content, 100, true)
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("formatContentParts() mismatch (-want +got):\n%s", diff)
 		}
 	})
 	t.Run("offloading off", func(t *testing.T) {
@@ -4925,7 +4926,7 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 		}
 	})
 
-	t.Run("FormatContentParts", func(t *testing.T) {
+	t.Run("formatContentParts", func(t *testing.T) {
 		content := &genai.Content{Parts: []*genai.Part{
 			{Text: in},
 			{FunctionCall: &genai.FunctionCall{Name: "find\xff", Args: map[string]any{"q": in}}},
@@ -4934,12 +4935,7 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 		}}
 		for _, tt := range limits {
 			for _, redact := range []bool{true, false} {
-				var parts []map[string]any
-				if redact {
-					parts = FormatContentParts(content, tt.maxLength)
-				} else {
-					parts, _ = formatContentParts(content, tt.maxLength, false)
-				}
+				parts, _ := formatContentParts(content, tt.maxLength, redact)
 				if len(parts) != 4 {
 					t.Fatalf("%s: formatContentParts(redact=%v) returned %d parts, want 4", tt.name, redact, len(parts))
 				}
@@ -5401,12 +5397,12 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"embedded neutral marshaler", struct{ time.Time }{time.Unix(0, 0).UTC()}, `"1970-01-01T00:00:00Z"`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				got, truncated, err := SmartTruncate(tt.in, 1000)
+				got, truncated, err := smartTruncate(tt.in, 1000, true)
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+					t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
 				if marshalerCalled.Load() {
-					t.Errorf("SmartTruncate(%T) called a credential marshaler", tt.in)
+					t.Errorf("smartTruncate(%T) called a credential marshaler", tt.in)
 				}
 			})
 		}
@@ -5491,31 +5487,31 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"[]*url.Userinfo", fillUserinfos},
 		} {
 			t.Run(tt.name+"/over_budget", func(t *testing.T) {
-				got, truncated, err := SmartTruncate(tt.make(maxSanitizeNodes+10), 100)
+				got, truncated, err := smartTruncate(tt.make(maxSanitizeNodes+10), 100, true)
 				if err != nil || !truncated {
-					t.Fatalf("SmartTruncate(%s over budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
+					t.Fatalf("smartTruncate(%s over budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
 				}
 				var parsed []any
 				if err := json.Unmarshal(got, &parsed); err != nil {
 					t.Fatalf("json.Unmarshal(%s over budget) error: %v", tt.name, err)
 				}
 				if len(parsed) != maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
-					t.Errorf("SmartTruncate(%s over budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+					t.Errorf("smartTruncate(%s over budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
 				}
 			})
 
 			t.Run(tt.name+"/exact_budget", func(t *testing.T) {
 				const wantLen = maxSanitizeNodes - 1
-				got, truncated, err := SmartTruncate(tt.make(wantLen), 100)
+				got, truncated, err := smartTruncate(tt.make(wantLen), 100, true)
 				if err != nil || !truncated {
-					t.Fatalf("SmartTruncate(%s exact budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
+					t.Fatalf("smartTruncate(%s exact budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
 				}
 				var parsed []any
 				if err := json.Unmarshal(got, &parsed); err != nil {
 					t.Fatalf("json.Unmarshal(%s exact budget) error: %v", tt.name, err)
 				}
 				if len(parsed) != wantLen || parsed[len(parsed)-1] != redactedValue {
-					t.Errorf("SmartTruncate(%s exact budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], wantLen, redactedValue)
+					t.Errorf("smartTruncate(%s exact budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], wantLen, redactedValue)
 				}
 			})
 		}
@@ -5525,16 +5521,16 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			for i := range maxSanitizeNodes + 10 {
 				m[Token(fmt.Sprintf("%s_%d", secret, i))] = "v"
 			}
-			got, truncated, err := SmartTruncate(m, 100)
+			got, truncated, err := smartTruncate(m, 100, true)
 			if err != nil || !truncated {
-				t.Fatalf("SmartTruncate(map[Token]string) = (truncated %v, %v), want truncated", truncated, err)
+				t.Fatalf("smartTruncate(map[Token]string) = (truncated %v, %v), want truncated", truncated, err)
 			}
 			var parsed map[string]any
 			if err := json.Unmarshal(got, &parsed); err != nil {
 				t.Fatalf("json.Unmarshal(map[Token]string) error: %v", err)
 			}
 			if parsed[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder {
-				t.Errorf("SmartTruncate(map[Token]string) = %v, want %s entry", parsed, sanitizeBudgetPlaceholder)
+				t.Errorf("smartTruncate(map[Token]string) = %v, want %s entry", parsed, sanitizeBudgetPlaceholder)
 			}
 		})
 
@@ -5549,9 +5545,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			for i := range maxSanitizeNodes + 10 {
 				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
 			}
-			got, truncated, err := SmartTruncate(h, 100)
+			got, truncated, err := smartTruncate(h, 100, true)
 			if err != nil || !truncated {
-				t.Fatalf("SmartTruncate(self-referential map over budget) = (truncated %v, %v), want truncated", truncated, err)
+				t.Fatalf("smartTruncate(self-referential map over budget) = (truncated %v, %v), want truncated", truncated, err)
 			}
 			var parsed struct {
 				M map[string]any
@@ -5560,7 +5556,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				t.Fatalf("json.Unmarshal(self-referential map over budget) error: %v", err)
 			}
 			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
-				t.Errorf("SmartTruncate(self-referential map over budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+				t.Errorf("smartTruncate(self-referential map over budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
 			}
 		})
 
@@ -5574,9 +5570,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			for i := range wantKeys {
 				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
 			}
-			got, truncated, err := SmartTruncate(h, 100)
+			got, truncated, err := smartTruncate(h, 100, true)
 			if err != nil || !truncated {
-				t.Fatalf("SmartTruncate(self-referential map exact budget) = (truncated %v, %v), want truncated", truncated, err)
+				t.Fatalf("smartTruncate(self-referential map exact budget) = (truncated %v, %v), want truncated", truncated, err)
 			}
 			var parsed struct {
 				M map[string]any
@@ -5585,21 +5581,21 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				t.Fatalf("json.Unmarshal(self-referential map exact budget) error: %v", err)
 			}
 			if len(parsed.M) != 1 || parsed.M[redactedValue] != redactedValue {
-				t.Errorf("SmartTruncate(self-referential map exact budget) M = %v, want only %s", parsed.M, redactedValue)
+				t.Errorf("smartTruncate(self-referential map exact budget) M = %v, want only %s", parsed.M, redactedValue)
 			}
 
 			// One extra entry pushes the walk past maxSanitizeNodes.
 			h.M[Token(fmt.Sprintf("%s_%d", secret, wantKeys))] = h
-			gotOver, truncatedOver, err := SmartTruncate(h, 100)
+			gotOver, truncatedOver, err := smartTruncate(h, 100, true)
 			if err != nil || !truncatedOver {
-				t.Fatalf("SmartTruncate(self-referential map exact+1 budget) = (truncated %v, %v), want truncated", truncatedOver, err)
+				t.Fatalf("smartTruncate(self-referential map exact+1 budget) = (truncated %v, %v), want truncated", truncatedOver, err)
 			}
 			parsed.M = nil
 			if err := json.Unmarshal(gotOver, &parsed); err != nil {
 				t.Fatalf("json.Unmarshal(self-referential map exact+1 budget) error: %v", err)
 			}
 			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
-				t.Errorf("SmartTruncate(self-referential map exact+1 budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+				t.Errorf("smartTruncate(self-referential map exact+1 budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
 			}
 		})
 
@@ -5643,9 +5639,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			for range maxSanitizeDepth - 1 {
 				nested = []any{nested}
 			}
-			got, truncated, err := SmartTruncate(nested, 100)
+			got, truncated, err := smartTruncate(nested, 100, true)
 			if err != nil || !truncated {
-				t.Fatalf("SmartTruncate(pointers at max depth) = (truncated %v, %v), want truncated", truncated, err)
+				t.Fatalf("smartTruncate(pointers at max depth) = (truncated %v, %v), want truncated", truncated, err)
 			}
 			var cur any
 			if err := json.Unmarshal(got, &cur); err != nil {
@@ -5664,7 +5660,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}
 			const wantInnerLen = maxSanitizeNodes - maxSanitizeDepth + 1
 			if len(inner) != wantInnerLen || inner[len(inner)-1] != sanitizeBudgetPlaceholder {
-				t.Errorf("SmartTruncate(pointers at max depth) wrote %d items ending in %v, want %d ending in %s", len(inner), inner[len(inner)-1], wantInnerLen, sanitizeBudgetPlaceholder)
+				t.Errorf("smartTruncate(pointers at max depth) wrote %d items ending in %v, want %d ending in %s", len(inner), inner[len(inner)-1], wantInnerLen, sanitizeBudgetPlaceholder)
 			}
 		})
 
@@ -5693,22 +5689,22 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}
 			// A nil neutral pointer at max depth writes null without marking
 			// the row truncated, matching a nil interface at the same depth.
-			got, truncated, err := SmartTruncate(nestAtMaxDepth((*int)(nil)), 100)
+			got, truncated, err := smartTruncate(nestAtMaxDepth((*int)(nil)), 100, true)
 			if err != nil || truncated {
-				t.Fatalf("SmartTruncate(nil *int at max depth) = (truncated %v, %v), want (false, nil)", truncated, err)
+				t.Fatalf("smartTruncate(nil *int at max depth) = (truncated %v, %v), want (false, nil)", truncated, err)
 			}
 			if leaf := unwrap(t, got); leaf != nil {
-				t.Errorf("SmartTruncate(nil *int at max depth) leaf = %v, want nil", leaf)
+				t.Errorf("smartTruncate(nil *int at max depth) leaf = %v, want nil", leaf)
 			}
 			// Credential pointers at max depth still redact from their static
 			// type without calling IsNil.
 			for _, credNil := range []any{APIKey(nil), (*Token)(nil), (*url.Userinfo)(nil)} {
-				got, truncated, err = SmartTruncate(nestAtMaxDepth(credNil), 100)
+				got, truncated, err = smartTruncate(nestAtMaxDepth(credNil), 100, true)
 				if err != nil || !truncated {
-					t.Fatalf("SmartTruncate(%T at max depth) = (truncated %v, %v), want (true, nil)", credNil, truncated, err)
+					t.Fatalf("smartTruncate(%T at max depth) = (truncated %v, %v), want (true, nil)", credNil, truncated, err)
 				}
 				if leaf := unwrap(t, got); leaf != redactedValue {
-					t.Errorf("SmartTruncate(%T at max depth) leaf = %v, want %s", credNil, leaf, redactedValue)
+					t.Errorf("smartTruncate(%T at max depth) leaf = %v, want %s", credNil, leaf, redactedValue)
 				}
 			}
 		})
@@ -5771,15 +5767,15 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"nil key in an interface", map[any]string{nil: "v"}, `{"null":"v"}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				got, truncated, err := SmartTruncate(tt.in, 1000)
+				got, truncated, err := smartTruncate(tt.in, 1000, true)
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+					t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
 				if keyCalled.Load() {
-					t.Errorf("SmartTruncate(%T) called the MarshalText method of a key", tt.in)
+					t.Errorf("smartTruncate(%T) called the MarshalText method of a key", tt.in)
 				}
 				if valCalled.Load() {
-					t.Errorf("SmartTruncate(%T) called the MarshalJSON method of a redacted key's value", tt.in)
+					t.Errorf("smartTruncate(%T) called the MarshalJSON method of a redacted key's value", tt.in)
 				}
 			})
 		}
@@ -5852,9 +5848,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				got, truncated, err := SmartTruncate(tt.in, 1000)
+				got, truncated, err := smartTruncate(tt.in, 1000, true)
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+					t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
 			})
 		}
@@ -5901,9 +5897,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"defined type over url.Userinfo", definedUserinfo(*u), `"[REDACTED]"`, true, `{}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				got, truncated, err := SmartTruncate(tt.in, 1000)
+				got, truncated, err := smartTruncate(tt.in, 1000, true)
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+					t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
 				got, truncated, err = smartTruncate(tt.in, 1000, false)
 				if err != nil || string(got) != tt.wantOff || truncated != tt.wantOffTrunc {
@@ -5918,16 +5914,16 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{Scheme: "https", Host: "example.com", Path: "/v1"},
 			{Scheme: "https", User: u, Host: "example.com", Path: "/v1"},
 		} {
-			got, truncated, err := SmartTruncate(in, 1000)
+			got, truncated, err := smartTruncate(in, 1000, true)
 			if err != nil || !truncated {
-				t.Fatalf("SmartTruncate(*url.URL) = (%s, %v, %v), want truncated", got, truncated, err)
+				t.Fatalf("smartTruncate(*url.URL) = (%s, %v, %v), want truncated", got, truncated, err)
 			}
 			var parsed map[string]any
 			if err := json.Unmarshal(got, &parsed); err != nil {
 				t.Fatalf("json.Unmarshal(%s) error: %v", got, err)
 			}
 			if parsed["User"] != redactedValue || parsed["Host"] != "example.com" || parsed["Path"] != "/v1" {
-				t.Errorf("SmartTruncate(*url.URL) = %v, want User=%q, Host=example.com, Path=/v1", parsed, redactedValue)
+				t.Errorf("smartTruncate(*url.URL) = %v, want User=%q, Host=example.com, Path=/v1", parsed, redactedValue)
 			}
 		}
 	})
@@ -6015,12 +6011,12 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 				E:  struct{ encoding.TextMarshaler }{credentialText{secret}},
 			},
 		} {
-			got, truncated, err := SmartTruncate(in, 1000)
+			got, truncated, err := smartTruncate(in, 1000, true)
 			if err != nil || string(got) != want || !truncated {
-				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", in, got, truncated, err, want)
+				t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", in, got, truncated, err, want)
 			}
 			if called.Load() {
-				t.Errorf("SmartTruncate(%T) called generic credential marshaler", in)
+				t.Errorf("smartTruncate(%T) called generic credential marshaler", in)
 			}
 		}
 		// Redaction off omits the empty fields as encoding/json does.
@@ -6064,9 +6060,9 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 			{"empty string fields", texts{}, `{}`},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
-				got, _, err := SmartTruncate(tt.in, 1000)
+				got, _, err := smartTruncate(tt.in, 1000, true)
 				if err != nil || string(got) != tt.want {
-					t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+					t.Errorf("smartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
 				}
 			})
 		}
@@ -6119,8 +6115,8 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":""},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"}}`},
 			{"set", set, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":"id-2"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"},"when":"1970-01-01T00:00:00Z"}`},
 		} {
-			if got, _, err := SmartTruncate(tt.in, 10000); err != nil || string(got) != tt.want {
-				t.Errorf("%s: SmartTruncate(*holder) = (%s, %v), want %s", tt.name, got, err, tt.want)
+			if got, _, err := smartTruncate(tt.in, 10000, true); err != nil || string(got) != tt.want {
+				t.Errorf("%s: smartTruncate(*holder) = (%s, %v), want %s", tt.name, got, err, tt.want)
 			}
 		}
 		// Redaction off omits the zero fields as encoding/json does.
@@ -6135,7 +6131,7 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 }
 
 // TestJSONFormatter_ConcurrentCredentialStructNoRace checks that, under
-// redaction, SmartTruncate reads none of the credentials of a struct while
+// redaction, smartTruncate reads none of the credentials of a struct while
 // another goroutine updates them atomically or under a lock: neither a field
 // of url.Userinfo or of a type named for a credential (including untagged
 // named or unnamed pointer fields and pointer slice elements rotated via
@@ -6260,8 +6256,8 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 		h.userMu.Unlock()
 	}, func() {
 		for range 1000 {
-			if got, _, err := SmartTruncate(h, 10000); err != nil || string(got) != want {
-				t.Fatalf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+			if got, _, err := smartTruncate(h, 10000, true); err != nil || string(got) != want {
+				t.Fatalf("smartTruncate(*holder) = (%s, %v), want %s", got, err, want)
 			}
 		}
 	})
@@ -6407,12 +6403,12 @@ func TestJSONFormatter_EmbeddedRedactsWholeNoShadow(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated, err := SmartTruncate(tt.in, 1000)
+			got, truncated, err := smartTruncate(tt.in, 1000, true)
 			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 			}
 			if marshalerCalled.Load() {
-				t.Errorf("SmartTruncate(%T) called embedded credential marshaler", tt.in)
+				t.Errorf("smartTruncate(%T) called embedded credential marshaler", tt.in)
 			}
 			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
 			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
@@ -6502,9 +6498,9 @@ func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated, err := SmartTruncate(tt.in, 1000)
+			got, truncated, err := smartTruncate(tt.in, 1000, true)
 			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 			}
 			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
 			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
@@ -6513,16 +6509,16 @@ func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
 		})
 	}
 
-	gotBudget, truncBudget, err := SmartTruncate(make([]Token, maxSanitizeNodes+10), 100)
+	gotBudget, truncBudget, err := smartTruncate(make([]Token, maxSanitizeNodes+10), 100, true)
 	if err != nil || !truncBudget {
-		t.Fatalf("SmartTruncate([]Token over budget) = (truncated %v, %v), want truncated", truncBudget, err)
+		t.Fatalf("smartTruncate([]Token over budget) = (truncated %v, %v), want truncated", truncBudget, err)
 	}
 	var parsed []any
 	if err := json.Unmarshal(gotBudget, &parsed); err != nil {
 		t.Fatalf("json.Unmarshal([]Token over budget) error: %v", err)
 	}
 	if len(parsed) != maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
-		t.Errorf("SmartTruncate([]Token over budget) wrote %d items ending in %v, want %d ending in %s", len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+		t.Errorf("smartTruncate([]Token over budget) wrote %d items ending in %v, want %d ending in %s", len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
 	}
 }
 
@@ -6559,12 +6555,12 @@ func TestJSONFormatter_PlainCredentialStructMapKeys(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			valCalled.Store(false)
-			got, truncated, err := SmartTruncate(tt.in, 1000)
+			got, truncated, err := smartTruncate(tt.in, 1000, true)
 			if want := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got) != want || !truncated {
-				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", tt.in, got, truncated, err, want)
+				t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", tt.in, got, truncated, err, want)
 			}
 			if valCalled.Load() {
-				t.Errorf("SmartTruncate(%T) called MarshalJSON on map value under plain credential struct key", tt.in)
+				t.Errorf("smartTruncate(%T) called MarshalJSON on map value under plain credential struct key", tt.in)
 			}
 		})
 	}
@@ -6596,13 +6592,13 @@ func TestJSONFormatter_PlainCredentialStructMapKeys(t *testing.T) {
 	// Non-credential plain struct keys and recursive pointer keys remain [UNSUPPORTED_KEY] and walk values.
 	var neutralCalled atomic.Bool
 	neutralProbe := labelValueProbe{called: &neutralCalled, raw: "kept"}
-	gotNeutral, truncNeutral, err := SmartTruncate(map[LabelStruct]labelValueProbe{{ID: "k"}: neutralProbe}, 1000)
+	gotNeutral, truncNeutral, err := smartTruncate(map[LabelStruct]labelValueProbe{{ID: "k"}: neutralProbe}, 1000, true)
 	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotNeutral) != want || !truncNeutral || !neutralCalled.Load() {
-		t.Errorf("SmartTruncate(map[LabelStruct]labelValueProbe) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotNeutral, truncNeutral, neutralCalled.Load(), err, want)
+		t.Errorf("smartTruncate(map[LabelStruct]labelValueProbe) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotNeutral, truncNeutral, neutralCalled.Load(), err, want)
 	}
-	gotRec, truncRec, err := SmartTruncate(map[selfPtr]string{nil: "kept"}, 1000)
+	gotRec, truncRec, err := smartTruncate(map[selfPtr]string{nil: "kept"}, 1000, true)
 	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotRec) != want || !truncRec {
-		t.Errorf("SmartTruncate(map[selfPtr]string) = (%s, %v, %v), want (%s, true, nil)", gotRec, truncRec, err, want)
+		t.Errorf("smartTruncate(map[selfPtr]string) = (%s, %v, %v), want (%s, true, nil)", gotRec, truncRec, err, want)
 	}
 	neutralCalled.Store(false)
 	gotOff, truncOff, err := smartTruncate(map[Secret]labelValueProbe{sec: neutralProbe}, 1000, false)
@@ -6630,8 +6626,8 @@ func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
 	if notU.username != "alice" || notU.password != secret || !notU.passwordSet {
 		t.Fatalf("unexpected NotUserinfo fixture: %+v", notU)
 	}
-	if got, truncated, err := SmartTruncate(notU, 1000); err != nil || string(got) != `{}` || truncated {
-		t.Errorf("SmartTruncate(NotUserinfo) = (%s, %v, %v), want ({}, false, nil)", got, truncated, err)
+	if got, truncated, err := smartTruncate(notU, 1000, true); err != nil || string(got) != `{}` || truncated {
+		t.Errorf("smartTruncate(NotUserinfo) = (%s, %v, %v), want ({}, false, nil)", got, truncated, err)
 	}
 
 	u := url.UserPassword("alice", secret)
@@ -6720,15 +6716,15 @@ func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			credsUserinfoMarshalCalled.Store(false)
 			valCalled.Store(false)
-			got, truncated, err := SmartTruncate(tt.in, 1000)
+			got, truncated, err := smartTruncate(tt.in, 1000, true)
 			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
-				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				t.Errorf("smartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 			}
 			if credsUserinfoMarshalCalled.Load() {
-				t.Errorf("SmartTruncate(%T) called CredsUserinfo.MarshalJSON", tt.in)
+				t.Errorf("smartTruncate(%T) called CredsUserinfo.MarshalJSON", tt.in)
 			}
 			if valCalled.Load() {
-				t.Errorf("SmartTruncate(%T) called value MarshalJSON under CredsUserinfo map key", tt.in)
+				t.Errorf("smartTruncate(%T) called value MarshalJSON under CredsUserinfo map key", tt.in)
 			}
 			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
 			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
@@ -6748,12 +6744,12 @@ func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
 	}
 	zeroHolder := &omitZeroHolder{}
 	credsUserinfoMarshalCalled.Store(false)
-	gotZero, truncZero, err := SmartTruncate(zeroHolder, 1000)
+	gotZero, truncZero, err := smartTruncate(zeroHolder, 1000, true)
 	if want := `{"Ptr":"[REDACTED]","inner":{"C":"[REDACTED]"}}`; err != nil || string(gotZero) != want || !truncZero {
-		t.Errorf("SmartTruncate(zero omitZeroHolder) = (%s, %v, %v), want (%s, true, nil)", gotZero, truncZero, err, want)
+		t.Errorf("smartTruncate(zero omitZeroHolder) = (%s, %v, %v), want (%s, true, nil)", gotZero, truncZero, err, want)
 	}
 	if credsUserinfoMarshalCalled.Load() {
-		t.Errorf("SmartTruncate(zero omitZeroHolder) called CredsUserinfo.MarshalJSON")
+		t.Errorf("smartTruncate(zero omitZeroHolder) called CredsUserinfo.MarshalJSON")
 	}
 	if gotOff, _, err := smartTruncate(zeroHolder, 1000, false); err != nil || string(gotOff) != `{"Ptr":null}` {
 		t.Errorf("smartTruncate(zero omitZeroHolder, redact off) = (%s, %v), want {\"Ptr\":null}", gotOff, err)
@@ -6777,13 +6773,13 @@ func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
 		live.Inner.mu.Unlock()
 	}, func() {
 		for range 300 {
-			if got, _, err := SmartTruncate(live, 1000); err != nil || string(got) != wantLive {
-				t.Fatalf("SmartTruncate(live omitZeroHolder) = (%s, %v), want %s", got, err, wantLive)
+			if got, _, err := smartTruncate(live, 1000, true); err != nil || string(got) != wantLive {
+				t.Fatalf("smartTruncate(live omitZeroHolder) = (%s, %v), want %s", got, err, wantLive)
 			}
 		}
 	})
 	if credsUserinfoMarshalCalled.Load() {
-		t.Errorf("SmartTruncate(live omitZeroHolder) called CredsUserinfo.MarshalJSON")
+		t.Errorf("smartTruncate(live omitZeroHolder) called CredsUserinfo.MarshalJSON")
 	}
 }
 
@@ -6791,9 +6787,9 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	// A small circular pointer still emits [CIRCULAR_REFERENCE] with truncated=false.
 	node := &cyclicNode{Name: "a"}
 	node.Next = node
-	gotSingle, truncSingle, err := SmartTruncate(node, 1000)
+	gotSingle, truncSingle, err := smartTruncate(node, 1000, true)
 	if want := `{"Name":"a","Next":"[CIRCULAR_REFERENCE]"}`; err != nil || string(gotSingle) != want || truncSingle {
-		t.Fatalf("SmartTruncate(single pointer cycle) = (%s, %v, %v), want (%s, false, nil)", gotSingle, truncSingle, err, want)
+		t.Fatalf("smartTruncate(single pointer cycle) = (%s, %v, %v), want (%s, false, nil)", gotSingle, truncSingle, err, want)
 	}
 
 	type selfPtrList struct {
@@ -6806,9 +6802,9 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	for i := range exact.Ptrs {
 		exact.Ptrs[i] = exact
 	}
-	gotExact, truncExact, err := SmartTruncate(exact, 100)
+	gotExact, truncExact, err := smartTruncate(exact, 100, true)
 	if err != nil || truncExact {
-		t.Fatalf("SmartTruncate(exact circular pointers) = (truncated %v, %v), want (false, nil)", truncExact, err)
+		t.Fatalf("smartTruncate(exact circular pointers) = (truncated %v, %v), want (false, nil)", truncExact, err)
 	}
 	var parsedExact struct {
 		Ptrs []any
@@ -6817,7 +6813,7 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 		t.Fatalf("json.Unmarshal(exact circular pointers) error: %v", err)
 	}
 	if len(parsedExact.Ptrs) != exactRefs || parsedExact.Ptrs[len(parsedExact.Ptrs)-1] != circularRefPlaceholder {
-		t.Errorf("SmartTruncate(exact circular pointers) wrote %d items ending in %v, want %d ending in %s", len(parsedExact.Ptrs), parsedExact.Ptrs[len(parsedExact.Ptrs)-1], exactRefs, circularRefPlaceholder)
+		t.Errorf("smartTruncate(exact circular pointers) wrote %d items ending in %v, want %d ending in %s", len(parsedExact.Ptrs), parsedExact.Ptrs[len(parsedExact.Ptrs)-1], exactRefs, circularRefPlaceholder)
 	}
 
 	// Over budget: a slice of maxSanitizeNodes + 10 self-pointers stops at maxSanitizeNodes.
@@ -6825,9 +6821,9 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	for i := range over.Ptrs {
 		over.Ptrs[i] = over
 	}
-	gotOver, truncOver, err := SmartTruncate(over, 100)
+	gotOver, truncOver, err := smartTruncate(over, 100, true)
 	if err != nil || !truncOver {
-		t.Fatalf("SmartTruncate(over-budget circular pointers) = (truncated %v, %v), want (true, nil)", truncOver, err)
+		t.Fatalf("smartTruncate(over-budget circular pointers) = (truncated %v, %v), want (true, nil)", truncOver, err)
 	}
 	var parsedOver struct {
 		Ptrs []any
@@ -6837,7 +6833,7 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	}
 	const wantOverLen = maxSanitizeNodes - 1
 	if len(parsedOver.Ptrs) != wantOverLen || parsedOver.Ptrs[0] != circularRefPlaceholder || parsedOver.Ptrs[len(parsedOver.Ptrs)-1] != sanitizeBudgetPlaceholder {
-		t.Errorf("SmartTruncate(over-budget circular pointers) wrote %d items (first=%v, last=%v), want %d (first=%s, last=%s)", len(parsedOver.Ptrs), parsedOver.Ptrs[0], parsedOver.Ptrs[len(parsedOver.Ptrs)-1], wantOverLen, circularRefPlaceholder, sanitizeBudgetPlaceholder)
+		t.Errorf("smartTruncate(over-budget circular pointers) wrote %d items (first=%v, last=%v), want %d (first=%s, last=%s)", len(parsedOver.Ptrs), parsedOver.Ptrs[0], parsedOver.Ptrs[len(parsedOver.Ptrs)-1], wantOverLen, circularRefPlaceholder, sanitizeBudgetPlaceholder)
 	}
 
 	// Slice and map cycles are likewise bounded by maxSanitizeNodes.
@@ -6845,16 +6841,16 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	for i := range cyclicSlices {
 		cyclicSlices[i] = cyclicSlices
 	}
-	gotSliceCycle, truncSliceCycle, err := SmartTruncate(cyclicSlices, 100)
+	gotSliceCycle, truncSliceCycle, err := smartTruncate(cyclicSlices, 100, true)
 	if err != nil || !truncSliceCycle {
-		t.Fatalf("SmartTruncate(over-budget slice cycles) = (truncated %v, %v), want (true, nil)", truncSliceCycle, err)
+		t.Fatalf("smartTruncate(over-budget slice cycles) = (truncated %v, %v), want (true, nil)", truncSliceCycle, err)
 	}
 	var parsedSlices []any
 	if err := json.Unmarshal(gotSliceCycle, &parsedSlices); err != nil {
 		t.Fatalf("json.Unmarshal(over-budget slice cycles) error: %v", err)
 	}
 	if len(parsedSlices) != maxSanitizeNodes || parsedSlices[0] != circularRefPlaceholder || parsedSlices[len(parsedSlices)-1] != sanitizeBudgetPlaceholder {
-		t.Errorf("SmartTruncate(over-budget slice cycles) wrote %d items ending in %v, want %d ending in %s", len(parsedSlices), parsedSlices[len(parsedSlices)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+		t.Errorf("smartTruncate(over-budget slice cycles) wrote %d items ending in %v, want %d ending in %s", len(parsedSlices), parsedSlices[len(parsedSlices)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
 	}
 
 	cyclicMaps := make([]any, maxSanitizeNodes+10)
@@ -6862,9 +6858,9 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	for i := range cyclicMaps {
 		cyclicMaps[i] = rootMap
 	}
-	gotMapCycle, truncMapCycle, err := SmartTruncate(rootMap, 100)
+	gotMapCycle, truncMapCycle, err := smartTruncate(rootMap, 100, true)
 	if err != nil || !truncMapCycle {
-		t.Fatalf("SmartTruncate(over-budget map cycles) = (truncated %v, %v), want (true, nil)", truncMapCycle, err)
+		t.Fatalf("smartTruncate(over-budget map cycles) = (truncated %v, %v), want (true, nil)", truncMapCycle, err)
 	}
 	var parsedMap map[string][]any
 	if err := json.Unmarshal(gotMapCycle, &parsedMap); err != nil {
@@ -6872,7 +6868,7 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 	}
 	items := parsedMap["items"]
 	if len(items) != maxSanitizeNodes-1 || items[0] != circularRefPlaceholder || items[len(items)-1] != sanitizeBudgetPlaceholder {
-		t.Errorf("SmartTruncate(over-budget map cycles) wrote %d items ending in %v, want %d ending in %s", len(items), items[len(items)-1], maxSanitizeNodes-1, sanitizeBudgetPlaceholder)
+		t.Errorf("smartTruncate(over-budget map cycles) wrote %d items ending in %v, want %d ending in %s", len(items), items[len(items)-1], maxSanitizeNodes-1, sanitizeBudgetPlaceholder)
 	}
 }
 
@@ -6914,9 +6910,9 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			gotOn, truncOn, err := SmartTruncate(tt.in, 1000)
+			gotOn, truncOn, err := smartTruncate(tt.in, 1000, true)
 			if err != nil || string(gotOn) != tt.wantOn || truncOn != tt.wantTrunc {
-				t.Errorf("SmartTruncate(%s) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOn, truncOn, err, tt.wantOn, tt.wantTrunc)
+				t.Errorf("smartTruncate(%s) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOn, truncOn, err, tt.wantOn, tt.wantTrunc)
 			}
 			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
 			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantTrunc {
@@ -6929,18 +6925,18 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 func TestJSONFormatter_DeclaredSensitiveTypeMapKey(t *testing.T) {
 	type SyntaxToken int
 
-	gotMapOn, truncMapOn, err := SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000)
+	gotMapOn, truncMapOn, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, true)
 	if err != nil || string(gotMapOn) != `{"[REDACTED]":"[REDACTED]"}` || !truncMapOn {
-		t.Errorf("SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}) = (%s, %v, %v), want (%s, true, nil)", gotMapOn, truncMapOn, err, `{"[REDACTED]":"[REDACTED]"}`)
+		t.Errorf("smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}) = (%s, %v, %v), want (%s, true, nil)", gotMapOn, truncMapOn, err, `{"[REDACTED]":"[REDACTED]"}`)
 	}
 	gotMapOff, truncMapOff, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, false)
 	if err != nil || string(gotMapOff) != `{"1":12,"2":9}` || truncMapOff {
 		t.Errorf("smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, redact off) = (%s, %v, %v), want (%s, false, nil)", gotMapOff, truncMapOff, err, `{"1":12,"2":9}`)
 	}
 
-	gotValOn, truncValOn, err := SmartTruncate(SyntaxToken(7), 1000)
+	gotValOn, truncValOn, err := smartTruncate(SyntaxToken(7), 1000, true)
 	if err != nil || string(gotValOn) != `"[REDACTED]"` || !truncValOn {
-		t.Errorf("SmartTruncate(SyntaxToken(7)) = (%s, %v, %v), want (%s, true, nil)", gotValOn, truncValOn, err, `"[REDACTED]"`)
+		t.Errorf("smartTruncate(SyntaxToken(7)) = (%s, %v, %v), want (%s, true, nil)", gotValOn, truncValOn, err, `"[REDACTED]"`)
 	}
 	gotValOff, truncValOff, err := smartTruncate(SyntaxToken(7), 1000, false)
 	if err != nil || string(gotValOff) != `7` || truncValOff {

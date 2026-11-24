@@ -707,6 +707,40 @@ func TestGenerateContent_ContextCacheRequestShape(t *testing.T) {
 	}
 }
 
+// TestGenerateContent_ContextCacheToolConfig checks where a request's tool
+// config goes when a cache is created and then used: into the cache, and out
+// of the request that names it. See applyCache for why it cannot stay.
+func TestGenerateContent_ContextCacheToolConfig(t *testing.T) {
+	api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m := newCacheTestModel(t, api, "test-model")
+	newRequest := func() *model.LLMRequest {
+		req := cacheTestRequest(&model.ContextCacheConfig{})
+		req.Config.ToolConfig = &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny}}
+		return req
+	}
+	req := newRequest()
+	req.PreviousPromptTokenCount = 5000
+	// The tool config is part of the prefix, so the earlier request had it too.
+	req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, newRequest(), 2), ContentsCount: 2}
+
+	generateOnce(t, cacheTestContext(t), m, req)
+
+	if len(api.creates) != 1 {
+		t.Fatalf("caches created = %d, want 1", len(api.creates))
+	}
+	wantToolConfig := map[string]any{"functionCallingConfig": map[string]any{"mode": "ANY"}}
+	if diff := cmp.Diff(wantToolConfig, api.creates[0]["toolConfig"]); diff != "" {
+		t.Errorf("cache toolConfig mismatch (-want +got):\n%s", diff)
+	}
+	sent := api.generates[0]
+	if got, want := sent["cachedContent"], "cachedContents/1"; got != want {
+		t.Fatalf("request cachedContent = %v, want %v", got, want)
+	}
+	if got, ok := sent["toolConfig"]; ok {
+		t.Errorf("request toolConfig = %v alongside a cache, want none", got)
+	}
+}
+
 // TestGenerateContent_ContextCacheDefaults checks the TTL a zero config
 // creates a cache with, and the expiry recorded when the provider reports
 // none.
@@ -1226,6 +1260,36 @@ func TestGenerateContent_ContextCacheKeepsExplicitCache(t *testing.T) {
 	}
 	if resp.CacheMetadata != nil {
 		t.Errorf("CacheMetadata = %+v, want none for a cache ADK does not manage", resp.CacheMetadata)
+	}
+}
+
+// TestGenerateContent_ContextCacheExplicitCacheMissing checks that a request
+// naming its own cache gets the provider's error when the provider no longer
+// holds that cache. The cache is the caller's, so the request is not sent again
+// and the cache is not deleted.
+func TestGenerateContent_ContextCacheExplicitCacheMissing(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/mine": true}}
+			m := newCacheTestModel(t, api, "test-model")
+			req := cacheTestRequest(&model.ContextCacheConfig{})
+			req.Config.CachedContent = "cachedContents/mine"
+			req.Config.SystemInstruction = nil
+			req.Config.Tools = nil
+
+			var lastErr error
+			for _, err := range m.GenerateContent(cacheTestContext(t), req, stream) {
+				lastErr = err
+			}
+
+			var apiErr genai.APIError
+			if !errors.As(lastErr, &apiErr) || apiErr.Code != http.StatusNotFound {
+				t.Errorf("error = %v, want the provider's 404 passed to the caller", lastErr)
+			}
+			if diff := cmp.Diff([]string{"generate"}, api.calls); diff != "" {
+				t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
