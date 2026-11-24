@@ -171,16 +171,6 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			yield(nil, failedResponseError(term.resp))
 			return
 		}
-		// A call the translator could not emit with its arguments: its done
-		// event named no item, argument deltas no item could claim may have
-		// been its own, or those deltas belonged to a call that never finished.
-		// A terminal event stating every call rebuilds it below, as blocking
-		// would; without one, the call is lost and the turn must not end as a
-		// clean stop.
-		if translator.lostCall() && !statesEveryCall(term, translator.calls()) {
-			yield(nil, errFunctionCallMissingItemID)
-			return
-		}
 
 		final := aggregator.Close()
 		var completedContent *genai.Content
@@ -284,45 +274,6 @@ func carriesResponse(resp *oairesponses.Response) bool {
 	j := &resp.JSON
 	return j.ID.Valid() || j.Status.Valid() || j.Output.Valid() ||
 		j.IncompleteDetails.Valid() || j.Error.Valid() || j.Model.Valid()
-}
-
-// statesEveryCall reports whether the terminal event can stand in for a call
-// the stream lost: the turn ran to completion, the event states at least as
-// many function calls as the stream saw (and at least one), and each states
-// its name, call ID and decodable arguments. A truncated payload states only
-// part of the output. A call missing any of those fields would be completed by
-// adoptTerminalCalls from a streamed call paired with it by position or name,
-// which the lost call is not among; a call whose arguments are absent, null or
-// "" would be rebuilt with none, where a call taking none states "{}".
-func statesEveryCall(term terminalEvent, calls int) bool {
-	if !term.seen || truncated(term.resp, term.incomplete) {
-		return false
-	}
-	stated := 0
-	for _, item := range term.resp.Output {
-		if item.Type != "function_call" {
-			continue
-		}
-		if item.Name == "" || item.CallID == "" || !statesArguments(item.Arguments) {
-			return false
-		}
-		if _, err := functionCallArgs(item.Arguments); err != nil {
-			return false
-		}
-		stated++
-	}
-	return stated > 0 && stated >= calls
-}
-
-// statesArguments reports whether a function call item carries an arguments
-// payload, read the way functionCallArgs reads it.
-func statesArguments(arguments oairesponses.ResponseOutputItemUnionArguments) bool {
-	switch arguments.OfResponseToolSearchCallArguments.(type) {
-	case nil, string:
-		return arguments.OfString != ""
-	default:
-		return true
-	}
 }
 
 // adoptTerminalCalls makes the terminal event's tool calls the turn's own. Text
