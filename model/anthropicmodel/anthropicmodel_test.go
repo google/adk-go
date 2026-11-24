@@ -1908,6 +1908,21 @@ func TestMultimodalSupport(t *testing.T) {
 	})
 }
 
+// roundTripPart marshals a part to JSON and back, the way session storage
+// persists parts between turns.
+func roundTripPart(t *testing.T, part *genai.Part) *genai.Part {
+	t.Helper()
+	data, err := json.Marshal(part)
+	if err != nil {
+		t.Fatalf("marshal part: %v", err)
+	}
+	out := &genai.Part{}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("unmarshal part: %v", err)
+	}
+	return out
+}
+
 func TestExtendedThinkingAndEffort(t *testing.T) {
 	var lastBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2118,6 +2133,179 @@ func TestExtendedThinkingAndEffort(t *testing.T) {
 			t.Errorf("thinking blocks were not ordered first on assistant turn: %+v", asstBlocks)
 		}
 	})
+}
+
+// TestEmptyThinkingBlockRoundTrip covers issue #2463: a thinking block with
+// empty text and only a signature must replay as a thinking block, not as
+// redacted_thinking, while a genuine redacted_thinking block — and a signed
+// empty-text thought part carrying no recorded provenance — still replay as
+// redacted_thinking.
+func TestEmptyThinkingBlockRoundTrip(t *testing.T) {
+	var bodies []map[string]any
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(data, &body)
+		bodies = append(bodies, body)
+		calls++
+
+		if isStream, _ := body["stream"].(bool); isStream {
+			// Streamed turn: a thinking block with empty text and only a
+			// signature, followed by a tool call — the shape Claude models
+			// stream by default when no thinking parameter is set.
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			events := []string{
+				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_e1","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n",
+				`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}` + "\n\n",
+				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_empty_thinking"}}` + "\n\n",
+				`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n",
+				`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"search_docs","input":{}}}` + "\n\n",
+				`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"x\"}"}}` + "\n\n",
+				`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n",
+				`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}` + "\n\n",
+				`event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n",
+			}
+			for _, ev := range events {
+				_, _ = io.WriteString(w, ev)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 3 {
+			// Non-streamed turn holding an empty-text thinking block and a
+			// genuine redacted_thinking block side by side.
+			_, _ = io.WriteString(w, `{"id":"msg_e3","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"","signature":"sig_ns_empty"},{"type":"redacted_thinking","data":"enc_ns_redacted"},{"type":"text","text":"done"}],"usage":{"input_tokens":1,"output_tokens":3}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"msg_e2","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+
+	generate := func(req *model.LLMRequest, stream bool) *model.LLMResponse {
+		t.Helper()
+		var final *model.LLMResponse
+		for resp, err := range m.GenerateContent(t.Context(), req, stream) {
+			if err != nil {
+				t.Fatalf("GenerateContent() error = %v", err)
+			}
+			if !resp.Partial {
+				final = resp
+			}
+		}
+		if final == nil {
+			t.Fatal("GenerateContent() returned no final response")
+		}
+		return final
+	}
+
+	assistantBlocks := func(body map[string]any) []map[string]any {
+		t.Helper()
+		msgs, _ := body["messages"].([]any)
+		for _, raw := range msgs {
+			msg, _ := raw.(map[string]any)
+			if msg["role"] != "assistant" {
+				continue
+			}
+			content, _ := msg["content"].([]any)
+			blocks := make([]map[string]any, 0, len(content))
+			for _, c := range content {
+				if b, ok := c.(map[string]any); ok {
+					blocks = append(blocks, b)
+				}
+			}
+			return blocks
+		}
+		t.Fatal("no assistant message in request body")
+		return nil
+	}
+
+	// Streamed turn (call 1), then its replay in a tool loop (call 2). The
+	// replayed history also carries a hand-built signed thought part with no
+	// recorded provenance, which must keep the historical redacted_thinking
+	// replay.
+	resp1 := generate(&model.LLMRequest{Contents: genai.Text("go")}, true)
+	if len(resp1.Content.Parts) != 2 {
+		t.Fatalf("streamed parts = %+v, want 2 parts (thinking, tool_use)", resp1.Content.Parts)
+	}
+	if p := resp1.Content.Parts[0]; !p.Thought || p.Text != "" || string(p.ThoughtSignature) != "sig_empty_thinking" {
+		t.Errorf("streamed part[0] = %+v, want empty-text thought part signed sig_empty_thinking", p)
+	}
+	legacyPart := &genai.Part{Thought: true, ThoughtSignature: []byte("legacy_sig")}
+	// The streamed thinking part goes through a JSON round-trip first, the
+	// way session storage persists and reloads it between turns; the
+	// recorded provenance has to survive that for the replay to work.
+	generate(&model.LLMRequest{Contents: []*genai.Content{
+		genai.NewContentFromText("go", genai.RoleUser),
+		{Role: genai.RoleModel, Parts: []*genai.Part{roundTripPart(t, resp1.Content.Parts[0]), legacyPart, resp1.Content.Parts[1]}},
+		{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "toolu_01", Name: "search_docs", Response: map[string]any{"r": "ok"}}}}},
+	}}, false)
+
+	blocks := assistantBlocks(bodies[1])
+	if len(blocks) != 3 {
+		t.Fatalf("replayed assistant blocks = %d (%+v), want 3 (thinking, redacted_thinking, tool_use)", len(blocks), blocks)
+	}
+	if blocks[0]["type"] != "thinking" || blocks[0]["thinking"] != "" || blocks[0]["signature"] != "sig_empty_thinking" {
+		t.Errorf("replayed block[0] = %+v, want thinking block with empty text and signature sig_empty_thinking", blocks[0])
+	}
+	if blocks[1]["type"] != "redacted_thinking" || blocks[1]["data"] != "legacy_sig" {
+		t.Errorf("replayed block[1] = %+v, want redacted_thinking block with data legacy_sig", blocks[1])
+	}
+	if blocks[2]["type"] != "tool_use" {
+		t.Errorf("replayed block[2] = %+v, want tool_use block", blocks[2])
+	}
+
+	// Non-streamed turn (call 3), then its replay (call 4): the empty-text
+	// thinking block replays as thinking, the genuine redacted_thinking
+	// block still replays as redacted_thinking.
+	resp2 := generate(&model.LLMRequest{Contents: genai.Text("again")}, false)
+	if len(resp2.Content.Parts) != 3 {
+		t.Fatalf("non-streamed parts = %+v, want 3 parts (thinking, redacted_thinking, text)", resp2.Content.Parts)
+	}
+	if p := resp2.Content.Parts[0]; !p.Thought || p.Text != "" || string(p.ThoughtSignature) != "sig_ns_empty" {
+		t.Errorf("non-streamed part[0] = %+v, want empty-text thought part signed sig_ns_empty", p)
+	}
+	if p := resp2.Content.Parts[1]; !p.Thought || string(p.ThoughtSignature) != "enc_ns_redacted" {
+		t.Errorf("non-streamed part[1] = %+v, want redacted thought part with data enc_ns_redacted", p)
+	}
+	// Reload the non-streamed parts through JSON too, as a stored session
+	// would, before replaying them.
+	reloaded := &genai.Content{Role: resp2.Content.Role}
+	for _, part := range resp2.Content.Parts {
+		reloaded.Parts = append(reloaded.Parts, roundTripPart(t, part))
+	}
+	generate(&model.LLMRequest{Contents: []*genai.Content{
+		genai.NewContentFromText("again", genai.RoleUser),
+		reloaded,
+		genai.NewContentFromText("next", genai.RoleUser),
+	}}, false)
+
+	blocks = assistantBlocks(bodies[3])
+	if len(blocks) != 3 {
+		t.Fatalf("replayed assistant blocks = %d (%+v), want 3 (thinking, redacted_thinking, text)", len(blocks), blocks)
+	}
+	if blocks[0]["type"] != "thinking" || blocks[0]["thinking"] != "" || blocks[0]["signature"] != "sig_ns_empty" {
+		t.Errorf("replayed block[0] = %+v, want thinking block with empty text and signature sig_ns_empty", blocks[0])
+	}
+	if blocks[1]["type"] != "redacted_thinking" || blocks[1]["data"] != "enc_ns_redacted" {
+		t.Errorf("replayed block[1] = %+v, want redacted_thinking block with data enc_ns_redacted", blocks[1])
+	}
+	if blocks[2]["type"] != "text" || blocks[2]["text"] != "done" {
+		t.Errorf("replayed block[2] = %+v, want text block \"done\"", blocks[2])
+	}
 }
 
 func TestPromptCaching(t *testing.T) {

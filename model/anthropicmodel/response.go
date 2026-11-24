@@ -36,6 +36,15 @@ const (
 	CacheCreationInputTokensMetadataKey = "anthropic_cache_creation_input_tokens"
 )
 
+// contentBlockTypeMetadataKey is the key in [genai.Part.PartMetadata] recording
+// the Anthropic content block type a thought part was converted from. A
+// `thinking` block with empty text and a `redacted_thinking` block otherwise
+// produce identical parts — Thought set, no text, only a signature — so the
+// request conversion reads this key to replay the part as the block type it
+// came from. Parts without the key, built by callers or stored before it was
+// recorded, keep the historical replay as `redacted_thinking`.
+const contentBlockTypeMetadataKey = "anthropic_content_block_type"
+
 func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*model.LLMResponse, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("%w: received nil message from API", ErrAPIStatus)
@@ -124,6 +133,12 @@ func convertContentBlock(block *anthropic.ContentBlockUnion, unwrapOutput bool) 
 		}
 		if block.Signature != "" {
 			part.ThoughtSignature = []byte(block.Signature)
+		}
+		if block.Thinking == "" && block.Signature != "" {
+			// With no text, this part is indistinguishable from one converted
+			// from a redacted_thinking block; record where it came from so
+			// the request conversion replays it as a thinking block.
+			part.PartMetadata = map[string]any{contentBlockTypeMetadataKey: block.Type}
 		}
 		return part, true, nil
 
