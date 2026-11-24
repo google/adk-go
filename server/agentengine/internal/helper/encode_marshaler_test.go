@@ -133,6 +133,34 @@ func TestConvertSnakeOpaqueValues(t *testing.T) {
 			want:  map[string]any{"amount": json.RawMessage("5")},
 		},
 		{
+			name: "pointer_receiver_on_nested_addressable_field",
+			value: &struct {
+				Account struct {
+					Amount big.Int `json:"amount"`
+				} `json:"account"`
+			}{Account: struct {
+				Amount big.Int `json:"amount"`
+			}{Amount: *big.NewInt(7)}},
+			want: map[string]any{"account": map[string]any{"amount": json.RawMessage("7")}},
+		},
+		{
+			name: "omitempty_keeps_non_nil_pointer_to_zero_value",
+			value: struct {
+				A *netip.Addr `json:"a,omitempty"`
+				S *string     `json:"s,omitempty"`
+				N *netip.Addr `json:"n,omitempty"`
+			}{A: &netip.Addr{}, S: new(string)},
+			want: map[string]any{"a": "", "s": ""},
+		},
+		{
+			name: "omitempty_keeps_non_nil_interface_to_zero_value",
+			value: struct {
+				A any `json:"a,omitempty"`
+				B any `json:"b,omitempty"`
+			}{A: ""},
+			want: map[string]any{"a": ""},
+		},
+		{
 			name: "omitempty_keeps_marshaled_struct",
 			value: struct {
 				A netip.Addr `json:"a,omitempty"` //nolint:modernize // checks that omitempty has no effect, as in encoding/json

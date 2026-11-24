@@ -123,19 +123,18 @@ func convertSnakeValue(path string, v reflect.Value, depth int, active map[snake
 				continue
 			}
 
-			// Pass an addressable field as is, so a marshaler with a pointer
-			// receiver (big.Int) is found, as encoding/json does.
-			fieldValue := reflect.ValueOf(fv.Interface())
-			if fv.CanAddr() && fv.Kind() != reflect.Pointer && isOpaque(fv.Type()) {
-				fieldValue = fv
-			}
-			val, err := convertSnakeValue(newPath, fieldValue, depth+1, active)
+			// Pass the field as is: it stays addressable when its parent is, so
+			// a marshaler with a pointer receiver (big.Int) is found at any
+			// depth, as encoding/json does.
+			val, err := convertSnakeValue(newPath, fv, depth+1, active)
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert regular struct field with path: %v err: %w", newPath, err)
 			}
-			// encoding/json never omits a struct for omitempty, so a marshaled
-			// netip.Addr{} stays as "".
-			if omitEmpty && isOpaque(fvt.Type) && fvt.Type.Kind() != reflect.Pointer {
+			// encoding/json never omits a struct for omitempty, and omits a
+			// pointer or interface only when nil, which already yields a nil
+			// val. So a marshaled netip.Addr{}, or a non-nil pointer to one,
+			// stays as "".
+			if k := fvt.Type.Kind(); k == reflect.Pointer || k == reflect.Interface || isOpaque(fvt.Type) {
 				omitEmpty = false
 			}
 			if val != nil && (!omitEmpty || notEmpty(val)) {
