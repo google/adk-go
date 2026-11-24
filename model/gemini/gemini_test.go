@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -1066,7 +1067,8 @@ func TestModel_TrackingHeaders_RuntimeSuffix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+			versiontest.ClearRuntimeEnv(t)
+			for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
 				t.Setenv(name, "")
 			}
 			t.Setenv("K_SERVICE", "svc")
@@ -1167,7 +1169,8 @@ func TestModel_LiveTrackingHeaders_RuntimeSuffix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+			versiontest.ClearRuntimeEnv(t)
+			for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
 				t.Setenv(name, "")
 			}
 			t.Setenv("K_SERVICE", "svc")

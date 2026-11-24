@@ -35,6 +35,7 @@ import (
 
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -1489,9 +1490,7 @@ func contentTexts(v any) []string {
 // Cache calls follow the same rule as model calls: the hosting runtime is
 // named only when the base URL in effect is a Google API endpoint.
 func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
-		t.Setenv(name, "")
-	}
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	const google, proxy = "https://generativelanguage.googleapis.com/", "https://proxy.example.com/"
 	plain := version.TrackingHeader(nil)
@@ -1527,7 +1526,8 @@ func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
 // TestGenerateContent_ContextCacheRuntimeSuffix checks the labels on the calls
 // that create and delete a cache, as the provider receives them.
 func TestGenerateContent_ContextCacheRuntimeSuffix(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL"} {
+	versiontest.ClearRuntimeEnv(t)
+	for _, name := range []string{"GOOGLE_GEMINI_BASE_URL"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")

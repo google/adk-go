@@ -76,7 +76,7 @@ func runtimeTag() string {
 	return ""
 }
 
-// isGoogleAPI reports whether a request to dest goes, over TLS, to a DNS name
+// isGoogleAPI reports whether dest is an https URL whose host is a DNS name
 // under googleapis.com. It follows adk-python's is_googleapis_url and is
 // stricter in one way: the host may hold only the characters of a DNS name.
 // That leaves out an IP address, whose IPv6 zone can end in the suffix while

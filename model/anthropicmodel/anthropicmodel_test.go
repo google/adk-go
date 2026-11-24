@@ -47,6 +47,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/anthropicmodel"
 	"google.golang.org/adk/v2/session"
@@ -4045,9 +4046,7 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 // on a request that goes to a Google API endpoint, whichever option decided
 // where the request goes.
 func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
-		t.Setenv(name, "")
-	}
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("CLOUD_RUN_JOB", "job")
 	const (
 		proxy      = "https://proxy.example.com"
@@ -4149,9 +4148,7 @@ func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
 // caller's: it is sent as the caller left it, and the other one still names
 // the hosting runtime.
 func TestNewModel_VertexRuntimeSuffixKeepsCallerHeaders(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
-		t.Setenv(name, "")
-	}
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")
 
 	// send returns the headers of a request made with reqOpts.

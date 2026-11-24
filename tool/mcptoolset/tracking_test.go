@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 )
 
 // headerRecorder records the headers of every request a test server receives.
@@ -287,9 +288,7 @@ func TestAuthCredentialBypassesDefaultClientTransport(t *testing.T) {
 
 // The hosting runtime is reported to Google API endpoints only.
 func TestTrackingTransportRuntimeSuffix(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
-		t.Setenv(name, "")
-	}
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")
 	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
@@ -322,9 +321,7 @@ func TestTrackingTransportRuntimeSuffix(t *testing.T) {
 
 // Each hop of a redirect is labeled for its own URL.
 func TestTrackingTransportRuntimeSuffixOnRedirect(t *testing.T) {
-	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
-		t.Setenv(name, "")
-	}
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")
 	plain := version.TrackingHeader(nil)
 	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)

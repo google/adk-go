@@ -22,18 +22,21 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
+	"google.golang.org/adk/v2/internal/version/versiontest"
 )
 
 // The MCP tests compare against TrackingHeader and the Gemini test checks only
 // substrings, so only this test pins its form.
 func TestTrackingHeader(t *testing.T) {
-	clearRuntimeEnv(t)
+	versiontest.ClearRuntimeEnv(t)
 	re := regexp.MustCompile(`^google-adk/` + regexp.QuoteMeta(Version) + ` gl-go/\S+( \S+)*$`)
 	for _, dest := range []*url.URL{nil, googleAPI, otherHost} {
 		if got := TrackingHeader(dest); !re.MatchString(got) {
@@ -77,12 +80,12 @@ func TestTrackingHeaderRuntimeSuffix(t *testing.T) {
 		{name: "Cloud Run job wins over Kubernetes", set: []string{"CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"}, want: "+cloud_run"},
 		{name: "Agent Engine wins over Cloud Run", set: []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE"}, want: "+remote_reasoning_engine"},
 		{name: "Agent Engine wins over Kubernetes", set: []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "KUBERNETES_SERVICE_HOST"}, want: "+remote_reasoning_engine"},
-		{name: "Agent Engine wins over all", set: runtimeEnvVars, want: "+remote_reasoning_engine"},
+		{name: "Agent Engine wins over all", set: versiontest.RuntimeEnvVars(), want: "+remote_reasoning_engine"},
 		{name: "no runtime"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			clearRuntimeEnv(t)
+			versiontest.ClearRuntimeEnv(t)
 			for _, name := range tt.set {
 				t.Setenv(name, "some-value")
 			}
@@ -106,7 +109,7 @@ func TestTrackingHeaderRuntimeSuffix(t *testing.T) {
 
 // Detection is not cached, so a variable set after the first call counts.
 func TestTrackingHeaderReadsEnvironmentOnEveryCall(t *testing.T) {
-	clearRuntimeEnv(t)
+	versiontest.ClearRuntimeEnv(t)
 	if got, want := adkToken(TrackingHeader(googleAPI)), "google-adk/"+Version; got != want {
 		t.Fatalf("TrackingHeader(%v) starts with %q, want %q", googleAPI, got, want)
 	}
@@ -119,7 +122,7 @@ func TestTrackingHeaderReadsEnvironmentOnEveryCall(t *testing.T) {
 // The table holds the rows of adk-python's test_is_googleapis_url, and more.
 // A destination that does not parse is no destination, as it is to a caller.
 func TestTrackingHeaderDestination(t *testing.T) {
-	clearRuntimeEnv(t)
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")
 	tests := []struct {
 		dest       string
@@ -191,7 +194,7 @@ func TestTrackingHeaderDestination(t *testing.T) {
 // The host a client connects to decides, which is the URL's Host: a URL built
 // by hand can render as another one.
 func TestTrackingHeaderDestinationBuiltByHand(t *testing.T) {
-	clearRuntimeEnv(t)
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")
 	tests := []struct {
 		dest       *url.URL
@@ -297,10 +300,12 @@ func TestTrackingHeaderDestinationIsDialed(t *testing.T) {
 		{name: "colons in the host", godebug: "urlstrictcolons=0", only: "https://evil.com:443,foo.googleapis.com:443/v1"},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
-			clearRuntimeEnv(t)
+			versiontest.ClearRuntimeEnv(t)
 			t.Setenv("K_SERVICE", "svc")
 			if mode.godebug != "" {
-				t.Setenv("GODEBUG", mode.godebug)
+				// After what the environment holds, because the last setting
+				// of a name wins.
+				t.Setenv("GODEBUG", os.Getenv("GODEBUG")+","+mode.godebug)
 				if _, err := url.Parse(mode.only); err != nil {
 					t.Skipf("GODEBUG=%s has no effect: %v", mode.godebug, err)
 				}
@@ -396,7 +401,7 @@ func TestWithTrackingHeaders(t *testing.T) {
 }
 
 func TestWithTrackingHeadersRuntimeSuffix(t *testing.T) {
-	clearRuntimeEnv(t)
+	versiontest.ClearRuntimeEnv(t)
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	plain, tagged := TrackingHeader(nil), TrackingHeader(googleAPI)
 	if want := "google-adk/" + Version + "+k8s"; adkToken(tagged) != want {
@@ -424,21 +429,8 @@ var (
 	otherHost = &url.URL{Scheme: "https", Host: "mcp.example", Path: "/mcp"}
 )
 
-// runtimeEnvVars are the variables that select a runtime suffix. The names
-// and the suffixes in these tests are literals because services parse them.
-var runtimeEnvVars = []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"}
-
 // errDialed stops a request once the address it would connect to is known.
 var errDialed = errors.New("dialed")
-
-// clearRuntimeEnv hides the runtime the test itself runs on, which may be one
-// of the runtimes ADK detects.
-func clearRuntimeEnv(t *testing.T) {
-	t.Helper()
-	for _, name := range runtimeEnvVars {
-		t.Setenv(name, "")
-	}
-}
 
 // adkToken returns the first token of a tracking header value.
 func adkToken(header string) string {

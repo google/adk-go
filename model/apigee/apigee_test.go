@@ -379,8 +379,10 @@ func TestGenerateContentWithRequestModel(t *testing.T) {
 	}
 }
 
-// The proxy is the customer's, not a Google API endpoint, so requests to it
-// never name the hosting runtime, as in adk-python's ApigeeLlm.
+// A proxy outside googleapis.com is not a Google API endpoint, so requests to
+// it do not name the hosting runtime. adk-python's ApigeeLlm leaves the
+// runtime out for every proxy. Here a proxy at an https host under
+// googleapis.com would get it, because the base URL decides, as for Gemini.
 func TestGenerateContentSendsNoRuntimeSuffixToProxy(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
 	t.Setenv("K_SERVICE", "svc")
