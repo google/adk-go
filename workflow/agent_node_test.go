@@ -128,6 +128,30 @@ func TestAgentNode_New(t *testing.T) {
 	}
 }
 
+func TestAgentNode_Agent(t *testing.T) {
+	wrapped, err := agent.New(agent.Config{
+		Name: "wrapped",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	node, err := NewAgentNode(wrapped, defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	if got := node.Agent(); got != wrapped {
+		t.Errorf("Agent() = %v, want the wrapped agent %v", got, wrapped)
+	}
+
+	var nilNode *AgentNode
+	if got := nilNode.Agent(); got != nil {
+		t.Errorf("(*AgentNode)(nil).Agent() = %v, want nil", got)
+	}
+}
+
 func TestAgentNode_Run(t *testing.T) {
 	type Input struct {
 		Val string `json:"val"`

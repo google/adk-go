@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
@@ -33,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type dummyLLM struct {
@@ -98,6 +100,19 @@ func newTestAgent(t *testing.T, name, description string, agentType agentinterna
 
 	if err != nil {
 		t.Fatalf("failed to create agent: %v", err)
+	}
+	return a
+}
+
+func newTestWorkflowAgent(t *testing.T, name string, subAgents []agent.Agent, edges []workflow.Edge) agent.Agent {
+	t.Helper()
+	a, err := workflowagent.New(workflowagent.Config{
+		Name:      name,
+		SubAgents: subAgents,
+		Edges:     edges,
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New: %v", err)
 	}
 	return a
 }
@@ -248,6 +263,11 @@ func TestShouldBuildAgentCluster(t *testing.T) {
 		{
 			name:     "parallel agent",
 			instance: newTestAgent(t, "ParAgent", "", agentinternal.TypeParallelAgent, nil, nil),
+			expected: true,
+		},
+		{
+			name:     "workflow agent",
+			instance: newTestWorkflowAgent(t, "WorkflowAgent", nil, nil),
 			expected: true,
 		},
 		{
@@ -869,4 +889,253 @@ func TestNestedWorkflowGraph(t *testing.T) {
 			t.Fatalf("undrawn workflow was anchored inside its cluster\n%s", dot)
 		}
 	})
+}
+
+func TestWorkflowAgentGraph(t *testing.T) {
+	writer := newTestAgent(t, "writer", "", agentinternal.TypeLLMAgent, nil, nil)
+	registeredOnly := newTestAgent(t, "registered_only", "", agentinternal.TypeLLMAgent, nil, nil)
+	writerNode, err := workflow.NewAgentNode(writer, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode: %v", err)
+	}
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+	prepare := workflow.NewFunctionNode("prepare", passThrough, workflow.NodeConfig{})
+	check := workflow.NewFunctionNode("check", passThrough, workflow.NodeConfig{})
+	done := workflow.NewFunctionNode("done", passThrough, workflow.NodeConfig{})
+	edges := workflow.NewEdgeBuilder().
+		Add(workflow.Start, prepare).
+		Add(prepare, writerNode).
+		Add(writerNode, check).
+		AddRoute(check, writerNode, workflow.StringRoute("retry")).
+		AddRoute(check, done, workflow.StringRoute("done")).
+		Build()
+	flow := newTestWorkflowAgent(t, "flow", []agent.Agent{writer, registeredOnly}, edges)
+
+	dot, err := GetAgentGraph(context.Background(), flow, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+
+	if !g.IsSubGraph("cluster_flow") {
+		t.Fatalf("missing workflow cluster\n%s", dot)
+	}
+	if g.IsNode("flow") || g.IsNode("START") {
+		t.Fatalf("workflow cluster or START was drawn as a node\n%s", dot)
+	}
+	if g.IsNode("registered_only") || g.IsSubGraph("cluster_registered_only") {
+		t.Fatalf("registered-only sub-agent was drawn as a workflow node\n%s", dot)
+	}
+	for _, name := range []string{"prepare", "writer", "check", "done"} {
+		parents := g.Relations.ChildToParents[name]
+		if !g.IsNode(name) || !parents["cluster_flow"] {
+			t.Errorf("node %s parents = %v, want it inside cluster_flow\n%s", name, parents, dot)
+		}
+	}
+	for _, name := range []string{"prepare", "check", "done"} {
+		node := g.Nodes.Lookup[name]
+		if node == nil {
+			continue
+		}
+		if shape := node.Attrs["shape"]; shape != "box" {
+			t.Errorf("function node %s shape = %q, want box\n%s", name, shape, dot)
+		}
+	}
+	writerNodeGraph := g.Nodes.Lookup["writer"]
+	if writerNodeGraph == nil || writerNodeGraph.Attrs["shape"] != "ellipse" || writerNodeGraph.Attrs["label"] != "\"🤖 writer\"" {
+		t.Errorf("writer node = %v, want the wrapped agent with its ellipse and caption\n%s", writerNodeGraph, dot)
+	}
+	for _, pair := range [][2]string{
+		{"prepare", "writer"},
+		{"writer", "check"},
+		{"check", "writer"},
+		{"check", "done"},
+	} {
+		if lookupEdge(t, g, pair[0], pair[1]) == nil {
+			t.Errorf("missing workflow edge %s -> %s\n%s", pair[0], pair[1], dot)
+		}
+	}
+	if lookupEdge(t, g, "flow", "writer") != nil {
+		t.Fatalf("workflow root was connected directly to its sub-agent instead of its graph edges\n%s", dot)
+	}
+}
+
+func TestWorkflowAgentGraphUsesAgentNodeIdentity(t *testing.T) {
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+
+	t.Run("function node with registered agent name", func(t *testing.T) {
+		registeredOnly := newTestAgent(t, "writer", "", agentinternal.TypeLLMAgent, nil, nil)
+		functionNode := workflow.NewFunctionNode("writer", passThrough, workflow.NodeConfig{})
+		flow := newTestWorkflowAgent(t, "flow", []agent.Agent{registeredOnly}, workflow.Chain(workflow.Start, functionNode))
+
+		dot, err := GetAgentGraph(context.Background(), flow, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		g := parseGraph(t, dot)
+		node := g.Nodes.Lookup["writer"]
+		if node == nil || node.Attrs["shape"] != "box" || node.Attrs["label"] != "\"writer\"" {
+			t.Fatalf("writer node = %v, want the function node box\n%s", node, dot)
+		}
+	})
+
+	t.Run("agent node without registered sub-agent", func(t *testing.T) {
+		writer := newTestAgent(t, "writer", "", agentinternal.TypeLLMAgent, nil, nil)
+		writerNode, err := workflow.NewAgentNode(writer, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		flow := newTestWorkflowAgent(t, "flow", nil, workflow.Chain(workflow.Start, writerNode))
+
+		dot, err := GetAgentGraph(context.Background(), flow, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		g := parseGraph(t, dot)
+		node := g.Nodes.Lookup["writer"]
+		if node == nil || node.Attrs["shape"] != "ellipse" || node.Attrs["label"] != "\"🤖 writer\"" {
+			t.Fatalf("writer node = %v, want the wrapped agent ellipse\n%s", node, dot)
+		}
+	})
+}
+
+func TestWorkflowAgentGraphWithCompositeAgentNode(t *testing.T) {
+	first := newTestAgent(t, "first", "", agentinternal.TypeLLMAgent, nil, nil)
+	second := newTestAgent(t, "second", "", agentinternal.TypeLLMAgent, nil, nil)
+	composite := newTestAgent(t, "composite", "", agentinternal.TypeSequentialAgent, []agent.Agent{first, second}, nil)
+	compositeNode, err := workflow.NewAgentNode(composite, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode: %v", err)
+	}
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+	prepare := workflow.NewFunctionNode("prepare", passThrough, workflow.NodeConfig{})
+	done := workflow.NewFunctionNode("done", passThrough, workflow.NodeConfig{})
+	flow := newTestWorkflowAgent(t, "flow", []agent.Agent{composite}, workflow.Chain(workflow.Start, prepare, compositeNode, done))
+
+	dot, err := GetAgentGraph(context.Background(), flow, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+	if !g.IsSubGraph("cluster_composite") {
+		t.Fatalf("missing composite agent cluster\n%s", dot)
+	}
+	incoming := lookupEdge(t, g, "prepare", "first")
+	if incoming == nil || incoming.Attrs["lhead"] != "cluster_composite" {
+		t.Fatalf("incoming edge = %v, want prepare -> first with lhead cluster_composite\n%s", incoming, dot)
+	}
+	outgoing := lookupEdge(t, g, "second", "done")
+	if outgoing == nil || outgoing.Attrs["ltail"] != "cluster_composite" {
+		t.Fatalf("outgoing edge = %v, want second -> done with ltail cluster_composite\n%s", outgoing, dot)
+	}
+}
+
+func TestWorkflowAgentGraphNestedCycleHasExitAnchor(t *testing.T) {
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+	first := workflow.NewFunctionNode("first", passThrough, workflow.NodeConfig{})
+	second := workflow.NewFunctionNode("second", passThrough, workflow.NodeConfig{})
+	edges := workflow.NewEdgeBuilder().
+		Add(workflow.Start, first).
+		AddRoute(first, second, workflow.StringRoute("retry")).
+		AddRoute(second, first, workflow.StringRoute("retry")).
+		Build()
+	flow := newTestWorkflowAgent(t, "flow", nil, edges)
+	tail := newTestAgent(t, "tail", "", agentinternal.TypeLLMAgent, nil, nil)
+	outer, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "outer",
+			SubAgents: []agent.Agent{flow, tail},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+
+	dot, err := GetAgentGraph(context.Background(), outer, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+	outgoing := lookupEdge(t, g, "first", "tail")
+	if outgoing == nil || outgoing.Attrs["ltail"] != "cluster_flow" {
+		t.Fatalf("outgoing edge = %v, want the cyclic workflow to anchor first -> tail with ltail cluster_flow\n%s", outgoing, dot)
+	}
+}
+
+func TestWorkflowAgentGraphNestedInSequential(t *testing.T) {
+	head := newTestAgent(t, "head", "", agentinternal.TypeLLMAgent, nil, nil)
+	writer := newTestAgent(t, "writer", "", agentinternal.TypeLLMAgent, nil, nil)
+	tail := newTestAgent(t, "tail", "", agentinternal.TypeLLMAgent, nil, nil)
+	writerNode, err := workflow.NewAgentNode(writer, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode: %v", err)
+	}
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+	prepare := workflow.NewFunctionNode("prepare", passThrough, workflow.NodeConfig{})
+	finish := workflow.NewFunctionNode("finish", passThrough, workflow.NodeConfig{})
+	edges := workflow.Chain(workflow.Start, prepare, writerNode, finish)
+	flow := newTestWorkflowAgent(t, "flow", []agent.Agent{writer}, edges)
+	outer, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "outer",
+			SubAgents: []agent.Agent{head, flow, tail},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+
+	dot, err := GetAgentGraph(context.Background(), outer, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+	if !g.IsSubGraph("cluster_flow") {
+		t.Fatalf("missing workflow cluster\n%s", dot)
+	}
+	if parents := g.Relations.ChildToParents["cluster_flow"]; !parents["cluster_outer"] {
+		t.Fatalf("cluster_flow parents = %v, want cluster_outer\n%s", parents, dot)
+	}
+	incoming := lookupEdge(t, g, "head", "prepare")
+	if incoming == nil || incoming.Attrs["lhead"] != "cluster_flow" {
+		t.Fatalf("incoming edge = %v, want head -> prepare with lhead cluster_flow\n%s", incoming, dot)
+	}
+	outgoing := lookupEdge(t, g, "finish", "tail")
+	if outgoing == nil || outgoing.Attrs["ltail"] != "cluster_flow" {
+		t.Fatalf("outgoing edge = %v, want finish -> tail with ltail cluster_flow\n%s", outgoing, dot)
+	}
+}
+
+func TestWorkflowAgentGraphWithOnlyFunctionNodes(t *testing.T) {
+	passThrough := func(_ agent.Context, input string) (string, error) {
+		return input, nil
+	}
+	first := workflow.NewFunctionNode("first", passThrough, workflow.NodeConfig{})
+	second := workflow.NewFunctionNode("second", passThrough, workflow.NodeConfig{})
+	flow := newTestWorkflowAgent(t, "flow", nil, workflow.Chain(workflow.Start, first, second))
+
+	dot, err := GetAgentGraph(context.Background(), flow, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+	for _, name := range []string{"first", "second"} {
+		parents := g.Relations.ChildToParents[name]
+		if !g.IsNode(name) || !parents["cluster_flow"] {
+			t.Errorf("node %s parents = %v, want it inside cluster_flow\n%s", name, parents, dot)
+		}
+	}
+	if lookupEdge(t, g, "first", "second") == nil {
+		t.Fatalf("missing workflow edge first -> second\n%s", dot)
+	}
 }

@@ -40,6 +40,14 @@ type AgentNode struct {
 	modelOutputSchema *genai.Schema
 }
 
+// Agent returns the agent wrapped by n.
+func (n *AgentNode) Agent() agent.Agent {
+	if n == nil {
+		return nil
+	}
+	return n.agent
+}
+
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
 func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {

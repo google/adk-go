@@ -22,9 +22,11 @@ import (
 	"github.com/awalterschulze/gographviz"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	llmagentinternal "google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 const (
@@ -72,6 +74,7 @@ var supportedClusterAgents = []agentinternal.Type{
 	agentinternal.TypeLoopAgent,
 	agentinternal.TypeSequentialAgent,
 	agentinternal.TypeParallelAgent,
+	agentinternal.TypeWorkflowAgent,
 }
 
 type namedInstance interface {
@@ -83,6 +86,8 @@ func nodeName(instance any) string {
 	case agent.Agent:
 		return i.Name()
 	case tool.Tool:
+		return i.Name()
+	case workflow.Node:
 		return i.Name()
 	default:
 		return "Unknown instance type"
@@ -101,6 +106,17 @@ func edgeAnchor(graph *gographviz.Graph, instance any, fromClusterEnd bool) (nod
 	clusterID = "cluster_" + nodeName(instance)
 	if !graph.IsSubGraph(clusterID) {
 		return nodeName(instance), ""
+	}
+	if cfg, ok := workflowAgentConfig(instance); ok {
+		child, ok := workflowBoundaryNode(cfg, fromClusterEnd)
+		if !ok {
+			return nodeName(instance), ""
+		}
+		nodeID, _ = edgeAnchor(graph, workflowNodeInstance(child), fromClusterEnd)
+		if !graph.IsNode(nodeID) {
+			return nodeName(instance), ""
+		}
+		return nodeID, clusterID
 	}
 	subs := instance.(agent.Agent).SubAgents()
 	if len(subs) == 0 {
@@ -163,6 +179,8 @@ func nodeCaption(instance any) string {
 		}
 	case tool.Tool:
 		caption = "🔧 " + i.Name()
+	case workflow.Node:
+		caption = i.Name()
 	default:
 		caption = "Unsupported agent or tool type"
 	}
@@ -174,6 +192,8 @@ func nodeShape(instance any) string {
 	case agent.Agent:
 		return "ellipse"
 	case tool.Tool:
+		return "box"
+	case workflow.Node:
 		return "box"
 	default:
 		return "cylinder"
@@ -233,6 +253,14 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	if !ok {
 		return nil
 	}
+	agentType := agentinternal.Reveal(agentInternal).AgentType
+	if agentType == agentinternal.TypeWorkflowAgent {
+		if err := drawWorkflowGraph(cluster, parentGraph, agent, highlightedPairs, visitedNodes, theme); err != nil {
+			return fmt.Errorf("draw cluster: draw workflow graph: %w", err)
+		}
+		return nil
+	}
+
 	subs := agent.SubAgents()
 	// Draw every member before any edge. An edge anchor has to see whether the
 	// destination cluster was actually added; a name already visited as a tool
@@ -243,7 +271,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
 	}
-	switch agentinternal.Reveal(agentInternal).AgentType {
+	switch agentType {
 	// Sequential sub-agents should be connected one after another with edges.
 	case agentinternal.TypeSequentialAgent:
 		for i := range len(subs) - 1 {
@@ -267,6 +295,109 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	}
 	// Parallel sub-agents shouldn't be connected, they will be a part of the sub graph.
 	return nil
+}
+
+// drawWorkflowGraph draws the explicit nodes and routed edges stored in a
+// WorkflowAgent config.
+func drawWorkflowGraph(graph, parentGraph *gographviz.Graph, workflowAgent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+	cfg, ok := workflowAgentConfig(workflowAgent)
+	if !ok {
+		return nil
+	}
+	// Draw every node before any edge. Cluster endpoints are resolved from the
+	// nodes that have already been added to the graph.
+	for _, edge := range cfg.Edges {
+		for _, node := range []workflow.Node{edge.From, edge.To} {
+			if isWorkflowStartNode(node) {
+				continue
+			}
+			instance := workflowNodeInstance(node)
+			if err := buildGraph(graph, parentGraph, instance, highlightedPairs, visitedNodes, theme); err != nil {
+				return fmt.Errorf("build workflow node %q: %w", node.Name(), err)
+			}
+		}
+	}
+	for _, edge := range cfg.Edges {
+		if isWorkflowStartNode(edge.From) || isWorkflowStartNode(edge.To) {
+			continue
+		}
+		from := workflowNodeInstance(edge.From)
+		to := workflowNodeInstance(edge.To)
+		if err := drawClusterEdge(parentGraph, from, to, highlightedPairs, theme); err != nil {
+			return fmt.Errorf("draw workflow edge %q -> %q: %w", edge.From.Name(), edge.To.Name(), err)
+		}
+	}
+	return nil
+}
+
+// workflowAgentConfig returns the config stored by workflowagent.New. Only the
+// workflow package can inspect its unexported runtime, but the public config is
+// retained in the agent's internal state for graph consumers.
+func workflowAgentConfig(instance any) (workflowagent.Config, bool) {
+	a, ok := instance.(agent.Agent)
+	if !ok {
+		return workflowagent.Config{}, false
+	}
+	internalAgent, ok := a.(agentinternal.Agent)
+	if !ok {
+		return workflowagent.Config{}, false
+	}
+	state := agentinternal.Reveal(internalAgent)
+	if state.AgentType != agentinternal.TypeWorkflowAgent {
+		return workflowagent.Config{}, false
+	}
+	cfg, ok := state.Config.(workflowagent.Config)
+	return cfg, ok
+}
+
+func workflowNodeInstance(node workflow.Node) any {
+	if node == nil {
+		return nil
+	}
+	if agentNode, ok := node.(*workflow.AgentNode); ok {
+		return agentNode.Agent()
+	}
+	return node
+}
+
+func workflowBoundaryNode(cfg workflowagent.Config, fromClusterEnd bool) (workflow.Node, bool) {
+	if len(cfg.Edges) == 0 {
+		return nil, false
+	}
+	if !fromClusterEnd {
+		for _, edge := range cfg.Edges {
+			if isWorkflowStartNode(edge.From) && !isWorkflowStartNode(edge.To) {
+				return edge.To, true
+			}
+		}
+	}
+	outgoing := make(map[string]bool, len(cfg.Edges))
+	for _, edge := range cfg.Edges {
+		if !isWorkflowStartNode(edge.From) && !isWorkflowStartNode(edge.To) {
+			outgoing[edge.From.Name()] = true
+		}
+	}
+	var fallback workflow.Node
+	for _, edge := range slices.Backward(cfg.Edges) {
+		to := edge.To
+		if isWorkflowStartNode(to) {
+			continue
+		}
+		if fallback == nil {
+			fallback = to
+		}
+		if !outgoing[to.Name()] {
+			return to, true
+		}
+	}
+	if fallback != nil {
+		return fallback, true
+	}
+	return nil, false
+}
+
+func isWorkflowStartNode(node workflow.Node) bool {
+	return node == nil || node.Name() == workflow.Start.Name()
 }
 
 func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
@@ -350,6 +481,11 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 	}
 	agent, ok := instance.(agent.Agent)
 	if !ok {
+		return nil
+	}
+	if _, ok := workflowAgentConfig(agent); ok {
+		// drawWorkflowGraph already drew every workflow node. Config.SubAgents
+		// can include agents registered only for event-author resolution.
 		return nil
 	}
 	llmAgent, ok := instance.(llmagentinternal.Agent)
