@@ -161,3 +161,29 @@ func TestListArtifactVersionsServiceResponses(t *testing.T) {
 		})
 	}
 }
+
+func TestListArtifactVersionsPreservesServiceOrder(t *testing.T) {
+	serviceVersions := []int64{2, 0}
+	svc := artifactVersionsService{response: &artifact.VersionsResponse{Versions: serviceVersions}}
+	srv, err := adkrest.NewServer(adkrest.ServerConfig{ArtifactService: svc})
+	if err != nil {
+		t.Fatalf("NewServer() failed: %v", err)
+	}
+
+	const path = "/apps/app/users/alice/sessions/session/artifacts/notes.txt/versions"
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET versions status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var got []int64
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal("GET versions response is not a JSON array of integers")
+	}
+	if want := []int64{0, 2}; !slices.Equal(got, want) {
+		t.Errorf("GET versions = %v, want %v", got, want)
+	}
+	if want := []int64{2, 0}; !slices.Equal(serviceVersions, want) {
+		t.Errorf("service versions after GET = %v, want %v", serviceVersions, want)
+	}
+}
