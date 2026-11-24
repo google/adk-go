@@ -254,8 +254,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		case part.Text != "":
 			text = part.Text
 		case outputSchema != nil:
-			// Python's AgentTool includes code artifacts here. Use only answer text
-			// so this tool validates the same JSON as its child.
+			// adk-python includes code artifacts in the text it validates and
+			// joins parts with "\n". This port keeps only answer text (the way
+			// LlmAgent selects text when saving OutputKey) and joins with "",
+			// so the two ports can produce different JSON for the same reply.
 			continue
 		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
 			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
@@ -274,8 +276,15 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return map[string]any{"result": ""}, nil
 	}
 	if outputSchema != nil {
-		// Reassemble JSON fragments exactly as the child LLM agent does.
-		parsedOutput, err := utils.ValidateOutputSchema(strings.Join(textParts, ""), outputSchema)
+		// Reassemble JSON fragments from answer text, the way LlmAgent
+		// collects text when saving OutputKey. Whitespace-only answer text is
+		// an empty reply here, matching how the child skips it, not something
+		// to parse.
+		joined := strings.Join(textParts, "")
+		if strings.TrimSpace(joined) == "" {
+			return map[string]any{"result": ""}, nil
+		}
+		parsedOutput, err := utils.ValidateOutputSchema(joined, outputSchema)
 		if err != nil {
 			return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
 		}

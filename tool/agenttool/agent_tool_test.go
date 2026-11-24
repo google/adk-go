@@ -439,6 +439,14 @@ func TestAgentTool_Run_StructuredOutputCodeParts(t *testing.T) {
 			},
 			want: map[string]any{"result": ""},
 		},
+		{
+			name: "execution_result_with_whitespace_only_text",
+			parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "{\"ok\":true}\n", Outcome: genai.OutcomeOK}},
+				{Text: "\n"},
+			},
+			want: map[string]any{"result": ""},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -451,8 +459,8 @@ func TestAgentTool_Run_StructuredOutputCodeParts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run failed: %v", err)
 			}
-			if !cmp.Equal(got, tt.want) {
-				t.Error("Run returned an unexpected tool result")
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
 			}
 		})
 	}
