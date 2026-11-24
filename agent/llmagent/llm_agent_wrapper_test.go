@@ -17,6 +17,7 @@ package llmagent_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -1943,6 +1944,12 @@ func TestLlmAgent_OutputArtifact_SequentialSingleTurnSchemaBodyNotPersisted(t *t
 	}
 }
 
+type namedToolset struct{ name string }
+
+func (s namedToolset) Name() string { return s.name }
+
+func (s namedToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
+
 type namedVariantLLM struct {
 	*scriptedLLM
 	name                string
@@ -1994,8 +2001,34 @@ func TestLlmAgent_OutputArtifact_SetModelResponseWorkaroundRejected(t *testing.T
 	if err == nil {
 		t.Fatal("llmagent.New succeeded when set_model_response workaround would be injected with OutputArtifact, want error")
 	}
-	if !strings.Contains(err.Error(), "OutputArtifact") {
-		t.Errorf("llmagent.New error = %v, want mention of OutputArtifact", err)
+	wantErr := `agent "writer" cannot combine OutputArtifact "design.md" with OutputSchema: model "gemini-1.5-flash" cannot use OutputSchema together with tools [noop] without the set_model_response tool, which OutputArtifact does not support; remove OutputSchema or OutputArtifact, or use a model that supports OutputSchema with tools, such as Gemini 2.0 or later on Vertex AI`
+	if got := err.Error(); got != wantErr {
+		t.Errorf("llmagent.New error = %q, want %q", got, wantErr)
+	}
+
+	helper, err := llmagent.New(llmagent.Config{
+		Name:  "helper",
+		Mode:  llmagent.ModeSingleTurn,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+	_, err = llmagent.New(llmagent.Config{
+		Name: "coordinator",
+		Model: &namedVariantLLM{
+			scriptedLLM: &scriptedLLM{},
+			name:        "gemini-1.5-flash",
+			backend:     genai.BackendGeminiAPI,
+		},
+		SubAgents:      []agent.Agent{helper},
+		Toolsets:       []tool.Toolset{namedToolset{name: "search"}},
+		OutputSchema:   schema,
+		OutputArtifact: "design.md",
+	})
+	wantErr = `agent "coordinator" cannot combine OutputArtifact "design.md" with OutputSchema: model "gemini-1.5-flash" cannot use OutputSchema together with tools [helper (single-turn sub-agent)] and toolsets [search] without the set_model_response tool, which OutputArtifact does not support; remove OutputSchema or OutputArtifact, or use a model that supports OutputSchema with tools, such as Gemini 2.0 or later on Vertex AI`
+	if got := fmt.Sprint(err); got != wantErr {
+		t.Errorf("llmagent.New(coordinator) error = %q, want %q", got, wantErr)
 	}
 
 	// A model that supports OutputSchema + tools natively (Vertex AI Gemini 2.0+) must still succeed.

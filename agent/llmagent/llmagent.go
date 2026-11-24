@@ -135,10 +135,39 @@ func New(cfg Config) (agent.Agent, error) {
 		return nil, err
 	}
 	if a.OutputArtifact != "" && llminternal.NeedsOutputSchemaProcessor(&a.State) {
-		return nil, fmt.Errorf("agent %q cannot combine OutputArtifact %q with OutputSchema and tools on model %q: set_model_response is not supported with OutputArtifact", cfg.Name, cfg.OutputArtifact, cfg.Model.Name())
+		return nil, fmt.Errorf("agent %q cannot combine OutputArtifact %q with OutputSchema: model %q cannot use OutputSchema together with %s without the set_model_response tool, which OutputArtifact does not support; remove OutputSchema or OutputArtifact, or use a model that supports OutputSchema with tools, such as Gemini 2.0 or later on Vertex AI", cfg.Name, cfg.OutputArtifact, cfg.Model.Name(), describeTools(&a.State))
 	}
 
 	return a, nil
+}
+
+// describeTools lists the tools and toolsets on state for an error message.
+// Tools that New installs for task and single-turn sub-agents are labeled, since
+// the caller did not add them to Config.Tools.
+func describeTools(state *llminternal.State) string {
+	var parts []string
+	if len(state.Tools) > 0 {
+		names := make([]string, len(state.Tools))
+		for i, t := range state.Tools {
+			switch t.(type) {
+			case *workflowinternal.SingleTurnTool:
+				names[i] = t.Name() + " (single-turn sub-agent)"
+			case *workflowinternal.TaskAgentTool:
+				names[i] = t.Name() + " (task sub-agent)"
+			default:
+				names[i] = t.Name()
+			}
+		}
+		parts = append(parts, fmt.Sprintf("tools [%s]", strings.Join(names, ", ")))
+	}
+	if len(state.Toolsets) > 0 {
+		names := make([]string, len(state.Toolsets))
+		for i, ts := range state.Toolsets {
+			names[i] = ts.Name()
+		}
+		parts = append(parts, fmt.Sprintf("toolsets [%s]", strings.Join(names, ", ")))
+	}
+	return strings.Join(parts, " and ")
 }
 
 func installTaskTools(a *llmAgent) error {
@@ -355,16 +384,34 @@ type Config struct {
 	//
 	// When set, the reply text is written to the invocation's artifact service,
 	// the saved version is recorded in EventActions.ArtifactDelta, and the
-	// event's non-thought text parts are replaced with a short reference, so the
-	// body is neither persisted in the session's events nor replayed from them
-	// on later turns. When OutputKey is also set, session state still receives
-	// the full reply under that key, or the parsed value when OutputSchema is
-	// set, so the body is persisted there and an instruction placeholder for
-	// the key carries it into later turns. Saving requires an artifact service
-	// on the runner; the run fails if none is configured. Live runs (RunLive)
-	// and models that require the set_model_response tool workaround for
-	// OutputSchema with tools are not supported when OutputArtifact is set and
-	// return an error.
+	// event's non-thought text parts are replaced with the reference
+	// `Saved artifact "<name>" (version <N>).`. The event's content then
+	// carries the reference instead of the body, so the body is not replayed
+	// from the session's events on later turns.
+	//
+	// OutputKey still receives the full reply, or the value parsed against
+	// OutputSchema when OutputSchema is set. That value is written to the same
+	// event's EventActions.StateDelta, which session services store with the
+	// event, so with OutputKey set the body is persisted in the session's
+	// events and state, and an instruction placeholder for the key carries it
+	// into later turns. Leave OutputKey empty to keep the body out of the
+	// session entirely.
+	//
+	// The reference is also what the agent hands to its callers: the output of
+	// a workflow node running the agent, the function response of an agent
+	// tool or single-turn sub-agent tool, and the input of a successor node.
+	// This holds when OutputSchema is set, so a typed node whose output type is
+	// an object, such as one built with workflow.NewAgentNodeTyped, fails
+	// output validation. Callers read the body with the load_artifacts tool or
+	// the artifact service.
+	//
+	// Nothing is saved in task mode (ModeTask), where the agent's result
+	// arrives through the finish_task tool rather than in a final text reply.
+	//
+	// Saving requires an artifact service on the runner; the run fails if none
+	// is configured. Live runs (RunLive) and models that require the
+	// set_model_response tool workaround for OutputSchema with tools are not
+	// supported when OutputArtifact is set and return an error.
 	OutputArtifact string
 
 	// Mode is the delegation mode for this agent.
@@ -645,7 +692,7 @@ func (a *llmAgent) maybeSaveOutputToArtifact(ctx agent.InvocationContext, event 
 		}
 	}
 
-	if ctx == nil || ctx.Artifacts() == nil {
+	if ctx.Artifacts() == nil {
 		return fmt.Errorf("agent %q cannot save OutputArtifact %q: artifact service is not configured", a.Name(), a.OutputArtifact)
 	}
 	cbCtx := agent.NewCallbackContextWithArtifactTracking(ctx, &event.Actions)

@@ -248,6 +248,11 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //   - stash the parsed value on event.Output for the node's terminal
 //     output.
 //
+// When the agent's OutputArtifact was saved on this event, which its
+// ArtifactDelta records, the text is the artifact reference: it is not
+// parsed against OutputSchema, OutputKey is left as the save already wrote
+// it, and event.Output is the reference text.
+//
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
 func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {

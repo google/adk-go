@@ -25,6 +25,7 @@ import (
 	"io/fs"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -120,6 +121,14 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 type artifactVersionSelector struct {
 	Name    string `json:"name"`
 	Version int    `json:"version,omitempty"`
+}
+
+// loadItem is one artifact a load_artifacts response asks for. position names
+// where the request listed it, such as "artifact_versions[1]", so an error can
+// identify the item without echoing the model-supplied name.
+type loadItem struct {
+	artifactVersionSelector
+	position string
 }
 
 // Run implements tool.Tool.
@@ -281,6 +290,14 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		}
 	}
 
+	nameItems := make([]loadItem, len(artifactNames))
+	for i, name := range artifactNames {
+		nameItems[i] = loadItem{
+			artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
+			position:                fmt.Sprintf("artifact_names[%d]", i),
+		}
+	}
+
 	listVersions := false
 	if rawListVersions, ok := functionResponse.Response["list_versions"]; ok && rawListVersions != nil {
 		var extraNames []string
@@ -289,23 +306,27 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		if err != nil {
 			return err
 		}
-		for _, name := range extraNames {
+		for i, name := range extraNames {
 			if !slices.Contains(artifactNames, name) {
 				artifactNames = append(artifactNames, name)
+				nameItems = append(nameItems, loadItem{
+					artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
+					position:                fmt.Sprintf("list_versions[%d]", i),
+				})
 			}
 		}
 	}
 
 	artifactsService := ctx.Artifacts()
 	if listVersions {
-		if len(artifactNames) == 0 {
+		if len(nameItems) == 0 {
 			return nil
 		}
-		results := make([]*genai.Content, len(artifactNames))
+		results := make([]*genai.Content, len(nameItems))
 		group, childCtx := errgroup.WithContext(ctx)
-		for i, artifactName := range artifactNames {
+		for i, item := range nameItems {
 			group.Go(func() error {
-				content, err := t.listArtifactVersions(childCtx, artifactsService, artifactName)
+				content, err := t.listArtifactVersions(childCtx, artifactsService, item)
 				if err != nil {
 					return err
 				}
@@ -320,11 +341,13 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return nil
 	}
 
-	loadItems := make([]artifactVersionSelector, 0, len(artifactNames)+len(selectors))
-	for _, name := range artifactNames {
-		loadItems = append(loadItems, artifactVersionSelector{Name: name, Version: version})
+	loadItems := nameItems
+	for i, sel := range selectors {
+		loadItems = append(loadItems, loadItem{
+			artifactVersionSelector: sel,
+			position:                fmt.Sprintf("artifact_versions[%d]", i),
+		})
 	}
-	loadItems = append(loadItems, selectors...)
 	if len(loadItems) == 0 {
 		return nil
 	}
@@ -334,7 +357,7 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 
 	for i, item := range loadItems {
 		group.Go(func() error {
-			content, err := t.loadIndividualArtifact(childCtx, artifactsService, item.Name, item.Version)
+			content, err := t.loadIndividualArtifact(childCtx, artifactsService, item)
 			if err != nil {
 				return err
 			}
@@ -351,11 +374,34 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	return nil
 }
 
-func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string, version int) (*genai.Content, error) {
+// redactFor redacts err, an error the artifact service returned for name. When
+// err wraps none of redactSentinels and name is empty or contains a path
+// separator, the message adds that fact to the error type. The in-memory and
+// GCS services reject such names with errors that wrap no sentinel, so the
+// type alone would not tell a bad name from a storage failure. The type stays
+// in the message because a service that accepts such names can fail for other
+// reasons, and the name is checked only after the service has failed, so such
+// a service still serves them.
+func redactFor(name string, err error) error {
+	if r := redactSentinel(err); r != nil {
+		return r
+	}
+	r := redactType(err)
+	switch {
+	case name == "":
+		r.msg += "; the name is empty"
+	case strings.ContainsAny(name, `/\`):
+		r.msg += "; the name contains a path separator, which the in-memory and GCS artifact services reject"
+	}
+	return r
+}
+
+func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, item loadItem) (*genai.Content, error) {
+	artifactName, version := item.Name, item.Version
 	if version > 0 {
 		resp, err := artifactsService.LoadVersion(ctx, artifactName, version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load artifact (version %d): %w", version, redact(err))
+			return nil, fmt.Errorf("failed to load artifact at %s (version %d): %w", item.position, version, redactFor(artifactName, err))
 		}
 		return &genai.Content{
 			Parts: []*genai.Part{
@@ -367,7 +413,7 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	}
 	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load artifact: %w", redact(err))
+		return nil, fmt.Errorf("failed to load artifact at %s: %w", item.position, redactFor(artifactName, err))
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
@@ -384,10 +430,11 @@ type artifactVersionSummary struct {
 	MimeType   string `json:"mime_type,omitempty"`
 }
 
-func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
+func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsService agent.Artifacts, item loadItem) (*genai.Content, error) {
+	artifactName := item.Name
 	versionsResp, err := artifactinternal.Versions(ctx, artifactsService, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list artifact versions: %w", redact(err))
+		return nil, fmt.Errorf("failed to list versions of artifact at %s: %w", item.position, redactFor(artifactName, err))
 	}
 	versions := slices.Clone(versionsResp.Versions)
 	slices.Sort(versions)
@@ -396,7 +443,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 	for _, v := range versions {
 		metaResp, err := artifactinternal.GetArtifactVersion(ctx, artifactsService, artifactName, int(v))
 		if err != nil {
-			return nil, fmt.Errorf("failed to get version %d metadata for artifact: %w", v, redact(err))
+			return nil, fmt.Errorf("failed to get version %d metadata for artifact at %s: %w", v, item.position, redactFor(artifactName, err))
 		}
 		summary := artifactVersionSummary{Version: v}
 		if av := metaResp.ArtifactVersion; av != nil {
@@ -411,7 +458,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 
 	encoded, err := json.Marshal(summaries)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal version metadata for artifact: %w", err)
+		return nil, fmt.Errorf("failed to marshal version metadata for artifact at %s: %w", item.position, err)
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
@@ -433,17 +480,43 @@ type redactedError struct {
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.cause }
 
+// redactSentinels are the errors whose text redact keeps, checked in order.
+var redactSentinels = []error{
+	fs.ErrNotExist,
+	fs.ErrPermission,
+	errors.ErrUnsupported,
+	context.Canceled,
+	context.DeadlineExceeded,
+}
+
 // redact wraps err, an error from the artifact service, in an error whose text
-// is that of the standard sentinel err wraps or, failing that, the type of the
-// innermost error in its chain. errors.Is and errors.As still reach err.
-// Services write the object path or the request URL into their errors, and both
-// carry the model-supplied artifact name and the user and session IDs.
+// is that of the first error in redactSentinels that err wraps. When err wraps
+// none of them, the text is the type of the innermost error in its chain, so a
+// service error that wraps no sentinel loses its own message. errors.Is and
+// errors.As still reach err. Services write the object path or the request URL
+// into their errors, and both carry the model-supplied artifact name and the
+// user and session IDs.
 func redact(err error) error {
-	for _, sentinel := range []error{fs.ErrNotExist, errors.ErrUnsupported, context.Canceled, context.DeadlineExceeded} {
+	if r := redactSentinel(err); r != nil {
+		return r
+	}
+	return redactType(err)
+}
+
+// redactSentinel returns err redacted to the text of the first error in
+// redactSentinels it wraps, or nil if it wraps none.
+func redactSentinel(err error) error {
+	for _, sentinel := range redactSentinels {
 		if errors.Is(err, sentinel) {
 			return &redactedError{msg: sentinel.Error(), cause: err}
 		}
 	}
+	return nil
+}
+
+// redactType returns err redacted to the type of the innermost error in its
+// chain.
+func redactType(err error) *redactedError {
 	inner := err
 	for errors.Unwrap(inner) != nil {
 		inner = errors.Unwrap(inner)

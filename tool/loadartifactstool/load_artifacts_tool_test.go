@@ -903,56 +903,63 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 			failing:  "Load",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(7)}}},
-			wantErr:  "failed to load artifact (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): file does not exist",
 		},
 		{
 			name:     "in-process artifact_versions with a version",
 			failing:  "Load",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_versions": []map[string]any{{"name": fileName, "version": 7}}},
-			wantErr:  "failed to load artifact (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): file does not exist",
 		},
 		{
 			name:     "artifact_names with top-level version",
 			failing:  "Load",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_names": []any{fileName}, "version": float64(7)},
-			wantErr:  "failed to load artifact (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_names[0] (version 7): file does not exist",
 		},
 		{
 			name:     "artifact_versions without a version",
 			failing:  "Load",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName}}},
-			wantErr:  "failed to load artifact: file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0]: file does not exist",
 		},
 		{
 			name:     "artifact_versions with version 0",
 			failing:  "Load",
 			cause:    context.DeadlineExceeded,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(0)}}},
-			wantErr:  "failed to load artifact: context deadline exceeded",
+			wantErr:  "failed to load artifact at artifact_versions[0]: context deadline exceeded",
 		},
 		{
 			name:     "artifact_names",
 			failing:  "Load",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_names": []any{fileName}},
-			wantErr:  "failed to load artifact: file does not exist",
+			wantErr:  "failed to load artifact at artifact_names[0]: file does not exist",
+		},
+		{
+			name:     "artifact_names denied by the service",
+			failing:  "Load",
+			cause:    fs.ErrPermission,
+			response: map[string]any{"artifact_names": []any{fileName}},
+			wantErr:  "failed to load artifact at artifact_names[0]: permission denied",
 		},
 		{
 			name:     "list_versions listing revisions",
 			failing:  "Versions",
 			cause:    dnsErr,
 			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
-			wantErr:  "failed to list artifact versions: artifact service error of type *net.DNSError",
+			wantErr:  "failed to list versions of artifact at artifact_names[0]: artifact service error of type *net.DNSError",
 		},
 		{
 			name:     "list_versions reading revision metadata",
 			failing:  "GetArtifactVersion",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
-			wantErr:  "failed to get version 1 metadata for artifact: file does not exist",
+			wantErr:  "failed to get version 1 metadata for artifact at artifact_names[0]: file does not exist",
 		},
 	}
 	for _, tt := range tests {
@@ -1016,12 +1023,176 @@ func TestLoadArtifactsTool_ProcessRequest_ListVersionsUnsupported(t *testing.T) 
 	}}}
 
 	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
-	if got, want := fmt.Sprint(err), "failed to list artifact versions: unsupported operation"; got != want {
+	if got, want := fmt.Sprint(err), "failed to list versions of artifact at artifact_names[0]: unsupported operation"; got != want {
 		t.Errorf("ProcessRequest error = %q, want %q", got, want)
 	}
 	if !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("errors.Is(err, errors.ErrUnsupported) = false, want true, got: %v", err)
 	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ErrorsIdentifyFailingItem(t *testing.T) {
+	tests := []struct {
+		name     string
+		response map[string]any
+		wantErr  string
+	}{
+		{
+			name: "second of two selectors with the same version",
+			response: map[string]any{"artifact_versions": []any{
+				map[string]any{"name": "doc1.txt", "version": float64(1)},
+				map[string]any{"name": "missing.txt", "version": float64(1)},
+			}},
+			wantErr: "failed to load artifact at artifact_versions[1] (version 1): file does not exist",
+		},
+		{
+			name: "selector after artifact_names",
+			response: map[string]any{
+				"artifact_names":    []any{"doc1.txt"},
+				"artifact_versions": []any{map[string]any{"name": "missing.txt"}},
+			},
+			wantErr: "failed to load artifact at artifact_versions[0]: file does not exist",
+		},
+		{
+			name:     "list_versions over several names",
+			response: map[string]any{"artifact_names": []any{"doc1.txt", "missing.txt"}, "list_versions": true},
+			wantErr:  "failed to list versions of artifact at artifact_names[1]: file does not exist",
+		},
+		{
+			name:     "name given only in list_versions",
+			response: map[string]any{"artifact_names": []any{"doc1.txt"}, "list_versions": []any{"doc1.txt", "missing.txt"}},
+			wantErr:  "failed to list versions of artifact at list_versions[1]: file does not exist",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", genai.NewPartFromText("v1")); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			req := &model.LLMRequest{Contents: []*genai.Content{{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", tt.response)},
+			}}}
+
+			err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
+			if got := fmt.Sprint(err); got != tt.wantErr {
+				t.Errorf("ProcessRequest error = %q, want %q", got, tt.wantErr)
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true")
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_InvalidNameKeepsReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		response map[string]any
+		wantErr  string
+	}{
+		{
+			name:     "artifact_names with a slash",
+			response: map[string]any{"artifact_names": []any{"reports/q3.pdf"}},
+			wantErr:  "failed to load artifact at artifact_names[0]: artifact service error of type *errors.errorString; the name contains a path separator, which the in-memory and GCS artifact services reject",
+		},
+		{
+			name:     "artifact_versions with a backslash",
+			response: map[string]any{"artifact_versions": []any{map[string]any{"name": `reports\q3.pdf`, "version": float64(2)}}},
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 2): artifact service error of type *errors.errorString; the name contains a path separator, which the in-memory and GCS artifact services reject",
+		},
+		{
+			name:     "artifact_names with an empty name",
+			response: map[string]any{"artifact_names": []any{""}},
+			wantErr:  "failed to load artifact at artifact_names[0]: artifact service error of type *errors.errorString; the name is empty",
+		},
+		{
+			name:     "list_versions with a slash",
+			response: map[string]any{"artifact_names": []any{"reports/q3.pdf"}, "list_versions": true},
+			wantErr:  "failed to list versions of artifact at artifact_names[0]: artifact service error of type *errors.errorString; the name contains a path separator, which the in-memory and GCS artifact services reject",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := createToolContext(t)
+			req := &model.LLMRequest{Contents: []*genai.Content{{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", tt.response)},
+			}}}
+
+			err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
+			if got := fmt.Sprint(err); got != tt.wantErr {
+				t.Errorf("ProcessRequest error = %q, want %q", got, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ServiceAcceptsNestedName(t *testing.T) {
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: &artifactinternal.Artifacts{
+			Service:   nestedNameService{},
+			AppName:   "app",
+			UserID:    "user",
+			SessionID: "session",
+		},
+	})
+	tc := agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"reports/q3.pdf"}})},
+	}}}
+
+	if err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req); err != nil {
+		t.Fatalf("ProcessRequest: %v", err)
+	}
+	if got := len(req.Contents); got != 2 {
+		t.Fatalf("len(req.Contents) = %d, want 2", got)
+	}
+	if got, want := req.Contents[1].Parts[1].Text, "q3 body"; got != want {
+		t.Errorf("loaded artifact text = %q, want %q", got, want)
+	}
+
+	missing := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"reports/q4.pdf"}})},
+	}}}
+	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, missing)
+	if got, want := fmt.Sprint(err), "failed to load artifact at artifact_names[0]: file does not exist"; got != want {
+		t.Errorf("ProcessRequest error for a missing nested name = %q, want %q", got, want)
+	}
+
+	unreachable := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"reports/offline.pdf"}})},
+	}}}
+	err = loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, unreachable)
+	if got, want := fmt.Sprint(err), "failed to load artifact at artifact_names[0]: artifact service error of type *net.DNSError; the name contains a path separator, which the in-memory and GCS artifact services reject"; got != want {
+		t.Errorf("ProcessRequest error for a storage failure on a nested name = %q, want %q", got, want)
+	}
+}
+
+// nestedNameService is an artifact service that, unlike the in-tree ones,
+// accepts file names containing a path separator. It lists "reports/q3.pdf",
+// answers a Load of it with the text "q3 body", fails "reports/offline.pdf"
+// with a DNS error and reports every other name as not found.
+type nestedNameService struct {
+	artifact.Service
+}
+
+func (nestedNameService) List(context.Context, *artifact.ListRequest) (*artifact.ListResponse, error) {
+	return &artifact.ListResponse{FileNames: []string{"reports/q3.pdf"}}, nil
+}
+
+func (nestedNameService) Load(_ context.Context, req *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	switch req.FileName {
+	case "reports/q3.pdf":
+		return &artifact.LoadResponse{Part: genai.NewPartFromText("q3 body")}, nil
+	case "reports/offline.pdf":
+		return nil, fmt.Errorf("get: %w", &net.DNSError{Err: "no such host", Name: "storage.example"})
+	}
+	return nil, fmt.Errorf("artifact %q: %w", req.FileName, fs.ErrNotExist)
 }
 
 // identifyingErrorService fails the operation named by failing with an error
