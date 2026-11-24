@@ -22,14 +22,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/genai"
 
+	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/platform"
 	"google.golang.org/adk/server/adkrest/internal/models"
 	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool/toolconfirmation"
 )
 
 // TODO: Confirm error handling and target semantic for REST API.
@@ -59,6 +63,12 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	// Validate before anything is created, so a rejected request leaves no
+	// session behind.
+	if err := validateSessionInitializationEvents(createSessionRequest.Events); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
 	}
 	// Convert every event before creating anything, so an event the request
 	// cannot carry is a 400 with no session left behind, rather than a 500
@@ -97,6 +107,84 @@ func (c *SessionsAPIController) createSession(ctx context.Context, sessionID mod
 		}
 	}
 	return models.FromSession(session.Session)
+}
+
+// adkProtocolFunctionNames are the function calls ADK generates itself to drive
+// human-in-the-loop flows, as opposed to calls to a tool. 1.x exports only the
+// confirmation name; the other two are spelled out to match adk-python's
+// CLIENT_FUNCTION_CALL_NAMES.
+var adkProtocolFunctionNames = []string{
+	toolconfirmation.FunctionCallName,
+	"adk_request_credential",
+	"adk_request_input",
+}
+
+// validateSessionInitializationEvents rejects events submitted with a new
+// session that claim to be ADK-generated: ones carrying event actions,
+// long-running tool IDs, or a call to or response from one of
+// [adkProtocolFunctionNames].
+//
+// Those fields are runtime output. Accepting them from a client would let it
+// write app- and user-scoped state through Actions.StateDelta, which other
+// sessions and users read, or plant the calls ADK reserves for its own
+// confirmation, credential and input requests. Ordinary messages, tool calls
+// and tool responses are allowed, so a conversation that used tools can still
+// be restored.
+//
+// This mirrors adk-python's _validate_session_initialization_events.
+func validateSessionInitializationEvents(events []models.Event) error {
+	for i, event := range events {
+		var disallowed string
+		switch {
+		case len(event.LongRunningToolIDs) > 0:
+			disallowed = "long-running tool IDs"
+		case hasEventActions(event.Actions):
+			disallowed = "event actions"
+		case callsADKProtocolFunction(event.Content):
+			disallowed = "ADK protocol function calls"
+		default:
+			continue
+		}
+		return fmt.Errorf("session initialization event %d cannot include %s", i, disallowed)
+	}
+	return nil
+}
+
+// hasEventActions reports whether any field of actions is set. It checks every
+// field by reflection rather than by name, so a field added to
+// [models.EventActions] is covered without changing this function. An empty
+// map counts as unset: every event the runtime writes reads back with
+// "stateDelta": {} and "artifactDelta": {}.
+func hasEventActions(actions models.EventActions) bool {
+	for _, field := range reflect.ValueOf(actions).Fields() {
+		switch field.Kind() {
+		case reflect.Map, reflect.Slice:
+			if field.Len() > 0 {
+				return true
+			}
+		default:
+			if !field.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// callsADKProtocolFunction reports whether content holds a function call or
+// function response named in [adkProtocolFunctionNames].
+func callsADKProtocolFunction(content *genai.Content) bool {
+	for _, call := range utils.FunctionCalls(content) {
+		if slices.Contains(adkProtocolFunctionNames, call.Name) {
+			return true
+		}
+	}
+	for _, response := range utils.FunctionResponses(content) {
+		if slices.Contains(adkProtocolFunctionNames, response.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeleteSession handles deleting a specific session.
