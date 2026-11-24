@@ -1,0 +1,44 @@
+Get the columns in each index of a Spanner table.
+
+Args:
+    project_id (str): The Google Cloud project id.
+    instance_id (str): The Spanner instance id.
+    database_id (str): The Spanner database id.
+    table_id (str): The Spanner table id.
+
+Returns:
+    dict: Dictionary with a list of Spanner table index column
+    information.
+
+Examples:
+    >>> get_table_index_columns("my_project", "my_instance", "my_database",
+    ... "my_table")
+    {
+      "status": "SUCCESS",
+      "results": [
+        {
+          'INDEX_NAME': 'PRIMARY_KEY',
+          'TABLE_SCHEMA': '',
+          'COLUMN_NAME': 'ColumnKey1',
+          'ORDINAL_POSITION': 1,
+          'IS_NULLABLE': 'NO',
+          'SPANNER_TYPE': 'STRING(MAX)'
+        },
+        {
+          'INDEX_NAME': 'PRIMARY_KEY',
+          'TABLE_SCHEMA': '',
+          'COLUMN_NAME': 'ColumnKey2',
+          'ORDINAL_POSITION': 2,
+          'IS_NULLABLE': 'NO',
+          'SPANNER_TYPE': 'INT64'
+        },
+        {
+            'INDEX_NAME': 'IDX_MyTable_Column_FC70CD41F3A5FD3A',
+            'TABLE_SCHEMA': '',
+            'COLUMN_NAME': 'Column',
+            'ORDINAL_POSITION': 3,
+            'IS_NULLABLE': 'NO',
+            'SPANNER_TYPE': 'STRING(MAX)'
+        }
+      ]
+    }

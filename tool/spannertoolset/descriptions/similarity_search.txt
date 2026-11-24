@@ -1,0 +1,119 @@
+Similarity search in Spanner using a text query.
+
+The function will use embedding service (provided from options) to embed
+the text query automatically, then use the embedding vector to do similarity
+search and to return requested data. This is suitable when the Spanner table
+contains a column that stores the embeddings of the data that we want to
+search the `query` against.
+
+Args:
+    project_id (str): The GCP project id in which the spanner database
+      resides.
+    instance_id (str): The instance id of the spanner database.
+    database_id (str): The database id of the spanner database.
+    table_name (str): The name of the table used for vector search.
+    query (str): The user query for which the tool will find the top similar
+      content. The query will be embedded and used for vector search.
+    embedding_column_to_search (str): The name of the column that contains the
+      embeddings of the documents. The tool will do similarity search on this
+      column.
+    columns (List[str]): A list of column names, representing the additional
+      columns to return in the search results.
+    embedding_options (Dict[str, str]): A dictionary of options to use for
+      the embedding service. **Exactly one of the following three keys
+      MUST be present in this dictionary**:
+      `vertex_ai_embedding_model_name`, `spanner_googlesql_embedding_model_name`,
+      or `spanner_postgresql_vertex_ai_embedding_model_endpoint`.
+      - vertex_ai_embedding_model_name (str): (Supported both **GoogleSQL and
+          PostgreSQL** dialects Spanner database) The name of a
+          public Vertex AI embedding model (e.g., `'text-embedding-005'`).
+          If specified, the tool generates embeddings client-side using the
+          Vertex AI embedding model.
+      - spanner_googlesql_embedding_model_name (str): (For GoogleSQL dialect) The
+        name of the embedding model that is registered in Spanner via a
+        `CREATE MODEL` statement. For more details, see
+        https://cloud.google.com/spanner/docs/ml-tutorial-embeddings#generate_and_store_text_embeddings
+        If specified, embedding generation is performed using Spanner's
+        `ML.PREDICT` function.
+      - spanner_postgresql_vertex_ai_embedding_model_endpoint (str):
+        (For PostgreSQL dialect) The fully qualified endpoint of the Vertex AI
+        embedding model, in the format of
+        `projects/$project/locations/$location/publishers/google/models/$model_name`,
+        where $project is the project hosting the Vertex AI endpoint,
+        $location is the location of the endpoint, and $model_name is
+        the name of the text embedding model.
+        If specified, embedding generation is performed using Spanner's
+        `spanner.ML_PREDICT_ROW` function.
+      - output_dimensionality: Optional. An integer. The output
+        dimensionality of the embedding. If not specified, the embedding
+        model's default output dimensionality will be used.
+    additional_filter (Optional[str]): An optional filter to apply to the
+      search query. If provided, this will be added to the WHERE clause of the
+      final query. Only simple filters are allowed. Supported grammar:
+      - Columns and values compared with: =, !=, <, >, <=, >=, LIKE, IS, IS NOT
+      - Set membership: IN, NOT IN (e.g., col IN (val1, val2))
+      - Range checks: BETWEEN ... AND ... (e.g., col BETWEEN val1 AND val2)
+      - Boolean columns (e.g., col_name) or dummy filter '1=1'
+      - Logical operators: AND, OR (case-insensitive)
+      - Parentheses: up to 2 levels of nesting (e.g., (col1 = val1 OR col2 = val2) AND col3 = val3)
+      Values must be numbers, single-quoted strings (without backslashes), booleans, or NULL.
+    search_options (Optional[Dict[str, Any]]): A dictionary of options to use
+      for the similarity search. The following options are supported:
+      - top_k: An integer. The number of most similar documents to return.
+        The default value is 4.
+      - distance_type: The distance type to use to perform the
+        similarity search. Valid values include "COSINE",
+        "EUCLIDEAN", and "DOT_PRODUCT". Default value is
+        "COSINE".
+      - nearest_neighbors_algorithm: The nearest neighbors search
+        algorithm to use. Valid values include "EXACT_NEAREST_NEIGHBORS"
+        and "APPROXIMATE_NEAREST_NEIGHBORS". Default value is
+        "EXACT_NEAREST_NEIGHBORS".
+      - num_leaves_to_search: An integer. (Only applies when the
+        nearest_neighbors_algorithm is APPROXIMATE_NEAREST_NEIGHBORS.)
+        The number of leaves to search in the vector index.
+
+Returns:
+    Dict[str, Any]: A dictionary representing the result of the search.
+      On success, it contains {"status": "SUCCESS", "rows": [...]}. The last
+      column of each row is the distance between the query and the column
+      embedding (i.e. the embedding_column_to_search).
+      On error, it contains {"status": "ERROR", "error_details": "..."}.
+
+Examples:
+    Search for relevant products given a user's text description and a filter
+    on the price:
+      >>> similarity_search(
+      ...   project_id="my-project",
+      ...   instance_id="my-instance",
+      ...   database_id="my-database",
+      ...   table_name="my_product_table",
+      ...   query="Tools that can help me clean my house.",
+      ...   embedding_column_to_search="product_description_embedding",
+      ...   columns=["product_name", "product_description", "price_in_cents"],
+      ...   additional_filter="price_in_cents < 100000",
+      ...   embedding_options={
+      ...     "vertex_ai_embedding_model_name": "text-embedding-005"
+      ...   },
+      ...   search_options={
+      ...     "top_k": 2,
+      ...     "distance_type": "COSINE"
+      ...   }
+      ... )
+      {
+        "status": "SUCCESS",
+        "rows": [
+          (
+            "Powerful Robot Vacuum",
+            "This is a powerful robot vacuum that can clean carpets and wood floors.",
+            99999,
+            0.31,
+          ),
+          (
+            "Nice Mop",
+            "Great for cleaning different surfaces.",
+            5099,
+            0.45,
+          ),
+        ],
+      }
