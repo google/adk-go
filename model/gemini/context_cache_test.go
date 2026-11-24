@@ -48,6 +48,10 @@ type fakeCacheAPI struct {
 	// every cache creation or generation gets.
 	createStatus   int
 	generateStatus int
+	// deleteStatus, when non-zero, is the error status every deletion gets.
+	deleteStatus int
+	// createNoName makes a cache creation succeed without naming the cache.
+	createNoName bool
 	// emptyReply makes generations answer with a STOP and no content, which
 	// the flow drops without storing an event.
 	emptyReply bool
@@ -55,7 +59,7 @@ type fakeCacheAPI struct {
 	expireTime time.Time
 	// gone names caches the provider no longer holds. A generation naming one
 	// fails with goneStatus, 404 when zero, and the message the Gemini API
-	// gives for a cache it cannot find.
+	// gives for a cache it cannot find. Deleting one fails with 404.
 	gone       map[string]bool
 	goneStatus int
 	// goneMessage replaces the message, so a 403 can be one about something
@@ -116,6 +120,9 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp := map[string]any{"name": fmt.Sprintf("cachedContents/%d", len(f.creates))}
+		if f.createNoName {
+			delete(resp, "name")
+		}
 		if !f.expireTime.IsZero() {
 			resp["expireTime"] = f.expireTime.Format(time.RFC3339)
 		}
@@ -123,6 +130,15 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete:
 		f.calls = append(f.calls, "delete "+path[strings.Index(path, "cachedContents/"):])
 		f.deleteHeaders = append(f.deleteHeaders, r.Header.Clone())
+		if f.gone[path[strings.Index(path, "cachedContents/"):]] {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"error": {"code": 404, "message": "CachedContent not found (or permission denied)", "status": "NOT_FOUND"}}`)
+			return
+		}
+		if f.deleteStatus != 0 {
+			fail(f.deleteStatus)
+			return
+		}
 		_, _ = fmt.Fprint(w, `{}`)
 	case strings.HasSuffix(path, ":streamGenerateContent"):
 		f.calls = append(f.calls, "generate")

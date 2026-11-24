@@ -46,6 +46,12 @@ func (r *ArtifactsAPIRouter) Routes() Routes {
 			HandlerFunc: r.artifactsController.LoadArtifactHandler,
 		},
 		Route{
+			Name:        "ListArtifactVersions",
+			Methods:     []string{http.MethodGet},
+			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}/versions",
+			HandlerFunc: r.artifactsController.ListArtifactVersionsHandler,
+		},
+		Route{
 			Name:        "LoadArtifactVersion",
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/apps/{app_name}/users/{user_id}/sessions/{session_id}/artifacts/{artifact_name}/versions/{version}",

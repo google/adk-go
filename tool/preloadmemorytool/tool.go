@@ -77,7 +77,7 @@ func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequ
 	}
 	var queryParts []string
 	for _, part := range userContent.Parts {
-		if part == nil || part.Text == "" {
+		if part == nil || part.Text == "" || part.Thought {
 			continue
 		}
 		queryParts = append(queryParts, part.Text)
