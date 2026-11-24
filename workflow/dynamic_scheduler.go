@@ -54,6 +54,22 @@ type dynamicSubScheduler struct {
 	inflightByPath map[string]*inflightRun
 	delegation     outputDelegation
 	failedPaths    map[string]struct{}
+
+	// returned is set once the body that owns this scheduler has
+	// returned; from then on a running or newly started child is
+	// detached. attached holds the runs that started before that and
+	// have not finished. A run is tracked by its own childTrack, not by
+	// childPath: two overlapping calls with one WithRunID can each lead
+	// a run of the same path.
+	returned bool
+	attached map[*childTrack]struct{}
+}
+
+// childTrack is the detach state of one child run. detached is guarded
+// by the scheduler's mu; once true, the run is registered with the
+// workflow's detachedRuns, which must hear its outcome.
+type childTrack struct {
+	detached bool
 }
 
 // runResult is one child run's outcome, shared by every caller that
@@ -172,6 +188,7 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		resultByPath:       map[string]any{},
 		inflightByPath:     map[string]*inflightRun{},
 		failedPaths:        map[string]struct{}{},
+		attached:           map[*childTrack]struct{}{},
 	}
 	s.rehydrateCache()
 	return s
@@ -336,6 +353,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		s.commitDelegation(childPath, res.out)
 		return res.out, nil
 	}
+	track, ok := s.startChild()
+	if !ok {
+		res := runResult{err: &NodeRunError{
+			ChildName: name, ChildPath: childPath, RunID: runID,
+			Cause: fmt.Errorf("%w: %w", ErrNodeFailed, errDetachedUndeliverable),
+		}}
+		s.finishRun(childPath, res, false, failureInventory{})
+		return nil, res.err
+	}
 	childCtx, inventoryRecorder := withFailureInventory(childCtx, child)
 	// This caller leads: hand the outcome to every waiter, on every exit
 	// path, so overlapping callers never start a second run. completed is
@@ -345,6 +371,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// child had emitted before it stopped.
 	var completed bool
 	var inventory failureInventory
+	var longRunning bool // the child emitted a long-running call
 	defer func() {
 		res := runResult{out: out, err: err}
 		if err == nil && !completed {
@@ -362,9 +389,10 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
 			ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
 			recordFailedChildPaths(ev.CustomMetadata, inventory)
-			failureRecorded = s.emitUp(ev) == nil
+			failureRecorded = s.forward(ev) == nil
 		}
 		s.finishRun(childPath, res, failureRecorded, inventory)
+		s.endChild(track, childPath, res.err, longRunning)
 	}()
 
 	var (
@@ -410,6 +438,9 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 		if ev.RequestedInput != nil {
 			interrupted = true
+		}
+		if len(ev.LongRunningToolIDs) > 0 {
+			longRunning = true
 		}
 		// Track LongRunningToolIDs vs FunctionResponses for
 		// WithRaiseOnWait. The check runs unconditionally so this
@@ -477,7 +508,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				ev.NodeInfo.OutputFor = outputFor
 			}
 		}
-		if emitErr := s.emitUp(ev); emitErr != nil {
+		if emitErr := s.forward(ev); emitErr != nil {
 			rawErr = emitErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
@@ -518,6 +549,76 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
 	completed = true
 	return out, nil
+}
+
+// bodyReturned records that the body owning s has returned. Children
+// still running become detached: they are registered with the
+// workflow's detachedRuns, so the workflow waits for them and hears
+// their outcome. Idempotent.
+func (s *dynamicSubScheduler) bodyReturned() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.returned {
+		return
+	}
+	s.returned = true
+	d := detachedRunsFrom(s.parentCtx)
+	for track := range s.attached {
+		// register fails only outside a workflow, which has nowhere to
+		// deliver a detached child's events; forward then refuses them.
+		track.detached = d.register()
+	}
+	clear(s.attached)
+}
+
+// startChild returns the track of a child run that is starting. A run
+// started after the body returned is detached from the start; it
+// reports false, and must not run, when no workflow can take it.
+func (s *dynamicSubScheduler) startChild() (*childTrack, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	track := &childTrack{}
+	if !s.returned {
+		s.attached[track] = struct{}{}
+		return track, true
+	}
+	if !detachedRunsFrom(s.parentCtx).register() {
+		return nil, false
+	}
+	track.detached = true
+	return track, true
+}
+
+// forward passes an event of a child run up to the parent. Once the
+// parent body has returned, the parent's iterator is ending and its
+// emit refuses the event; the event then goes to the workflow's
+// detachedRuns instead, which yields it while the workflow runs.
+func (s *dynamicSubScheduler) forward(ev *session.Event) error {
+	err := s.emitUp(ev)
+	if !errors.Is(err, errEmitAfterReturn) {
+		return err
+	}
+	return detachedRunsFrom(s.parentCtx).send(ev, s.parentCtx.Branch())
+}
+
+// endChild records that the child run tracked by track finished with
+// err, and reports a detached run's outcome to the workflow. A detached
+// run that emitted a long-running call is reported as interrupted even
+// if it returned cleanly: adk-python counts every long-running tool ID
+// a child emits as an interrupt (NodeRunner._track_event_in_context),
+// and nobody can resume a detached child.
+func (s *dynamicSubScheduler) endChild(track *childTrack, childPath string, err error, longRunning bool) {
+	s.mu.Lock()
+	delete(s.attached, track)
+	detached := track.detached
+	s.mu.Unlock()
+	if !detached {
+		return
+	}
+	if err == nil && longRunning {
+		err = ErrNodeInterrupted
+	}
+	detachedRunsFrom(s.parentCtx).finish(childPath, err)
 }
 
 // pause reports that a child did not finish this turn so the parent must
