@@ -20,6 +20,7 @@ package toolutils
 
 import (
 	"fmt"
+	"reflect"
 
 	"google.golang.org/genai"
 
@@ -33,10 +34,18 @@ type Tool interface {
 	Declaration() *genai.FunctionDeclaration
 }
 
-// PackTool ensures that in case there is a usage of multiple function tools,
-// all of them are consolidated into one genai tool that has all the function declarations
-// provided by the tools. So, if there is already a tool with a function declaration,
-// it appends another to it; otherwise, it creates a new genai tool.
+// PackTool registers t in req.Tools under t.Name() and appends t's function
+// declaration to the first genai.Tool of req.Config.Tools whose
+// FunctionDeclarations list is not empty, or, when there is none, to the first
+// bare genai.Tool (one with a nil or empty FunctionDeclarations slice and no
+// other field set), or to a new genai.Tool appended to req.Config.Tools, so
+// successive calls share one genai.Tool.
+//
+// A tool whose Declaration returns nil is registered and adds no declaration.
+// The LLM flow does not offer such a tool to the model, and a function call to
+// its name gets the same tool-not-found result as a call to an unknown name.
+//
+// PackTool returns an error when req.Tools already holds t.Name().
 func PackTool(req *model.LLMRequest, t Tool) error {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
@@ -55,13 +64,23 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 	if decl := t.Declaration(); decl == nil {
 		return nil
 	}
-	// Find an existing genai.Tool with FunctionDeclarations
-	var funcTool *genai.Tool
+	// Prefer the first genai.Tool that already has function declarations; fall
+	// back to the first bare genai.Tool placeholder.
+	var funcTool, placeholder *genai.Tool
 	for _, tool := range req.Config.Tools {
-		if tool != nil && tool.FunctionDeclarations != nil {
+		if tool == nil {
+			continue
+		}
+		if len(tool.FunctionDeclarations) > 0 {
 			funcTool = tool
 			break
 		}
+		if placeholder == nil && isBareTool(*tool) {
+			placeholder = tool
+		}
+	}
+	if funcTool == nil {
+		funcTool = placeholder
 	}
 	if funcTool == nil {
 		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
@@ -71,4 +90,10 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
 	}
 	return nil
+}
+
+// isBareTool reports whether t has no field other than FunctionDeclarations set.
+func isBareTool(t genai.Tool) bool {
+	t.FunctionDeclarations = nil
+	return reflect.ValueOf(t).IsZero()
 }

@@ -34,6 +34,12 @@ type LLMRequest struct {
 	Contents []*genai.Content
 	Config   *genai.GenerateContentConfig
 
+	// Tools maps a tool name to the tool that answers a function call of that
+	// name. Tools add themselves while the flow prepares the request, usually
+	// through toolutils.PackTool. The flow then deletes every entry whose
+	// Declaration method returns nil, so the model and the callbacks see only
+	// declared tools. A function call to an undeclared tool added later, for
+	// example by a before-model callback, gets the tool-not-found result.
 	Tools map[string]any `json:"-"`
 
 	// CacheConfig turns on context caching for this request when non-nil. The

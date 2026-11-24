@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"iter"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -296,13 +297,23 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	if r.Config == nil {
 		r.Config = &genai.GenerateContentConfig{}
 	}
-	// Find an existing genai.Tool with FunctionDeclarations
-	var funcTool *genai.Tool
+	// Prefer the first genai.Tool that already has function declarations; fall
+	// back to the first bare genai.Tool placeholder.
+	var funcTool, placeholder *genai.Tool
 	for _, gt := range r.Config.Tools {
-		if gt.FunctionDeclarations != nil {
+		if gt == nil {
+			continue
+		}
+		if len(gt.FunctionDeclarations) > 0 {
 			funcTool = gt
 			break
 		}
+		if placeholder == nil && isBareTool(*gt) {
+			placeholder = gt
+		}
+	}
+	if funcTool == nil {
+		funcTool = placeholder
 	}
 	if funcTool != nil {
 		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, declarations...)
@@ -312,6 +323,12 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 		})
 	}
 	return nil
+}
+
+// isBareTool reports whether t has no field other than FunctionDeclarations set.
+func isBareTool(t genai.Tool) bool {
+	t.FunctionDeclarations = nil
+	return reflect.ValueOf(t).IsZero()
 }
 
 var transferToAgentPromptTmpl = template.Must(
