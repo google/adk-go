@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -220,6 +221,24 @@ func TestByteSliceOmitEmpty(t *testing.T) {
 	}
 	if _, present := m["sig"]; present {
 		t.Errorf("sig should be omitted for an empty []byte, got: %v", m["sig"])
+	}
+}
+
+func TestUUIDMarshalText(t *testing.T) {
+	type A struct {
+		ID uuid.UUID `json:"id"`
+	}
+	id := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+	got, err := convertSnake("", A{ID: id})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("got is not a map: %T", got)
+	}
+	if want := id.String(); m["id"] != want {
+		t.Errorf("id = %v (%T), want string %q", m["id"], m["id"], want)
 	}
 }
 
