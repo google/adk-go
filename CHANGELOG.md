@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/google/adk-go/compare/v1.10.0...v1.11.0) (2026-11-24)
+
+
+### Bug Fixes
+
+* **adkrest:** backport create-session event validation ([#1995](https://github.com/google/adk-go/issues/1995)) ([#2482](https://github.com/google/adk-go/issues/2482)) ([e93b236](https://github.com/google/adk-go/commit/e93b2363abd46d740e9013cd3609f5ae7be9ce99))
+* **v1:** align Go version requirements and deployment builds ([#1927](https://github.com/google/adk-go/issues/1927)) ([9dca8d7](https://github.com/google/adk-go/commit/9dca8d7f0111589e348c50743f30b9e6269532db))
+
 ## [1.10.0](https://github.com/google/adk-go/compare/v1.9.0...v1.10.0) (2026-11-16)
 
 
