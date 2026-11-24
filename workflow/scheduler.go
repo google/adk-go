@@ -108,11 +108,20 @@ type scheduler struct {
 	// in arrival order as in-flight nodes complete. Owned by the
 	// consumer goroutine.
 	pendingQueue []pendingActivation
+
+	// deferred holds, per node name, activations that arrived while
+	// that node was busy (see isBusy), in arrival order. Activations
+	// of one node never overlap: runsByName and runCancels hold one
+	// entry per name, so a second concurrent activation would
+	// overwrite the first. Each completion releases the next one.
+	// Mirrors adk-python's per-node trigger_buffer. Owned by the
+	// consumer goroutine.
+	deferred map[string][]pendingActivation
 }
 
-// pendingActivation is a deferred scheduleResumedNode call kept on
+// pendingActivation is a deferred scheduleResumedNode call, kept on
 // the consumer-owned pendingQueue while the concurrency cap is
-// saturated. Drained by tryDispatchPending on each completion.
+// saturated, or on deferred while its node is busy.
 type pendingActivation struct {
 	node         Node
 	input        any
@@ -269,6 +278,7 @@ func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler
 		runsByName:     map[string]*nodeRun{},
 		runCancels:     map[string]context.CancelFunc{},
 		retryTimers:    map[string]*time.Timer{},
+		deferred:       map[string][]pendingActivation{},
 		eventQueue:     make(chan queueItem, defaultEventQueueCapacity),
 		parentCtx:      parent,
 		maxConcurrency: maxConcurrency,
@@ -338,6 +348,12 @@ func (s *scheduler) tryDispatchPending() {
 // InterruptID; nil disables re-entry semantics and yields the same
 // behavior as scheduleNode.
 //
+// When n is busy (see isBusy), or earlier activations of n are
+// still deferred, the activation is deferred behind them without
+// touching n's NodeState; releaseDeferred dispatches it once n is
+// idle. Two activations of one node therefore never overlap, and
+// they start in the order they were scheduled.
+//
 // When the engine's max-concurrency cap is reached, the
 // activation is enqueued onto pendingQueue and the node enters
 // NodePending instead of starting immediately. tryDispatchPending
@@ -345,23 +361,67 @@ func (s *scheduler) tryDispatchPending() {
 //
 // scheduleResumedNode runs only on the consumer goroutine.
 func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
-	if s.atConcurrencyLimit() {
-		name := n.Name()
-		ns := s.state.EnsureNode(name)
-		ns.Status = NodePending
-		ns.Input = input
-		ns.TriggeredBy = triggeredBy
-		ns.Branch = branch
-		s.pendingQueue = append(s.pendingQueue, pendingActivation{
-			node:         n,
-			input:        input,
-			triggeredBy:  triggeredBy,
-			branch:       branch,
-			resumeInputs: resumeInputs,
-		})
+	act := pendingActivation{
+		node:         n,
+		input:        input,
+		triggeredBy:  triggeredBy,
+		branch:       branch,
+		resumeInputs: resumeInputs,
+	}
+	if name := n.Name(); s.isBusy(name) || len(s.deferred[name]) > 0 {
+		s.deferred[name] = append(s.deferred[name], act)
 		return
 	}
-	s.startNode(n, input, triggeredBy, branch, resumeInputs)
+	s.dispatch(act)
+}
+
+// dispatch starts act, or enqueues it onto pendingQueue when the
+// concurrency cap is reached. It does not check isBusy: callers
+// either have, or are continuing the node's current activation (a
+// retry).
+func (s *scheduler) dispatch(act pendingActivation) {
+	if s.atConcurrencyLimit() {
+		ns := s.state.EnsureNode(act.node.Name())
+		ns.Status = NodePending
+		ns.Input = act.input
+		ns.TriggeredBy = act.triggeredBy
+		ns.Branch = act.branch
+		s.pendingQueue = append(s.pendingQueue, act)
+		return
+	}
+	s.startNode(act.node, act.input, act.triggeredBy, act.branch, act.resumeInputs)
+}
+
+// isBusy reports whether an activation of the named node is in
+// flight: running, waiting for a retry, or queued behind the
+// concurrency cap. Mirrors the RUNNING check in adk-python's
+// Workflow._schedule_ready_nodes, which retries inside the node
+// runner, so a node waiting for a retry there is still RUNNING.
+func (s *scheduler) isBusy(name string) bool {
+	if _, ok := s.runsByName[name]; ok {
+		return true
+	}
+	if _, ok := s.retryTimers[name]; ok {
+		return true
+	}
+	return slices.ContainsFunc(s.pendingQueue, func(a pendingActivation) bool {
+		return a.node.Name() == name
+	})
+}
+
+// releaseDeferred dispatches the oldest activation deferred for the
+// named node, if the node is no longer busy.
+func (s *scheduler) releaseDeferred(name string) {
+	queue := s.deferred[name]
+	if len(queue) == 0 || s.isBusy(name) {
+		return
+	}
+	if len(queue) == 1 {
+		delete(s.deferred, name)
+	} else {
+		s.deferred[name] = queue[1:]
+	}
+	s.dispatch(queue[0])
 }
 
 // startNode is the unguarded core of scheduleResumedNode: it
@@ -638,14 +698,18 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 				}
 			}
 			// A slot just freed up; promote any queued
-			// activations to running.
+			// activations to running, then release the node's next
+			// deferred activation if it is now idle.
 			if !draining {
 				s.tryDispatchPending()
+				s.releaseDeferred(it.nodeName)
 			}
 		case retryItem:
 			delete(s.retryTimers, it.node.Name())
 			if !draining {
-				s.scheduleNode(it.node, it.input, it.triggeredBy, it.branch)
+				// A retry continues the activation that failed, so it
+				// goes ahead of any activation deferred behind it.
+				s.dispatch(pendingActivation{node: it.node, input: it.input, triggeredBy: it.triggeredBy, branch: it.branch})
 			}
 		}
 	}
