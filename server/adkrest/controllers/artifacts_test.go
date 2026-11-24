@@ -292,6 +292,18 @@ func TestDeleteArtifactHandler(t *testing.T) {
 	}
 }
 
+func TestListArtifactVersionsHandlerWithoutAuthorizer(t *testing.T) {
+	controller := controllers.NewArtifactsAPIController(artifact.InMemoryService())
+	controller.WithAuthorizer(nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/artifacts/report.txt/versions", nil)
+	req = mux.SetURLVars(req, artifactVars(testArtifactName, ""))
+	rr := httptest.NewRecorder()
+	controller.ListArtifactVersionsHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET versions status = %d, want %d", rr.Code, http.StatusOK)
+	}
+}
+
 // TestArtifactHandlersNilService covers the case where the server was built
 // without an artifact service. Dereferencing the nil service panics, which drops
 // the connection with no HTTP response at all, so each handler must answer 503.

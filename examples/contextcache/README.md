@@ -97,7 +97,8 @@ Refunds above the standard limit need approval from the support lead on duty.
   refuses every cache with `429 RESOURCE_EXHAUSTED`
   (`TotalCachedContentStorageTokensPerModelFreeTier ... limit=0`). The runner
   then sends each request uncached, which is why the session above never
-  reports cached tokens.
+  reports cached tokens. With tracing set up, each refusal shows as a failed
+  `create_cache` span carrying the provider's error.
 
 - **A cache is billed while it lives.** The sample sets a five-minute TTL so
   the cache it creates does not linger.
