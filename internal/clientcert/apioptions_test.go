@@ -16,9 +16,11 @@ package clientcert
 
 import (
 	"bytes"
-	"cmp"
 	"crypto/tls"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"google.golang.org/api/option"
@@ -32,9 +34,10 @@ import (
 // TestAPIOptions checks the options by what a client built with them does.
 //
 // No case of this test sets GOOGLE_API_USE_CLIENT_CERTIFICATE to true, and
-// none does in the packages that use the options. With it google.golang.org/api consults its
-// own certificate sources whenever the options hand it no certificate, and
-// those end at the SecureConnect of the machine's real home directory.
+// none does in the packages that use the options. With it
+// google.golang.org/api consults its own certificate sources whenever the
+// options hand it no certificate, and those end at the SecureConnect of the
+// machine's real home directory.
 // TestSource covers true, and APIOptions does not look at how the rule came
 // to be on.
 func TestAPIOptions(t *testing.T) {
@@ -143,6 +146,8 @@ func TestAPIOptionsReportsABrokenConfig(t *testing.T) {
 }
 
 func TestCallerSettings(t *testing.T) {
+	// TestCallerSettingsLibraryRuleOn covers true.
+	t.Setenv(envUseClientCert, "false")
 	t.Setenv(envMTLSEndpointOld, "")
 	client := option.WithHTTPClient(&http.Client{})
 	cert := option.WithClientCertSource(func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return nil, nil })
@@ -152,7 +157,6 @@ func TestCallerSettings(t *testing.T) {
 		opts         []option.ClientOption
 		env          string // GOOGLE_CLOUD_UNIVERSE_DOMAIN
 		mode         string // GOOGLE_API_USE_MTLS_ENDPOINT
-		useCert      string // GOOGLE_API_USE_CLIENT_CERTIFICATE, false when empty
 		wantClient   bool
 		wantUniverse string
 	}{
@@ -180,28 +184,62 @@ func TestCallerSettings(t *testing.T) {
 		// The library returns an endpoint of the caller's in place of the
 		// one that names the universe.
 		{name: "an endpoint of the caller's in another universe", opts: []option.ClientOption{another, option.WithEndpoint("https://example.test")}, wantUniverse: "example.com"},
-		// The library picks the mTLS endpoint with always, and with its own
-		// certificate rule on: GOOGLE_API_USE_CLIENT_CERTIFICATE=true. It
-		// has one in googleapis.com alone and fails in another universe,
-		// which leaves no universe to report.
+		// With always the library picks the mTLS endpoint. It has one in
+		// googleapis.com alone and fails in another universe, which leaves
+		// no universe to report.
 		{name: "always", opts: []option.ClientOption{option.WithUserAgent("ua")}, mode: "always", wantUniverse: "googleapis.com"},
 		{name: "always, the option wins over the environment", opts: []option.ClientOption{option.WithUniverseDomain("googleapis.com")}, env: "example.com", mode: "always", wantUniverse: "googleapis.com"},
 		{name: "always in another universe", opts: []option.ClientOption{another}, mode: "always", wantUniverse: ""},
 		{name: "always in another universe, an HTTP client and an endpoint", opts: []option.ClientOption{client, another, option.WithEndpoint("https://example.test")}, mode: "always", wantUniverse: ""},
-		{name: "the library's rule on", opts: []option.ClientOption{option.WithUserAgent("ua")}, useCert: "true", wantUniverse: "googleapis.com"},
-		{name: "the library's rule on, another universe", opts: []option.ClientOption{another}, useCert: "true", wantUniverse: ""},
 		// A generated client's default endpoint replaces the probe's.
 		{name: "a default endpoint template among the options", opts: []option.ClientOption{internaloption.WithDefaultEndpointTemplate("https://own.UNIVERSE_DOMAIN/")}, env: "example.com", wantUniverse: "example.com"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envUniverseDomain, tc.env)
 			t.Setenv(envMTLSEndpoint, tc.mode)
-			// With true the api library looks for a certificate of its own,
-			// unless it is handed one, as the probe does.
-			t.Setenv(envUseClientCert, cmp.Or(tc.useCert, "false"))
 			gotClient, gotUniverse := callerSettings(t.Context(), tc.opts)
 			if gotClient != tc.wantClient || gotUniverse != tc.wantUniverse {
 				t.Errorf("callerSettings() = %v, %q, want %v, %q", gotClient, gotUniverse, tc.wantClient, tc.wantUniverse)
+			}
+		})
+	}
+}
+
+// TestCallerSettingsLibraryRuleOn covers GOOGLE_API_USE_CLIENT_CERTIFICATE=true.
+// With it the api library searches for a certificate of its own, unless it is
+// handed one, as the probe does. The search starts at the certificate proxy
+// the certificate config names, so the test runs in a child process and names
+// a proxy of its own: a search the probe must not start then ends at the
+// test's helper, which leaves a file behind, and reaches nothing of the
+// machine's.
+func TestCallerSettingsLibraryRuleOn(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	dir := t.TempDir()
+	ran, helper, config := filepath.Join(dir, "ran"), filepath.Join(dir, "helper.sh"), filepath.Join(dir, "certificate_config.json")
+	// The child has no PATH, so the helper uses a shell builtin alone.
+	if err := os.WriteFile(helper, fmt.Appendf(nil, "#!/bin/sh\necho ran >> %q\n", ran), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clientcerttest.WriteFile(t, config, fmt.Appendf(nil, `{"libs":{"ecp":%q}}`, helper))
+	t.Setenv(envCertConfig, config)
+	t.Setenv(envUseClientCert, "true")
+	for _, tc := range []struct {
+		name         string
+		opts         []option.ClientOption
+		wantUniverse string
+	}{
+		{name: "googleapis.com", opts: []option.ClientOption{option.WithUserAgent("ua")}, wantUniverse: "googleapis.com"},
+		{name: "another universe", opts: []option.ClientOption{option.WithUniverseDomain("example.com")}, wantUniverse: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotClient, gotUniverse := callerSettings(t.Context(), tc.opts)
+			if gotClient || gotUniverse != tc.wantUniverse {
+				t.Errorf("callerSettings() = %v, %q, want false, %q", gotClient, gotUniverse, tc.wantUniverse)
+			}
+			if _, err := os.Stat(ran); err == nil {
+				t.Error("callerSettings() made the api library search for a certificate of its own")
 			}
 		})
 	}
