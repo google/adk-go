@@ -46,8 +46,10 @@ const maxCacheIntervals = 100
 // invocation ends and the next invocation creates another, which costs more
 // than not caching.
 //
-// A failure to create or delete a cache is not reported. Caching only saves
-// tokens and time, so the request goes ahead without a cache instead.
+// A failure to create or delete a cache is not returned to the caller. Caching
+// only saves tokens and time, so the request goes ahead without a cache
+// instead. A model may record the failure in its traces: the Gemini model
+// does, as its package documentation describes.
 //
 // The zero value of each field selects its default.
 type ContextCacheConfig struct {
