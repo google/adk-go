@@ -20,6 +20,7 @@ import (
 	"iter"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -651,4 +652,349 @@ func TestHandleFunctionCalls_NoArgsReachOnToolErrorForNonFunctionTool(t *testing
 	if diff := cmp.Diff(map[string]any{}, gotArgs); diff != "" {
 		t.Errorf("on-tool-error args mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// streamRecorder records the arguments a streaming tool ran with.
+type streamRecorder struct {
+	mu   sync.Mutex
+	runs []string
+}
+
+func (r *streamRecorder) record(msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runs = append(r.runs, msg)
+}
+
+func (r *streamRecorder) calls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.runs...)
+}
+
+// A streaming tool goes through the same callback pipeline as a plain function
+// tool: a before-tool callback can answer the call or rewrite its arguments,
+// and the outcome of the call reaches the on-tool-error and after-tool
+// callbacks.
+func TestHandleFunctionCalls_StreamingToolCallbacks(t *testing.T) {
+	type Args struct {
+		Msg string `json:"msg"`
+	}
+
+	// newStreamTool returns a streaming tool that records what it ran with and
+	// then yields its argument back, or fails with failWith.
+	newStreamTool := func(t *testing.T, failWith error) (tool.Tool, *streamRecorder) {
+		t.Helper()
+		rec := &streamRecorder{}
+		streamTool, err := functiontool.NewStreaming(functiontool.Config{
+			Name:        "test_stream",
+			Description: "streams chunks",
+		}, func(_ agent.Context, args Args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				rec.record(args.Msg)
+				if failWith != nil {
+					yield("", failWith)
+					return
+				}
+				yield(args.Msg, nil)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return streamTool, rec
+	}
+
+	call := &model.LLMResponse{Content: &genai.Content{
+		Role: "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID:   "call_1",
+			Name: "test_stream",
+			Args: map[string]any{"msg": "sent"},
+		}}},
+	}}
+
+	// run calls the tool and returns the function response for the model.
+	run := func(t *testing.T, flow *Flow, streamTool tool.Tool, liveSess agent.LiveSession) map[string]any {
+		t.Helper()
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		})
+		event, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, call, nil, liveSess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event == nil {
+			t.Fatal("handleFunctionCalls returned no event")
+		}
+		if len(event.LLMResponse.Content.Parts) != 1 {
+			t.Fatalf("got %d parts, want 1", len(event.LLMResponse.Content.Parts))
+		}
+		part := event.LLMResponse.Content.Parts[0].FunctionResponse
+		if part == nil {
+			t.Fatal("event part is not a function response")
+		}
+		return part.Response
+	}
+
+	t.Run("before-tool callback answers instead of the tool", func(t *testing.T) {
+		streamTool, rec := newStreamTool(t, nil)
+		flow := &Flow{BeforeToolCallbacks: []BeforeToolCallback{
+			func(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
+				return map[string]any{"denied": true}, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, nil)
+
+		if diff := cmp.Diff(map[string]any{"denied": true}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+		if runs := rec.calls(); len(runs) != 0 {
+			t.Errorf("tool ran %v, want it not to run", runs)
+		}
+	})
+
+	t.Run("before-tool callback fails the call", func(t *testing.T) {
+		streamTool, rec := newStreamTool(t, nil)
+		flow := &Flow{BeforeToolCallbacks: []BeforeToolCallback{
+			func(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
+				return nil, errors.New("not allowed")
+			},
+		}}
+
+		got := run(t, flow, streamTool, nil)
+
+		if diff := cmp.Diff(map[string]any{"error": "not allowed"}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+		if runs := rec.calls(); len(runs) != 0 {
+			t.Errorf("tool ran %v, want it not to run", runs)
+		}
+	})
+
+	t.Run("before-tool callback rewrites the arguments", func(t *testing.T) {
+		streamTool, rec := newStreamTool(t, nil)
+		flow := &Flow{BeforeToolCallbacks: []BeforeToolCallback{
+			func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["msg"] = "rewritten"
+				return nil, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, nil)
+
+		if diff := cmp.Diff(map[string]any{"result": "rewritten"}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{"rewritten"}, rec.calls()); diff != "" {
+			t.Errorf("tool arguments mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("after-tool callback sees the result", func(t *testing.T) {
+		streamTool, _ := newStreamTool(t, nil)
+		var gotResult map[string]any
+		var gotErr error
+		flow := &Flow{AfterToolCallbacks: []AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+				gotResult, gotErr = result, err
+				return map[string]any{"wrapped": result["result"]}, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, nil)
+
+		if diff := cmp.Diff(map[string]any{"result": "sent"}, gotResult); diff != "" {
+			t.Errorf("after-tool result mismatch (-want +got):\n%s", diff)
+		}
+		if gotErr != nil {
+			t.Errorf("after-tool err = %v, want nil", gotErr)
+		}
+		if diff := cmp.Diff(map[string]any{"wrapped": "sent"}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("on-tool-error callback answers a failing stream", func(t *testing.T) {
+		streamTool, _ := newStreamTool(t, errors.New("order not found"))
+		var gotErr error
+		flow := &Flow{OnToolErrorCallbacks: []OnToolErrorCallback{
+			func(_ agent.Context, _ tool.Tool, _ map[string]any, err error) (map[string]any, error) {
+				gotErr = err
+				return map[string]any{"handled": true}, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, nil)
+
+		if gotErr == nil || gotErr.Error() != "order not found" {
+			t.Errorf("on-tool-error err = %v, want \"order not found\"", gotErr)
+		}
+		if diff := cmp.Diff(map[string]any{"handled": true}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("live mode: before-tool callback keeps the stream from starting", func(t *testing.T) {
+		streamTool, rec := newStreamTool(t, nil)
+		var sends atomic.Int64
+		sess := &mockLiveSession{sendFunc: func(agent.LiveRequest) error {
+			sends.Add(1)
+			return nil
+		}}
+		flow := &Flow{BeforeToolCallbacks: []BeforeToolCallback{
+			func(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
+				return map[string]any{"denied": true}, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, sess)
+
+		if diff := cmp.Diff(map[string]any{"denied": true}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+		if runs := rec.calls(); len(runs) != 0 {
+			t.Errorf("tool ran %v, want it not to run", runs)
+		}
+		if n := sends.Load(); n != 0 {
+			t.Errorf("live session received %d requests, want 0", n)
+		}
+	})
+
+	t.Run("live mode: after-tool callback sees the pending status", func(t *testing.T) {
+		streamTool, _ := newStreamTool(t, nil)
+		var sent sync.WaitGroup
+		sent.Add(1)
+		sess := &mockLiveSession{sendFunc: func(agent.LiveRequest) error {
+			sent.Done()
+			return nil
+		}}
+		var gotResult map[string]any
+		flow := &Flow{AfterToolCallbacks: []AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				gotResult = result
+				return nil, nil
+			},
+		}}
+
+		got := run(t, flow, streamTool, sess)
+		sent.Wait()
+
+		want := map[string]any{"status": "The function is running asynchronously and the results are pending."}
+		if diff := cmp.Diff(want, gotResult); diff != "" {
+			t.Errorf("after-tool result mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// A live streaming tool is registered before the after-tool callbacks run, so
+// a stop_streaming call issued in the same batch can still find it, and it
+// does not start when one of those callbacks fails the call.
+func TestHandleFunctionCalls_LiveStreamingToolAfterCallback(t *testing.T) {
+	type Args struct {
+		Msg string `json:"msg"`
+	}
+
+	newLive := func(t *testing.T) *liveSessionImpl {
+		t.Helper()
+		sess := newLiveSessionImpl()
+		sess.activeTools = make(map[string][]activeTask)
+		go func() {
+			for range sess.inputCh {
+			}
+		}()
+		return sess
+	}
+
+	call := &model.LLMResponse{Content: &genai.Content{
+		Role: "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID:   "call_1",
+			Name: "test_stream",
+			Args: map[string]any{"msg": "sent"},
+		}}},
+	}}
+
+	run := func(t *testing.T, flow *Flow, streamTool tool.Tool, sess *liveSessionImpl) map[string]any {
+		t.Helper()
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+		})
+		event, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, call, nil, sess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return event.LLMResponse.Content.Parts[0].FunctionResponse.Response
+	}
+
+	t.Run("registered while the after-tool callbacks run", func(t *testing.T) {
+		streamTool, err := functiontool.NewStreaming(functiontool.Config{
+			Name:        "test_stream",
+			Description: "streams chunks",
+		}, func(_ agent.Context, args Args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) { yield(args.Msg, nil) }
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess := newLive(t)
+		var registered bool
+		flow := &Flow{AfterToolCallbacks: []AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				sess.mu.Lock()
+				registered = len(sess.activeTools["test_stream"]) == 1
+				sess.mu.Unlock()
+				return nil, nil
+			},
+		}}
+
+		run(t, flow, streamTool, sess)
+
+		if !registered {
+			t.Error("streaming tool was not registered while the after-tool callback ran")
+		}
+	})
+
+	t.Run("after-tool callback failure keeps the stream from starting", func(t *testing.T) {
+		var ran atomic.Bool
+		streamTool, err := functiontool.NewStreaming(functiontool.Config{
+			Name:        "test_stream",
+			Description: "streams chunks",
+		}, func(_ agent.Context, args Args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				ran.Store(true)
+				yield(args.Msg, nil)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sess := newLive(t)
+		flow := &Flow{AfterToolCallbacks: []AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				return nil, errors.New("not allowed")
+			},
+		}}
+
+		got := run(t, flow, streamTool, sess)
+
+		if diff := cmp.Diff(map[string]any{"error": "not allowed"}, got); diff != "" {
+			t.Errorf("function response mismatch (-want +got):\n%s", diff)
+		}
+		if ran.Load() {
+			t.Error("streaming tool ran, want it not to start")
+		}
+		sess.mu.Lock()
+		left := len(sess.activeTools["test_stream"])
+		sess.mu.Unlock()
+		if left != 0 {
+			t.Errorf("%d streaming tools still registered, want 0", left)
+		}
+	})
 }
