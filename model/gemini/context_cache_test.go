@@ -1414,6 +1414,28 @@ func TestEstimatePrefixTokens(t *testing.T) {
 		Config:                   &genai.GenerateContentConfig{},
 		PreviousPromptTokenCount: 4000,
 	}
+	fnRespFileDataReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Parts: []*genai.FunctionResponsePart{genai.NewFunctionResponsePartFromURI("gs://bucket/b.png", "image/png")},
+			}}}},
+			genai.NewContentFromText(strings.Repeat("t", 258*4), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	nonTextSysReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText(strings.Repeat("t", 258*4), genai.RoleUser),
+		},
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}}},
+			},
+		},
+		PreviousPromptTokenCount: 4000,
+	}
 	tests := []struct {
 		name  string
 		req   *model.LLMRequest
@@ -1430,6 +1452,8 @@ func TestEstimatePrefixTokens(t *testing.T) {
 		{name: "inline media scales prefix share", req: mediaReq, count: 1, want: 1000},
 		{name: "inline media and file data scale prefix share", req: mediaReq, count: 2, want: 2000},
 		{name: "function response media parts scale prefix share", req: mediaReq, count: 3, want: 3000},
+		{name: "function response file data part scales prefix share", req: fnRespFileDataReq, count: 1, want: 2000},
+		{name: "non-text system instruction scales prefix share", req: nonTextSysReq, count: 0, want: 2000},
 		{name: "executable code and result scale prefix share", req: codeReq, count: 1, want: 1000},
 		{name: "nil args and response maps count as zero chars", req: nilMapReq, count: 1, want: 2000},
 	}
