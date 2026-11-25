@@ -904,6 +904,46 @@ func TestStaticSchemaValidation(t *testing.T) {
 	}
 }
 
+func TestStaticSchemaValidation_LiteralArrayOrder(t *testing.T) {
+	for _, keyword := range []string{"enum", "const"} {
+		for _, name := range []string{"required", "type"} {
+			t.Run(keyword+"/"+name, func(t *testing.T) {
+				output := map[string]any{name: []string{"a", "b"}}
+				input := map[string]any{name: []string{"b", "a"}}
+				resolve := func(value any) *jsonschema.Resolved {
+					t.Helper()
+					schema := &jsonschema.Schema{Enum: []any{value}}
+					if keyword == "const" {
+						schema = &jsonschema.Schema{Const: &value}
+					}
+					resolved, err := schema.Resolve(nil)
+					if err != nil {
+						t.Fatalf("failed to resolve schema: %v", err)
+					}
+					return resolved
+				}
+				outputSchema := resolve(output)
+				inputSchema := resolve(input)
+				if err := outputSchema.Validate(output); err != nil {
+					t.Fatalf("output schema rejected its own literal: %v", err)
+				}
+				if err := inputSchema.Validate(output); err == nil {
+					t.Fatal("input schema accepted a literal with a different array order")
+				}
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, outputSchema)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, inputSchema, nil)}
+				_, err := New("test_wf", []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				})
+				if err == nil || !strings.Contains(err.Error(), "schema mismatch on edge A -> B") {
+					t.Fatalf("New() error = %v, want schema mismatch on edge A -> B", err)
+				}
+			})
+		}
+	}
+}
+
 type customTestRoute struct{}
 
 func (customTestRoute) Matches(*session.Event) bool { return false }
