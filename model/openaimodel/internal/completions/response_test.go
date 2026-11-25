@@ -289,9 +289,7 @@ func TestConvertUsage(t *testing.T) {
 			"prompt_tokens_details":{"cached_tokens":40},
 			"completion_tokens_details":{"reasoning_tokens":7}}}`)
 	got := convertUsage(resp.Usage)
-	// The field names differ from the Responses API's on every count, so this
-	// pins the mapping rather than the arithmetic.
-	if got.PromptTokenCount != 100 || got.CandidatesTokenCount != 20 || got.TotalTokenCount != 120 {
+	if got.PromptTokenCount != 100 || got.CandidatesTokenCount != 13 || got.TotalTokenCount != 120 {
 		t.Errorf("totals = %#v", got)
 	}
 	if got.CachedContentTokenCount != 40 {

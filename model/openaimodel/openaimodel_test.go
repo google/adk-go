@@ -15,9 +15,11 @@
 package openaimodel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,8 +27,11 @@ import (
 	"time"
 
 	"github.com/openai/openai-go/v3/option"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -218,6 +223,116 @@ var completedBodies = map[API]string{
 		`"content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`,
 	APIChatCompletions: `{"id":"c","object":"chat.completion","model":"m",` +
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`,
+}
+
+func TestGenerateContentReasoningUsage(t *testing.T) {
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	tests := []struct {
+		name           string
+		details        string
+		output         int32
+		wantCandidates int32
+		wantThoughts   int32
+	}{
+		{name: "reasoning", details: `{"reasoning_tokens":38}`, output: 50, wantCandidates: 12, wantThoughts: 38},
+		{name: "no_reasoning_details", output: 50, wantCandidates: 50},
+		{name: "all_reasoning", details: `{"reasoning_tokens":50}`, output: 50, wantThoughts: 50},
+		{name: "reasoning_exceeds_output", details: `{"reasoning_tokens":60}`, output: 50, wantThoughts: 50},
+		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, output: 50, wantCandidates: 50},
+		{name: "negative_output", output: -1},
+	}
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", api, stream), func(t *testing.T) {
+				for _, tt := range tests {
+					t.Run(tt.name, func(t *testing.T) {
+						body, contentType := reasoningUsageResponse(api, stream, tt.output, tt.details)
+						client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"Content-Type": []string{contentType}},
+								Body:       io.NopCloser(strings.NewReader(body)),
+								Request:    r,
+							}, nil
+						})}
+						llm, err := NewModel(t.Context(), "o4-mini", &ClientConfig{
+							APIKey: "test", API: api, HTTPClient: client,
+						})
+						if err != nil {
+							t.Fatalf("NewModel() err = %v", err)
+						}
+						req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+						spans := tracetest.NewSpanRecorder()
+						telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+						params := telemetry.GenerateContentParams{ModelName: llm.Name(), Request: req, Stream: stream}
+						call := telemetry.InstrumentGenerateContent(t.Context(), params,
+							func(resp *model.LLMResponse) (*model.LLMResponse, string) { return resp, "" },
+							func(ctx context.Context) iter.Seq2[*model.LLMResponse, error] {
+								return llm.GenerateContent(ctx, req, stream)
+							})
+						var usage *genai.GenerateContentResponseUsageMetadata
+						for resp, err := range call {
+							if err != nil {
+								t.Fatalf("GenerateContent() err = %v", err)
+							}
+							usage = resp.UsageMetadata
+						}
+						if usage == nil {
+							t.Fatal("final response has no usage metadata")
+						}
+						if usage.CandidatesTokenCount != tt.wantCandidates || usage.ThoughtsTokenCount != tt.wantThoughts {
+							t.Errorf("candidate and thought tokens = (%d, %d), want (%d, %d)", usage.CandidatesTokenCount, usage.ThoughtsTokenCount, tt.wantCandidates, tt.wantThoughts)
+						}
+						details := usage.CandidatesTokensDetails
+						if len(details) != 1 || details[0] == nil || details[0].Modality != genai.MediaModalityText || details[0].TokenCount != tt.wantCandidates {
+							t.Errorf("want one text candidate detail with %d tokens", tt.wantCandidates)
+						}
+						wantTotal := 20 + tt.output
+						if usage.PromptTokenCount != 20 || usage.CachedContentTokenCount != 5 || usage.TotalTokenCount != wantTotal {
+							t.Errorf("prompt, cached and total tokens = (%d, %d, %d), want (20, 5, %d)", usage.PromptTokenCount, usage.CachedContentTokenCount, usage.TotalTokenCount, wantTotal)
+						}
+						ended := spans.Ended()
+						if len(ended) != 1 {
+							t.Fatalf("ended spans = %d, want 1", len(ended))
+						}
+						for _, attr := range ended[0].Attributes() {
+							if attr.Key == "gen_ai.usage.output_tokens" {
+								want := int64(tt.wantCandidates + tt.wantThoughts)
+								if got := attr.Value.AsInt64(); got != want {
+									t.Errorf("gen_ai.usage.output_tokens = %d, want %d", got, want)
+								}
+								return
+							}
+						}
+						t.Error("span has no gen_ai.usage.output_tokens attribute")
+					})
+				}
+			})
+		}
+	}
+}
+
+func reasoningUsageResponse(api API, stream bool, outputTokens int32, details string) (body, contentType string) {
+	input, output := "input", "output"
+	if api == APIChatCompletions {
+		input, output = "prompt", "completion"
+	}
+	usage := fmt.Sprintf(`"usage":{"%s_tokens":20,"%s_tokens":%d,"total_tokens":%d,"%s_tokens_details":{"cached_tokens":5}`, input, output, outputTokens, 20+outputTokens, input)
+	if details != "" {
+		usage += fmt.Sprintf(`,"%s_tokens_details":%s`, output, details)
+	}
+	usage += "}"
+	completed := strings.TrimSuffix(completedBodies[api], "}") + "," + usage + "}"
+	if !stream {
+		return completed, "application/json"
+	}
+	if api == APIResponses {
+		return `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+			`data: {"type":"response.completed","response":` + completed + "}\n\n", "text/event-stream"
+	}
+	return `data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n" +
+		`data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[],` + usage + "}\n\ndata: [DONE]\n\n", "text/event-stream"
 }
 
 // TestNewModel_UsesTheConfiguredClient pins that NewModel hands

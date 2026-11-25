@@ -139,21 +139,25 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	// OpenAI includes reasoning in its output total. Split the total into
+	// disjoint genai counts so telemetry can sum candidates and thoughts.
+	output := shared.SafeInt32(max(usage.CompletionTokens, 0))
+	thoughts := min(shared.SafeInt32(max(usage.CompletionTokensDetails.ReasoningTokens, 0)), output)
+	candidates := output - thoughts
+
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
+		CandidatesTokenCount:    candidates,
 		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
 		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
 	}
 }
 
