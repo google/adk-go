@@ -45,7 +45,7 @@ type Model struct {
 func (m *Model) Name() string { return m.name }
 
 func (m *Model) Capabilities() model.Capabilities {
-	return model.Capabilities{OutputSchemaAndTools: true}
+	return model.Capabilities{AcceptsOutputSchemaAndTools: true}
 }
 
 // GenerateContent converts a generic LLMRequest into a Chat Completions request

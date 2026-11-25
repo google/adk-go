@@ -128,20 +128,20 @@ func TestOutputSchemaWithTools_RespectsModelCapabilities(t *testing.T) {
 	}{
 		{
 			name:         "custom_model_declaring_support_with_tools",
-			model:        &capabilityModel{name: "custom-model", caps: model.Capabilities{OutputSchemaAndTools: true}},
+			model:        &capabilityModel{name: "custom-model", caps: model.Capabilities{AcceptsOutputSchemaAndTools: true}},
 			withTool:     true,
 			wantSchema:   schema,
 			wantMIMEType: "application/json",
 		},
 		{
 			name:             "custom_model_declaring_no_support_with_tools",
-			model:            &capabilityModel{name: "custom-model", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			model:            &capabilityModel{name: "custom-model", caps: model.Capabilities{AcceptsOutputSchemaAndTools: false}},
 			withTool:         true,
 			wantSetModelResp: true,
 		},
 		{
 			name:         "custom_model_declaring_no_support_without_tools",
-			model:        &capabilityModel{name: "custom-model", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			model:        &capabilityModel{name: "custom-model", caps: model.Capabilities{AcceptsOutputSchemaAndTools: false}},
 			withTool:     false,
 			wantSchema:   schema,
 			wantMIMEType: "application/json",

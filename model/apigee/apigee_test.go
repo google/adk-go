@@ -435,8 +435,8 @@ func TestApigeeModel_Capabilities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel(%q) error = %v", tt.modelName, err)
 			}
-			if got := m.Capabilities().OutputSchemaAndTools; got != tt.want {
-				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			if got := m.Capabilities().AcceptsOutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().AcceptsOutputSchemaAndTools = %t, want %t", got, tt.want)
 			}
 		})
 	}

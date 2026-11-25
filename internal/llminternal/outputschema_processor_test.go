@@ -157,7 +157,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 	t.Run("NoOpWhenNativeSupportAvailable", func(t *testing.T) {
 		llm := &mockLLM{
 			name: "gemini-2.5-flash",
-			caps: model.Capabilities{OutputSchemaAndTools: true},
+			caps: model.Capabilities{AcceptsOutputSchemaAndTools: true},
 		}
 
 		baseAgent := utils.Must(agent.New(agent.Config{Name: "VertexGemini2Agent"}))

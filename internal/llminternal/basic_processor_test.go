@@ -163,7 +163,7 @@ func TestBasicRequestProcessor_CapabilitiesDecideOutputSchemaWithTools(t *testin
 		{
 			name:         "model_declares_support_with_tools",
 			mode:         ModeChat,
-			model:        &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: true}},
+			model:        &mockLLM{name: "custom", caps: model.Capabilities{AcceptsOutputSchemaAndTools: true}},
 			tools:        []tool.Tool{&mockTool{name: "dummy_tool"}},
 			wantSchema:   schema,
 			wantMIMEType: "application/json",
@@ -171,26 +171,26 @@ func TestBasicRequestProcessor_CapabilitiesDecideOutputSchemaWithTools(t *testin
 		{
 			name:  "model_declares_no_support_with_tools",
 			mode:  ModeChat,
-			model: &mockLLM{name: "gemini-2.5-flash", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			model: &mockLLM{name: "gemini-2.5-flash", caps: model.Capabilities{AcceptsOutputSchemaAndTools: false}},
 			tools: []tool.Tool{&mockTool{name: "dummy_tool"}},
 		},
 		{
 			name:     "model_declares_no_support_with_toolsets",
 			mode:     ModeChat,
-			model:    &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			model:    &mockLLM{name: "custom", caps: model.Capabilities{AcceptsOutputSchemaAndTools: false}},
 			toolsets: []tool.Toolset{&mockToolset{}},
 		},
 		{
 			name:         "model_declares_no_support_without_tools",
 			mode:         ModeChat,
-			model:        &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: false}},
+			model:        &mockLLM{name: "custom", caps: model.Capabilities{AcceptsOutputSchemaAndTools: false}},
 			wantSchema:   schema,
 			wantMIMEType: "application/json",
 		},
 		{
 			name:  "task_mode_ignores_declared_support",
 			mode:  ModeTask,
-			model: &mockLLM{name: "custom", caps: model.Capabilities{OutputSchemaAndTools: true}},
+			model: &mockLLM{name: "custom", caps: model.Capabilities{AcceptsOutputSchemaAndTools: true}},
 			tools: []tool.Tool{&mockTool{name: "dummy_tool"}},
 		},
 		{

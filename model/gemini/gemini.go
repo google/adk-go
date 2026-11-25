@@ -445,7 +445,7 @@ func (m *geminiModel) Capabilities() model.Capabilities {
 		return model.Capabilities{}
 	}
 	return model.Capabilities{
-		OutputSchemaAndTools: !googlellm.IsGeminiModel(m.name) ||
+		AcceptsOutputSchemaAndTools: !googlellm.IsGeminiModel(m.name) ||
 			(m.GetGoogleLLMVariant() == genai.BackendVertexAI && googlellm.IsGemini2OrAbove(m.name)),
 	}
 }

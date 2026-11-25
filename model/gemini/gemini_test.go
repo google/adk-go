@@ -1240,8 +1240,8 @@ func TestGeminiModel_Capabilities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel() error = %v", err)
 			}
-			if got := llm.Capabilities().OutputSchemaAndTools; got != tt.want {
-				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			if got := llm.Capabilities().AcceptsOutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().AcceptsOutputSchemaAndTools = %t, want %t", got, tt.want)
 			}
 		})
 	}

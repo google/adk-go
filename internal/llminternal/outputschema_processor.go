@@ -105,7 +105,7 @@ func needOutputSchemaProcessor(state *State) bool {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
-	return hasTools && !state.Model.Capabilities().OutputSchemaAndTools
+	return hasTools && !state.Model.Capabilities().AcceptsOutputSchemaAndTools
 }
 
 // setModelResponseTool implements tool.Tool and toolinternal.FunctionTool.

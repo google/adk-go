@@ -276,8 +276,8 @@ func TestNewModel_Capabilities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel() err = %v", err)
 			}
-			if !llm.Capabilities().OutputSchemaAndTools {
-				t.Error("Capabilities().OutputSchemaAndTools = false, want true")
+			if !llm.Capabilities().AcceptsOutputSchemaAndTools {
+				t.Error("Capabilities().AcceptsOutputSchemaAndTools = false, want true")
 			}
 		})
 	}

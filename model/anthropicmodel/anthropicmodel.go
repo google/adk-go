@@ -437,7 +437,7 @@ func (m *anthropicModel) Name() string {
 }
 
 func (m *anthropicModel) Capabilities() model.Capabilities {
-	return model.Capabilities{OutputSchemaAndTools: true}
+	return model.Capabilities{AcceptsOutputSchemaAndTools: true}
 }
 
 func (m *anthropicModel) logger() *slog.Logger {

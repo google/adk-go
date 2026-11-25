@@ -39,16 +39,16 @@ type LLM interface {
 // capabilities are supported. Capabilities is a value type and is safe for
 // concurrent use.
 type Capabilities struct {
-	// OutputSchemaAndTools reports whether the model accepts a native output
-	// schema (GenerateContentConfig.ResponseSchema) together with tools in the
-	// same request.
+	// AcceptsOutputSchemaAndTools reports whether the model accepts a native
+	// output schema (GenerateContentConfig.ResponseSchema) together with tools
+	// in the same request.
 	//
 	// When false and an agent configures both an output schema and tools (or
 	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
 	// request config and instead instructs the model to return its structured
 	// answer through a synthetic function tool. When an agent has no tools,
 	// ADK still sends the output schema natively.
-	OutputSchemaAndTools bool
+	AcceptsOutputSchemaAndTools bool
 }
 
 // LLMRequest is the raw LLM request.
