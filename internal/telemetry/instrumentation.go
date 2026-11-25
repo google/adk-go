@@ -139,7 +139,10 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 			metrics.record(ctx, duration)
 		}()
 		legacy := useLegacySchema()
-		func() {
+		// consume relays the model's responses to the caller and ends the span
+		// when the call is over. Any return from it is a normal end, so only a
+		// panic skips setting completed after it.
+		consume := func() {
 			for v, err := range call(ctx) {
 				resp, eventID := response(v)
 				metrics.observe(ctx, resp, err, !ended)
@@ -174,8 +177,8 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 					return
 				}
 			}
-		}()
-		// Not reached when a panic unwinds the call.
+		}
+		consume()
 		completed = true
 	}
 }
