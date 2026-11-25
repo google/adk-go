@@ -130,11 +130,68 @@ func TestResolveAgentReferenceAllowsPathsInsideAgentDir(t *testing.T) {
 	}
 }
 
+func TestResolveToolReferenceMcpToolsetStdioOptIn(t *testing.T) {
+	const env = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
+	args := map[string]any{
+		"stdio_connection_params": map[string]any{
+			"server_params": map[string]any{
+				"command": "echo",
+				"args":    []any{},
+			},
+		},
+		"tool_filter": []any{},
+	}
+	tests := []struct {
+		name  string
+		value string
+		unset bool
+		args  map[string]any
+		allow bool
+	}{
+		{name: "unset", unset: true, args: args},
+		{name: "empty", args: args},
+		{name: "zero", value: "0", args: args},
+		{name: "false", value: "false", args: args},
+		{name: "other", value: "yes", args: args},
+		{name: "whitespace", value: " true ", args: args},
+		{name: "missing args without opt-in"},
+		{name: "one", value: "1", args: args, allow: true},
+		{name: "true", value: "true", args: args, allow: true},
+		{name: "mixed case", value: "TrUe", args: args, allow: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(env, tc.value)
+			if tc.unset {
+				if err := os.Unsetenv(env); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, toolset, err := ResolveToolReference(t.Context(), "McpToolset", tc.args)
+			if tc.allow {
+				if err != nil {
+					t.Fatal("ResolveToolReference(McpToolset) returned an unexpected error")
+				}
+				if toolset == nil {
+					t.Fatal("ResolveToolReference(McpToolset) returned a nil toolset, want non-nil")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), env) {
+				t.Errorf("ResolveToolReference(McpToolset) should return an error naming %s", env)
+			}
+		})
+	}
+}
+
 // TestResolveToolReferenceMcpToolsetNonStringArgs reproduces the bug where a
 // non-string element in the McpToolset "args" or "tool_filter" lists triggered
 // an unchecked type assertion that panicked and killed the process. The factory
 // must now return a descriptive error instead of crashing.
 func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
+	t.Setenv("ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS", "1")
+
 	newArgs := func(serverArgs, toolFilter []any) map[string]any {
 		return map[string]any{
 			"stdio_connection_params": map[string]any{

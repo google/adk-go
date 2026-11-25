@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -198,6 +199,12 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
+		// This factory only supports stdio, so it can check the opt-in before parsing.
+		const allowStdioEnv = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
+		if v := os.Getenv(allowStdioEnv); v != "1" && !strings.EqualFold(v, "true") {
+			return nil, fmt.Errorf("stdio MCP servers are not allowed in agent configs: set %s=1 only if you trust every config this process loads", allowStdioEnv)
+		}
+
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("stdio_connection_params not found in args")
