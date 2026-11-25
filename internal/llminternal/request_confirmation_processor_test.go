@@ -1308,30 +1308,47 @@ func TestRequestConfirmationPendingAndResultClassification(t *testing.T) {
 			},
 			wantDispatch: false,
 		},
+		// The cases below use the timestamps the runner produces when every
+		// event of a runner.Run call gets one time: run 1 (request and
+		// placeholder) at ts, run 2 (first answer and what the resumed tool
+		// writes) at ts+1s, run 3 (repeated answer) at ts+2s. The database
+		// session service orders events of one run by ID, so a response
+		// written after the answer can sort on either side of it.
 		{
-			// The database session service orders events with equal timestamps by
-			// ID, so the placeholder can land after the approval it precedes.
-			name:         "placeholder tied with the first approval and sorted after it does not count",
-			events:       []*session.Event{request(), answer(ts), pending(placeholderResp)},
-			wantDispatch: true,
-		},
-		{
-			name: "placeholder from a resumed tool asking again counts as its result",
+			name: "placeholder from a resumed tool asking again, sorted after the answer, counts",
 			events: []*session.Event{
 				request(), pending(placeholderResp), answer(ts.Add(time.Second)),
-				pendingAt(ts.Add(2*time.Second), placeholderResp), requestAt(ts.Add(2*time.Second), "conf-2"),
-				answer(ts.Add(3 * time.Second)),
+				pendingAt(ts.Add(time.Second), placeholderResp), requestAt(ts.Add(time.Second), "conf-2"),
+				answer(ts.Add(2 * time.Second)),
 			},
 			wantDispatch: false,
 		},
 		{
-			name: "response to an unrelated call reusing the ID before the answer does not count",
+			name: "placeholder from a resumed tool asking again, sorted before the answer, counts",
+			events: []*session.Event{
+				request(), pending(placeholderResp),
+				pendingAt(ts.Add(time.Second), placeholderResp), requestAt(ts.Add(time.Second), "conf-2"),
+				answer(ts.Add(time.Second)),
+				answer(ts.Add(2 * time.Second)),
+			},
+			wantDispatch: false,
+		},
+		{
+			name: "response of another tool reusing the ID, tied with the answer and sorted before it, does not count",
 			events: []*session.Event{
 				request(), pending(placeholderResp),
 				agentEvent(ts.Add(time.Second), &genai.Part{FunctionCall: &genai.FunctionCall{Name: "other_tool", ID: callID}}),
 				agentEvent(ts.Add(time.Second), &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "other_tool", ID: callID, Response: map[string]any{"ok": true}}}),
-				answer(ts.Add(2 * time.Second)),
+				answer(ts.Add(time.Second)),
 			},
+			wantDispatch: true,
+		},
+		{
+			// With a clock that did not move between the run that asked and the
+			// run that answered, the placeholder written with the request shares
+			// the answer's timestamp, so a tie cannot place it after the answer.
+			name:         "placeholder tied with the answer when the clock did not move between runs does not count",
+			events:       []*session.Event{request(), pending(placeholderResp), answer(ts)},
 			wantDispatch: true,
 		},
 	}

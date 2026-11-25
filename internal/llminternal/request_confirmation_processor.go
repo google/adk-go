@@ -126,27 +126,44 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				}
 			}
 		}
-		// answeredAfter reports whether the response at idx for callID came
-		// after the user's first answer at ansIdx, so it is the result of
-		// resuming that call.
+		// answeredAfter reports whether the response at idx to call (whose
+		// confirmation was requested by the event at reqIdx) was written after
+		// the user's first answer at ansIdx, so it is the result of resuming
+		// that call.
+		//
+		// A response that sorts after the answer counts, as in adk-python
+		// (flows/llm_flows/tools/_confirmation.py). That includes the
+		// placeholder of a resumed tool that asks for confirmation again.
 		//
 		// The database session service orders events that share a timestamp
-		// by ID, so the order of the slice alone cannot be trusted on a tie:
-		//   - A real result that ties with the answer may sort before it; it
-		//     still counts.
-		//   - The pending placeholder (a response carrying a confirmation
-		//     request for the call) that ties with the answer may sort after
-		//     it; it was written before the answer, so it does not count. A
-		//     placeholder written later, when the resumed tool asks for
-		//     confirmation again, does count, as in adk-python
-		//     (flows/llm_flows/tools/_confirmation.py).
-		answeredAfter := func(idx, ansIdx int, callID string) bool {
-			ev, ans := events[idx], events[ansIdx]
-			tie := !ev.Timestamp.IsZero() && ev.Timestamp.Equal(ans.Timestamp)
-			if _, pending := ev.Actions.RequestedToolConfirmations[callID]; pending {
-				return idx > ansIdx && !tie
+		// by ID, so a response written after the answer can sort before it
+		// when both have the same timestamp. That happens when every event of
+		// a runner.Run call gets one time (platform.WithTimeProvider), or with
+		// a clock coarser than the gap between two writes. A response that
+		// sorts before the answer therefore also counts when all of these hold:
+		//   - The request is strictly older than the answer. The placeholder
+		//     stored with the request is never newer than the request, so it
+		//     cannot share the answer's timestamp, and a response that does
+		//     was written in the answer's run or later. If the clock did not
+		//     move between the two runs, a tie says nothing about which run
+		//     wrote the response, so only the order of the slice is used.
+		//   - It shares the answer's timestamp.
+		//   - It is a response of the same tool. A response of another tool
+		//     that reuses the call ID is not the result of this call.
+		answeredAfter := func(idx, ansIdx, reqIdx int, call genai.FunctionCall) bool {
+			if idx > ansIdx {
+				return true
 			}
-			return idx > ansIdx || tie
+			ev, ans, req := events[idx], events[ansIdx], events[reqIdx]
+			if req.Timestamp.IsZero() || !req.Timestamp.Before(ans.Timestamp) || !ev.Timestamp.Equal(ans.Timestamp) {
+				return false
+			}
+			for _, resp := range utils.FunctionResponses(ev.Content) {
+				if resp.ID == call.ID && resp.Name == call.Name {
+					return true
+				}
+			}
+			return false
 		}
 
 		agentName := ctx.Agent().Name()
@@ -260,15 +277,17 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			// Remove the tools that already have a result stored after the user's first
-			// answer to the confirmation (repeated approvals).
-			for callID := range toolsToResumeByFunctionCallID {
+			// Remove the tools that already have a response written after the user's
+			// first answer to the confirmation (repeated approvals): one sorted after
+			// that answer, or one that shares its timestamp and sorts before it (see
+			// answeredAfter).
+			for callID, cc := range toolsToResumeByFunctionCallID {
 				ansIdx, answered := firstAnswerIndex[confirmationIDByCallID[callID]]
 				if !answered {
 					ansIdx = k
 				}
 				for _, idx := range responseIndexes[callID] {
-					if idx > k && answeredAfter(idx, ansIdx, callID) {
+					if idx > k && answeredAfter(idx, ansIdx, k, cc.call) {
 						delete(toolsToResumeByFunctionCallID, callID)
 						break
 					}
