@@ -16,9 +16,12 @@ package skilltool_test
 
 import (
 	"context"
+	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -30,9 +33,10 @@ import (
 )
 
 type mockSource struct {
-	frontmatters []*skill.Frontmatter
-	resources    map[string]map[string]string
-	instructions map[string]string
+	frontmatters     []*skill.Frontmatter
+	resources        map[string]map[string]string
+	instructions     map[string]string
+	listResourcesErr error
 }
 
 func (m *mockSource) ListFrontmatters(ctx context.Context) ([]*skill.Frontmatter, error) {
@@ -40,12 +44,16 @@ func (m *mockSource) ListFrontmatters(ctx context.Context) ([]*skill.Frontmatter
 }
 
 func (m *mockSource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
+	if m.listResourcesErr != nil {
+		return nil, m.listResourcesErr
+	}
 	var res []string
 	for p := range m.resources[name] {
-		if strings.HasPrefix(p, subpath) {
+		if subpath == "" || subpath == "." || strings.HasPrefix(p, subpath) {
 			res = append(res, p)
 		}
 	}
+	slices.Sort(res)
 	return res, nil
 }
 
@@ -152,6 +160,118 @@ func TestLoadSkill(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("LoadSkill result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestLoadSkill_WithResources(t *testing.T) {
+	t.Run("mock source lists bundled resources", func(t *testing.T) {
+		source := &mockSource{
+			frontmatters: []*skill.Frontmatter{
+				{Name: "skill1", Description: "description1"},
+			},
+			instructions: map[string]string{
+				"skill1": "instructions1",
+			},
+			resources: map[string]map[string]string{
+				"skill1": {
+					"assets/data.txt":     "content1",
+					"references/guide.md": "guide1",
+				},
+			},
+		}
+		tTool, err := skilltool.LoadSkill(source)
+		if err != nil {
+			t.Fatalf("LoadSkill failed: %v", err)
+		}
+		functionTool := tTool.(toolinternal.FunctionTool)
+
+		got, err := functionTool.Run(createToolContext(t), map[string]any{"name": "skill1"})
+		if err != nil {
+			t.Fatalf("LoadSkill tool.Run failed: %v", err)
+		}
+		want := map[string]any{
+			"skill_name":   "skill1",
+			"instructions": "instructions1",
+			"frontmatter": map[string]any{
+				"name":        "skill1",
+				"description": "description1",
+			},
+			"resources": []any{"assets/data.txt", "references/guide.md"},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("LoadSkill result mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("filesystem source lists bundled resources via subpath dot", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"skill1/SKILL.md":            {Data: []byte("---\nname: skill1\ndescription: fs skill\n---\n\nDo the work.\n")},
+			"skill1/references/guide.md": {Data: []byte("# Guide")},
+			"skill1/assets/template.txt": {Data: []byte("hello")},
+			"skill1/scripts/run.sh":      {Data: []byte("#!/bin/sh\necho ok\n")},
+		}
+		source := skill.NewFileSystemSource(fsys)
+		tTool, err := skilltool.LoadSkill(source)
+		if err != nil {
+			t.Fatalf("LoadSkill failed: %v", err)
+		}
+		functionTool := tTool.(toolinternal.FunctionTool)
+
+		got, err := functionTool.Run(createToolContext(t), map[string]any{"name": "skill1"})
+		if err != nil {
+			t.Fatalf("LoadSkill tool.Run failed: %v", err)
+		}
+		want := map[string]any{
+			"skill_name":   "skill1",
+			"instructions": "Do the work.",
+			"frontmatter": map[string]any{
+				"name":        "skill1",
+				"description": "fs skill",
+			},
+			"resources": []any{"references/guide.md", "assets/template.txt", "scripts/run.sh"},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("LoadSkill result mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestLoadSkill_OmitsEmptyResources(t *testing.T) {
+	fsys := fstest.MapFS{
+		"skill1/SKILL.md": {Data: []byte("---\nname: skill1\ndescription: fs skill\n---\n\nNo resources.\n")},
+	}
+	source := skill.NewFileSystemSource(fsys)
+	tTool, err := skilltool.LoadSkill(source)
+	if err != nil {
+		t.Fatalf("LoadSkill failed: %v", err)
+	}
+	functionTool := tTool.(toolinternal.FunctionTool)
+
+	got, err := functionTool.Run(createToolContext(t), map[string]any{"name": "skill1"})
+	if err != nil {
+		t.Fatalf("LoadSkill tool.Run failed: %v", err)
+	}
+	if _, exists := got["resources"]; exists {
+		t.Fatalf("expected resources key to be omitted when empty, got %#v", got)
+	}
+}
+
+func TestLoadSkill_ListResourcesError(t *testing.T) {
+	boom := errors.New("storage unavailable")
+	source := &mockSource{
+		frontmatters:     []*skill.Frontmatter{{Name: "skill1", Description: "description1"}},
+		instructions:     map[string]string{"skill1": "instructions1"},
+		listResourcesErr: boom,
+	}
+	tTool, err := skilltool.LoadSkill(source)
+	if err != nil {
+		t.Fatalf("LoadSkill failed: %v", err)
+	}
+	functionTool := tTool.(toolinternal.FunctionTool)
+
+	_, err = functionTool.Run(createToolContext(t), map[string]any{"name": "skill1"})
+	if !errors.Is(err, boom) {
+		t.Fatalf("LoadSkill error = %v, want wrapping %v", err, boom)
 	}
 }
 
