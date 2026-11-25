@@ -38,7 +38,7 @@ func newToolCall(t *testing.T, s toolcall.Scenario) agent.Agent {
 			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "some_tool", Args: map[string]any{"arg1": "val1"}}}}},
 			{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text response"}}},
 		}
-		usage = []*genai.GenerateContentResponseUsageMetadata{usageA(), usageB()}
+		usage = []*genai.GenerateContentResponseUsageMetadata{firstCallUsage(), secondCallUsage()}
 	}
 
 	type Args struct {

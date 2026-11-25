@@ -45,13 +45,13 @@ func newDynamicWorkflow(t *testing.T, s dynamicworkflow.Scenario) agent.Agent {
 			return strings.ToUpper(in), nil
 		}, nodeCfg)
 
-	taskAgent := newCollaborativeAgent(t, "task_agent", llmagent.ModeTask, s.Failure != dynamicworkflow.FirstAgentError, "task complete", usageA())
+	taskAgent := newCollaborativeAgent(t, "task_agent", llmagent.ModeTask, s.Failure != dynamicworkflow.FirstAgentError, "task complete", firstCallUsage())
 	taskNode, err := workflow.NewAgentNode(taskAgent, nodeCfg)
 	if err != nil {
 		t.Fatalf("NewAgentNode(task_agent): %v", err)
 	}
 
-	singleTurnAgent := newCollaborativeAgent(t, "single_turn_agent", llmagent.ModeSingleTurn, s.Failure != dynamicworkflow.SecondAgentError, "single turn complete", usageB())
+	singleTurnAgent := newCollaborativeAgent(t, "single_turn_agent", llmagent.ModeSingleTurn, s.Failure != dynamicworkflow.SecondAgentError, "single turn complete", secondCallUsage())
 	singleTurnNode, err := workflow.NewAgentNode(singleTurnAgent, nodeCfg)
 	if err != nil {
 		t.Fatalf("NewAgentNode(single_turn_agent): %v", err)

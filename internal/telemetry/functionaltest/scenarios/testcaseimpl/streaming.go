@@ -38,7 +38,7 @@ func newStreaming(t *testing.T) agent.Agent {
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text "}}},
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "response"}}},
 			},
-			Usage:                []*genai.GenerateContentResponseUsageMetadata{usageB(), usageB()},
+			Usage:                []*genai.GenerateContentResponseUsageMetadata{streamChunkUsage(), streamChunkUsage()},
 			StreamResponsesCount: 2,
 		},
 		Instruction: "you are helpful",
