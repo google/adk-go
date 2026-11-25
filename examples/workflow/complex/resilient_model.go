@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"log"
 	"time"
@@ -47,12 +48,16 @@ type resilientModel struct {
 // retryBackoff is the fixed pause between attempts.
 const retryBackoff = time.Second
 
-// newResilientModel wraps inner. attempts is clamped to a minimum of 1.
-func newResilientModel(inner model.LLM, timeout time.Duration, attempts int, fallback string) *resilientModel {
+// newResilientModel wraps inner, returning an error if inner is nil. attempts
+// is clamped to a minimum of 1.
+func newResilientModel(inner model.LLM, timeout time.Duration, attempts int, fallback string) (*resilientModel, error) {
+	if inner == nil {
+		return nil, errors.New("resilientModel: inner model must not be nil")
+	}
 	if attempts < 1 {
 		attempts = 1
 	}
-	return &resilientModel{inner: inner, timeout: timeout, attempts: attempts, fallback: fallback}
+	return &resilientModel{inner: inner, timeout: timeout, attempts: attempts, fallback: fallback}, nil
 }
 
 // Name implements model.LLM.
