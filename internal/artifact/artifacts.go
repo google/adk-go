@@ -50,13 +50,13 @@ func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadRespon
 	})
 }
 
-func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+func (a *Artifacts) LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error) {
 	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
-		Version:   int64(version),
+		Version:   version,
 	})
 }
 
@@ -77,19 +77,19 @@ func (a *Artifacts) Versions(ctx context.Context, name string) (*artifact.Versio
 	})
 }
 
-func (a *Artifacts) GetArtifactVersion(ctx context.Context, name string, version int) (*artifact.GetArtifactVersionResponse, error) {
+func (a *Artifacts) GetArtifactVersion(ctx context.Context, name string, version int64) (*artifact.GetArtifactVersionResponse, error) {
 	return a.Service.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
-		Version:   int64(version),
+		Version:   &version,
 	})
 }
 
 type versionedArtifacts interface {
 	Versions(ctx context.Context, name string) (*artifact.VersionsResponse, error)
-	GetArtifactVersion(ctx context.Context, name string, version int) (*artifact.GetArtifactVersionResponse, error)
+	GetArtifactVersion(ctx context.Context, name string, version int64) (*artifact.GetArtifactVersionResponse, error)
 }
 
 // Versions lists all versions of the named artifact using the backing service
@@ -105,7 +105,7 @@ func Versions(ctx context.Context, a agent.Artifacts, name string) (*artifact.Ve
 // GetArtifactVersion returns the metadata for a specific version of the named
 // artifact using the backing service of a, unwrapping any decorator that
 // implements Unwrap() agent.Artifacts.
-func GetArtifactVersion(ctx context.Context, a agent.Artifacts, name string, version int) (*artifact.GetArtifactVersionResponse, error) {
+func GetArtifactVersion(ctx context.Context, a agent.Artifacts, name string, version int64) (*artifact.GetArtifactVersionResponse, error) {
 	v, err := unwrapVersioned(a)
 	if err != nil {
 		return nil, err

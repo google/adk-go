@@ -65,6 +65,44 @@ func TestGCSArtifactService(t *testing.T) {
 	tests.TestArtifactService(t, "GCS", factory)
 }
 
+func TestDeleteMissingVersion(t *testing.T) {
+	svc := newGCSServiceForTesting("bucket")
+	if err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(0)),
+	}); !errors.Is(err, storage.ErrObjectNotExist) {
+		t.Errorf("Delete(missing version) = %v, want %v", err, storage.ErrObjectNotExist)
+	}
+}
+
+func TestDeleteVersionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "success"},
+		{name: "not found", err: storage.ErrObjectNotExist, wantErr: storage.ErrObjectNotExist},
+		{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist), wantErr: storage.ErrObjectNotExist},
+		{name: "permission denied", err: fs.ErrPermission, wantErr: fs.ErrPermission},
+		{name: "canceled", err: context.Canceled, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("bucket")
+			if _, err := svc.Save(t.Context(), saveReq()); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+			svc.bucket.(*fakeBucket).deleteErr = tc.err
+
+			err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(0)),
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Delete() = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestGCSArtifactVersionFields(t *testing.T) {
 	firstCreateTime := time.Date(2026, time.August, 31, 12, 34, 56, 0, time.UTC)
 	secondCreateTime := firstCreateTime.Add(time.Minute)
@@ -105,7 +143,7 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromBytes([]byte("data"), "image/png"), CustomMetadata: metadata,
 			}); err != nil {
-				t.Fatalf("Save(v1) failed: %v", err)
+				t.Fatalf("Save(v0) failed: %v", err)
 			}
 			metadata["string"] = "changed after save"
 
@@ -114,7 +152,7 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromText("text"),
 			}); err != nil {
-				t.Fatalf("Save(v2) failed: %v", err)
+				t.Fatalf("Save(v1) failed: %v", err)
 			}
 
 			latest, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
@@ -124,8 +162,8 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 				t.Fatalf("GetArtifactVersion(latest) failed: %v", err)
 			}
 			wantLatest := &artifact.ArtifactVersion{
-				Version:        2,
-				CanonicalURI:   tc.uriPrefix + "2",
+				Version:        1,
+				CanonicalURI:   tc.uriPrefix + "1",
 				CustomMetadata: map[string]any{},
 				CreateTime:     secondCreateTime,
 				MimeType:       "text/plain",
@@ -135,14 +173,14 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 			}
 
 			first, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
-				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: new(int64(0)),
 			})
 			if err != nil {
-				t.Fatalf("GetArtifactVersion(v1) failed: %v", err)
+				t.Fatalf("GetArtifactVersion(v0) failed: %v", err)
 			}
 			wantFirst := &artifact.ArtifactVersion{
-				Version:      1,
-				CanonicalURI: tc.uriPrefix + "1",
+				Version:      0,
+				CanonicalURI: tc.uriPrefix + "0",
 				CustomMetadata: map[string]any{
 					"string":  "value",
 					"number":  "42",
@@ -152,18 +190,18 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 				MimeType:   "image/png",
 			}
 			if diff := cmp.Diff(wantFirst, first.ArtifactVersion); diff != "" {
-				t.Errorf("GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+				t.Errorf("GetArtifactVersion(v0) mismatch (-want +got):\n%s", diff)
 			}
 
 			first.ArtifactVersion.CustomMetadata["string"] = "changed after read"
 			again, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
-				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: new(int64(0)),
 			})
 			if err != nil {
-				t.Fatalf("second GetArtifactVersion(v1) failed: %v", err)
+				t.Fatalf("second GetArtifactVersion(v0) failed: %v", err)
 			}
 			if diff := cmp.Diff(wantFirst, again.ArtifactVersion); diff != "" {
-				t.Errorf("second GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+				t.Errorf("second GetArtifactVersion(v0) mismatch (-want +got):\n%s", diff)
 			}
 
 			if err := svc.Delete(t.Context(), &artifact.DeleteRequest{
@@ -185,8 +223,8 @@ func TestGCSArtifactVersionFields(t *testing.T) {
 				t.Fatalf("GetArtifactVersion(recreated) failed: %v", err)
 			}
 			wantRecreated := &artifact.ArtifactVersion{
-				Version:        1,
-				CanonicalURI:   tc.uriPrefix + "1",
+				Version:        0,
+				CanonicalURI:   tc.uriPrefix + "0",
 				CustomMetadata: map[string]any{},
 				CreateTime:     recreateTime,
 				MimeType:       "application/octet-stream",
@@ -215,16 +253,14 @@ func TestGCSArtifactServiceConcurrentSave(t *testing.T) {
 	gotVersions := make([]int64, savers)
 	errs := make([]error, savers)
 	for i := range savers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			resp, err := srv.Save(t.Context(), saveReq())
 			if err != nil {
 				errs[i] = err
 				return
 			}
 			gotVersions[i] = resp.Version
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -239,7 +275,7 @@ func TestGCSArtifactServiceConcurrentSave(t *testing.T) {
 	slices.Sort(gotVersions)
 	want := make([]int64, savers)
 	for i := range want {
-		want[i] = int64(i + 1)
+		want[i] = int64(i)
 	}
 	if diff := cmp.Diff(want, gotVersions); diff != "" {
 		t.Errorf("returned versions mismatch (-want +got):\n%s", diff)
@@ -315,7 +351,7 @@ func TestSaveZeroByteArtifact(t *testing.T) {
 		}
 	}
 
-	for want := int64(1); want <= 2; want++ {
+	for want := range int64(2) {
 		resp, err := svc.Save(t.Context(), req())
 		if err != nil {
 			t.Fatalf("Save() failed: %v", err)
@@ -332,7 +368,7 @@ func TestSaveZeroByteArtifact(t *testing.T) {
 		t.Fatalf("Versions() failed: %v", err)
 	}
 	slices.Sort(versions.Versions)
-	if diff := cmp.Diff([]int64{1, 2}, versions.Versions); diff != "" {
+	if diff := cmp.Diff([]int64{0, 1}, versions.Versions); diff != "" {
 		t.Errorf("stored versions mismatch (-want +got):\n%s", diff)
 	}
 
@@ -344,6 +380,81 @@ func TestSaveZeroByteArtifact(t *testing.T) {
 	}
 	if got := loaded.Part.InlineData.Data; len(got) != 0 {
 		t.Errorf("Load() data = %q, want empty", got)
+	}
+}
+
+// TestGCSLegacyOneBasedObjects verifies that buckets written under the earlier
+// 1-based numbering (objects /1, /2 with no /0) continue working without
+// migration: nil addresses the latest version, explicit 0 reports not-found
+// without deleting existing versions, explicit 1 loads object /1, and the next
+// Save writes /3.
+func TestGCSLegacyOneBasedObjects(t *testing.T) {
+	ctx := t.Context()
+	svc := newGCSServiceForTesting("legacy")
+	for _, entry := range []struct {
+		version int64
+		text    string
+	}{{1, "legacy v1"}, {2, "legacy v2"}} {
+		obj := svc.bucket.object(buildBlobName("app", "user", "session", "file", entry.version))
+		if err := writeArtifact(ctx, obj, genai.NewPartFromText(entry.text), nil); err != nil {
+			t.Fatalf("seed v%d failed: %v", entry.version, err)
+		}
+	}
+
+	latest, err := svc.Load(ctx, &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+	})
+	if err != nil {
+		t.Fatalf("Load(latest) failed: %v", err)
+	}
+	if latest.Part == nil || latest.Part.InlineData == nil || string(latest.Part.InlineData.Data) != "legacy v2" {
+		t.Fatalf("Load(latest) = %v, want legacy v2", latest.Part)
+	}
+
+	latestMeta, err := svc.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+	})
+	if err != nil {
+		t.Fatalf("GetArtifactVersion(latest) failed: %v", err)
+	}
+	if latestMeta.ArtifactVersion.Version != 2 {
+		t.Fatalf("GetArtifactVersion(latest).Version = %d, want 2", latestMeta.ArtifactVersion.Version)
+	}
+
+	v1, err := svc.Load(ctx, &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(1)),
+	})
+	if err != nil {
+		t.Fatalf("Load(v1) failed: %v", err)
+	}
+	if v1.Part == nil || v1.Part.InlineData == nil || string(v1.Part.InlineData.Data) != "legacy v1" {
+		t.Fatalf("Load(v1) = %v, want legacy v1", v1.Part)
+	}
+
+	if _, err := svc.Load(ctx, &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(0)),
+	}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Load(v0) on legacy 1-based store err = %v, want %v", err, fs.ErrNotExist)
+	}
+
+	if _, err := svc.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(0)),
+	}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("GetArtifactVersion(v0) on legacy 1-based store err = %v, want %v", err, fs.ErrNotExist)
+	}
+
+	if err := svc.Delete(ctx, &artifact.DeleteRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: new(int64(0)),
+	}); !errors.Is(err, storage.ErrObjectNotExist) {
+		t.Fatalf("Delete(v0) on legacy 1-based store err = %v, want %v", err, storage.ErrObjectNotExist)
+	}
+
+	saved, err := svc.Save(ctx, &artifact.SaveRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
+		Part: genai.NewPartFromText("v3"),
+	})
+	if err != nil || saved.Version != 3 {
+		t.Fatalf("Save() on legacy 1-based store = (%v, %v), want version 3", saved, err)
 	}
 }
 
@@ -365,7 +476,7 @@ func TestNotFoundIsWrappedSentinel(t *testing.T) {
 			call: func(svc *gcsService) error {
 				_, err := svc.Load(t.Context(), &artifact.LoadRequest{
 					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
-					Version: 1,
+					Version: new(int64(0)),
 				})
 				return err
 			},
@@ -375,7 +486,7 @@ func TestNotFoundIsWrappedSentinel(t *testing.T) {
 			call: func(svc *gcsService) error {
 				_, err := svc.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
 					AppName: "app", UserID: "user", SessionID: "session", FileName: "file",
-					Version: 1,
+					Version: new(int64(0)),
 				})
 				return err
 			},
@@ -526,16 +637,16 @@ func TestIsPreconditionFailed(t *testing.T) {
 }
 
 // TestSleepContext checks that sleepContext honors a non-positive duration, an
-// already-cancelled context, and a normal short wait.
+// already-canceled context, and a normal short wait.
 func TestSleepContext(t *testing.T) {
 	if err := sleepContext(t.Context(), 0); err != nil {
 		t.Errorf("sleepContext(_, 0) = %v, want nil", err)
 	}
 
-	cancelled, cancel := context.WithCancel(t.Context())
+	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := sleepContext(cancelled, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Errorf("sleepContext(cancelled, 1h) = %v, want context.Canceled", err)
+	if err := sleepContext(canceled, time.Hour); !errors.Is(err, context.Canceled) {
+		t.Errorf("sleepContext(canceled, 1h) = %v, want context.Canceled", err)
 	}
 
 	if err := sleepContext(t.Context(), time.Millisecond); err != nil {
@@ -589,6 +700,8 @@ type fakeBucket struct {
 	// client library's wrapped storage.ErrObjectNotExist (see
 	// TestNotFoundIsWrappedSentinel).
 	attrsErr error
+
+	deleteErr error
 }
 
 func (f *fakeBucket) setNow(now func() time.Time) {
@@ -692,9 +805,20 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 
 // delete removes the object from the in-memory store.
 func (o *fakeObject) delete(ctx context.Context) error {
+	if o.bucket != nil {
+		o.bucket.mu.Lock()
+		forced := o.bucket.deleteErr
+		o.bucket.mu.Unlock()
+		if forced != nil {
+			return forced
+		}
+	}
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.exists {
+		return storage.ErrObjectNotExist
+	}
 	b.exists = false
 	b.data = nil
 	b.contentType = ""

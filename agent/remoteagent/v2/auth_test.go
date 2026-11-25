@@ -260,22 +260,17 @@ func TestRemoteAgent_AuthAcceptedByEnforcingServer(t *testing.T) {
 			}
 
 			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
-
-			errEvent := firstErrorEvent(events)
 			if tc.wantErr {
-				if errEvent == nil {
-					t.Fatal("want an error event from the rejected request, got none")
+				if err == nil {
+					t.Fatal("want an error from the rejected request, got none")
 				}
-				if !strings.Contains(errEvent.ErrorMessage, "401") {
-					t.Errorf("error event = %q, want it to mention 401", errEvent.ErrorMessage)
+				if !strings.Contains(err.Error(), "401") {
+					t.Errorf("agent.Run() error = %q, want it to mention 401", err)
 				}
 				return
 			}
-			if errEvent != nil {
-				t.Fatalf("unexpected error event: %q", errEvent.ErrorMessage)
+			if err != nil {
+				t.Fatalf("agent.Run() error = %v", err)
 			}
 			if !eventsContainText(events, "ok") {
 				t.Errorf("authenticated response missing the remote agent's reply %q", "ok")
@@ -532,10 +527,7 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 
 	mu.Lock()
 	hits, key := elsewhereHits, elsewhereSawKey
@@ -544,59 +536,11 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 		t.Errorf("the redirect target received %d requests, want 0; it saw X-Card-Key = %q", hits, key)
 	}
 
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil {
-		t.Fatal("want an error event from the refused redirect, got none")
+	if err == nil {
+		t.Fatal("want an error from the refused redirect, got none")
 	}
-	if !strings.Contains(errEvent.ErrorMessage, "refusing redirect") {
-		t.Errorf("error event = %q, want it to mention the refused redirect", errEvent.ErrorMessage)
-	}
-}
-
-// TestSameCredentialTarget covers which redirects may carry the credential,
-// across the scheme and port combinations the end-to-end redirect tests above
-// do not reach: an upgrade to https, default ports written out or left
-// implicit, and schemes that are neither http nor https.
-func TestSameCredentialTarget(t *testing.T) {
-	tests := []struct {
-		name     string
-		from, to string
-		want     bool
-	}{
-		{name: "identical", from: "https://h/rpc", to: "https://h/other", want: true},
-		{name: "default port made explicit", from: "https://h/rpc", to: "https://h:443/rpc", want: true},
-		{name: "default http port made explicit", from: "http://h/rpc", to: "http://h:80/rpc", want: true},
-		{name: "host case differs", from: "https://Host/rpc", to: "https://host/rpc", want: true},
-		{name: "scheme upgraded to https, same explicit port", from: "http://h:8080/rpc", to: "https://h:8080/rpc", want: true},
-		{name: "scheme upgraded to https, both ports implicit", from: "http://h/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme upgraded to https, explicit default ports", from: "http://h:80/rpc", to: "https://h:443/rpc", want: true},
-		{name: "scheme upgraded to https onto a different port", from: "http://h/rpc", to: "https://h:9443/rpc", want: false},
-		{name: "scheme downgraded with implicit ports", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "unrelated scheme", from: "https://h/rpc", to: "ftp://h/rpc", want: false},
-		// Only http to https counts as an upgrade: either half alone is not one.
-		{name: "http to an unrelated scheme", from: "http://h/rpc", to: "ftp://h/rpc", want: false},
-		{name: "an unrelated scheme to https", from: "ftp://h/rpc", to: "https://h/rpc", want: false},
-		// An explicit default port on one side and an implicit one on the other
-		// is still each scheme's own default.
-		{name: "scheme upgraded to https, explicit http default to implicit", from: "http://h:80/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme downgraded to http", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "different host", from: "https://h/rpc", to: "https://other/rpc", want: false},
-		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			from, err := url.Parse(tc.from)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.from, err)
-			}
-			to, err := url.Parse(tc.to)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.to, err)
-			}
-			if got := sameCredentialTarget(from, to); got != tc.want {
-				t.Errorf("sameCredentialTarget(%q, %q) = %v, want %v", tc.from, tc.to, got, tc.want)
-			}
-		})
+	if !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("agent.Run() error = %q, want it to mention the refused redirect", err)
 	}
 }
 
@@ -618,9 +562,9 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 	if !strings.Contains(err.Error(), "stopped after") {
 		t.Errorf("Get() error = %v, want it to report the redirect cap", err)
 	}
-	// The literal, not maxRedirects: an expectation derived from the constant
-	// under test shrinks and grows with it, so the test can never fire on a
-	// change to the cap. 10 is net/http's own default, which a custom
+	// The literal, not credredirect.MaxRedirects: an expectation derived from
+	// the constant under test shrinks and grows with it, so the test can never
+	// fire on a change to the cap. 10 is net/http's own default, which a custom
 	// CheckRedirect replaces rather than extends.
 	if got := hits.Load(); got != 10 {
 		t.Errorf("server saw %d requests, want %d", got, 10)
@@ -658,6 +602,7 @@ func TestCheckRedirect(t *testing.T) {
 	tests := []struct {
 		name    string
 		urls    []string
+		host    string // req.Host on the hop under test
 		wantErr string
 	}{
 		{name: "same origin", urls: []string{"https://h/a", "https://h/b"}},
@@ -672,10 +617,24 @@ func TestCheckRedirect(t *testing.T) {
 			urls:    []string{"http://h/a", "https://h/b", "http://h/c"},
 			wantErr: "refusing redirect",
 		},
+		// The rule is shared with mcptoolset through internal/credredirect.
+		// These are the decisions that differ from comparing the hostnames
+		// as written: a name in its mapped form and its punycode are one
+		// target, two spellings net/http would send as Host differently are
+		// not, a port written out on one side is the port implied on the
+		// other, and a Host header has to name the URL's host.
+		{name: "unicode host to its punycode form", urls: []string{"https://fa\u00df.example/a", "https://xn--fa-hia.example/a"}},
+		{name: "sharp s to capital sharp s", urls: []string{"https://fa\u00df.example/a", "https://fa\u1e9e.example/a"}, wantErr: "refusing redirect"},
+		{name: "unicode case differs", urls: []string{"https://M\u00dcNCHEN.example/a", "https://m\u00fcnchen.example/a"}, wantErr: "refusing redirect"},
+		{name: "upgrade with the http default written out", urls: []string{"http://h/a", "https://h:80/a"}},
+		{name: "upgrade with the https default written out", urls: []string{"http://h:443/a", "https://h/a"}},
+		{name: "host header names the url's host", urls: []string{"https://h/a", "https://h/b"}, host: "h"},
+		{name: "host header names another host", urls: []string{"https://h/a", "https://h/b"}, host: "other", wantErr: "refusing redirect"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req, via := chain(tc.urls...)
+			req.Host = tc.host
 			err := checkRedirect(req, via)
 			if tc.wantErr == "" {
 				if err != nil {
@@ -850,8 +809,8 @@ func TestRemoteAgent_AuthCleanupReusesTheInvocationCredential(t *testing.T) {
 }
 
 // TestRedactTokenError pins that the token endpoint's response body does not
-// reach the error string, which ends up in the invocation's error event, while
-// the error chain still resolves for a caller inspecting it.
+// reach the error string, which Run returns to the caller, while the error
+// chain still resolves for a caller inspecting it.
 func TestRedactTokenError(t *testing.T) {
 	const body = "sensitive-echo-of-the-request"
 	tests := []struct {
@@ -902,8 +861,7 @@ func TestRedactTokenError(t *testing.T) {
 					t.Errorf("mintGroup.token() error = %v, want %q dropped", err, gone)
 				}
 			}
-			var re *oauth2.RetrieveError
-			if !errors.As(err, &re) {
+			if _, ok := errors.AsType[*oauth2.RetrieveError](err); !ok {
 				t.Errorf("mintGroup.token() error = %v, want errors.As to still find *oauth2.RetrieveError", err)
 			}
 		})
@@ -965,7 +923,7 @@ func (e *wrappedRetrieveError) Unwrap() error { return e.inner }
 
 // quotingRetrieveError re-encodes the body instead of printing it verbatim.
 // No wrapper on any path this package uses does that today, which is exactly
-// why redaction must not depend on recognising the body in the message.
+// why redaction must not depend on recognizing the body in the message.
 type quotingRetrieveError struct {
 	inner *oauth2.RetrieveError
 }
@@ -1006,8 +964,7 @@ func TestRedactTokenErrorSeesThroughAWrapper(t *testing.T) {
 	if !strings.Contains(got, "400 Bad Request") || !strings.Contains(got, "invalid_grant") {
 		t.Errorf("redactTokenError() = %q, want it to keep the status and the error code", got)
 	}
-	var re *oauth2.RetrieveError
-	if !errors.As(redactTokenError(err), &re) {
+	if _, ok := errors.AsType[*oauth2.RetrieveError](redactTokenError(err)); !ok {
 		t.Error("redactTokenError() lost the error chain")
 	}
 }
@@ -1157,11 +1114,9 @@ func TestRemoteAgent_AuthConcurrentInvocations(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, users)
 	for i := range users {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, errs[i] = runAndCollect(contexts[i], remoteAgent)
-		}()
+		})
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -1409,12 +1364,12 @@ func TestNewA2AOwnsAuthScope(t *testing.T) {
 }
 
 // TestMintGroupSingleFlight pins that a request arriving while a mint is in
-// flight joins it instead of starting another. Token() cannot be cancelled, so
+// flight joins it instead of starting another. Token() cannot be canceled, so
 // a caller released by its own deadline leaves the mint running; without the
 // single-flight, every request arriving while a token endpoint hangs would
 // start another one and park another goroutine.
 //
-// The joining callers carry an already-cancelled context, which makes the test
+// The joining callers carry an already-canceled context, which makes the test
 // deterministic: joining happens under the lock before the wait, so each one
 // returns at once and can be driven from the test goroutine with no window in
 // which it might have missed the in-flight call.
@@ -1725,7 +1680,7 @@ func TestRemoteAgent_AuthOverwritesACallerScope(t *testing.T) {
 }
 
 // TestMintGroupRetiresAnOverdueAttempt covers the attempt's own deadline. The
-// mint cannot be cancelled, so without retiring an overdue one its map entry
+// mint cannot be canceled, so without retiring an overdue one its map entry
 // would never be removed and every later request for that scope would join a
 // mint that can never finish — a token endpoint that hangs once would lock that
 // identity out for the life of the process.
@@ -1802,10 +1757,7 @@ func TestRemoteAgent_AuthRefusesADifferentHostname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1814,12 +1766,11 @@ func TestRemoteAgent_AuthRefusesADifferentHostname(t *testing.T) {
 			t.Errorf("the redirect was followed to %q; the credential must not leave the hostname the card named (saw %q)", host, hostsSeen)
 		}
 	}
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil {
-		t.Fatal("want an error event from the refused redirect, got none")
+	if err == nil {
+		t.Fatal("want an error from the refused redirect, got none")
 	}
-	if !strings.Contains(errEvent.ErrorMessage, "refusing redirect") {
-		t.Errorf("error event = %q, want it to mention the refused redirect", errEvent.ErrorMessage)
+	if !strings.Contains(err.Error(), "refusing redirect") {
+		t.Errorf("agent.Run() error = %q, want it to mention the refused redirect", err)
 	}
 }
 
@@ -2104,22 +2055,18 @@ func TestRemoteAgent_AuthFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewA2A() error = %v", err)
 			}
-			events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-			if err != nil {
-				t.Fatalf("agent.Run() error = %v", err)
-			}
+			_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
 			if n := hits.Load(); n != 0 {
 				t.Errorf("the server received %d requests, want 0: a credential failure must stop the request", n)
 			}
-			errEvent := firstErrorEvent(events)
-			if errEvent == nil {
-				t.Fatal("want an error event explaining the failure, got none")
+			if err == nil {
+				t.Fatal("want an error explaining the failure, got none")
 			}
-			if !strings.Contains(errEvent.ErrorMessage, tc.wantErr) {
-				t.Errorf("error event = %q, want it to contain %q", errEvent.ErrorMessage, tc.wantErr)
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("agent.Run() error = %q, want it to contain %q", err, tc.wantErr)
 			}
-			if tc.absent != "" && strings.Contains(errEvent.ErrorMessage, tc.absent) {
-				t.Errorf("error event = %q, want it not to leak %q", errEvent.ErrorMessage, tc.absent)
+			if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
+				t.Errorf("agent.Run() error = %q, want it not to leak %q", err, tc.absent)
 			}
 		})
 	}
@@ -2199,13 +2146,9 @@ func TestRemoteAgent_AuthRefusesAnInsecureCardSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewA2A() error = %v", err)
 	}
-	events, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
-	}
-	errEvent := firstErrorEvent(events)
-	if errEvent == nil || !strings.Contains(errEvent.ErrorMessage, "must use https") {
-		t.Fatalf("error event = %v, want the insecure card source refused", errEvent)
+	_, err = runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("agent.Run() error = %v, want the insecure card source refused", err)
 	}
 	if n := calls.Load(); n != 0 {
 		t.Errorf("provider called %d times, want 0: nothing should be resolved for a fetch that is refused", n)
@@ -2627,7 +2570,7 @@ func TestAuthTransportSharesAStepWithinAScope(t *testing.T) {
 		t.Fatal("no step recorded in flight for the scope while its Apply is running; the transport is not using its shared group")
 	}
 
-	// The second request carries an already-cancelled context, so it returns
+	// The second request carries an already-canceled context, so it returns
 	// as soon as it has joined or started a step, and the count below is read
 	// with no window in which it might still be starting one.
 	cancelled, cancel := context.WithCancel(scope)
@@ -2667,7 +2610,7 @@ func TestAuthTransportSharesAMintWithinAScope(t *testing.T) {
 	<-entered
 	defer func() {
 		close(release)
-		<-first
+		<-first //nolint:errcheck // only reaps the first apply; its result is not under test here
 	}()
 
 	sid, _ := a2aclient.SessionIDFrom(scope)

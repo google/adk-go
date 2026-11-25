@@ -39,11 +39,12 @@ func (m *audioMockArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func (m *audioMockArtifacts) List(context.Context) (*artifact.ListResponse, error) { return nil, nil }
+
 func (m *audioMockArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
 
-func (m *audioMockArtifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+func (m *audioMockArtifacts) LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
 

@@ -19,6 +19,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -32,6 +33,11 @@ import (
 // Custom nodes typically embed BaseNode (constructed via NewBaseNode)
 // to inherit Name, Description, and Config implementations, and
 // supply only Run.
+//
+// A custom node that calls another node's Run directly does not forward
+// its private recovery inventory. On failure, retries may conservatively
+// invalidate the custom node's subtree and repeat completed descendants.
+// Use RunNode within a DynamicNode to track child activations explicitly.
 type Node interface {
 	Name() string
 	Description() string
@@ -66,12 +72,7 @@ type Route interface {
 }
 
 func matchRoute(routeValue string, event *session.Event) bool {
-	for _, v := range event.Routes {
-		if v == routeValue {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(event.Routes, routeValue)
 }
 
 // StringRoute is a route defined by a string value.
@@ -243,7 +244,7 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 // An empty name adds no prefix, so this workflow's nodes are recorded
 // under the bare node path.
 //
-// Optional Option values configure engine behaviour
+// Optional Option values configure engine behavior
 // (concurrency cap, etc.); see WithMaxConcurrency.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
@@ -307,7 +308,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			ancestors = ac.OutputForAncestors()
 		}
 		runID := "1"
-		var subScheduler agent.DynamicSubScheduler = nil
+		var subScheduler agent.DynamicSubScheduler
 		delta := &agent.CommonContextDelta{
 			Path:               &wfPath,
 			RunID:              &runID,
@@ -326,12 +327,13 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		s.workflowName = w.name
 		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
 		s.scheduleNode(Start, input, "", ctx.Branch())
 
-		s.run(yield)
+		s.run(yield, false)
 
 		// All goroutines have returned; ensure no leak.
 		s.wg.Wait()

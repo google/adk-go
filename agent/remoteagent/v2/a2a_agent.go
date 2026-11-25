@@ -51,8 +51,9 @@ type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageReques
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
-// In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
-// decides to not emit an A2A event.
+// In streaming responses the callback is invoked for every request. The default converter passes a nil session event
+// with err on a transport or conversion failure, so a callback must check the event before use. An event returned
+// together with an error by a BeforeRequestCallbacks entry or a custom Converter is passed on as is.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
@@ -276,12 +277,8 @@ type A2AConfig struct {
 	// Either AgentCard or AgentCardProvider must be set.
 	AgentCardProvider AgentCardProvider
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [agent.BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
 	// BeforeRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then the
@@ -292,7 +289,7 @@ type A2AConfig struct {
 	// response, which would skip the actual remote agent call.
 	BeforeRequestCallbacks []BeforeA2ARequestCallback
 	// Converter is used to convert a2a.Event to session.Event. If not provided, adka2a.ToSessionEvent
-	// is used as the default implementation and errors are converted to events with error payload.
+	// is used as the default implementation and transport and conversion errors are returned from Run.
 	Converter A2AEventConverter
 	// AfterRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then
@@ -301,12 +298,9 @@ type A2AConfig struct {
 	// This is the ideal place to log agent responses, collect metrics on token or perform
 	// pre-processing of events before a mapper is invoked.
 	AfterRequestCallbacks []AfterA2ARequestCallback
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [agent.AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// AllowTransferToAgent controls whether a transfer_to_agent value set by
@@ -515,7 +509,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		sendCtx := authSendContext(ctx, cfg, a.cardClient)
 		card, err := iremoteagent.ResolveAgentCard(sendCtx, a.serverConfig)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("agent card resolution failed: %w", err))
 			return
 		}
 		if cfg.Auth != nil {
@@ -533,14 +527,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		sender, err := cfg.ClientProvider(sendCtx, card)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("sender creation failed: %w", err))
 			return
 		}
 		defer destroy(ctx, sender)
 
 		msg, err := newMessage(ctx, cfg)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("message creation failed: %w", err))
 			return
 		}
 
@@ -722,7 +716,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-		msg.TaskID = a2a.TaskID(userFnCall.taskID)
+		msg.TaskID = userFnCall.taskID
 		msg.ContextID = userFnCall.contextID
 		return msg, nil
 	}
@@ -746,14 +740,6 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
-}
-
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
-	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
-	event.TurnComplete = true
-	return event
 }
 
 func destroy(ctx context.Context, client A2AClient) {

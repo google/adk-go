@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,12 +30,16 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/artifact"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
@@ -45,6 +50,12 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 	toolImpl, ok := loadArtifactsTool.(toolinternal.FunctionTool)
 	if !ok {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
+	}
+
+	// Arguments the model can correct get an error result, not a Go error.
+	invalidArtifactNamesResult := map[string]any{
+		"error":      "'artifact_names' must be a list of strings.",
+		"error_code": "INVALID_ARGUMENTS",
 	}
 
 	tests := []struct {
@@ -110,14 +121,37 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			args: map[string]any{
 				"artifact_names": "not a slice",
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "incorrect type (object)",
+			args: map[string]any{
+				"artifact_names": map[string]any{"name": "fileA"},
+			},
+			want: invalidArtifactNamesResult,
 		},
 		{
 			name: "any slice with non-string",
 			args: map[string]any{
 				"artifact_names": []any{"fileA", 123},
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "any slice with empty string",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", ""},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"fileA", ""},
+			},
+		},
+		{
+			name: "any slice with null",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", nil},
+			},
+			want: invalidArtifactNamesResult,
 		},
 		{
 			name: "specific version as float64 from JSON",
@@ -128,6 +162,33 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			want: map[string]any{
 				"artifact_names": []string{"design.md"},
 				"version":        2,
+			},
+		},
+		{
+			name: "version 0 is kept",
+			args: map[string]any{
+				"artifact_names": []any{"design.md"},
+				"version":        float64(0),
+			},
+			want: map[string]any{
+				"artifact_names": []string{"design.md"},
+				"version":        0,
+			},
+		},
+		{
+			name: "artifact_versions selector without version",
+			args: map[string]any{
+				"artifact_versions": []any{
+					map[string]any{"name": "design.md"},
+					map[string]any{"name": "design.md", "version": float64(0)},
+				},
+			},
+			want: map[string]any{
+				"artifact_names": []string{},
+				"artifact_versions": []map[string]any{
+					{"name": "design.md"},
+					{"name": "design.md", "version": 0},
+				},
 			},
 		},
 		{
@@ -493,7 +554,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 	otherFR := &genai.FunctionResponse{
 		Name: "other_function",
 		Response: map[string]any{
-			"status": "ok",
+			"artifact_names": []string{"unrelated.txt"},
 		},
 	}
 	loadArtifactsFR := &genai.FunctionResponse{
@@ -538,6 +599,10 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 				t.Fatalf("Failed to save artifact: %v", err)
 			}
 
+			if _, err := tc.Artifacts().Save(t.Context(), "unrelated.txt", genai.NewPartFromText("unrelated body")); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+
 			llmRequest := &model.LLMRequest{
 				Contents: []*genai.Content{
 					{
@@ -574,6 +639,160 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 			if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
 				t.Errorf("Second part of appended content: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
 			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
+	const (
+		app, user, sid    = "app", "user", "session"
+		january, february = "january body", "february body"
+	)
+	backendError := errors.New("storage unavailable")
+	for _, tc := range []struct {
+		name        string
+		firstArgs   []any
+		secondFile  string
+		failLoadFor string
+		loadErr     error
+		wantBodies  []string
+		wantErr     error
+	}{
+		{name: "two successful calls", firstArgs: []any{"january.txt"}, secondFile: "february.txt", wantBodies: []string{january, february}},
+		{name: "invalid arguments before successful call", firstArgs: []any{123}, secondFile: "february.txt", wantBodies: []string{february}},
+		{name: "missing file follows successful call", firstArgs: []any{"january.txt"}, secondFile: "missing.txt", wantBodies: []string{january}},
+		{name: "missing file precedes successful call", firstArgs: []any{"missing.txt"}, secondFile: "february.txt", wantBodies: []string{february}},
+		{name: "invalid filename follows successful call", firstArgs: []any{"january.txt"}, secondFile: "dir/february.txt", wantBodies: []string{january}},
+		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "january.txt", loadErr: fs.ErrNotExist, wantBodies: []string{february}},
+		{name: "backend failure", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "february.txt", loadErr: backendError, wantErr: backendError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			artifacts := artifact.InMemoryService()
+			for name, text := range map[string]string{"january.txt": january, "february.txt": february} {
+				if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+					AppName: app, UserID: user, SessionID: sid, FileName: name,
+					Part: genai.NewPartFromText(text),
+				}); err != nil {
+					t.Fatalf("Save() error = %v", err)
+				}
+			}
+			first := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{"artifact_names": tc.firstArgs})
+			first.FunctionCall.ID = "call-1"
+			second := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{"artifact_names": []any{tc.secondFile}})
+			second.FunctionCall.ID = "call-2"
+			mock := &testutil.MockModel{Responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{first, second}},
+				genai.NewContentFromText("done", genai.RoleModel),
+			}}
+			a, err := llmagent.New(llmagent.Config{
+				Name: "reader", Model: mock, Tools: []tool.Tool{loadartifactstool.New()},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			sessions := session.InMemoryService()
+			if _, err := sessions.Create(ctx, &session.CreateRequest{AppName: app, UserID: user, SessionID: sid}); err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			if tc.loadErr != nil {
+				artifacts = &failingArtifactLoad{Service: artifacts, name: tc.failLoadFor, err: tc.loadErr}
+			}
+			r, err := runner.New(runner.Config{
+				AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
+			})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+			prompt := genai.NewContentFromText("Compare January and February", genai.RoleUser)
+			for _, err := range r.Run(ctx, user, sid, prompt, agent.RunConfig{}) {
+				if err != nil {
+					if tc.wantErr != nil && errors.Is(err, tc.wantErr) {
+						return
+					}
+					t.Fatalf("Run() returned an unexpected error of type %T", err)
+				}
+			}
+			if tc.wantErr != nil {
+				t.Fatal("Run() succeeded despite a backend failure")
+			}
+			if len(mock.Requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(mock.Requests))
+			}
+			var responses int
+			var bodies []string
+			for _, content := range mock.Requests[1].Contents {
+				if content == nil {
+					t.Fatal("request includes nil content")
+				}
+				for _, part := range content.Parts {
+					if part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+						responses++
+					}
+					if part.Text == january || part.Text == february {
+						bodies = append(bodies, part.Text)
+					}
+				}
+			}
+			if responses != 2 {
+				t.Errorf("load_artifacts responses = %d, want 2", responses)
+			}
+			if len(bodies) != len(tc.wantBodies) {
+				t.Fatalf("attached artifact bodies = %d, want %d", len(bodies), len(tc.wantBodies))
+			}
+			if !slices.Equal(bodies, tc.wantBodies) {
+				t.Error("artifact bodies do not match the expected tool response order")
+			}
+		})
+	}
+}
+
+type failingArtifactLoad struct {
+	artifact.Service
+	name string
+	err  error
+}
+
+func (s *failingArtifactLoad) Load(ctx context.Context, req *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	if req.FileName == s.name {
+		return nil, s.err
+	}
+	return s.Service.Load(ctx, req)
+}
+
+func TestLoadArtifactsTool_ProcessRequest_MalformedResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		malformed any
+	}{
+		{"not a list", "bad.txt"},
+		{"list with a non-string element", []any{"bad.txt", 123}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := createToolContext(t)
+			for _, name := range []string{"ok.txt", "bad.txt"} {
+				if _, err := ctx.Artifacts().Save(t.Context(), name, genai.NewPartFromText("body")); err != nil {
+					t.Fatalf("Save() returned an error of type %T", err)
+				}
+			}
+			processor := loadartifactstool.New().(toolinternal.RequestProcessor)
+			malformed := genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": tc.malformed})
+			valid := genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"ok.txt"}})
+			t.Run("single", func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{malformed}}}}
+				if err := processor.ProcessRequest(ctx, req); err == nil {
+					t.Fatal("ProcessRequest() accepted a malformed response")
+				}
+			})
+			t.Run("parallel", func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{malformed, valid}}}}
+				if err := processor.ProcessRequest(ctx, req); err != nil {
+					t.Fatalf("ProcessRequest() returned an error of type %T", err)
+				}
+				if len(req.Contents) != 2 || req.Contents[1].Parts[0].Text != "Artifact ok.txt is:" {
+					t.Fatal("ProcessRequest() did not attach exactly the valid artifact")
+				}
+			})
 		})
 	}
 }
@@ -650,6 +869,73 @@ func createToolContext(t *testing.T) agent.Context {
 	return agent.NewToolContext(ctx, "", nil, nil)
 }
 
+func TestLoadArtifactsTool_ProcessRequest_FirstRevisionIsZero(t *testing.T) {
+	tc := createToolContext(t)
+	for _, body := range []string{"draft v0", "draft v1"} {
+		if _, err := tc.Artifacts().Save(t.Context(), "design.md", genai.NewPartFromText(body)); err != nil {
+			t.Fatalf("Save(%q): %v", body, err)
+		}
+	}
+	tests := []struct {
+		name       string
+		response   map[string]any
+		wantHeader string
+		wantBody   string
+	}{
+		{
+			name:       "top-level version 0",
+			response:   map[string]any{"artifact_names": []any{"design.md"}, "version": float64(0)},
+			wantHeader: "Artifact design.md (version 0) is:",
+			wantBody:   "draft v0",
+		},
+		{
+			name:       "artifact_versions version 0",
+			response:   map[string]any{"artifact_versions": []any{map[string]any{"name": "design.md", "version": float64(0)}}},
+			wantHeader: "Artifact design.md (version 0) is:",
+			wantBody:   "draft v0",
+		},
+		{
+			name:       "artifact_versions without version loads the latest",
+			response:   map[string]any{"artifact_versions": []any{map[string]any{"name": "design.md"}}},
+			wantHeader: "Artifact design.md is:",
+			wantBody:   "draft v1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: []*genai.Content{{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", tt.response)},
+			}}}
+			if err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req); err != nil {
+				t.Fatalf("ProcessRequest: %v", err)
+			}
+			if len(req.Contents) != 2 {
+				t.Fatalf("len(req.Contents) = %d, want 2", len(req.Contents))
+			}
+			if got := req.Contents[1].Parts[0].Text; got != tt.wantHeader {
+				t.Errorf("header = %q, want %q", got, tt.wantHeader)
+			}
+			if got := req.Contents[1].Parts[1].Text; got != tt.wantBody {
+				t.Errorf("body = %q, want %q", got, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_Declaration_RevisionsStartAtZero(t *testing.T) {
+	decl := loadartifactstool.New().(toolinternal.FunctionTool).Declaration()
+	props := decl.Parameters.Properties
+	want := "Optional revision number to load for each artifact in artifact_names. Revisions are numbered from 0. If omitted, the latest revision is loaded."
+	if got := props["version"].Description; got != want {
+		t.Errorf("version description = %q, want %q", got, want)
+	}
+	want = "Revision number to load. Revisions are numbered from 0. If omitted, the latest revision is loaded."
+	if got := props["artifact_versions"].Items.Properties["version"].Description; got != want {
+		t.Errorf("artifact_versions[].version description = %q, want %q", got, want)
+	}
+}
+
 func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -700,7 +986,7 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 				Parts: []*genai.Part{
 					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
 						"artifact_names": []any{"design.md"},
-						"version":        float64(1),
+						"version":        float64(0),
 					}),
 				},
 			}},
@@ -712,7 +998,7 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 			t.Fatalf("len(Contents) = %d, want 2", len(llmReq.Contents))
 		}
 		parts := llmReq.Contents[1].Parts
-		if got, want := parts[0].Text, "Artifact design.md (version 1) is:"; got != want {
+		if got, want := parts[0].Text, "Artifact design.md (version 0) is:"; got != want {
 			t.Errorf("header = %q, want %q", got, want)
 		}
 		if got, want := parts[1].Text, "draft v1"; got != want {
@@ -727,8 +1013,8 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 				Parts: []*genai.Part{
 					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
 						"artifact_versions": []any{
-							map[string]any{"name": "design.md", "version": float64(1)},
-							map[string]any{"name": "design.md", "version": float64(3)},
+							map[string]any{"name": "design.md", "version": float64(0)},
+							map[string]any{"name": "design.md", "version": float64(2)},
 						},
 					}),
 				},
@@ -784,7 +1070,7 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 		if len(summaries) != 3 {
 			t.Fatalf("len(summaries) = %d, want 3", len(summaries))
 		}
-		for i, wantVer := range []int64{1, 2, 3} {
+		for i, wantVer := range []int64{0, 1, 2} {
 			if summaries[i].Version != wantVer {
 				t.Errorf("summaries[%d].Version = %d, want %d", i, summaries[i].Version, wantVer)
 			}
@@ -931,7 +1217,7 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 			failing:  "Load",
 			cause:    context.DeadlineExceeded,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(0)}}},
-			wantErr:  "failed to load artifact at artifact_versions[0]: context deadline exceeded",
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 0): context deadline exceeded",
 		},
 		{
 			name:     "artifact_names",
@@ -959,7 +1245,7 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 			failing:  "GetArtifactVersion",
 			cause:    fs.ErrNotExist,
 			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
-			wantErr:  "failed to get version 1 metadata for artifact at artifact_names[0]: file does not exist",
+			wantErr:  "failed to get version 0 metadata for artifact at artifact_names[0]: file does not exist",
 		},
 	}
 	for _, tt := range tests {
@@ -996,9 +1282,8 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 			if !errors.Is(err, tt.cause) {
 				t.Errorf("errors.Is(err, %v) = false, want true", tt.cause)
 			}
-			var urlErr *url.Error
-			if !errors.As(err, &urlErr) {
-				t.Error("errors.As(err, *url.Error) = false, want true")
+			if _, ok := errors.AsType[*url.Error](err); !ok {
+				t.Error("errors.AsType[*url.Error](err) = false, want true")
 			}
 		})
 	}
@@ -1040,10 +1325,10 @@ func TestLoadArtifactsTool_ProcessRequest_ErrorsIdentifyFailingItem(t *testing.T
 		{
 			name: "second of two selectors with the same version",
 			response: map[string]any{"artifact_versions": []any{
-				map[string]any{"name": "doc1.txt", "version": float64(1)},
-				map[string]any{"name": "missing.txt", "version": float64(1)},
+				map[string]any{"name": "doc1.txt", "version": float64(0)},
+				map[string]any{"name": "missing.txt", "version": float64(0)},
 			}},
-			wantErr: "failed to load artifact at artifact_versions[1] (version 1): file does not exist",
+			wantErr: "failed to load artifact at artifact_versions[1] (version 0): file does not exist",
 		},
 		{
 			name: "selector after artifact_names",
@@ -1083,6 +1368,35 @@ func TestLoadArtifactsTool_ProcessRequest_ErrorsIdentifyFailingItem(t *testing.T
 				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true")
 			}
 		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ParallelErrorNamesCall(t *testing.T) {
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: unversionedArtifacts{&artifactinternal.Artifacts{
+			Service:   artifact.InMemoryService(),
+			AppName:   "app",
+			UserID:    "user",
+			SessionID: "session",
+		}},
+	})
+	tc := agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)
+	for _, name := range []string{"doc1.txt", "doc2.txt"} {
+		if _, err := tc.Artifacts().Save(t.Context(), name, genai.NewPartFromText("body")); err != nil {
+			t.Fatalf("Save(%q): %v", name, err)
+		}
+	}
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"doc1.txt"}}),
+			genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"list_versions": []any{"doc2.txt"}}),
+		},
+	}}}
+
+	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
+	if got, want := fmt.Sprint(err), "failed to list versions of artifact at load_artifacts[1].list_versions[0]: unsupported operation"; got != want {
+		t.Errorf("ProcessRequest error = %q, want %q", got, want)
 	}
 }
 

@@ -47,14 +47,13 @@ func (c *callbackContextWrapper) WithICDelta(d *InvocationContextDelta) Invocati
 
 // WithAgentCancel implements [Context].
 func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
-	log.Print("WithAgentCancel() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil, nil
+	return c.context.WithAgentCancel()
 }
 
 // WithAgentTimeout implements [Context].
 func (c *callbackContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil, nil
+	// Honor the Context contract: shallow-copy with timeout on the underlying context.
+	return c.context.WithAgentTimeout(timeout)
 }
 
 // InvocationContext implements [Context].

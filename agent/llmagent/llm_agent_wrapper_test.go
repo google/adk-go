@@ -86,7 +86,7 @@ func TestDispatchTaskFC_IsolationScope(t *testing.T) {
 
 	// Coordinator: a chat-mode LlmAgent that on its first turn emits
 	// a TaskAgentTool FC to delegate to the task sub-agent, then on
-	// its second turn (after the wrapper synthesises the task's FR)
+	// its second turn (after the wrapper synthesizes the task's FR)
 	// emits a final text "delegation complete" and exits.
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
@@ -348,7 +348,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		}
 	})
 
-	t.Run("single_turn + struct input is JSON-marshalled", func(t *testing.T) {
+	t.Run("single_turn + struct input is JSON-marshaled", func(t *testing.T) {
 		t.Parallel()
 		a := makeLLMAgent(t, "st", withMode(llmagent.ModeSingleTurn))
 		ctx := newStubNodeContext(t, a, "")
@@ -366,7 +366,7 @@ func TestPrepareLLMAgentInput(t *testing.T) {
 		// JSON map iteration order is non-deterministic; check both keys present.
 		if !strings.Contains(text, `"task":"summarize"`) ||
 			!strings.Contains(text, `"limit":5`) {
-			t.Errorf("text %q does not look like marshalled %+v", text, input)
+			t.Errorf("text %q does not look like marshaled %+v", text, input)
 		}
 	})
 
@@ -618,6 +618,92 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 		if got["name"] != "alice" {
 			t.Errorf("Output[\"name\"] = %v, want \"alice\"", got["name"])
+		}
+	})
+
+	t.Run("OutputSchema valid JSON: parsed Output is not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		const key = "story"
+		a := makeLLMAgent(t, "x", withOutputSchema(schema), withOutputKey(key))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: `{"title":"T"}`}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		want := map[string]any{"title": "T"}
+		if diff := cmp.Diff(want, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, ev.Actions.StateDelta[key]); diff != "" {
+			t.Errorf("StateDelta[%q] mismatch (-want +got):\n%s", key, diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the parsed Output is the node output)")
+		}
+	})
+
+	t.Run("OutputSchema empty object reply: Output is the empty map, not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "{}"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if diff := cmp.Diff(map[string]any{}, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the empty map is the node output)")
+		}
+	})
+
+	t.Run("OutputSchema null reply: marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "null"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ev.NodeInfo == nil || !ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput is unset, want true (a null reply has no parsed value to keep)")
 		}
 	})
 
@@ -989,11 +1075,11 @@ func runChatCoordinatorOneTurn(t *testing.T, coord agent.Agent, userText string)
 // the coordinator must see both FRs before producing its final reply.
 //
 // Note on chat-loop semantics: the coordinator's first LLM turn emits
-// ONE task FC (to sub_a); the wrapper dispatches it and synthesises
+// ONE task FC (to sub_a); the wrapper dispatches it and synthesizes
 // the FR; the loop re-enters Agent.Run; the second LLM turn emits the
 // FC for sub_b; same dispatch; loop re-enters once more; the third
 // LLM turn emits the final coordinator reply. So this test pins
-// runChat's sequential dispatch-and-re-enter behaviour.
+// runChat's sequential dispatch-and-re-enter behavior.
 func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 	t.Parallel()
 	const (
@@ -1028,7 +1114,7 @@ func TestChatRoot_TwoTaskSubAgents_Sequential(t *testing.T) {
 	subB := makeTaskAgent(nameB)
 
 	// Coordinator emits FC-A first, then FC-B (after seeing FR-A
-	// synthesised into session), then a final "all done" reply.
+	// synthesized into session), then a final "all done" reply.
 	coordLLM := &scriptedLLM{
 		turns: []*model.LLMResponse{
 			{Content: fcContent(fcIDA, nameA, map[string]any{"q": "first"})},
@@ -1183,7 +1269,7 @@ func TestChatTask_ValidationErrorDrivesRetry(t *testing.T) {
 // TestChatCoordinator_ResumesUnresolvedTaskFC verifies that on
 // the first user turn, the coordinator emits a task FC but no
 // matching FR is produced (we simulate this by stopping the runner
-// before the FR can be synthesised — in this Go variant we instead
+// before the FR can be synthesized — in this Go variant we instead
 // rely on the fact that a fresh runner.Run on a SECOND user turn
 // triggers the wrapper's findUnresolvedTaskDelegations pre-LLM
 // scan, which re-dispatches the still-pending FC before letting the
@@ -1221,7 +1307,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	//     FC and re-enter, but to simulate "the session has an
 	//     unresolved FC from a prior turn" we have the coordinator's
 	//     second-turn script emit a terminal text "first done" — this
-	//     happens AFTER the wrapper synthesises the FR on its first
+	//     happens AFTER the wrapper synthesizes the FR on its first
 	//     re-entry, so by the time the second user turn fires below,
 	//     the FC is resolved already.
 	//
@@ -1277,7 +1363,7 @@ func TestChatCoordinator_ResumesUnresolvedTaskFC(t *testing.T) {
 	}
 
 	// Now drive a user turn. The wrapper's pre-LLM scan must find
-	// the pending FC, dispatch it, and synthesise an FR — all
+	// the pending FC, dispatch it, and synthesize an FR — all
 	// BEFORE the coordinator's LLM is called.
 	events := []*session.Event{}
 	for ev, err := range r.Run(t.Context(), "u", "s",
@@ -1601,9 +1687,9 @@ func TestLlmAgent_OutputArtifact_MultiTurnDoesNotReplayBody(t *testing.T) {
 		}
 	}
 
-	for wantVer, wantBody := range map[int64]string{1: rev1Body, 2: rev2Body} {
+	for wantVer, wantBody := range map[int64]string{0: rev1Body, 1: rev2Body} {
 		loaded, err := artifactSvc.Load(t.Context(), &artifact.LoadRequest{
-			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: wantVer,
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: new(wantVer),
 		})
 		if err != nil {
 			t.Fatalf("artifactSvc.Load(version=%d): %v", wantVer, err)
@@ -1681,6 +1767,69 @@ func TestLlmAgent_OutputArtifact_SingleTurnSchemaBodyNotPersisted(t *testing.T) 
 	for ev := range got.Session.Events().All() {
 		if b, err := json.Marshal(ev.Content); err == nil && strings.Contains(string(b), "BODY") {
 			t.Errorf("persisted event by %s carries the artifact body: %s", ev.Author, b)
+		}
+	}
+}
+
+func TestLlmAgent_OutputArtifact_ModelCallbackSaveOfSameName(t *testing.T) {
+	t.Parallel()
+
+	writer, err := llmagent.New(llmagent.Config{
+		Name: "writer",
+		Model: &scriptedLLM{turns: []*model.LLMResponse{
+			{Content: genai.NewContentFromText("final reply", genai.RoleModel)},
+		}},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			func(cctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				_, err := cctx.Artifacts().Save(cctx, "design.md", genai.NewPartFromText("callback draft"))
+				return nil, err
+			},
+		},
+		OutputArtifact: "design.md",
+		OutputKey:      "latest_design",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	arts := artifact.InMemoryService()
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             writer,
+		SessionService:    sessions,
+		ArtifactService:   arts,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+
+	loaded, err := arts.Load(t.Context(), &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md"})
+	if err != nil {
+		t.Fatalf("arts.Load: %v", err)
+	}
+	if got, want := loaded.Part.Text, "final reply"; got != want {
+		t.Errorf("latest design.md = %q, want %q", got, want)
+	}
+	got, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("sessions.Get: %v", err)
+	}
+	state, err := got.Session.State().Get("latest_design")
+	if err != nil {
+		t.Fatalf("State.Get(latest_design): %v", err)
+	}
+	if state != "final reply" {
+		t.Errorf("latest_design = %v, want %q", state, "final reply")
+	}
+	for ev := range got.Session.Events().All() {
+		if b, err := json.Marshal(ev.Content); err == nil && strings.Contains(string(b), "final reply") {
+			t.Errorf("persisted event by %s carries the reply body: %s", ev.Author, b)
 		}
 	}
 }
@@ -1776,13 +1925,13 @@ func TestLlmAgent_OutputArtifact_TransferBackReentry(t *testing.T) {
 			t.Fatalf("schema=%v: got %d revisions, want 1", withSchema, len(vers.Versions))
 		}
 		loaded, err := arts.Load(t.Context(), &artifact.LoadRequest{
-			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: 1,
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: new(int64(0)),
 		})
 		if err != nil {
 			t.Fatalf("schema=%v: arts.Load: %v", withSchema, err)
 		}
 		if loaded.Part.Text != final {
-			t.Errorf("schema=%v: version 1 text = %q, want %q", withSchema, loaded.Part.Text, final)
+			t.Errorf("schema=%v: version 0 text = %q, want %q", withSchema, loaded.Part.Text, final)
 		}
 		gotSess, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
 		if err != nil {
@@ -2153,7 +2302,7 @@ func runSequentialWithOptionalLive(t *testing.T, doLive bool, turn *model.LLMRes
 	}
 	if runErr == nil {
 		loaded, err := arts.Load(t.Context(), &artifact.LoadRequest{
-			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: 1,
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: new(int64(0)),
 		})
 		if err != nil {
 			t.Fatalf("arts.Load(design.md): %v", err)
@@ -2187,4 +2336,63 @@ func TestLlmAgent_OutputArtifact_SequentialRunLiveThenRunNoSetModelResponse(t *t
 			t.Errorf("after_failed_live: sawSetModelResponse=%v persistedWithBody=%d err=%v; want false, 0, nil", m.sawSetModelResponse, n, runErr)
 		}
 	})
+}
+
+// A task agent whose OutputSchema is a nullable non-object type must not
+// finish with a null result: a nil Output reads as "the task did not finish",
+// so the coordinator would never get a function response. finish_task rejects
+// the null and the model retries with a value, which closes the delegation.
+func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
+	fcTurn := func(id, name string, args map[string]any) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
+		}}}}
+	}
+	taskLLM := &scriptedLLM{turns: []*model.LLMResponse{
+		fcTurn("finish-1", "finish_task", map[string]any{"result": nil}),
+		fcTurn("finish-2", "finish_task", map[string]any{"result": "retry-value"}),
+	}}
+	task, err := llmagent.New(llmagent.Config{
+		Name: "doer", Description: "d", Model: taskLLM, Mode: llmagent.ModeTask,
+		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordLLM := &scriptedLLM{turns: []*model.LLMResponse{
+		fcTurn("fc-1", "doer", map[string]any{"request": "x"}),
+	}}
+	coord, err := llmagent.New(llmagent.Config{Name: "coord", Model: coordLLM, Mode: llmagent.ModeChat, SubAgents: []agent.Agent{task}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: coord, SessionService: session.InMemoryService(), AppName: "app", AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var delegationFR *genai.FunctionResponse
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionResponse != nil && p.FunctionResponse.Name == "doer" {
+				delegationFR = p.FunctionResponse
+			}
+		}
+	}
+
+	if delegationFR == nil {
+		t.Fatal("no function response closed the delegation to doer")
+	}
+	if diff := cmp.Diff(map[string]any{"output": "retry-value"}, delegationFR.Response); diff != "" {
+		t.Errorf("delegation response mismatch (-want +got):\n%s", diff)
+	}
+	if taskLLM.callIdx != 2 {
+		t.Errorf("task model called %d times, want 2: the null result should be rejected and retried", taskLLM.callIdx)
+	}
 }

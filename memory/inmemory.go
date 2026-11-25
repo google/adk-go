@@ -17,13 +17,18 @@ package memory
 import (
 	"cmp"
 	"context"
-	"maps"
+	"errors"
+	"iter"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+	"golang.org/x/text/unicode/norm"
+	"golang.org/x/text/unicode/runenames"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/session"
@@ -34,17 +39,53 @@ const maxSearchResults = 10
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
 // Searches return at most ten entries, ranked by the number of distinct query
 // words they match. Ties follow session insertion order, then event order.
+//
+// The returned Service also implements [EventAdder]. AddEventsToMemory appends
+// to the bucket of req.SessionID and keeps the first stored event of each
+// non-empty event ID in that bucket; AddSessionToMemory replaces the bucket of
+// the session.
+//
+// Both add methods skip nil events and events whose content is nil or holds
+// no non-nil part; such an event does not reserve its ID. Thought parts are
+// left out of both matching and the returned content. An event with parts but
+// no searchable text, such as a blob-only or thought-only event, is stored
+// and reserves its ID, but no search returns it.
+//
+// A query and the stored text are split into words: runs of letters, numbers
+// and underscores, taken after Unicode NFC normalization and lowercased with
+// full Unicode case mapping. A word that mixes Latin and other scripts, such
+// as the Python in 私はPythonを使う, also yields each single-script run as a
+// word, in the query as in the stored text; ASCII digits and underscores
+// count as Latin. Each such run is a query word of its own, so it adds to the
+// ranking as any other query word does. An event matches a query word
+// when it has that word. A whole query word with non-ASCII characters also
+// matches anywhere inside the event's text; a run split out of a query word
+// does not. A query with no words returns no entries.
+//
+// Returned entries carry the stored event's ID, Author, Timestamp and
+// CustomMetadata. They share the event's parts and metadata with the service
+// and with the events that were added, so callers must not modify them.
+// AddSessionToMemory, AddEventsToMemory and SearchMemory return an error for a
+// nil session or request.
 func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]*userMemories),
 	}
 }
 
+var _ EventAdder = (*inMemoryService)(nil)
+
 type key struct {
 	appName, userID string
 }
 
-type sessionID string
+// sessionKey identifies a session bucket within a user scope. The default
+// bucket, for events added with no session ID, has isDefault set and an
+// empty id, so it never equals the key of a session, even one whose ID is "".
+type sessionKey struct {
+	isDefault bool
+	id        string
+}
 
 type value struct {
 	id             string
@@ -62,8 +103,8 @@ type value struct {
 }
 
 type userMemories struct {
-	sessions     map[sessionID][]value
-	sessionOrder []sessionID
+	sessions     map[sessionKey][]value
+	sessionOrder []sessionKey
 }
 
 // inMemoryService is an in-memory implementation of Service.
@@ -73,67 +114,143 @@ type inMemoryService struct {
 }
 
 func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession session.Session) error {
-	var values []value
-
-	for event := range curSession.Events().All() {
-		if event.LLMResponse.Content == nil {
-			continue
-		}
-
-		words := make(map[string]struct{})
-		var texts []string
-		for _, part := range event.LLMResponse.Content.Parts {
-			if part.Text == "" {
-				continue
-			}
-
-			maps.Copy(words, extractWords(part.Text))
-			texts = append(texts, part.Text)
-		}
-
-		if len(words) == 0 {
-			continue
-		}
-
-		values = append(values, value{
-			id:             event.ID,
-			content:        event.LLMResponse.Content,
-			author:         event.Author,
-			timestamp:      event.Timestamp,
-			customMetadata: event.CustomMetadata,
-			words:          words,
-			textLower:      strings.ToLower(strings.Join(texts, " ")),
-		})
+	if curSession == nil {
+		return errors.New("memory: session must not be nil")
 	}
 
-	k := key{
-		appName: curSession.AppName(),
-		userID:  curSession.UserID(),
+	var values []value
+	if events := curSession.Events(); events != nil {
+		for event := range events.All() {
+			if v, ok := buildValue(event); ok {
+				values = append(values, v)
+			}
+		}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	v, ok := s.store[k]
-	if !ok {
-		v = &userMemories{sessions: make(map[sessionID][]value)}
-		s.store[k] = v
-	}
-
-	sid := sessionID(curSession.ID())
-	// Replacing a session must preserve its position, as in Python's dict.
-	if _, ok := v.sessions[sid]; !ok {
-		v.sessionOrder = append(v.sessionOrder, sid)
-	}
-	v.sessions[sid] = values
+	sk := sessionKey{id: curSession.ID()}
+	v := s.ensureUserBucket(key{appName: curSession.AppName(), userID: curSession.UserID()}, sk)
+	v.sessions[sk] = values
 	return nil
 }
 
+func (s *inMemoryService) AddEventsToMemory(ctx context.Context, req *AddEventsRequest) error {
+	if req == nil {
+		return errors.New("memory: AddEventsRequest must not be nil")
+	}
+
+	var values []value
+	for _, event := range req.Events {
+		if v, ok := buildValue(event); ok {
+			values = append(values, v)
+		}
+	}
+
+	sk := sessionKey{id: req.SessionID}
+	if req.SessionID == "" {
+		sk = sessionKey{isDefault: true}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v := s.ensureUserBucket(key{appName: req.AppName, userID: req.UserID}, sk)
+	existing := v.sessions[sk]
+	existingIDs := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		if e.id != "" {
+			existingIDs[e.id] = struct{}{}
+		}
+	}
+	for _, val := range values {
+		if val.id != "" {
+			if _, ok := existingIDs[val.id]; ok {
+				continue
+			}
+			existingIDs[val.id] = struct{}{}
+		}
+		existing = append(existing, val)
+	}
+	v.sessions[sk] = existing
+	return nil
+}
+
+// ensureUserBucket returns the memories of k, creating them and the bucket sk
+// if absent. A new bucket takes the next position in sessionOrder even when
+// nothing is stored in it, as in Python's dict. The caller must hold s.mu for
+// writing.
+func (s *inMemoryService) ensureUserBucket(k key, sk sessionKey) *userMemories {
+	v, ok := s.store[k]
+	if !ok {
+		v = &userMemories{sessions: make(map[sessionKey][]value)}
+		s.store[k] = v
+	}
+	// Replacing a session must preserve its position, as in Python's dict.
+	if _, ok := v.sessions[sk]; !ok {
+		v.sessionOrder = append(v.sessionOrder, sk)
+		v.sessions[sk] = nil
+	}
+	return v
+}
+
+// buildValue returns the stored form of event. It reports false for an event
+// that has no content or no non-nil part, which is neither stored nor
+// reserves its ID. An event with parts but no searchable words, such as a
+// blob-only event, is stored so that its ID blocks later duplicates; search
+// skips it.
+func buildValue(event *session.Event) (value, bool) {
+	if event == nil || event.Content == nil || !hasNonNilPart(event.Content.Parts) {
+		return value{}, false
+	}
+
+	// Thought parts are the model's reasoning, not conversation, so they are
+	// neither searched nor returned. adk-python v2.12.0 does both; this keeps
+	// internal reasoning out of memory results.
+	var texts []string
+	var visibleParts []*genai.Part
+	for _, part := range event.Content.Parts {
+		if part == nil || part.Thought {
+			continue
+		}
+		visibleParts = append(visibleParts, part)
+		if part.Text != "" {
+			texts = append(texts, part.Text)
+		}
+	}
+
+	content := *event.Content
+	content.Parts = visibleParts
+	text := strings.Join(texts, " ")
+
+	return value{
+		id:             event.ID,
+		content:        &content,
+		author:         event.Author,
+		timestamp:      event.Timestamp,
+		customMetadata: event.CustomMetadata,
+		words:          extractSearchableWords(text),
+		textLower:      cases.Lower(language.Und).String(norm.NFC.String(text)),
+	}, true
+}
+
 func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) (*SearchResponse, error) {
-	// A true value allows substring matching for that non-ASCII query word.
+	if req == nil {
+		return nil, errors.New("memory: SearchRequest must not be nil")
+	}
+
+	// The query is split into words like the stored text, so a Latin word
+	// inside Japanese or Chinese query text matches on its own. A true value
+	// allows substring matching, which only a whole non-ASCII query word gets:
+	// a run split out of one, such as と from Pythonと, would match nearly any
+	// Japanese text.
 	queryWords := make(map[string]bool)
-	for word := range extractWords(req.Query) {
-		queryWords[word] = strings.IndexFunc(word, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
+	for word := range extractSearchableWords(req.Query) {
+		queryWords[word] = false
+	}
+	for word := range extractWordsLower(req.Query) {
+		queryWords[word] = hasNonASCII(word)
 	}
 
 	k := key{
@@ -152,7 +269,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 	}
 	var scored []scoredMemory
 
-	// Hold the read lock for the whole scan. AddSessionToMemory writes into the
+	// Hold the read lock for the whole scan. The add methods write into the
 	// per-user session map under the write lock, so releasing the lock before
 	// iterating would race with a concurrent write and can panic with
 	// "concurrent map iteration and map write".
@@ -164,8 +281,11 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 		return res, nil
 	}
 
-	for _, sid := range values.sessionOrder {
-		for _, e := range values.sessions[sid] {
+	for _, sk := range values.sessionOrder {
+		for _, e := range values.sessions[sk] {
+			if len(e.words) == 0 {
+				continue
+			}
 			score := 0
 			for word, allowSubstring := range queryWords {
 				if _, ok := e.words[word]; ok || (allowSubstring && strings.Contains(e.textLower, word)) {
@@ -199,15 +319,73 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 	return res, nil
 }
 
-func extractWords(text string) map[string]struct{} {
+// extractWordsLower returns the lowercased \w+ tokens of the NFC form of text,
+// as adk-python's _extract_words_lower does. Combining marks are not word
+// characters, so after NFC a mark that composes nowhere separates words.
+func extractWordsLower(text string) map[string]struct{} {
+	// A Caser may be stateful, so each call builds its own.
+	lower := cases.Lower(language.Und)
 	res := make(map[string]struct{})
+	for word := range tokens(text) {
+		res[lower.String(word)] = struct{}{}
+	}
+	return res
+}
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
+// tokens returns the \w+ tokens of the NFC form of text, in their original
+// case.
+func tokens(text string) iter.Seq[string] {
+	return strings.FieldsFuncSeq(norm.NFC.String(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
+	})
+}
+
+// extractSearchableWords returns the words a query or an event is matched on,
+// as adk-python's _extract_searchable_words does: the tokens of
+// extractWordsLower plus, for each token with non-ASCII characters, its runs
+// of Latin and of non-Latin characters. Japanese and Chinese are written
+// without spaces, so in 私はPythonを使う the run python becomes a word of its
+// own.
+//
+// A token is split before it is lowercased. Lowercasing turns İ into i and
+// U+0307, which is not Latin, so splitting afterwards would make words of
+// that i and of the rest of the run, such as stanbul.
+func extractSearchableWords(text string) map[string]struct{} {
+	lower := cases.Lower(language.Und)
+	words := make(map[string]struct{})
+	for word := range tokens(text) {
+		words[lower.String(word)] = struct{}{}
+		if !hasNonASCII(word) {
 			continue
 		}
-		res[strings.ToLower(s)] = struct{}{}
+		start, runLatin := 0, false
+		for i, r := range word {
+			latin := isLatin(r)
+			if i > 0 && latin != runLatin {
+				words[lower.String(word[start:i])] = struct{}{}
+				start = i
+			}
+			runLatin = latin
+		}
+		words[lower.String(word[start:])] = struct{}{}
 	}
+	return words
+}
 
-	return res
+// isLatin reports whether r belongs to a Latin run, as adk-python's _is_latin
+// does: an ASCII word character, or a character whose Unicode name starts
+// with LATIN. The name rule leaves out ª and º, which unicode.Latin includes.
+func isLatin(r rune) bool {
+	if r <= unicode.MaxASCII {
+		return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
+	}
+	return strings.HasPrefix(runenames.Name(r), "LATIN")
+}
+
+func hasNonNilPart(parts []*genai.Part) bool {
+	return slices.ContainsFunc(parts, func(p *genai.Part) bool { return p != nil })
+}
+
+func hasNonASCII(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
 }

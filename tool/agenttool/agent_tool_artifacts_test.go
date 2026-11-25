@@ -121,8 +121,10 @@ func testAgentToolArtifacts(t *testing.T, nested bool) {
 		if err != nil {
 			t.Fatal("parent run failed")
 		}
-		if event != nil && event.Actions.ArtifactDelta["output.txt"] > 0 {
-			parentDelta = true
+		if event != nil {
+			if version, ok := event.Actions.ArtifactDelta["output.txt"]; ok && version == 0 {
+				parentDelta = true
+			}
 		}
 	}
 	if !childSaved {
@@ -197,20 +199,20 @@ func TestAgentTool_Run_OutputArtifactWithOutputSchema(t *testing.T) {
 		t.Fatalf("runner.New: %v", err)
 	}
 
-	var deltaVer int64
+	deltaVer := int64(-1)
 	for ev, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("run", genai.RoleUser), agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("r.Run: %v", err)
 		}
-		if ev != nil && ev.Actions.ArtifactDelta["spec.json"] > 0 {
-			deltaVer = ev.Actions.ArtifactDelta["spec.json"]
+		if v, ok := ev.Actions.ArtifactDelta["spec.json"]; ev != nil && ok {
+			deltaVer = v
 		}
 	}
-	if deltaVer != 1 {
-		t.Errorf("parent ArtifactDelta[\"spec.json\"] = %d, want 1", deltaVer)
+	if deltaVer != 0 {
+		t.Errorf("parent ArtifactDelta[\"spec.json\"] = %d, want 0", deltaVer)
 	}
 	loaded, err := store.Load(t.Context(), &artifact.LoadRequest{
-		AppName: "app", UserID: "user", SessionID: "session", FileName: "spec.json", Version: 1,
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "spec.json", Version: new(int64(0)),
 	})
 	if err != nil || loaded.Part.Text != `{"title":"v1"}` {
 		t.Errorf("loaded spec.json = (%v, %v), want {\"title\":\"v1\"}", loaded, err)

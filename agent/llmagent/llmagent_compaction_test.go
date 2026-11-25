@@ -16,6 +16,7 @@ package llmagent_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,36 @@ import (
 // conversation. The header alone is a few dozen bytes and a real recording here
 // is tens of kilobytes, so anything under this is a stub from a failed record.
 const minCassetteBytes = 1024
+
+// requireCassette fails the test unless its committed cassette is present and
+// larger than a stub. Recording mode is exempt, since that is the run that
+// creates the file.
+//
+// The cassette is committed, so its absence is a lost or renamed file rather
+// than an unrecorded checkout. Skipping would turn that into a silent pass,
+// which is how a test quietly stops running for months. A failed or interrupted
+// re-record leaves the header and nothing else, and accepting it meant dying
+// much later on a replay miss, with a message that never mentioned the
+// cassette.
+func requireCassette(t *testing.T) {
+	t.Helper()
+	// The same path newGeminiModel opens, subtest separators included.
+	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
+	if recording, _ := httprr.Recording(trace); recording {
+		return
+	}
+	reRecord := fmt.Sprintf("Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ "+
+		"-run '^%s$' -httprecord='%s\\.httprr$' -count=1 -v",
+		t.Name(), strings.TrimSuffix(filepath.Base(trace), ".httprr"))
+	info, err := os.Stat(trace)
+	if err != nil {
+		t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
+	}
+	if info.Size() < minCassetteBytes {
+		t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
+			"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
+	}
+}
 
 // TestCompactionE2E drives a real model through enough turns to trigger a
 // sliding-window compaction, then checks that the next prompt carries the
@@ -96,7 +127,7 @@ const minCassetteBytes = 1024
 // package claims it. That partitioning is enforced by
 // TestHTTPRecordDirectivesPartitionCassettes: every cassette must be re-recordable
 // by exactly one directive, so neither a stray "go generate ./..." nor a broad
-// pattern can quietly rewrite a neighbour's recording along with this one.
+// pattern can quietly rewrite a neighbor's recording along with this one.
 //
 // This used to carry no directive at all, on the grounds that the package-level
 // one matched every cassette here. It no longer does -- that directive is now
@@ -109,7 +140,7 @@ const minCassetteBytes = 1024
 //
 // The cassette is sensitive to anything that changes prompt bytes, including the
 // summarizer prompt template, the transcript line format, tool-argument
-// rendering and truncation behaviour. Any of those changes requires re-recording.
+// rendering and truncation behavior. Any of those changes requires re-recording.
 //go:generate go test -httprecord=^testdata[/\\]TestCompactionE2E\.httprr$
 
 func TestCompactionE2E(t *testing.T) {
@@ -117,27 +148,7 @@ func TestCompactionE2E(t *testing.T) {
 	// suite in this package. Change it only alongside a re-record, since the
 	// model name is part of the request URL the cassette keys on.
 
-	// The cassette is committed, so its absence is a lost or renamed file rather
-	// than an unrecorded checkout. Skipping would turn that into a silent pass,
-	// which is how a test quietly stops running for months. Every other cassette
-	// test in this package fails instead, and so does this one. Recording mode
-	// goes ahead regardless, since that is the run that creates the file.
-	trace := filepath.Join("testdata", t.Name()+".httprr")
-	if recording, _ := httprr.Recording(trace); !recording {
-		const reRecord = "Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ " +
-			"-run '^TestCompactionE2E$' -httprecord='TestCompactionE2E\\.httprr$' -count=1 -v"
-		info, err := os.Stat(trace)
-		if err != nil {
-			t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
-		}
-		// A failed or interrupted re-record leaves the header and nothing else.
-		// Accepting it meant dying eighty lines later on a replay miss, with a
-		// message that never mentioned the cassette.
-		if info.Size() < minCassetteBytes {
-			t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
-				"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
-		}
-	}
+	requireCassette(t)
 
 	// Captured before each model call, so the assertions can look at the exact
 	// history the agent sent rather than inferring it from the session.
@@ -211,6 +222,7 @@ func TestCompactionE2E(t *testing.T) {
 	const sessionID = "compaction_session"
 	turns := []string{
 		"What is the weather in Zurich?",
+		// Note: prompt strings below match recorded HTTP cassettes; do not edit without re-recording.
 		"My favourite colour is teal, remember that.",
 		"What was my favourite colour again?",
 		// A tool call after the compaction point, so the prompt that follows it
@@ -343,7 +355,7 @@ func TestCompactionE2E(t *testing.T) {
 	// working.
 	recall := strings.ToLower(strings.Join(answers[2], " "))
 	if !strings.Contains(recall, "teal") {
-		t.Errorf("the model could not recall the colour from the summary alone; answer was %q", recall)
+		t.Errorf("the model could not recall the color from the summary alone; answer was %q", recall)
 	}
 
 	// Structural checks, asserted here rather than inferred from the fact that a

@@ -16,7 +16,11 @@
 package exampletool
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -32,20 +36,37 @@ type Example struct {
 	Output []*genai.Content `json:"output"`
 }
 
+// Provider fetches few-shot examples for a user query.
+//
+// Examples takes a context.Context and returns an error because providers may
+// perform I/O.
+type Provider interface {
+	Examples(ctx context.Context, query string) ([]*Example, error)
+}
+
 // ExampleToolConfig configures an example tool with the few-shot examples to add.
+// Set either Examples or Provider, not both.
 type ExampleToolConfig struct {
 	Examples []*Example
+	Provider Provider
 }
 
 // exampleTool is a tool that adds (few-shot) examples to the LLM request.
 type exampleTool struct {
 	examples []*Example
+	provider Provider
 }
 
 // New creates an example tool that adds the configured few-shot examples to the
 // LLM request.
 func New(config ExampleToolConfig) (*exampleTool, error) {
-	return &exampleTool{examples: config.Examples}, nil
+	if config.Examples != nil && config.Provider != nil {
+		return nil, errors.New("exampletool: cannot specify both Examples and Provider")
+	}
+	return &exampleTool{
+		examples: config.Examples,
+		provider: config.Provider,
+	}, nil
 }
 
 // Name implements tool.Tool.
@@ -65,13 +86,46 @@ func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) er
 		return nil
 	}
 	parts := userContent.Parts
-	if len(parts) == 0 || parts[0] == nil || parts[0].Text == "" {
+	if len(parts) == 0 {
 		return nil
 	}
 
-	instruction := buildExamplesSystemInstruction(s.examples, req.Model)
+	var examples []*Example
+	if s.provider != nil {
+		query := userQuery(userContent)
+		if query == "" {
+			return nil
+		}
+		var err error
+		// Unlike adk-python's get_examples, the provider takes a context and
+		// returns an error because it may perform I/O.
+		examples, err = s.provider.Examples(ctx, query)
+		if err != nil {
+			return fmt.Errorf("exampletool: fetch examples: %w", err)
+		}
+	} else {
+		// Unlike adk-python, the static list path checks only the first part for
+		// non-empty text to preserve existing behavior.
+		if parts[0] == nil || parts[0].Text == "" {
+			return nil
+		}
+		examples = s.examples
+	}
+
+	instruction := buildExamplesSystemInstruction(examples, req.Model)
 	utils.AppendInstructions(req, instruction)
 	return nil
+}
+
+// userQuery joins the non-empty, non-thought text parts of c with spaces.
+func userQuery(c *genai.Content) string {
+	var texts []string
+	for _, p := range c.Parts {
+		if p != nil && !p.Thought && p.Text != "" {
+			texts = append(texts, p.Text)
+		}
+	}
+	return strings.Join(texts, " ")
 }
 
 // IsLongRunning implements tool.Tool.
@@ -97,6 +151,10 @@ const (
 func buildExamplesSystemInstruction(examples []*Example, model string) string {
 	var sb strings.Builder
 	sb.WriteString(examplesIntro)
+	// As in adk-python's convert_examples_to_text, Gemini models, and a request
+	// that names no model, take plain fences; the tool_code and tool_outputs
+	// fences are for other models.
+	isGemini := model == "" || strings.Contains(model, "gemini-")
 	for exampleNum, example := range examples {
 		fmt.Fprintf(&sb, exampleStart, exampleNum+1)
 		sb.WriteString(userPrefix)
@@ -109,7 +167,6 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 				}
 			}
 		}
-		gemini2 := strings.Contains(model, "gemini-2")
 		previousRole := ""
 		for _, content := range example.Output {
 			var role string
@@ -125,22 +182,25 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 			for _, part := range content.Parts {
 				if part.FunctionCall != nil {
 					args := []string{}
-					for k, v := range part.FunctionCall.Args {
+					// Sorted, because map order would make the instruction differ
+					// from one request to the next.
+					for _, k := range slices.Sorted(maps.Keys(part.FunctionCall.Args)) {
+						v := part.FunctionCall.Args[k]
 						if _, ok := v.(string); ok {
 							args = append(args, fmt.Sprintf("%s='%s'", k, v))
 						} else {
 							args = append(args, fmt.Sprintf("%s=%v", k, v))
 						}
 					}
-					prefix := functionPrefix
-					if gemini2 {
-						prefix = functionCallPrefix
+					prefix := functionCallPrefix
+					if isGemini {
+						prefix = functionPrefix
 					}
 					fmt.Fprintf(&sb, "%s%s(%s)%s", prefix, part.FunctionCall.Name, strings.Join(args, ", "), functionCallSuffix)
 				} else if part.FunctionResponse != nil {
-					prefix := functionPrefix
-					if gemini2 {
-						prefix = functionResponsePrefix
+					prefix := functionResponsePrefix
+					if isGemini {
+						prefix = functionPrefix
 					}
 					fmt.Fprintf(&sb, "%s%v%s", prefix, part.FunctionResponse, functionResponseSuffix)
 				} else if part.Text != "" {

@@ -302,7 +302,7 @@ func TestNestedWorkflowUpdatesStateOuterReads(t *testing.T) {
 
 func TestNestedWorkflow_Cancellation(t *testing.T) {
 	// Arrange: Create inner workflow with a node that waits
-	// and the outer workflow that should be cancelled.
+	// and the outer workflow that should be canceled.
 	ch := make(chan struct{})
 	started := make(chan struct{})
 	waitingFn := func(ctx agent.Context, input string) (string, error) {
@@ -330,22 +330,20 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 
 	var runErr error
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range outerWf.Run(mockCtx) {
 			if err != nil {
 				runErr = err
 			}
 		}
-	}()
+	})
 	// Wait for the node to start running deterministically
 	<-started
 	cancel()
 	wg.Wait()
 
 	// Assert: external cancellation is surfaced to the caller and the
-	// underlying context was cancelled.
+	// underlying context was canceled.
 	if !errors.Is(runErr, context.Canceled) {
 		t.Errorf("expected context.Canceled on cancellation, got %v", runErr)
 	}

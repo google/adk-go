@@ -201,7 +201,8 @@ func (m *MockModel) Generate(ctx context.Context, req *model.LLMRequest) (*model
 	}
 
 	resp := &model.LLMResponse{
-		Content: m.Responses[0],
+		Content:      m.Responses[0],
+		FinishReason: genai.FinishReasonStop,
 	}
 
 	m.Responses = m.Responses[1:]
@@ -216,11 +217,16 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 		if streamResponsesCount == 0 {
 			streamResponsesCount = 1
 		}
-		for i := 0; i < streamResponsesCount; i++ {
+		for i := range streamResponsesCount {
 			if len(m.Responses) == 0 {
 				break
 			}
-			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0], FinishReason: genai.FinishReasonStop}}}
+			// Only the chunk that ends the turn reports why, as a real stream does.
+			var finishReason genai.FinishReason
+			if i == streamResponsesCount-1 || len(m.Responses) == 1 {
+				finishReason = genai.FinishReasonStop
+			}
+			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0], FinishReason: finishReason}}}
 			m.Responses = m.Responses[1:]
 			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
 				if !yield(llmResponse, err) {

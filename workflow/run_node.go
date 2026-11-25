@@ -51,7 +51,7 @@ type runNodeOptions struct {
 // A child that is not a dynamic node must not call RunNode with its own
 // name and id from inside its own run. The inner call resolves to the run
 // already in progress, waits for it to finish, and so waits on itself
-// until the invocation is cancelled. A dynamic node can recurse this way,
+// until the invocation is canceled. A dynamic node can recurse this way,
 // because its body schedules children under its own path.
 //
 // Mirrors adk-python's run_id kwarg

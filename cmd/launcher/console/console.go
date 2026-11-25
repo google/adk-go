@@ -63,7 +63,7 @@ func NewLauncher() launcher.SubLauncher {
 	fs.StringVar(&config.streamingModeString, "streaming_mode", "",
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
 	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 2*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
-	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables/disables OpenTelemetry export to GCP: telemetry.googleapis.com. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
+	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables OpenTelemetry export to GCP: telemetry.googleapis.com. When not set, a telemetry.WithOtelToCloud option in launcher.Config.TelemetryOptions decides. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	return &consoleLauncher{config: config, flags: fs}
 }
 
@@ -235,29 +235,29 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 						continue
 					}
 
-					text := ""
+					var text strings.Builder
 					for _, p := range event.LLMResponse.Content.Parts {
-						text += p.Text
+						text.WriteString(p.Text)
 					}
-					if text != "" {
+					if text.String() != "" {
 						printedContent = true
 					}
 
 					if streamingMode != agent.StreamingModeSSE {
-						fmt.Print(text)
+						fmt.Print(text.String())
 						continue
 					}
 
 					// In SSE mode, always print partial responses and capture them.
 					if !event.IsFinalResponse() {
-						fmt.Print(text)
-						prevText += text
+						fmt.Print(text.String())
+						prevText += text.String()
 						continue
 					}
 
 					// Only print final response if it doesn't match previously captured text.
-					if text != prevText {
-						fmt.Print(text)
+					if text.String() != prevText {
+						fmt.Print(text.String())
 					}
 
 					prevText = ""

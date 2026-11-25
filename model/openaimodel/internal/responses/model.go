@@ -16,12 +16,15 @@ package responses
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"time"
 
 	"github.com/openai/openai-go/v3"
 	oairesponses "github.com/openai/openai-go/v3/responses"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
@@ -63,7 +66,7 @@ func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewPar
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed, not reassigned: the closure captures ctx by reference, so
 		// assigning to it would leave the second range over this sequence
-		// starting from the deadline the first one already cancelled.
+		// starting from the deadline the first one already canceled.
 		ctx := ctx
 		// Bounds the call, retries included, and is released when the caller
 		// stops consuming.
@@ -170,6 +173,8 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		}
 
 		final := aggregator.Close()
+		var completedContent *genai.Content
+		var terminalConversionErr error
 		if !shared.CarriesContent(final) && term.seen {
 			// The deltas contributed nothing that survived aggregation, but the
 			// terminal event can still hold the whole turn: a batched message,
@@ -196,10 +201,14 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			// it as a delta. Keep the aggregate if the snapshot is unusable or
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
-				content := genaiResp.Candidates[0].Content
-				if shared.CompletedContentSupersedes(final.Content, content) {
-					final.Content = content
+				completedContent = genaiResp.Candidates[0].Content
+				// If the snapshot preserves the streamed content, use it before
+				// adoption so additional calls do not borrow streamed arguments.
+				if shared.CompletedContentSupersedes(final.Content, completedContent) {
+					final.Content = completedContent
 				}
+			} else {
+				terminalConversionErr = err
 			}
 		}
 		if final == nil {
@@ -209,6 +218,26 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		if err := adoptTerminalCalls(final, term); err != nil {
 			yield(nil, err)
 			return
+		}
+		// Retry after adoption: when the snapshot restates the call's ID and
+		// arguments, correcting an item-ID fallback can make it supersede.
+		if shared.CompletedContentSupersedes(final.Content, completedContent) {
+			final.Content = completedContent
+		}
+		// Record only recovered failures; errors returned above belong to the
+		// caller. Classify them without retaining provider-controlled error text.
+		var errorType string
+		switch {
+		case errors.Is(terminalConversionErr, shared.ErrUnsupportedOutputItemType):
+			errorType = "unsupported_output_item"
+		case errors.Is(terminalConversionErr, shared.ErrUnsupportedMessageContentType):
+			errorType = "unsupported_message_content"
+		case errors.Is(terminalConversionErr, shared.ErrFunctionCallArgs):
+			errorType = "invalid_function_call_arguments"
+		}
+		if errorType != "" {
+			trace.SpanFromContext(ctx).AddEvent("openai.terminal_response_conversion_failed",
+				trace.WithAttributes(attribute.String("error.type", errorType)))
 		}
 		finalizeStreamResponse(final, term)
 		yield(final, nil)
@@ -472,7 +501,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
-		final.ModelVersion = string(term.resp.Model)
+		final.ModelVersion = term.resp.Model
 	}
 	if !term.seen {
 		// The model never said why it stopped, and finishReason would read that

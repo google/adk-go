@@ -117,15 +117,13 @@ func TestCompactionSurvivesAConcurrentWriter(t *testing.T) {
 	straggler.LLMResponse.Content = genai.NewContentFromText("from the other writer", "user")
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-summarizer.entered
 		if err := base.AppendEvent(t.Context(), sess, straggler); err != nil {
 			t.Errorf("the concurrent writer could not append: %v", err)
 		}
 		close(summarizer.release)
-	}()
+	})
 
 	err := runCompactionProcessor(t, base, sess, &compaction.Config{
 		TokenThreshold:     100,
@@ -146,7 +144,7 @@ func TestCompactionSurvivesAConcurrentWriter(t *testing.T) {
 		stored = append(stored, ev)
 	}
 
-	// Deliberately not asserting that a summary landed. There are two defences
+	// Deliberately not asserting that a summary landed. There are two defenses
 	// and this scenario reaches the first one: the race check before the append
 	// sees the session changed inside the range and throws the summary away.
 	// The second, RepairAfterAppend, covers the narrower window where the event
@@ -209,7 +207,7 @@ func TestCompactionUnderConcurrentAppendsLosesNothing(t *testing.T) {
 //   - Making RepairAfterAppend never report a straggler is caught in about five
 //     runs out of six.
 //   - Making the pre-append race check never fire is NOT caught, and should not
-//     be: the repair then handles the same case on its own. The two defences
+//     be: the repair then handles the same case on its own. The two defenses
 //     overlap deliberately, so removing either one alone still loses nothing.
 //     Removing both would be caught by the first bullet.
 
@@ -247,19 +245,15 @@ func concurrentAppendAttempt(t *testing.T) string {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for _, ev := range appended {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			if err := base.AppendEvent(t.Context(), sess, ev); err != nil {
 				t.Errorf("concurrent append failed: %v", err)
 			}
-		}()
+		})
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		// A failure here is a legitimate outcome: compaction may decline, or be
 		// discarded because the session moved under it. What must not happen is
@@ -269,7 +263,7 @@ func concurrentAppendAttempt(t *testing.T) string {
 			EventRetentionSize: 2,
 			Summarizer:         summarizer,
 		})
-	}()
+	})
 
 	close(start)
 	wg.Wait()

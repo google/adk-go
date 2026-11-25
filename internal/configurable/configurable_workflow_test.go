@@ -608,7 +608,7 @@ func TestParseEdges_RouteOrderIsDeterministic(t *testing.T) {
 	// yields sorted order only when the keys, read in sorted order around a
 	// circle (zulu back to "10"), split into two arcs of four to eight keys,
 	// each declared in the order the arc runs. "10", "2" and ALPHA are
-	// neighbours on that circle and are declared in reverse, so both gaps
+	// neighbors on that circle and are declared in reverse, so both gaps
 	// around "2" would have to fall between arcs, leaving "2" alone in one.
 	// Keep ALPHA declared before "2", and "2" before "10".
 	//
@@ -672,7 +672,7 @@ edges:
 func routeLabel(r workflow.Route) string {
 	// Checked first because the type switch below has no arm for the
 	// unexported type behind workflow.Default, so a Default route reaching it
-	// would be labelled with its Go type instead.
+	// would be labeled with its Go type instead.
 	if r == workflow.Default {
 		return "<default>"
 	}

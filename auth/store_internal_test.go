@@ -118,14 +118,12 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 200 {
 				key := keyFor(g + i)
 				switch (g + i) % 3 {
 				case 0:
-					// Every other write is already spent, so Get's eviction and the
+					// Every other write is already spent, so eviction by Get and the
 					// sweep's deletes run while other goroutines read.
 					expires := time.Now().Add(time.Hour)
 					if (g+i)%2 == 0 {
@@ -147,7 +145,7 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -231,7 +229,7 @@ func TestInMemoryCredentialStoreGetEvicts(t *testing.T) {
 		t.Fatalf("store holds %d entries, want the expired one resident until something removes it", got)
 	}
 
-	// No sweep is due, so a miss here can only come from Get's own eviction.
+	// No sweep is due, so a miss here can only come from eviction by Get itself.
 	if _, ok, _ := s.Get(t.Context(), key); ok {
 		t.Fatal("Get() of an expired entry = hit, want miss")
 	}

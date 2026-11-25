@@ -27,7 +27,7 @@ import (
 // to summarize.
 //
 // A single left-to-right pass tracks "open" obligations keyed by call ID: a
-// function call, or a tool-confirmation request, opens one; a function response
+// function call, or a request to the user, opens one; a function response
 // with the same ID closes it. Responses are applied before calls within one
 // event, so a response only ever closes an obligation opened by an earlier
 // event. Summarizing is safe exactly at the points where nothing is open, so
@@ -57,8 +57,9 @@ func longestSelfContainedPrefix(events []*session.Event) []*session.Event {
 		for id := range ev.Actions.RequestedToolConfirmations {
 			openIDs[id] = struct{}{}
 		}
-		// TODO: track outstanding authentication requests here too once
-		// adk-go models them on EventActions.
+		for id := range ev.Actions.RequestedAuthConfigs {
+			openIDs[id] = struct{}{}
+		}
 		// A cut here is valid only if it is balanced and does not split a
 		// group of events sharing a timestamp. Both conditions are checked at
 		// the same point, and the longest such cut wins.
@@ -477,7 +478,8 @@ func skipBlockedHead(window []*session.Event) []*session.Event {
 		prev := window[start-1]
 		if len(utils.FunctionCalls(utils.Content(prev))) == 0 &&
 			len(utils.FunctionResponses(utils.Content(prev))) == 0 &&
-			len(prev.Actions.RequestedToolConfirmations) == 0 {
+			len(prev.Actions.RequestedToolConfirmations) == 0 &&
+			len(prev.Actions.RequestedAuthConfigs) == 0 {
 			continue
 		}
 		tail := longestSelfContainedPrefix(window[start:])
@@ -503,6 +505,9 @@ func openCallIDs(events []*session.Event) map[string]struct{} {
 			open[callObligationKey(call, i)] = struct{}{}
 		}
 		for id := range ev.Actions.RequestedToolConfirmations {
+			open[id] = struct{}{}
+		}
+		for id := range ev.Actions.RequestedAuthConfigs {
 			open[id] = struct{}{}
 		}
 	}

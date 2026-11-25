@@ -13,14 +13,54 @@
 // limitations under the License.
 
 // Package gemini implements the [model.LLM] interface for Gemini models.
+//
+// # Context caching
+//
+// A request whose CacheConfig is set, which the runner arranges when
+// runner.Config.ContextCache is, is sent through an explicit Gemini context
+// cache when one applies. See [model.ContextCacheConfig] for turning it on.
+//
+// A cache holds the system instruction, the tools and their config, and the
+// leading contents: everything before the trailing run of user contents,
+// which is the turn being answered. It is created only once two consecutive
+// requests of an agent agree on that prefix, since a prefix seen once may not
+// be seen again, and only when the earlier request's prompt reached MinTokens
+// and the prefix is estimated to reach the model's own minimum: 2048 tokens
+// for Gemini 2.5 and 4096 for Gemini 3. Every later request with the same
+// prefix names the cache instead of sending what it holds, until the cache
+// expires, has served CacheIntervals invocations, or the prefix changes. Then
+// it is replaced.
+//
+// Under a runner, a cache is deleted only once the invocation that stopped
+// using it has ended, and only if no agent's latest stored record still names
+// it. A cache created for a reply that was never stored is deleted then too.
+// A request naming a cache that the provider no longer holds is sent again
+// once without it, and the next request creates a new cache.
+//
+// A request that already names a cache in its own config is sent as it is.
+//
+// Each request with a CacheConfig gets one handle_context_caching span, a
+// child of the generate_content span when an agent makes the call. Its
+// cache_action attribute is active_cache, with the cache in cache_name, when
+// the request is sent through a cache, its own included, and fingerprint_only
+// when it is sent without one. A create_cache child span covers each call that
+// creates a cache, and a delete_cache span each call that deletes one. A create
+// or delete that fails, whether the provider refuses it, it times out or it is
+// canceled, leaves its span failed with the error. Deleting a cache the
+// provider no longer holds is not a failure. A request resent without a missing
+// cache adds a context_cache_missing event, with the cache's name and the
+// provider's error, to the span the call was made under. The span names and
+// attributes are adk-python's, apart from delete_cache and
+// context_cache_missing, which adk-python does not have.
 package gemini
 
 import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
-	"runtime"
+	"net/url"
 	"strings"
 
 	"google.golang.org/genai"
@@ -28,15 +68,19 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
 
 // TODO: test coverage
 type geminiModel struct {
-	client             *genai.Client
-	name               string
-	versionHeaderValue string
+	client *genai.Client
+	name   string
+	// baseURL is the client's base URL, or nil if it does not parse. Whether
+	// a request goes to a Google API endpoint, and so may name the hosting
+	// runtime in its tracking headers, is decided by it.
+	baseURL *url.URL
 }
 
 // NewModel returns [model.LLM], backed by the Gemini API.
@@ -49,19 +93,30 @@ type geminiModel struct {
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
 	// Create a copy of the config to avoid mutating the caller's config
 	// or the underlying http.Client.
+	var cfgCopy genai.ClientConfig
 	if cfg != nil {
-		cfgCopy := *cfg
+		cfgCopy = *cfg
 		if cfg.HTTPClient != nil {
-			clientCopy := *cfg.HTTPClient
-			cfgCopy.HTTPClient = &clientCopy
+			cfgCopy.HTTPClient = new(*cfg.HTTPClient)
 		}
-		cfg = &cfgCopy
 	}
+	// The genai SDK builds the live WebSocket handshake from the client's
+	// headers alone, so the tracking headers GenerateContent sets per request
+	// never reach it.
+	callerHeaders := cfgCopy.HTTPOptions.Headers
+	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, nil)
 
-	client, err := genai.NewClient(ctx, cfg)
+	client, err := genai.NewClient(ctx, &cfgCopy)
 	if err != nil {
 		return nil, err
 	}
+	// genai resolves the base URL from the config, its defaults and the
+	// environment, so it is known only now. Live.Connect reads the headers
+	// from this map when it dials, so writing into it reaches the handshake.
+	// The client's Interactions service copied the headers while the client
+	// was built, so its calls, which ADK does not make, name no runtime.
+	baseURL, _ := url.Parse(client.ClientConfig().HTTPOptions.BaseURL)
+	maps.Copy(cfgCopy.HTTPOptions.Headers, version.WithTrackingHeaders(callerHeaders, baseURL))
 
 	if client.ClientConfig().HTTPClient != nil {
 		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
@@ -69,14 +124,10 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		}
 	}
 
-	// Create header value once, when the model is created
-	headerValue := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
-		strings.TrimPrefix(runtime.Version(), "go"))
-
 	return &geminiModel{
-		name:               modelName,
-		client:             client,
-		versionHeaderValue: headerValue,
+		name:    modelName,
+		client:  client,
+		baseURL: baseURL,
 	}, nil
 }
 
@@ -96,8 +147,11 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if req.Config.HTTPOptions.Headers == nil {
 		req.Config.HTTPOptions.Headers = make(http.Header)
 	}
-	m.addHeaders(req.Config.HTTPOptions.Headers)
+	m.addHeaders(req.Config.HTTPOptions)
 
+	if req.CacheConfig != nil {
+		return m.generateWithContextCache(ctx, req, stream)
+	}
 	if stream {
 		return m.generateStream(ctx, req)
 	}
@@ -108,10 +162,107 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	}
 }
 
+// generateWithContextCache calls the model through a context cache, creating
+// the cache first when one is due, and records the cache's state on every
+// complete response. Partial streaming chunks are not stored as events, so
+// they carry nothing.
+//
+// Under a runner, the caches this call created or stopped using go into the
+// invocation's ledger, and the runner deletes those that no agent's latest
+// stored record names once the invocation ends. Only the runner can tell,
+// because callbacks, plugins and the session write all sit between this
+// response and the stored event. Called without a runner, the model deletes on
+// its own: a cache it replaced once a complete response has reached the
+// caller, and a cache it created when none has.
+//
+// A request naming a cache that the provider no longer holds, for example one
+// deleted elsewhere or expired early, is sent again once without the cache, so
+// that one missing cache costs a cache creation rather than every turn until
+// the recorded expiry.
+func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.trackingHeader}
+		spanCtx, span := telemetry.StartHandleContextCachingSpan(ctx)
+		plan := cache.prepare(spanCtx, req)
+		telemetry.TraceContextCacheAction(span, plan.req.Config.CachedContent)
+		span.End()
+
+		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
+		responded := false
+		if ledger != nil {
+			cache.track(ledger, plan.created)
+			cache.track(ledger, plan.stale)
+		} else {
+			defer func() { cache.finish(ctx, plan, responded) }()
+		}
+
+		yielded := false
+		// attempt sends r and yields what comes back. It reports whether r
+		// named a cache the provider no longer holds and nothing has been
+		// yielded yet, so the request can be sent again without it.
+		var missingErr error
+		attempt := func(r *model.LLMRequest) (retry bool) {
+			for resp, err := range m.callModel(ctx, r, stream) {
+				if err != nil && !yielded && r != req && isMissingCacheError(err) {
+					missingErr = err
+					return true
+				}
+				if err == nil && resp != nil && !resp.Partial && plan.metadata != nil {
+					recorded := *plan.metadata
+					resp.CacheMetadata = &recorded
+					responded = true
+				}
+				yielded = true
+				if !yield(resp, err) {
+					return false
+				}
+			}
+			return false
+		}
+
+		if !attempt(plan.req) {
+			return
+		}
+		missing := plan.req.Config.CachedContent
+		if ledger != nil {
+			cache.track(ledger, missing)
+		} else {
+			cache.deleteCache(ctx, missing)
+		}
+		// The prefix is unchanged, so the next request can create a cache for
+		// it straight away.
+		plan = cachePlan{req: req, metadata: fingerprintOnly(plan.metadata), stale: plan.stale}
+		telemetry.TraceContextCacheMissing(ctx, missing, missingErr)
+		attempt(plan.req)
+	}
+}
+
+// callModel sends req and yields its responses, streamed or not.
+func (m *geminiModel) callModel(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if stream {
+		return m.generateStream(ctx, req)
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
 // addHeaders sets the x-goog-api-client and user-agent headers
-func (m *geminiModel) addHeaders(headers http.Header) {
-	headers.Set("x-goog-api-client", m.versionHeaderValue)
-	headers.Set("user-agent", m.versionHeaderValue)
+func (m *geminiModel) addHeaders(opts *genai.HTTPOptions) {
+	value := m.trackingHeader(opts)
+	opts.Headers.Set("x-goog-api-client", value)
+	opts.Headers.Set("user-agent", value)
+}
+
+// trackingHeader returns the tracking labels for a request sent with opts,
+// whose BaseURL, when set, replaces the client's.
+func (m *geminiModel) trackingHeader(opts *genai.HTTPOptions) string {
+	if opts != nil && opts.BaseURL != "" {
+		baseURL, _ := url.Parse(opts.BaseURL)
+		return version.TrackingHeader(baseURL)
+	}
+	return version.TrackingHeader(m.baseURL)
 }
 
 // modelName returns the model name to use for the API call.
@@ -125,92 +276,40 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 }
 
 // generate calls the model synchronously returning result from the first
-// candidate, resuming a generation the model paused with CONTINUATION.
+// candidate. The genai SDK resumes a generation the model paused with
+// CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
-	clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
-	contents, config := req.Contents, req.Config
-	for {
-		requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
-		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, requestConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to call model: %w", err)
-		}
-		if len(resp.Candidates) == 0 {
-			// shouldn't happen?
-			return nil, fmt.Errorf("empty response")
-		}
-		var parts []*genai.Part
-		if candidate := resp.Candidates[0]; candidate != nil {
-			if candidate.Content != nil {
-				parts = candidate.Content.Parts
-			}
-			c.keepMetadata(candidate)
-		}
-		var ok bool
-		if contents, config, ok = c.advance(continuationToken(resp), parts, resp.UsageMetadata); !ok {
-			return converters.Genai2LLMResponse(c.complete(resp)), nil
-		}
+	config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
+	// A response without candidates is not an error: a blocked prompt reports
+	// why in PromptFeedback, which Genai2LLMResponse turns into ErrorCode and
+	// ErrorMessage, as the streaming path already does.
+	return converters.Genai2LLMResponse(resp), nil
 }
 
-// generateStream returns a stream of responses from the model, resuming a
-// generation the model paused with CONTINUATION in a new stream that feeds the
-// same aggregator.
+// generateStream returns a stream of responses from the model. The genai SDK
+// resumes a generation the model paused with CONTINUATION, continuing the
+// stream with the chunks of each request.
 func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
-		clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
-		contents, config := req.Contents, req.Config
-		for {
-			var token []byte
-			var parts []*genai.Part
-			var usage *genai.GenerateContentResponseUsageMetadata
-			requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
-			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, requestConfig) {
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				if resp.UsageMetadata != nil {
-					usage = resp.UsageMetadata
-				}
-				if len(resp.Candidates) > 0 && resp.Candidates[0] != nil {
-					candidate := resp.Candidates[0]
-					if candidate.Content != nil {
-						// Copied before the aggregator sees them.
-						parts = appendParts(parts, candidate.Content.Parts)
-					}
-					if t := continuationToken(resp); t != nil {
-						token = t
-						if c.willResume(t) {
-							// The generation goes on in the next stream, so
-							// this chunk does not complete the turn.
-							candidate.FinishReason = ""
-						}
-					}
-				}
-				for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
-					if !yield(llmResponse, err) {
-						return // Consumer stopped
-					}
-				}
+		config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
+			if err != nil {
+				yield(nil, err)
+				return
 			}
-			var ok bool
-			if contents, config, ok = c.advance(token, parts, usage); !ok {
-				break
+			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
+				if !yield(llmResponse, err) {
+					return // Consumer stopped
+				}
 			}
 		}
 		if closeResult := aggregator.Close(); closeResult != nil {
-			if c.resumed() {
-				closeResult.UsageMetadata = c.usage
-				if closeResult.Content != nil {
-					// Joins the text each pause split by the unary path's rules.
-					closeResult.Content = &genai.Content{Role: closeResult.Content.Role, Parts: appendParts(nil, closeResult.Content.Parts)}
-				}
-			}
 			yield(closeResult, nil)
 		}
 	}
@@ -235,20 +334,29 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	if config.HTTPOptions != nil {
 		*httpOptions = *config.HTTPOptions
 	}
+	httpOptions.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(httpOptions.ExtrasRequestProvider, fallbackProvider)
+	configCopy.HTTPOptions = httpOptions
+	return &configCopy
+}
 
-	provider := httpOptions.ExtrasRequestProvider
+// providerPreservingEmptyTextThoughtSignatures returns an extras provider that
+// runs provider, or fallbackProvider when provider is nil, and then restores
+// the empty text of thought-signature parts in the body's contents.
+//
+// The fallback is the client's own provider, which genai drops when it merges
+// per-call options. Every request whose body carries contents needs both: a
+// cache creation sends the same contents a generation does.
+func providerPreservingEmptyTextThoughtSignatures(provider, fallbackProvider genai.ExtrasRequestProvider) genai.ExtrasRequestProvider {
 	if provider == nil {
 		provider = fallbackProvider
 	}
-	httpOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+	return func(body map[string]any) map[string]any {
 		if provider != nil {
 			body = provider(body)
 		}
 		preserveEmptyTextThoughtSignatureParts(body)
 		return body
 	}
-	configCopy.HTTPOptions = httpOptions
-	return &configCopy
 }
 
 func preserveEmptyTextThoughtSignatureParts(body map[string]any) {
@@ -289,15 +397,6 @@ func partHasData(part map[string]any) bool {
 		}
 	}
 	return false
-}
-
-// retryResends reports whether the requests that resume a generation set
-// continuationRetry: not when the request or the client sets retry options.
-func (m *geminiModel) retryResends(config *genai.GenerateContentConfig) bool {
-	if config != nil && config.HTTPOptions != nil && config.HTTPOptions.RetryOptions != nil {
-		return false
-	}
-	return m.client.ClientConfig().HTTPOptions.RetryOptions == nil
 }
 
 // maybeAppendUserContent appends a user content, so that model can continue to output.

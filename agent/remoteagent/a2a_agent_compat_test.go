@@ -686,7 +686,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	// Artifact text the mock subagent streams; the cancel step keys off it.
 	const remoteArtifactText = "remote-subagent-working"
 	// Remote A2A server publishes a submitted task and start generating artifact updates
-	// until it detects a context cancelation
+	// until it detects a context cancellation
 	serverB := startLegacyA2AServer(t, &mockLegacyExecutor{
 		cancelFn: func(ctx context.Context, reqCtx *legacyASrv.RequestContext, queue legacyEQ.Queue) error {
 			event := legacyA2A.NewStatusUpdateEvent(reqCtx, legacyA2A.TaskStateCanceled, nil)
@@ -744,9 +744,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan legacyA2A.Event, 10)
 	remoteStreamingChan := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(statusUpdateEventChan)
 		remoteStreaming := false
 		msg := legacyA2A.NewMessage(legacyA2A.MessageRoleUser, legacyA2A.TextPart{Text: "work"})
@@ -764,7 +762,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 			}
 			statusUpdateEventChan <- event
 		}
-	}()
+	})
 
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
@@ -772,9 +770,7 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 	taskID := firstUpdate.TaskInfo().TaskID
 	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *legacyA2A.Task, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &legacyA2A.TaskIDParams{ID: taskID})
 		if err != nil {
@@ -782,9 +778,9 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 			return
 		}
 		cancelResultChan <- task
-	}()
+	})
 
-	// Check the streaming message sender got a cancelled state task in their response
+	// Check the streaming message sender got a canceled state task in their response
 	var lastStreamingUpdate legacyA2A.Event
 	for event := range statusUpdateEventChan {
 		lastStreamingUpdate = event
@@ -797,8 +793,8 @@ func TestCompat_A2ACleanupPropagation(t *testing.T) {
 		t.Fatalf("type(lastStreamingUpdate) = %T, want *a2a.TaskStatusUpdateEvent", lastStreamingUpdate)
 	}
 
-	// Check subagent task got cancelled when the parent task was cancelled.
-	// Subagent cleanup fires twice: once for cancelation, once for execution.
+	// Check subagent task got canceled when the parent task was canceled.
+	// Subagent cleanup fires twice: once for cancellation, once for execution.
 	// A generous deadline avoids flaking under CPU contention.
 	testutil.AwaitN(t, remoteCleanupCalledChan, 2, "remote cleanup")
 	remoteTaskID := testutil.AwaitValue(t, remoteTaskIDChan, "server B remote task ID")

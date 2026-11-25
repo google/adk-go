@@ -45,19 +45,30 @@ func IsGeminiModel(model string) bool {
 	return strings.HasPrefix(extractModelName(model), "gemini-")
 }
 
-// IsGemini25OrLower returns true if the model is a Gemini 2.5 or less.
-func IsGemini25OrLower(model string) bool {
+// IsGemini1Model reports whether the model string names a Gemini 1.x model.
+func IsGemini1Model(model string) bool {
+	version, ok := extractGeminiVersion(model)
+	return ok && version < 2
+}
+
+func extractGeminiVersion(model string) (float64, bool) {
 	model = extractModelName(model)
 	// extract the model version from model name - e.g. turn gemini-2.5-flash or gemini-2.5-flash-lite into 2.5
 	matches := geminiModelVersionRegex.FindStringSubmatch(model)
 	if len(matches) < 2 {
-		return false
+		return 0, false
 	}
 	version, err := strconv.ParseFloat(matches[1], 64)
 	if err != nil {
-		return false
+		return 0, false
 	}
-	return version <= 2.5
+	return version, true
+}
+
+// IsGemini25OrLower returns true if the model is a Gemini 2.5 or less.
+func IsGemini25OrLower(model string) bool {
+	version, ok := extractGeminiVersion(model)
+	return ok && version <= 2.5
 }
 
 // IsGemini2OrAbove returns true for Gemini 2.0+ models.
@@ -102,6 +113,17 @@ func NeedsOutputSchemaProcessor(llm model.LLM) bool {
 		return false
 	}
 	return IsGeminiModel(llm.Name()) && !CanUseOutputSchemaWithTools(llm)
+}
+
+// IsGemini3xLive returns true for Gemini 3.x Live models other than Live
+// Translate. Follows adk-python's _is_gemini_3_x_live.
+func IsGemini3xLive(model string) bool {
+	name := extractModelName(model)
+	return strings.HasPrefix(name, "gemini-3.") && strings.Contains(name, "-live") && !isGemini35LiveTranslate(model)
+}
+
+func isGemini35LiveTranslate(model string) bool {
+	return strings.HasPrefix(extractModelName(model), "gemini-3.5-live-translate")
 }
 
 func extractModelName(model string) string {

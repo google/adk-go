@@ -16,11 +16,14 @@ package controllers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 func TestGetSession(t *testing.T) {
@@ -75,15 +79,15 @@ func TestGetSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			// The fake reports a missing session with a bare error rather than
-			// one wrapping session.ErrNotFound, which is how any other service
-			// failure looks: it stays a 500. The 404 path is covered by
-			// TestGetSessionMissingSessionIsNotFound.
-			name:           "session service error is not a missing session",
+			// The fake wraps session.ErrNotFound for a missing session, as the
+			// real services do, so the handler answers 404. A service failure
+			// that is not a missing session stays a 500: see
+			// TestGetSessionServiceFailureIsInternalError.
+			name:           "missing session is not found",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID:      id,
-			wantErr:        fmt.Errorf("not found"),
-			wantStatus:     http.StatusInternalServerError,
+			wantErr:        fmt.Errorf("session not found: %q", id.SessionID),
+			wantStatus:     http.StatusNotFound,
 		},
 		{
 			name: "user ID is missing in input",
@@ -275,6 +279,265 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+// TestCreateSessionValidatesInitializationEvents covers the events a client may
+// seed a new session with: conversation history is accepted, and anything only
+// the runtime produces is refused before the session exists.
+func TestCreateSessionValidatesInitializationEvents(t *testing.T) {
+	const (
+		text         = `{"author":"user","content":{"role":"user","parts":[{"text":"hello"}]}}`
+		toolCall     = `{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{"path":"x"}}}]}}`
+		toolResponse = `{"author":"agent","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{"status":"ok"}}}]}}`
+	)
+	type testCase struct {
+		name    string
+		events  []string
+		wantErr string // empty when the request is accepted
+	}
+	tests := []testCase{
+		{name: "text message", events: []string{text}},
+		{name: "tool call and response", events: []string{toolCall, toolResponse}},
+		{
+			name:   "empty action maps, as every runtime event reads back",
+			events: []string{`{"author":"user","actions":{"stateDelta":{},"artifactDelta":{}}}`},
+		},
+		{
+			name:   "null action maps",
+			events: []string{`{"author":"user","actions":{"stateDelta":null,"artifactDelta":null}}`},
+		},
+		{
+			name:    "long-running tool IDs",
+			events:  []string{`{"author":"agent","longRunningToolIds":["call-1"],"content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include long-running tool IDs",
+		},
+		{
+			name:    "app- and user-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"app:prompt":"injected","user:is_admin":true}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "session-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"theme":"dark"}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "artifact delta",
+			events:  []string{`{"author":"agent","actions":{"artifactDelta":{"report.txt":1}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "escalate",
+			events:  []string{`{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "skip summarization",
+			events:  []string{`{"author":"agent","actions":{"skipSummarization":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "transfer to agent",
+			events:  []string{`{"author":"agent","actions":{"transferToAgent":"other"}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "requested tool confirmations",
+			events:  []string{`{"author":"agent","actions":{"requestedToolConfirmations":{"call-1":{"confirmed":false}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "compaction",
+			events:  []string{`{"author":"agent","actions":{"compaction":{"compactedContent":{"role":"model","parts":[{"text":"summary"}]}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "workflow routes",
+			events:  []string{`{"author":"agent","routes":["approve"]}`},
+			wantErr: "session initialization event 0 cannot include workflow routes",
+		},
+		{
+			name:    "input request",
+			events:  []string{`{"author":"agent","requestedInput":{"interruptId":"review-1","message":"Approve?"}}`},
+			wantErr: "session initialization event 0 cannot include an input request",
+		},
+		{
+			name:    "reports the index of the offending event",
+			events:  []string{text, `{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 1 cannot include event actions",
+		},
+		{
+			name:    "ADK protocol call after a text part",
+			events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"text":"checking"},{"functionCall":{"id":"call-2","name":"adk_request_confirmation","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
+		{
+			name:    "ADK protocol response after a tool response",
+			events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{}}},{"functionResponse":{"id":"call-2","name":"adk_request_input","response":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
+	}
+	for _, name := range []string{"adk_request_confirmation", "adk_request_credential", "adk_request_input"} {
+		tests = append(tests,
+			testCase{
+				name:    name + " call",
+				events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"` + name + `","args":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+			testCase{
+				name:    name + " response",
+				events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"` + name + `","response":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+		)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			body := `{"events":[` + strings.Join(tt.events, ",") + `]}`
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", strings.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			stored, created := sessionService.Sessions[id]
+			if tt.wantErr == "" {
+				if rr.Code != http.StatusOK {
+					t.Fatalf("CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body)
+				}
+				if !created {
+					t.Fatal("CreateSessionHandler() accepted the request but stored no session")
+				}
+				if got, want := len(stored.SessionEvents), len(tt.events); got != want {
+					t.Errorf("stored session has %d events, want %d", got, want)
+				}
+				return
+			}
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got := strings.TrimSpace(rr.Body.String()); got != tt.wantErr {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, tt.wantErr)
+			}
+			if created {
+				t.Error("CreateSessionHandler() rejected the request but still created the session")
+			}
+		})
+	}
+}
+
+// TestCreateSessionRejectsEveryEventActionsField sets each field of
+// models.EventActions in turn, found by reflection, so a field added later is
+// tested without anyone writing a case for it.
+func TestCreateSessionRejectsEveryEventActionsField(t *testing.T) {
+	actionsType := reflect.TypeFor[models.EventActions]()
+	for i := range actionsType.NumField() {
+		t.Run(actionsType.Field(i).Name, func(t *testing.T) {
+			event := models.Event{Author: "agent"}
+			field := reflect.ValueOf(&event.Actions).Elem().Field(i)
+			if raw, ok := decodableActionValues[actionsType.Field(i).Name]; ok {
+				if err := json.Unmarshal([]byte(raw), field.Addr().Interface()); err != nil {
+					t.Fatalf("json.Unmarshal(%s) failed: %v", actionsType.Field(i).Name, err)
+				}
+			} else {
+				setNonZero(t, field)
+			}
+			body, err := json.Marshal(models.CreateSessionRequest{Events: []models.Event{event}})
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", bytes.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got, want := strings.TrimSpace(rr.Body.String()), "session initialization event 0 cannot include event actions"; got != want {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// decodableActionValues holds JSON for the EventActions fields whose zero
+// element the request decoder rejects, so the request reaches the validator
+// rather than failing to decode.
+var decodableActionValues = map[string]string{
+	"RequestedAuthConfigs": `{"call-1":{"authScheme":{"type":"apiKey","in":"header","name":"X-Key"}}}`,
+}
+
+// setNonZero sets v to a value that still reads as set after a JSON round trip.
+func setNonZero(t *testing.T, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.Zero(v.Type().Key()), reflect.Zero(v.Type().Elem()))
+		v.Set(m)
+	case reflect.Slice:
+		v.Set(reflect.Append(reflect.MakeSlice(v.Type(), 0, 1), reflect.Zero(v.Type().Elem())))
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	default:
+		t.Fatalf("setNonZero has no value for a %v field; add one", v.Kind())
+	}
+}
+
+func TestCreateSessionDropsNilParts(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	sessionService := session.InMemoryService()
+	apiController := controllers.NewSessionsAPIController(sessionService)
+	rr := httptest.NewRecorder()
+
+	// The event without content exercises the nil check in the handler.
+	body := strings.NewReader(`{"events": [
+		{"author": "other_agent"},
+		{"author": "other_agent", "content": {"role": "model", "parts": [null, {"text": "It is sunny in Paris."}, null]}}
+	]}`)
+	apiController.CreateSessionHandler(rr, newSessionRequest(t, http.MethodPost, id, body, id.UserID))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	stored, err := sessionService.Get(t.Context(), &session.GetRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	events := stored.Session.Events()
+	if events.Len() != 2 {
+		t.Fatalf("session has %d events, want 2", events.Len())
+	}
+	parts, err := json.Marshal(events.At(1).Content.Parts)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if want := `[{"text":"It is sunny in Paris."}]`; string(parts) != want {
+		t.Errorf("stored parts = %s, want %s", parts, want)
+	}
+}
+
 func TestDeleteSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",
@@ -463,6 +726,30 @@ func TestGetSessionMissingSessionIsNotFound(t *testing.T) {
 	}
 }
 
+// getFailingService fails Get with a plain error that does not wrap
+// session.ErrNotFound.
+type getFailingService struct {
+	session.Service
+}
+
+func (getFailingService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
+	return nil, errors.New("connection refused")
+}
+
+// TestGetSessionServiceFailureIsInternalError is the other side of the 404
+// mapping: a Get failure that is not a missing session is the server's fault.
+func TestGetSessionServiceFailureIsInternalError(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	apiController := controllers.NewSessionsAPIController(getFailingService{})
+	rr := httptest.NewRecorder()
+
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil, id.UserID))
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+}
+
 // TestGetSessionExistingSessionIsOK is the counterpart: a session that is there
 // is still a 200 after the not-found mapping.
 func TestGetSessionExistingSessionIsOK(t *testing.T) {
@@ -604,7 +891,7 @@ func TestUpdateSession(t *testing.T) {
 			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantState, got.State); diff != "" {
+			if diff := cmp.Diff(tt.wantState, map[string]any(got.State)); diff != "" {
 				t.Errorf("UpdateSession() response state mismatch (-want +got):\n%s", diff)
 			}
 
@@ -619,7 +906,7 @@ func TestUpdateSession(t *testing.T) {
 			if err := json.NewDecoder(getRR.Body).Decode(&reread); err != nil {
 				t.Fatalf("decode get response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantState, reread.State); diff != "" {
+			if diff := cmp.Diff(tt.wantState, map[string]any(reread.State)); diff != "" {
 				t.Errorf("state after re-read mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -655,6 +942,38 @@ func TestUpdateSessionAppliesDeltaThroughAnEvent(t *testing.T) {
 	}
 	want := map[string]any{"foo": "baz"}
 	if diff := cmp.Diff(want, events.At(0).Actions.StateDelta); diff != "" {
+		t.Errorf("appended event StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestUpdateSessionWritesAnUnchangedPlainKey pins the edge of the echo
+// exception: a session-scoped key holding no credential is written even when
+// its value matches the stored one, so the PATCH records an event carrying it.
+func TestUpdateSessionWritesAnUnchangedPlainKey(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	sessionService := newServiceWithSession(t, id, map[string]any{"theme": "dark"})
+	apiController := controllers.NewSessionsAPIController(sessionService)
+	rr := httptest.NewRecorder()
+
+	body := strings.NewReader(`{"stateDelta":{"theme":"dark"}}`)
+	apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, id, body, id.UserID))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	stored, err := sessionService.Get(t.Context(), &session.GetRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	events := stored.Session.Events()
+	if events.Len() != 1 {
+		t.Fatalf("session has %d events, want 1 carrying the unchanged key", events.Len())
+	}
+	if diff := cmp.Diff(map[string]any{"theme": "dark"}, events.At(0).Actions.StateDelta); diff != "" {
 		t.Errorf("appended event StateDelta mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -973,4 +1292,342 @@ func TestUpdateSessionRenameAppliesWithScopedStateInPlay(t *testing.T) {
 	if diff := cmp.Diff(want, metadata); diff != "" {
 		t.Errorf("__session_metadata__ mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// TestUpdateSessionEchoedRedactedCredentials covers the GET-then-PATCH rename
+// flow when session, user:, or app: state holds credentials whose secrets GET
+// strips. Echoing the redacted state back must neither overwrite a
+// session-scoped credential's secrets nor reject a scoped credential as a
+// write, while a credential value that differs from the redacted stored one is
+// still treated as a write.
+func TestUpdateSessionEchoedRedactedCredentials(t *testing.T) {
+	sessionCred := toolauth.Credential{
+		AuthType: toolauth.CredentialTypeOAuth2,
+		OAuth2: &toolauth.OAuth2Auth{
+			ClientID:     "app",
+			AccessToken:  "session-at",
+			RefreshToken: "session-rt",
+		},
+	}
+	appCred := toolauth.Credential{
+		AuthType: toolauth.CredentialTypeOAuth2,
+		OAuth2: &toolauth.OAuth2Auth{
+			ClientID:     "app",
+			AccessToken:  "app-at",
+			RefreshToken: "app-rt",
+		},
+	}
+	userCred := map[string]any{
+		"authType": "oauth2",
+		"oauth2": map[string]any{
+			"clientId":     "app",
+			"accessToken":  "user-at",
+			"refreshToken": "user-rt",
+		},
+	}
+
+	renameFromGET := func(t *testing.T, service session.Service, sessionID string) *httptest.ResponseRecorder {
+		t.Helper()
+		controller := controllers.NewSessionsAPIController(service)
+		ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
+		vars := map[string]string{
+			"app_name":   "app",
+			"user_id":    "user",
+			"session_id": sessionID,
+		}
+
+		getReq := mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil), vars)
+		getRec := httptest.NewRecorder()
+		controller.GetSessionHandler(getRec, getReq)
+		if getRec.Code != http.StatusOK {
+			t.Fatalf("GetSessionHandler() status = %d, want %d", getRec.Code, http.StatusOK)
+		}
+		var fetched struct {
+			State map[string]any `json:"state"`
+		}
+		if err := json.Unmarshal(getRec.Body.Bytes(), &fetched); err != nil {
+			t.Fatalf("Unmarshal(GET) failed: %v", err)
+		}
+
+		fetched.State["__session_metadata__"] = map[string]any{"displayName": "My renamed chat"}
+		body, err := json.Marshal(map[string]any{"stateDelta": fetched.State})
+		if err != nil {
+			t.Fatalf("Marshal(PATCH) failed: %v", err)
+		}
+		patchReq := mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body)), vars)
+		patchRec := httptest.NewRecorder()
+		controller.UpdateSessionHandler(patchRec, patchReq)
+		return patchRec
+	}
+
+	t.Run("session-scoped credential keeps its stored secrets", func(t *testing.T) {
+		service := session.InMemoryService()
+		created, err := service.Create(t.Context(), &session.CreateRequest{
+			AppName: "app",
+			UserID:  "user",
+			State:   map[string]any{"drive": sessionCred},
+		})
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+
+		patchRec := renameFromGET(t, service, created.Session.ID())
+		if patchRec.Code != http.StatusOK {
+			t.Fatalf("UpdateSessionHandler() status = %d, want %d", patchRec.Code, http.StatusOK)
+		}
+
+		reread, err := service.Get(t.Context(), &session.GetRequest{
+			AppName: "app", UserID: "user", SessionID: created.Session.ID(),
+		})
+		if err != nil {
+			t.Fatalf("Get() failed: %v", err)
+		}
+		metadata, err := reread.Session.State().Get("__session_metadata__")
+		if err != nil {
+			t.Fatalf("State().Get(__session_metadata__) failed: %v", err)
+		}
+		if diff := cmp.Diff(map[string]any{"displayName": "My renamed chat"}, metadata); diff != "" {
+			t.Errorf("__session_metadata__ mismatch (-want +got):\n%s", diff)
+		}
+		gotDrive, err := reread.Session.State().Get("drive")
+		if err != nil {
+			t.Fatalf("State().Get(drive) failed: %v", err)
+		}
+		if diff := cmp.Diff(sessionCred, gotDrive); diff != "" {
+			t.Errorf("stored session credential after rename mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// A read writes these numbers as they were stored, and the client sends
+	// back the float64 it decoded them to.
+	numbers := []struct {
+		name  string
+		value any
+	}{
+		{name: "a trailing zero", value: json.Number("1.0")},
+		{name: "an exponent", value: json.Number("1e3")},
+		{name: "an integer past float64 precision", value: int64(9007199254740993)},
+	}
+	for _, n := range numbers {
+		t.Run("session credential holding "+n.name+" keeps its stored secrets", func(t *testing.T) {
+			cred := map[string]any{
+				"authType": "oauth2",
+				"oauth2": map[string]any{
+					"clientId":     "app",
+					"accessToken":  "session-at",
+					"refreshToken": "session-rt",
+					"ratio":        n.value,
+				},
+			}
+			service := session.InMemoryService()
+			created, err := service.Create(t.Context(), &session.CreateRequest{
+				AppName: "app",
+				UserID:  "user",
+				State:   map[string]any{"drive": cred},
+			})
+			if err != nil {
+				t.Fatalf("Create() failed: %v", err)
+			}
+
+			patchRec := renameFromGET(t, service, created.Session.ID())
+			if patchRec.Code != http.StatusOK {
+				t.Fatalf("UpdateSessionHandler() status = %d, want %d", patchRec.Code, http.StatusOK)
+			}
+
+			reread, err := service.Get(t.Context(), &session.GetRequest{
+				AppName: "app", UserID: "user", SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() failed: %v", err)
+			}
+			gotDrive, err := reread.Session.State().Get("drive")
+			if err != nil {
+				t.Fatalf("State().Get(drive) failed: %v", err)
+			}
+			if diff := cmp.Diff(cred, gotDrive); diff != "" {
+				t.Errorf("stored session credential after rename mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("user and app scoped credentials do not turn the rename into a 400", func(t *testing.T) {
+		service := session.InMemoryService()
+		created, err := service.Create(t.Context(), &session.CreateRequest{
+			AppName: "app",
+			UserID:  "user",
+			State: map[string]any{
+				"app:drive":  appCred,
+				"user:drive": userCred,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+
+		patchRec := renameFromGET(t, service, created.Session.ID())
+		if patchRec.Code != http.StatusOK {
+			t.Fatalf("UpdateSessionHandler() status = %d, want %d", patchRec.Code, http.StatusOK)
+		}
+
+		reread, err := service.Get(t.Context(), &session.GetRequest{
+			AppName: "app", UserID: "user", SessionID: created.Session.ID(),
+		})
+		if err != nil {
+			t.Fatalf("Get() failed: %v", err)
+		}
+		metadata, err := reread.Session.State().Get("__session_metadata__")
+		if err != nil {
+			t.Fatalf("State().Get(__session_metadata__) failed: %v", err)
+		}
+		if diff := cmp.Diff(map[string]any{"displayName": "My renamed chat"}, metadata); diff != "" {
+			t.Errorf("__session_metadata__ mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("credential differing from the redacted stored value is a write", func(t *testing.T) {
+		service := session.InMemoryService()
+		created, err := service.Create(t.Context(), &session.CreateRequest{
+			AppName: "app",
+			UserID:  "user",
+			State: map[string]any{
+				"drive":      sessionCred,
+				"user:drive": userCred,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+		controller := controllers.NewSessionsAPIController(service)
+		ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
+		vars := map[string]string{
+			"app_name":   "app",
+			"user_id":    "user",
+			"session_id": created.Session.ID(),
+		}
+
+		changedScopedBody, err := json.Marshal(map[string]any{"stateDelta": map[string]any{
+			"user:drive": map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "other-app"},
+			},
+		}})
+		if err != nil {
+			t.Fatalf("Marshal(changed scoped PATCH) failed: %v", err)
+		}
+		changedScopedReq := mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(changedScopedBody)), vars)
+		changedScopedRec := httptest.NewRecorder()
+		controller.UpdateSessionHandler(changedScopedRec, changedScopedReq)
+		if changedScopedRec.Code != http.StatusBadRequest {
+			t.Errorf("UpdateSessionHandler() changed scoped credential status = %d, want %d", changedScopedRec.Code, http.StatusBadRequest)
+		}
+
+		newDrive := map[string]any{
+			"authType": "oauth2",
+			"oauth2": map[string]any{
+				"clientId":                "app",
+				"accessToken":             "new-session-at",
+				"tokenEndpointAuthMethod": "client_secret_basic",
+			},
+		}
+		changedSessionBody, err := json.Marshal(map[string]any{"stateDelta": map[string]any{
+			"drive": newDrive,
+		}})
+		if err != nil {
+			t.Fatalf("Marshal(changed session PATCH) failed: %v", err)
+		}
+		changedSessionReq := mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(changedSessionBody)), vars)
+		changedSessionRec := httptest.NewRecorder()
+		controller.UpdateSessionHandler(changedSessionRec, changedSessionReq)
+		if changedSessionRec.Code != http.StatusOK {
+			t.Fatalf("UpdateSessionHandler() changed session credential status = %d, want %d", changedSessionRec.Code, http.StatusOK)
+		}
+		afterWrite, err := service.Get(t.Context(), &session.GetRequest{
+			AppName: "app", UserID: "user", SessionID: created.Session.ID(),
+		})
+		if err != nil {
+			t.Fatalf("Get() after write failed: %v", err)
+		}
+		gotUpdatedDrive, err := afterWrite.Session.State().Get("drive")
+		if err != nil {
+			t.Fatalf("State().Get(drive) after write failed: %v", err)
+		}
+		if diff := cmp.Diff(newDrive, gotUpdatedDrive); diff != "" {
+			t.Errorf("stored session credential after write mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("root authType state keeps session secrets and accepts echoed scoped keys", func(t *testing.T) {
+		oauth := map[string]any{"clientId": "app", "accessToken": "at", "refreshToken": "rt"}
+		profile := map[string]any{"name": "ann", "token": "page-2"}
+		sessionService := session.InMemoryService()
+		sessionCreated, err := sessionService.Create(t.Context(), &session.CreateRequest{
+			AppName: "app",
+			UserID:  "user",
+			State: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   oauth,
+				"profile":  profile,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create() failed: %v", err)
+		}
+
+		patchRec := renameFromGET(t, sessionService, sessionCreated.Session.ID())
+		if patchRec.Code != http.StatusOK {
+			t.Fatalf("UpdateSessionHandler() status = %d, want %d", patchRec.Code, http.StatusOK)
+		}
+		reread, err := sessionService.Get(t.Context(), &session.GetRequest{
+			AppName: "app", UserID: "user", SessionID: sessionCreated.Session.ID(),
+		})
+		if err != nil {
+			t.Fatalf("Get() failed: %v", err)
+		}
+		gotOAuth, err := reread.Session.State().Get("oauth2")
+		if err != nil {
+			t.Fatalf("State().Get(oauth2) failed: %v", err)
+		}
+		if diff := cmp.Diff(oauth, gotOAuth); diff != "" {
+			t.Errorf("stored oauth2 after rename mismatch (-want +got):\n%s", diff)
+		}
+		gotProfile, err := reread.Session.State().Get("profile")
+		if err != nil {
+			t.Fatalf("State().Get(profile) failed: %v", err)
+		}
+		if diff := cmp.Diff(profile, gotProfile); diff != "" {
+			t.Errorf("stored profile after rename mismatch (-want +got):\n%s", diff)
+		}
+
+		scopedService := session.InMemoryService()
+		scopedCreated, err := scopedService.Create(t.Context(), &session.CreateRequest{
+			AppName: "app",
+			UserID:  "user",
+			State: map[string]any{
+				"authType":     "oauth2",
+				"user:profile": map[string]any{"name": "ann", "token": "t"},
+				"app:config":   map[string]any{"name": "cfg", "apiKey": "k"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create() scoped failed: %v", err)
+		}
+
+		scopedPatchRec := renameFromGET(t, scopedService, scopedCreated.Session.ID())
+		if scopedPatchRec.Code != http.StatusOK {
+			t.Fatalf("UpdateSessionHandler() scoped status = %d, want %d", scopedPatchRec.Code, http.StatusOK)
+		}
+		scopedReread, err := scopedService.Get(t.Context(), &session.GetRequest{
+			AppName: "app", UserID: "user", SessionID: scopedCreated.Session.ID(),
+		})
+		if err != nil {
+			t.Fatalf("Get() scoped failed: %v", err)
+		}
+		metadata, err := scopedReread.Session.State().Get("__session_metadata__")
+		if err != nil {
+			t.Fatalf("State().Get(__session_metadata__) failed: %v", err)
+		}
+		if diff := cmp.Diff(map[string]any{"displayName": "My renamed chat"}, metadata); diff != "" {
+			t.Errorf("__session_metadata__ mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

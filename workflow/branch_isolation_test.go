@@ -17,7 +17,6 @@ package workflow
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -59,7 +58,7 @@ func TestRunNode_SequentialFanOut_BranchesFromOptions(t *testing.T) {
 			},
 		},
 		{
-			// Default behaviour: without the opt-in, children
+			// Default behavior: without the opt-in, children
 			// inherit the orchestrator's branch verbatim
 			// (backward-compat contract for callers relying on
 			// inherited branches).
@@ -72,7 +71,7 @@ func TestRunNode_SequentialFanOut_BranchesFromOptions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			seenBranches := runSequentialFanOut(t, childName, tc.extraOpts)
-			sort.Strings(seenBranches)
+			slices.Sort(seenBranches)
 			if !slices.Equal(seenBranches, tc.wantBranches) {
 				t.Errorf("seenBranches = %q, want %q",
 					seenBranches, tc.wantBranches)

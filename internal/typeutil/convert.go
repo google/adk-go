@@ -17,6 +17,7 @@ package typeutil
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -33,7 +34,7 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 	if resolvedSchema != nil {
 		// Validate the JSON-decoded form rather than the Go value:
 		// struct validation can't account for `omitempty` or custom
-		// marshalling (see
+		// marshaling (see
 		// https://github.com/google/jsonschema-go/issues/23).
 		var decoded any
 		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
@@ -89,10 +90,5 @@ func schemaExpectsObject(resolved *jsonschema.Resolved) bool {
 	if root.Type == "object" {
 		return true
 	}
-	for _, t := range root.Types {
-		if t == "object" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(root.Types, "object")
 }

@@ -33,10 +33,11 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (*mcpTool, error) {
 	mcp := &mcpTool{
-		name:        t.Name,
-		description: t.Description,
+		name:         t.Name,
+		originalName: t.Name,
+		description:  t.Description,
 		funcDeclaration: &genai.FunctionDeclaration{
 			Name:        t.Name,
 			Description: t.Description,
@@ -47,11 +48,6 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		metadataProvider:            metadataProvider,
 	}
 
-	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
-	// is an interface (any), we have encountered the type nil problem.
-	// This will make the omitempty not work since ResponseJsonSchema becomes an interface wrapper
-	// to a nil pointer and genai converter includes "responseJsonSchema": null in the json sent to the llm which causes it to crash.
-	// we need the following "if" check to keep ResponseJsonSchema (nil,nil) instead of (*jsonschema.Schema, nil)
 	if t.InputSchema != nil {
 		mcp.funcDeclaration.ParametersJsonSchema = t.InputSchema
 	}
@@ -63,6 +59,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 
 type mcpTool struct {
 	name            string
+	originalName    string
 	description     string
 	funcDeclaration *genai.FunctionDeclaration
 
@@ -125,7 +122,7 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	params := &mcp.CallToolParams{
-		Name:      t.name,
+		Name:      t.originalName,
 		Arguments: args,
 	}
 	if t.metadataProvider != nil {

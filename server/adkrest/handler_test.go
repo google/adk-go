@@ -368,7 +368,7 @@ var probedMethods = []string{
 // one method appears in it.
 func parseAllow(allow string) []string {
 	var got []string
-	for _, method := range strings.Split(allow, ",") {
+	for method := range strings.SplitSeq(allow, ",") {
 		if method = strings.TrimSpace(method); method != "" {
 			got = append(got, method)
 		}
@@ -542,7 +542,7 @@ func TestTrailingSlashKeepsMethodAndBody(t *testing.T) {
 }
 
 // TestTrailingSlashOnSafeAndRejectedMethods covers the rest of the trailing
-// slash behaviour: a GET is served directly rather than redirected, and a verb
+// slash behavior: a GET is served directly rather than redirected, and a verb
 // the path does not serve is still refused with an Allow header.
 func TestTrailingSlashOnSafeAndRejectedMethods(t *testing.T) {
 	testServer := newAssembledServer(t, "")

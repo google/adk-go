@@ -15,12 +15,19 @@
 package workflow
 
 import (
+	"encoding/json"
+	"errors"
 	"iter"
+	"reflect"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -36,6 +43,651 @@ func (e sliceEvents) All() iter.Seq[*session.Event] {
 				return
 			}
 		}
+	}
+}
+
+func TestCollectNodeOutputs_Ownership(t *testing.T) {
+	nodes := map[string]Node{"p": newDummyNode("p"), "q": newDummyNode("q")}
+	for _, tc := range []struct {
+		name         string
+		path         string
+		outputFor    []string
+		partial      bool
+		workflowName string
+		basePath     *string
+		want         map[string]any
+	}{
+		{name: "own", path: "root@1/p@1", want: map[string]any{"p": "result"}},
+		{name: "discarded_child", path: "root@1/p@1/q@1", outputFor: []string{"root@1/p@1/q@1"}, want: map[string]any{}},
+		{name: "delegated_child", path: "root@1/p@1/q@1", outputFor: []string{"root@1/p@1/q@1", "root@1/p@1"}, want: map[string]any{"p": "result"}},
+		{name: "legacy_author", want: map[string]any{"p": "result"}},
+		{name: "partial", path: "root@1/p@1", partial: true, want: map[string]any{}},
+		{name: "same_workflow_and_node_name", path: "p@1/p@1", workflowName: "p", want: map[string]any{"p": "result"}},
+		{name: "unprefixed_dynamic_child", path: "p@1/q@1", workflowName: "p", basePath: new(string), want: map[string]any{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := &session.Event{Author: "p", Output: "result", NodeInfo: &session.NodeInfo{Path: tc.path, OutputFor: tc.outputFor}}
+			ev.Partial = tc.partial
+			if tc.basePath != nil {
+				ev.CustomMetadata = map[string]any{workflowBasePathPrefix + tc.workflowName: *tc.basePath}
+			}
+			outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes, "", tc.workflowName)
+			if !reflect.DeepEqual(outputs, tc.want) {
+				t.Fatal("output was attributed to the wrong graph node")
+			}
+		})
+	}
+}
+
+func TestReconstructRunState_WorkflowNameMatchesNode(t *testing.T) {
+	ask := NewDynamicNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "approval", Message: "approve"})
+	}, NodeConfig{})
+	done := NewFunctionNode("done", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{})
+	wf, err := New("done", []Edge{{From: Start, To: ask}, {From: Start, To: done}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefixed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "RunNode", true: "Run"}[prefixed], func(t *testing.T) {
+			ctx := newMockCtx(t)
+			seq := wf.RunNode(agent.Promote(ctx), nil)
+			if prefixed {
+				seq = wf.Run(ctx)
+			}
+			var events sliceEvents
+			for ev, err := range seq {
+				if err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, ev)
+			}
+			state, err := wf.ReconstructRunState(fakeSession{events: events}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nodeState(t, state, "ask").Status != NodeWaiting || nodeState(t, state, "done").Output != "result" {
+				t.Fatal("workflow name shadowed a graph node's event ownership")
+			}
+		})
+	}
+}
+
+func TestReconstructRunState_LatestOutcome(t *testing.T) {
+	ask, sibling := newDummyNode("ask"), newDummyNode("sibling")
+	wf, err := New("root", []Edge{{From: Start, To: ask}, {From: Start, To: sibling}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := func() *session.Event {
+		return &session.Event{Author: "sibling", Output: "result", Branch: "root.sibling"}
+	}
+	failure := func() *session.Event {
+		ev := &session.Event{Author: "sibling", Branch: "root.sibling"}
+		ev.ErrorCode = workflowNodeFailureCode
+		return ev
+	}
+	completed := func() *session.Event {
+		ev := &session.Event{Author: "sibling", Branch: "root.sibling"}
+		ev.CustomMetadata = map[string]any{workflowNodeCompletedKey: true}
+		return ev
+	}
+	for _, tc := range []struct {
+		name   string
+		events sliceEvents
+		status NodeStatus
+		output any
+	}{
+		{name: "output_then_failure", events: sliceEvents{output(), failure()}, status: NodeFailed},
+		{name: "failure_then_result", events: sliceEvents{failure(), output()}, status: NodeCompleted, output: "result"},
+		{name: "failure_then_nil_success", events: sliceEvents{failure(), completed()}, status: NodeCompleted},
+		{name: "nil_success", events: sliceEvents{completed()}, status: NodeCompleted},
+		{name: "later_nil_success_clears_old_output", events: sliceEvents{output(), completed()}, status: NodeCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := append(sliceEvents{&session.Event{Author: "ask", LongRunningToolIDs: []string{"approval"}}}, tc.events...)
+			// Session services round-trip event metadata through JSON.
+			data, err := json.Marshal(events)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stored sliceEvents
+			if err := json.Unmarshal(data, &stored); err != nil {
+				t.Fatal(err)
+			}
+			state, err := wf.ReconstructRunState(fakeSession{events: stored}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "sibling")
+			if ns.Status != tc.status || ns.Output != tc.output || ns.Branch != "root.sibling" {
+				t.Fatal("latest outcome was not reconstructed with its output and branch")
+			}
+			if tc.status == NodeFailed && state.completed["sibling"] {
+				t.Fatal("failed node would suppress a later retry")
+			}
+		})
+	}
+}
+
+func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
+	c := NewFunctionNode("c", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{RerunOnResume: new(true)})
+	wf, err := New("root", []Edge{{From: Start, To: c}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raised := &session.Event{Author: "c", LongRunningToolIDs: []string{"approval"}}
+	resolved := &session.Event{Author: "user"}
+	resolved.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": "approved"}, genai.RoleUser)
+	resolved.Content.Parts[0].FunctionResponse.ID = "approval"
+	for _, outcome := range []string{"not_rerun_yet", "already_finished", "partial_result"} {
+		t.Run(outcome, func(t *testing.T) {
+			events := sliceEvents{raised, resolved}
+			want := NodePending
+			if outcome != "not_rerun_yet" {
+				ev := &session.Event{Author: "c", Output: "result"}
+				ev.Partial = outcome == "partial_result"
+				events = append(events, ev)
+				if !ev.Partial {
+					want = NodeCompleted
+				}
+			}
+			state, err := wf.ReconstructRunState(fakeSession{events: events}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nodeState(t, state, "c").Status != want {
+				t.Fatal("previously resolved interrupt changed the latest node outcome")
+			}
+		})
+	}
+}
+
+func TestResume_FailedSiblingRequiresMatchedInterrupt(t *testing.T) {
+	var attempts atomic.Int32
+	ask := newDummyNode("ask")
+	failed := NewFunctionNode("failed", func(agent.Context, any) (string, error) {
+		attempts.Add(1)
+		return "retried", nil
+	}, NodeConfig{})
+	wf, err := New("root", []Edge{{From: Start, To: ask}, {From: Start, To: failed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := NewRunState()
+	state.Nodes["ask"] = &NodeState{Status: NodeWaiting, Interrupts: []string{"approval"}}
+	state.Nodes["failed"] = &NodeState{Status: NodeFailed}
+	var runErr error
+	for _, err := range wf.Resume(agent.Promote(newMockCtx(t)), state, map[string]any{"unknown": "response"}) {
+		if err != nil {
+			runErr = err
+		}
+	}
+	if !errors.Is(runErr, ErrNothingToResume) || attempts.Load() != 0 {
+		t.Fatal("unmatched response retried a failed sibling")
+	}
+}
+
+func TestReconstructRunState_CancellationAfterInterrupt(t *testing.T) {
+	ask := newDummyNode("ask")
+	wf := mustNew(t, []Edge{{From: Start, To: ask}})
+	raised := &session.Event{Author: "ask", LongRunningToolIDs: []string{"approval"}}
+	resolved := &session.Event{Author: "user"}
+	resolved.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": "approved"}, genai.RoleUser)
+	resolved.Content.Parts[0].FunctionResponse.ID = "approval"
+	cancelled := &session.Event{Author: "ask"}
+	cancelled.ErrorCode = workflowNodeCancelledCode
+	for _, answered := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pause_not_consumed", true: "reentry_cancelled"}[answered], func(t *testing.T) {
+			events := sliceEvents{raised}
+			want := NodeWaiting
+			if answered {
+				events = append(events, resolved)
+				want = NodeFailed
+			}
+			events = append(events, cancelled)
+			state, err := wf.ReconstructRunState(fakeSession{events: events}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nodeState(t, state, "ask").Status != want {
+				t.Fatal("cancellation confused an outstanding pause with failed re-entry")
+			}
+		})
+	}
+}
+
+// A re-entry node on a loop can pause once per visit. An answer belongs to
+// the activation that got it. Once history records that the activation
+// completed, the answer must not count for the next pause of the node.
+// Until then the node still needs it.
+func TestReconstructRunState_AnswerConsumedByCompletedActivation(t *testing.T) {
+	count := newDummyNode("count")
+	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
+	wf := mustNew(t, []Edge{
+		{From: Start, To: count},
+		{From: count, To: ask},
+		{From: ask, To: count, Route: StringRoute("again")},
+	})
+	// The events of ask are stamped the way the scheduler stamps them.
+	askEvent := func() *session.Event {
+		return &session.Event{NodeInfo: &session.NodeInfo{Path: "ask@1"}}
+	}
+	raised := func(id string) *session.Event {
+		ev := askEvent()
+		ev.LongRunningToolIDs = []string{id}
+		return ev
+	}
+	answered := func(id, payload string) *session.Event {
+		ev := &session.Event{Author: "user"}
+		ev.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": payload}, genai.RoleUser)
+		ev.Content.Parts[0].FunctionResponse.ID = id
+		return ev
+	}
+	output := func() *session.Event {
+		ev := askEvent()
+		ev.Output, ev.Routes = "again", []string{"again"}
+		ev.NodeInfo.OutputFor = []string{ev.NodeInfo.Path}
+		return ev
+	}
+	record := func(key string, value any) *session.Event {
+		ev := askEvent()
+		ev.CustomMetadata = map[string]any{key: value}
+		return ev
+	}
+	// completed is the record of a resumed activation that completed
+	// with output, and completedEmpty the one of an activation that
+	// completed without. failed is the record of a failed attempt.
+	completed := func() *session.Event { return record(workflowNodeResumeCompletedKey, true) }
+	completedEmpty := func() *session.Event { return record(workflowNodeCompletedKey, true) }
+	failed := func() *session.Event { return record(workflowNodeOutcomeKey, workflowNodeFailureOutcome) }
+	delegated := func() *session.Event {
+		ev := completedEmpty()
+		ev.CustomMetadata[workflowDelegatedOutputKey] = "again"
+		return ev
+	}
+	for _, tc := range []struct {
+		name           string
+		history        sliceEvents
+		wantStatus     NodeStatus
+		wantInterrupts []string
+		wantResumed    map[string]any
+		// wantNoOutput checks that history keeps no output of ask, the
+		// output it emitted having been cleared by an answer.
+		wantNoOutput bool
+	}{
+		{
+			name:           "second_pause_under_a_new_id",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:           "repeated_answer_to_the_first_pause",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2"), answered("ask-1", "again")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:        "second_pause_answered",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), completed(), raised("ask-2"), answered("ask-2", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask-2": "stop"},
+		},
+		{
+			name:           "second_pause_under_the_same_id",
+			history:        sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask"},
+		},
+		{
+			name:        "second_pause_under_the_same_id_answered",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask"), answered("ask", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "stop"},
+		},
+		{
+			// The first visit completed without output, which the
+			// scheduler records for every activation.
+			name:           "first_visit_completed_without_output",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), completedEmpty(), raised("ask-2")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			// Output is not the end of the activation. Here the node
+			// emitted output and paused again in the same run, so the
+			// rerun needs the first answer. A loop stored before the
+			// scheduler wrote completion records looks the same and
+			// keeps the behavior it had.
+			name:           "output_then_second_pause",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), raised("ask-2")},
+			wantStatus:     NodePending,
+			wantInterrupts: []string{"ask-2"},
+			wantResumed:    map[string]any{"ask-1": "again"},
+		},
+		{
+			name:        "output_then_second_pause_answered",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), raised("ask-2"), answered("ask-2", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask-1": "again", "ask-2": "stop"},
+		},
+		{
+			// A failed re-entry is retried with the answer it had.
+			name:        "output_then_failure",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), output(), failed()},
+			wantStatus:  NodeFailed,
+			wantResumed: map[string]any{"ask-1": "again"},
+		},
+		{
+			// A dynamic node records its delegated output before the
+			// activation is over. That is not a completion yet.
+			name:        "delegated_output_then_failure",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), delegated(), failed()},
+			wantStatus:  NodeFailed,
+			wantResumed: map[string]any{"ask-1": "again"},
+		},
+		{
+			// A node that raises an ID again waits for a new answer,
+			// completed or not. Same as adk-python.
+			name:           "asked_again_before_completing",
+			history:        sliceEvents{raised("ask"), answered("ask", "again"), raised("ask")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask"},
+		},
+		{
+			name:        "asked_again_before_completing_answered",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), raised("ask"), answered("ask", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "stop"},
+		},
+		{
+			// The answer to a pause raised again is the first answer to
+			// that pause. Like any first answer it discards output the
+			// node emitted while it waited, in the scan and in the
+			// outputs kept for successors.
+			name:         "output_during_second_pause_under_the_same_id",
+			history:      sliceEvents{raised("ask"), answered("ask", "again"), output(), completed(), raised("ask"), output(), answered("ask", "stop")},
+			wantStatus:   NodePending,
+			wantResumed:  map[string]any{"ask": "stop"},
+			wantNoOutput: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := wf.ReconstructRunState(fakeSession{events: tc.history}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "ask")
+			if ns.Status != tc.wantStatus || !reflect.DeepEqual(ns.Interrupts, tc.wantInterrupts) || !reflect.DeepEqual(ns.ResumedInputs, tc.wantResumed) {
+				t.Errorf("ask = status %v, interrupts %v, resumed inputs %v, want status %v, interrupts %v, resumed inputs %v",
+					ns.Status, ns.Interrupts, ns.ResumedInputs, tc.wantStatus, tc.wantInterrupts, tc.wantResumed)
+			}
+			if tc.wantNoOutput {
+				outputs, _ := collectNodeOutputs(tc.history, buildNodesByName(wf.graph), "", wf.name)
+				if out, ok := outputs["ask"]; ok {
+					t.Errorf("history keeps output %v of ask, want none", out)
+				}
+			}
+		})
+	}
+}
+
+// A resumed re-entry node that completes with output gets one record that
+// says so. Nodes that were not resumed get none, since nothing reads it there.
+func TestScheduler_ResumeCompletionRecord(t *testing.T) {
+	records := func(events []*session.Event) []string {
+		var paths []string
+		for _, ev := range events {
+			if ev.CustomMetadata[workflowNodeResumeCompletedKey] == true {
+				paths = append(paths, ev.NodeInfo.Path)
+			}
+		}
+		return paths
+	}
+	t.Run("not_resumed", func(t *testing.T) {
+		a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
+		b := NewFunctionNode("b", func(agent.Context, string) (string, error) { return "B", nil }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: a}, {From: a, To: b}})
+		if got := records(drain(t, wf.Run(newSeededMockCtx(t)))); len(got) != 0 {
+			t.Errorf("records on %v, want none", got)
+		}
+	})
+	t.Run("resumed", func(t *testing.T) {
+		ask := NewFunctionNode("ask", func(ctx agent.Context, _ any) (string, error) {
+			if _, ok := ctx.ResumedInput("approval"); !ok {
+				return "", errors.New("no answer")
+			}
+			return "done", nil
+		}, NodeConfig{RerunOnResume: new(true)})
+		next := NewFunctionNode("next", func(agent.Context, string) (string, error) { return "next", nil }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: ask}, {From: ask, To: next}})
+		state := NewRunState()
+		state.Nodes["ask"] = &NodeState{Status: NodeWaiting, Interrupts: []string{"approval"}}
+		got := records(drain(t, wf.Resume(agent.Promote(newMockCtx(t)), state, map[string]any{"approval": "yes"})))
+		if want := []string{"ask@1"}; !slices.Equal(got, want) {
+			t.Errorf("records on %v, want %v", got, want)
+		}
+	})
+}
+
+// A node that routes back to itself and to another node is queued behind
+// that node under a concurrency cap. Queueing it must not turn the run that
+// just completed into a failed one in history.
+func TestScheduler_SelfLoopUnderConcurrencyCapRecordsNoFailure(t *testing.T) {
+	visits := 0
+	loop := NewEmittingFunctionNode("loop", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		visits++
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = visits
+		if visits == 1 {
+			ev.Routes = []string{"again"}
+		}
+		return nil, emit(ev)
+	}, NodeConfig{})
+	side := NewFunctionNode("side", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{})
+	wf, err := New("", []Edge{
+		{From: Start, To: loop},
+		{From: loop, To: side, Route: StringRoute("again")},
+		{From: loop, To: loop, Route: StringRoute("again")},
+	}, WithMaxConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := drain(t, wf.Run(newSeededMockCtx(t)))
+	for _, ev := range events {
+		if outcome := workflowNodeOutcome(ev); outcome != "" {
+			t.Errorf("%s recorded as %s", ev.NodeInfo.Path, outcome)
+		}
+	}
+	if visits != 2 {
+		t.Errorf("loop ran %d times, want 2", visits)
+	}
+}
+
+func TestResume_FailedRequesterReceivesResponse(t *testing.T) {
+	var called atomic.Bool
+	ask := NewFunctionNode("ask", func(ctx agent.Context, _ any) (string, error) {
+		called.Store(true)
+		if value, ok := ctx.ResumedInput("approval"); !ok || value != "corrected" {
+			t.Error("failed requester did not receive its response on retry")
+		}
+		return "result", nil
+	}, NodeConfig{})
+	wf := mustNew(t, []Edge{{From: Start, To: ask}})
+	state := NewRunState()
+	state.Nodes["ask"] = &NodeState{Status: NodeFailed, ResumedInputs: map[string]any{"approval": "approved"}}
+	for _, err := range wf.Resume(agent.Promote(newMockCtx(t)), state, map[string]any{"approval": "corrected"}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !called.Load() {
+		t.Fatal("matched response did not retry the failed requester")
+	}
+}
+
+func TestResume_InvalidFailedResponseDoesNotRetry(t *testing.T) {
+	var called atomic.Bool
+	ask := newDummyNode("ask")
+	failed := NewFunctionNode("failed", func(agent.Context, any) (any, error) {
+		called.Store(true)
+		return nil, nil
+	}, NodeConfig{})
+	wf := mustNew(t, []Edge{{From: Start, To: ask}, {From: Start, To: failed}})
+	state := NewRunState()
+	state.Nodes["ask"] = &NodeState{Status: NodeWaiting, Interrupts: []string{"ask"}}
+	state.Nodes["failed"] = &NodeState{Status: NodeFailed, ResumedInputs: map[string]any{"approval": 1}, interruptSchemas: map[string]*jsonschema.Schema{"approval": {Type: "integer"}}}
+	var rejected bool
+	for _, err := range wf.Resume(agent.Promote(newMockCtx(t)), state, map[string]any{"ask": "approved", "approval": "invalid"}) {
+		if errors.Is(err, ErrInvalidResumeResponse) {
+			rejected = true
+		}
+	}
+	if !rejected || called.Load() {
+		t.Fatal("invalid corrected response retried a failed requester")
+	}
+}
+
+func TestScheduler_NoOutputCompletionConsumerExit(t *testing.T) {
+	n := NewDynamicNode("silent", func(agent.Context, any, func(*session.Event) error) (any, error) { return nil, nil }, NodeConfig{})
+	wf := mustNew(t, []Edge{{From: Start, To: n}})
+	sawCompletion := false
+	for ev, err := range wf.Run(newMockCtx(t)) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		sawCompletion = ev.CustomMetadata[workflowNodeCompletedKey] == true
+		break
+	}
+	if !sawCompletion {
+		t.Fatal("silent node did not produce a completion record")
+	}
+}
+
+func TestScheduler_NoOutputActivationClearsPreviousResult(t *testing.T) {
+	n := NewDynamicNode("silent", func(agent.Context, any, func(*session.Event) error) (any, error) { return nil, nil }, NodeConfig{})
+	wf := mustNew(t, []Edge{{From: Start, To: n}})
+	s := newScheduler(agent.Promote(newMockCtx(t)), wf.graph, 0)
+	s.state.Nodes["silent"] = &NodeState{Status: NodeCompleted, Output: "old result"}
+	s.scheduleNode(n, nil, "", "")
+	var sawCompletion bool
+	s.run(func(ev *session.Event, err error) bool {
+		if err != nil {
+			t.Error(err)
+		}
+		if ev != nil && ev.CustomMetadata[workflowNodeCompletedKey] == true {
+			sawCompletion = true
+		}
+		return true
+	}, false)
+	s.wg.Wait()
+	if ns := s.state.Nodes["silent"]; !sawCompletion || ns.Status != NodeCompleted || ns.Output != nil {
+		t.Fatal("silent activation retained a previous activation's result")
+	}
+}
+
+func TestWorkflow_CancelledDynamicChildDoesNotReplayOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nested       bool
+		contextError bool
+	}{
+		{name: "child"},
+		{name: "nested_child", nested: true},
+		{name: "nested_context_error", nested: true, contextError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paused, childEmitted := make(chan struct{}), make(chan struct{})
+			var attempts, failures, stableAttempts atomic.Int32
+			stable := NewFunctionNode("stable", func(agent.Context, any) (string, error) {
+				stableAttempts.Add(1)
+				return "stable", nil
+			}, NodeConfig{})
+			q := NewDynamicNode("q", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+				if attempts.Add(1) > 1 {
+					return "retried", nil
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Output = "partial"
+				if err := emit(ev); err != nil {
+					return nil, err
+				}
+				close(childEmitted)
+				<-ctx.Done()
+				return nil, nil
+			}, NodeConfig{})
+			if tc.nested {
+				leaf := q
+				q = NewDynamicNode("mid", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+					out, err := RunNode[any](ctx, leaf, in)
+					if tc.contextError && ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					return out, err
+				}, NodeConfig{})
+			}
+			c := NewDynamicNode("c", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+				if _, err := RunNode[string](ctx, stable, in); err != nil {
+					return nil, err
+				}
+				return RunNode[any](ctx, q, in)
+			}, NodeConfig{})
+			b := NewDynamicNode("b", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+				return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "b", Message: "approve"})
+			}, NodeConfig{})
+			failure := errors.New("scripted failure")
+			f := NewDynamicNode("f", func(agent.Context, any, func(*session.Event) error) (any, error) {
+				if failures.Add(1) > 1 {
+					return nil, nil
+				}
+				<-paused
+				<-childEmitted
+				return nil, failure
+			}, NodeConfig{})
+			join := NewJoinNode("join")
+			wf, err := New("root", []Edge{{From: Start, To: b}, {From: Start, To: c}, {From: Start, To: f}, {From: b, To: join}, {From: c, To: join}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := newMockCtx(t)
+			var events sliceEvents
+			var sawFailure bool
+			for ev, err := range wf.Run(ctx) {
+				if err != nil {
+					sawFailure = errors.Is(err, failure)
+					continue
+				}
+				events = append(events, ev)
+				if ev.RequestedInput != nil {
+					close(paused)
+				}
+			}
+			if !sawFailure {
+				t.Fatal("fixture did not cancel the dynamic child")
+			}
+			ctx.sess = &eventsSession{events: events}
+			state, err := wf.ReconstructRunState(ctx.sess, ctx.InvocationID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("root@1")})
+			var sawJoin bool
+			for ev, err := range wf.Resume(resumeCtx, state, map[string]any{"b": "approved"}) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if out, ok := ev.Output.(map[string]any); ok {
+					sawJoin = true
+					if !reflect.DeepEqual(out, map[string]any{"b": "approved", "c": "retried"}) {
+						t.Error("cancelled child output was replayed as a successful result")
+					}
+				}
+			}
+			if !sawJoin || attempts.Load() != 2 || stableAttempts.Load() != 1 {
+				t.Fatal("cancelled child was not executed again on resume")
+			}
+		})
 	}
 }
 
@@ -70,7 +722,7 @@ func TestCollectNodeOutputs_MessageAsOutput(t *testing.T) {
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", true)}
 
-	outputs, completed := collectNodeOutputs(events, nodes, "")
+	outputs, completed := collectNodeOutputs(events, nodes, "", "")
 
 	if got, want := outputs["talky"], "Hello, world!"; got != want {
 		t.Errorf("outputs[talky] = %#v, want %q", got, want)
@@ -85,7 +737,7 @@ func TestCollectNodeOutputs_MessageNotFlagged(t *testing.T) {
 
 	events := sliceEvents{modelEvent("talky", "Hello, world!", false)}
 
-	outputs, _ := collectNodeOutputs(events, nodes, "")
+	outputs, _ := collectNodeOutputs(events, nodes, "", "")
 
 	if _, ok := outputs["talky"]; ok {
 		t.Errorf("outputs[talky] = %#v, want absent", outputs["talky"])
@@ -99,7 +751,7 @@ func TestCollectNodeOutputs_ExplicitOutputWins(t *testing.T) {
 	ev.Output = "explicit"
 	events := sliceEvents{ev}
 
-	outputs, _ := collectNodeOutputs(events, nodes, "")
+	outputs, _ := collectNodeOutputs(events, nodes, "", "")
 
 	if got, want := outputs["talky"], "explicit"; got != want {
 		t.Errorf("outputs[talky] = %#v, want %q", got, want)
@@ -119,11 +771,11 @@ func TestCollectNodeOutputs_OutputForAttributesAncestors(t *testing.T) {
 		Output: "delegated",
 		NodeInfo: &session.NodeInfo{
 			Path:      "child/gc@1",
-			OutputFor: []string{"child/gc@1", "outer/child@1"},
+			OutputFor: []string{"child/gc@1", "child", "outer"},
 		},
 	}
 
-	outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes, "")
+	outputs, _ := collectNodeOutputs(sliceEvents{ev}, nodes, "", "")
 
 	if got, want := outputs["child"], "delegated"; got != want {
 		t.Errorf("outputs[child] = %#v, want %q", got, want)
@@ -259,4 +911,45 @@ func nodeState(t *testing.T, state *RunState, name string) *NodeState {
 		t.Fatalf("no NodeState for %q; nodes = %+v", name, state.Nodes)
 	}
 	return ns
+}
+
+// A completed sibling must retain its output and branch for a join after
+// another node pauses. Historical runs and unfinished siblings must not
+// become completed predecessors of the current invocation.
+func TestReconstructRunState_CompletedJoinPredecessors(t *testing.T) {
+	ask, done, old, streaming := newDummyNode("ask"), newDummyNode("done"), newDummyNode("old"), newDummyNode("streaming")
+	join := NewJoinNode("join")
+	wf, err := New("root", []Edge{{From: Start, To: ask}, {From: Start, To: done}, {From: Start, To: old}, {From: Start, To: streaming}, {From: ask, To: join}, {From: done, To: join}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, messageOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "explicit_output", true: "message_output"}[messageOutput], func(t *testing.T) {
+			completed := modelEvent("done", "saved", messageOutput)
+			completed.InvocationID, completed.Branch = "current", "outer@1.done@1"
+			if !messageOutput {
+				completed.Output = "saved"
+			}
+			pending := &session.Event{Author: "ask", InvocationID: "current", Output: "intermediate", LongRunningToolIDs: []string{"approval"}}
+			previous := &session.Event{Author: "old", InvocationID: "previous", Output: "obsolete"}
+			unfinished := modelEvent("streaming", "partial", false)
+			unfinished.InvocationID = "current"
+			state, err := wf.ReconstructRunState(fakeSession{events: sliceEvents{previous, completed, unfinished, pending}}, "current")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "done")
+			if ns.Status != NodeCompleted || ns.Output != "saved" || ns.Branch != completed.Branch {
+				t.Fatal("completed sibling lost its output, branch or completed status")
+			}
+			if nodeState(t, state, "ask").Status != NodeWaiting {
+				t.Fatal("interrupted node was marked completed")
+			}
+			for _, name := range []string{"old", "streaming"} {
+				if _, exists := state.Nodes[name]; exists {
+					t.Fatalf("%s incorrectly restored as completed", name)
+				}
+			}
+		})
+	}
 }

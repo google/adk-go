@@ -76,6 +76,12 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			wantStateDelta: map[string]any{"result": "Test response"},
 		},
 		{
+			name:           "skips task mode: finish_task delivers the result, not a text turn",
+			agentConfig:    Config{Name: "test_agent", OutputKey: "result", Mode: ModeTask},
+			event:          createTestEvent("test_agent", "Which language?", true),
+			wantStateDelta: map[string]any{},
+		},
+		{
 			name:           "skips when output_key is not set",
 			agentConfig:    Config{Name: "test_agent"}, // No OutputKey
 			event:          createTestEvent("test_agent", "Test response", true),
@@ -289,7 +295,7 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if err := a.maybeSaveOutput(ic, ev); err != nil {
 			t.Fatalf("maybeSaveOutput: %v", err)
 		}
-		if got, want := ev.Actions.ArtifactDelta["design.md"], int64(1); got != want {
+		if got, want := ev.Actions.ArtifactDelta["design.md"], int64(0); got != want {
 			t.Errorf("ArtifactDelta[\"design.md\"] = %d, want %d", got, want)
 		}
 		if got, want := ev.Actions.StateDelta["latest_design"], any("# Design v1\nBody text"); got != want {
@@ -301,12 +307,12 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if !ev.Content.Parts[0].Thought || ev.Content.Parts[0].Text != "internal reasoning" {
 			t.Errorf("Parts[0] = %+v, want preserved thought part", ev.Content.Parts[0])
 		}
-		if got, want := ev.Content.Parts[1].Text, `Saved artifact "design.md" (version 1).`; got != want {
+		if got, want := ev.Content.Parts[1].Text, `Saved artifact "design.md" (version 0).`; got != want {
 			t.Errorf("Parts[1].Text = %q, want %q", got, want)
 		}
 
 		loaded, err := svc.Load(t.Context(), &artifact.LoadRequest{
-			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: 1,
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "design.md", Version: new(int64(0)),
 		})
 		if err != nil {
 			t.Fatalf("svc.Load: %v", err)
@@ -479,7 +485,7 @@ func TestLlmAgent_MaybeSaveOutputToArtifact(t *testing.T) {
 		if !ok || gotState["title"] != "v1" {
 			t.Errorf("StateDelta[\"spec\"] = %#v, want parsed map with title=v1", goodEv.Actions.StateDelta["spec"])
 		}
-		if got, want := goodEv.Output, any(`Saved artifact "spec.json" (version 1).`); got != want {
+		if got, want := goodEv.Output, any(`Saved artifact "spec.json" (version 0).`); got != want {
 			t.Errorf("goodEv.Output = %#v, want %#v", got, want)
 		}
 	})

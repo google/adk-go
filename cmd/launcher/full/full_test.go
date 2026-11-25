@@ -47,7 +47,7 @@ func freePort(t *testing.T) int {
 type launchedServer struct {
 	base string
 	// runErr carries the result of Execute, which returns only once the
-	// launcher has stopped. A value here before the test context is cancelled
+	// launcher has stopped. A value here before the test context is canceled
 	// means it stopped early.
 	runErr chan error
 }
@@ -96,7 +96,7 @@ func startFullLauncher(t *testing.T, apiArgs ...string) *launchedServer {
 			&launcher.Config{AgentLoader: agent.NewSingleLoader(rootAgent)}, args)
 	}()
 
-	// The test context is cancelled just before cleanups run, so Execute is on
+	// The test context is canceled just before cleanups run, so Execute is on
 	// its way back with a nil error. Anything else is read here because the
 	// assertions can miss it entirely: when a bind is lost to another process
 	// running this same test, its server answers every request and the rows

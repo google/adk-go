@@ -38,9 +38,22 @@ const (
 // Attribute keys not yet in the Go semconv package; the string
 // literals match the keys used by adk-python.
 var (
-	genAIWorkflowName = attribute.Key("gen_ai.workflow.name")
-	genAINodeName     = attribute.Key("gen_ai.node.name")
+	genAIWorkflowName   = attribute.Key("gen_ai.workflow.name")
+	genAINodeName       = attribute.Key("gen_ai.node.name")
+	genAIWorkflowNested = attribute.Key("gen_ai.workflow.nested")
 )
+
+// workflowScopeKey marks a context as running inside an invoke_workflow span.
+type workflowScopeKey struct{}
+
+type invocationScopeKey struct{}
+
+// invocationScope identifies the span owned by this runner and, for workflow
+// roots, the agent that runs within it without starting a second span.
+type invocationScope struct {
+	span     trace.Span
+	workflow *agentinternal.State
+}
 
 // Operation is the internal sum-type which describes what can be used to start a span.
 type Operation interface {
@@ -83,15 +96,19 @@ type InvocationContext interface {
 
 // StartNodeSpan emits an OpenTelemetry span and returns a derived context with the new Span.
 // Emits:
-// - invoke_workflow <workflow_name> if provided with [OperationNode] or workflow agent.
+// - invoke_workflow <workflow_name> if provided with a workflow agent.
 // - invoke_agent <agent_name> if provided with non-workflow agent.
 // - invoke_node <node_name> if provided with a generic node.
 // - otherwise doesn't start any new span and returns the input context unchanged.
 func StartNodeSpan(ctx context.Context, ictx InvocationContext, op Operation) (context.Context, trace.Span) {
 	switch o := op.(type) {
 	case OperationAgent:
-		if isWorkflowAgent(o.Agent) {
-			return startInvokeWorkflowSpan(ctx, ictx, o.Agent)
+		if state := workflowState(o.Agent); state != nil {
+			if scope, ok := ctx.Value(invocationScopeKey{}).(*invocationScope); ok && scope.workflow == state {
+				// The runner ends this span after its callbacks and compaction.
+				return context.WithValue(ctx, invocationScopeKey{}, nil), noop.Span{}
+			}
+			return startInvokeWorkflowSpan(ctx, o.Agent.Name(), sessionID(ictx))
 		}
 		return startInvokeAgentSpan(ctx, ictx, o.Agent)
 	case OperationNode:
@@ -101,12 +118,16 @@ func StartNodeSpan(ctx context.Context, ictx InvocationContext, op Operation) (c
 	}
 }
 
-func isWorkflowAgent(a AgentLike) bool {
+func workflowState(a AgentLike) *agentinternal.State {
 	internal, ok := a.(agentinternal.Agent)
 	if !ok {
-		return false
+		return nil
 	}
-	return agentinternal.Reveal(internal).AgentType == agentinternal.TypeWorkflowAgent
+	state := agentinternal.Reveal(internal)
+	if state.AgentType == agentinternal.TypeWorkflowAgent {
+		return state
+	}
+	return nil
 }
 
 // sessionID returns ictx.Session().ID() or "" if the
@@ -122,7 +143,7 @@ func sessionID(ictx InvocationContext) string {
 }
 
 func startInvokeAgentSpan(ctx context.Context, ictx InvocationContext, a AgentLike) (context.Context, trace.Span) {
-	return tracer.Start(ctx, fmt.Sprintf("invoke_agent %s", a.Name()), trace.WithAttributes(
+	return tracer().Start(ctx, fmt.Sprintf("invoke_agent %s", a.Name()), trace.WithAttributes(
 		gcpVertexAgentInvocationID.String(ictx.InvocationID()), // used by adk-web
 		semconv.GenAIOperationNameInvokeAgent,
 		semconv.GenAIAgentDescription(a.Description()),
@@ -131,16 +152,22 @@ func startInvokeAgentSpan(ctx context.Context, ictx InvocationContext, a AgentLi
 	))
 }
 
-func startInvokeWorkflowSpan(ctx context.Context, ictx InvocationContext, w AgentLike) (context.Context, trace.Span) {
-	return tracer.Start(ctx, fmt.Sprintf("invoke_workflow %s", w.Name()), trace.WithAttributes(
+// startInvokeWorkflowSpan starts an invoke_workflow span, marked nested inside another one.
+func startInvokeWorkflowSpan(ctx context.Context, name, conversationID string) (context.Context, trace.Span) {
+	attrs := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(invokeWorkflowOperationName),
-		genAIWorkflowName.String(w.Name()),
-		semconv.GenAIConversationID(sessionID(ictx)),
-	))
+		genAIWorkflowName.String(name),
+		semconv.GenAIConversationID(conversationID),
+	}
+	if ctx.Value(workflowScopeKey{}) != nil && !useLegacySchema() {
+		attrs = append(attrs, genAIWorkflowNested.Bool(true))
+	}
+	ctx, span := tracer().Start(ctx, fmt.Sprintf("invoke_workflow %s", name), trace.WithAttributes(attrs...))
+	return context.WithValue(ctx, workflowScopeKey{}, true), span
 }
 
 func startInvokeNodeSpan(ctx context.Context, ictx InvocationContext, n WorkflowNodeLike) (context.Context, trace.Span) {
-	return tracer.Start(ctx, fmt.Sprintf("invoke_node %s", n.Name()), trace.WithAttributes(
+	return tracer().Start(ctx, fmt.Sprintf("invoke_node %s", n.Name()), trace.WithAttributes(
 		semconv.GenAIOperationNameKey.String(invokeNodeOperationName),
 		genAINodeName.String(n.Name()),
 		semconv.GenAIConversationID(sessionID(ictx)),

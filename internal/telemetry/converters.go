@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -43,6 +44,15 @@ func toLogValue(v any) attribute.Value {
 		return attribute.Float64Value(val)
 	case int:
 		return attribute.IntValue(val)
+	case json.Number:
+		if i, err := val.Int64(); err == nil {
+			return attribute.Int64Value(i)
+		}
+		if f, err := val.Float64(); err == nil {
+			return attribute.Float64Value(f)
+		}
+		// Out of float64 range: keep the exact JSON text, as the legacy schema does.
+		return attribute.StringValue(val.String())
 	case []any:
 		values := make([]attribute.Value, 0, len(val))
 		for _, item := range val {

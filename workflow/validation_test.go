@@ -16,12 +16,17 @@ package workflow
 
 import (
 	"errors"
+	"iter"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/workflowroute"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestUniqueNames(t *testing.T) {
@@ -98,6 +103,10 @@ func TestStartNodePresent(t *testing.T) {
 			}(),
 			expectErrorMsg: "no start node found",
 		},
+		{
+			name:  "empty edges",
+			edges: []Edge{},
+		},
 	}
 
 	for _, tc := range tests {
@@ -109,6 +118,8 @@ func TestStartNodePresent(t *testing.T) {
 				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
 					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
 				}
+			} else if err != nil {
+				t.Errorf("expected no error, got %v", err)
 			}
 		})
 	}
@@ -890,5 +901,136 @@ func TestStaticSchemaValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStaticSchemaValidation_LiteralArrayOrder(t *testing.T) {
+	for _, keyword := range []string{"enum", "const"} {
+		for _, name := range []string{"required", "type"} {
+			t.Run(keyword+"/"+name, func(t *testing.T) {
+				output := map[string]any{name: []string{"a", "b"}}
+				input := map[string]any{name: []string{"b", "a"}}
+				resolve := func(value any) *jsonschema.Resolved {
+					t.Helper()
+					schema := &jsonschema.Schema{Enum: []any{value}}
+					if keyword == "const" {
+						schema = &jsonschema.Schema{Const: &value}
+					}
+					resolved, err := schema.Resolve(nil)
+					if err != nil {
+						t.Fatalf("failed to resolve schema: %v", err)
+					}
+					return resolved
+				}
+				outputSchema := resolve(output)
+				inputSchema := resolve(input)
+				if err := outputSchema.Validate(output); err != nil {
+					t.Fatalf("output schema rejected its own literal: %v", err)
+				}
+				if err := inputSchema.Validate(output); err == nil {
+					t.Fatal("input schema accepted a literal with a different array order")
+				}
+				nodeA := &dummyNode{BaseNode: NewBaseNodeWithSchemas("A", "", NodeConfig{}, nil, outputSchema)}
+				nodeB := &dummyNode{BaseNode: NewBaseNodeWithSchemas("B", "", NodeConfig{}, inputSchema, nil)}
+				_, err := New("test_wf", []Edge{
+					{From: Start, To: nodeA},
+					{From: nodeA, To: nodeB},
+				})
+				if err == nil || !strings.Contains(err.Error(), "schema mismatch on edge A -> B") {
+					t.Fatalf("New() error = %v, want schema mismatch on edge A -> B", err)
+				}
+			})
+		}
+	}
+}
+
+type customTestRoute struct{}
+
+func (customTestRoute) Matches(*session.Event) bool { return false }
+
+type customBoolStringer bool
+
+func (customBoolStringer) String() string { return "yes" }
+
+func TestSummarizeOutgoingEdges(t *testing.T) {
+	from := newDummyNode("from")
+	targets := make([]Node, 13)
+	for i := range targets {
+		targets[i] = newDummyNode("n" + strings.Repeat("x", i+1))
+	}
+
+	edges := []Edge{
+		{From: from, To: targets[0]},
+		{From: from, To: targets[1], Route: Default},
+		{From: from, To: targets[2], Route: StringRoute("billing")},
+		{From: from, To: targets[3], Route: BoolRoute(true)},
+		{From: from, To: targets[4], Route: IntRoute(7)},
+		{From: from, To: targets[5], Route: MultiRoute[string]{"a", "b"}},
+		{From: from, To: targets[6], Route: MultiRoute[bool]{false}},
+		{From: from, To: targets[7], Route: MultiRoute[int]{8}},
+		{From: from, To: targets[8], Route: MultiRoute[any]{"dyn", true, nil, Default}},
+		{From: from, To: targets[9], Route: MultiRoute[StringRoute]{"sr"}},
+		{From: from, To: targets[10], Route: MultiRoute[BoolRoute]{true}},
+		{From: from, To: targets[11], Route: MultiRoute[customBoolStringer]{true}},
+		{From: from, To: targets[12], Route: MultiRoute[string]{}},
+	}
+	edges = append(edges, Edge{From: from, To: newDummyNode("custom"), Route: customTestRoute{}})
+
+	got := summarizeOutgoingEdges(edges)
+	want := workflowroute.OutgoingSummary{
+		HasUnrouted: true,
+		HasDefault:  true,
+		Routes: []workflowroute.Value{
+			{Kind: workflowroute.KindString, Label: `"billing"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "7"},
+			{Kind: workflowroute.KindString, Label: `"a"`},
+			{Kind: workflowroute.KindString, Label: `"b"`},
+			{Kind: workflowroute.KindBool, Label: "false"},
+			{Kind: workflowroute.KindOther, Label: "8"},
+			{Kind: workflowroute.KindString, Label: `"dyn"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "<nil>"},
+			{Kind: workflowroute.KindOther, Label: "Default"},
+			{Kind: workflowroute.KindString, Label: `"sr"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "workflow.customBoolStringer"},
+			{Kind: workflowroute.KindOther, Label: "[]"},
+			{Kind: workflowroute.KindOther, Label: "workflow.customTestRoute"},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("summarizeOutgoingEdges() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type failingEdgeValidatorNode struct {
+	BaseNode
+}
+
+func (n *failingEdgeValidatorNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(func(*session.Event, error) bool) {}
+}
+
+func TestValidateNodeOutgoingEdgesDeterministicOrder(t *testing.T) {
+	workflowroute.Register(func(node any, out workflowroute.OutgoingSummary) error {
+		if fn, ok := node.(*failingEdgeValidatorNode); ok && len(out.Routes) > 0 {
+			return errors.New("edge validation failed for " + fn.Name())
+		}
+		return nil
+	})
+
+	alpha := &failingEdgeValidatorNode{BaseNode: NewBaseNode("alpha", "", NodeConfig{})}
+	zeta := &failingEdgeValidatorNode{BaseNode: NewBaseNode("zeta", "", NodeConfig{})}
+	sink := newDummyNode("sink")
+
+	_, err := New("wf", []Edge{
+		{From: Start, To: zeta},
+		{From: Start, To: alpha},
+		{From: zeta, To: sink, Route: StringRoute("z")},
+		{From: alpha, To: sink, Route: StringRoute("a")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "edge validation failed for alpha") {
+		t.Fatalf("New() error = %v, want deterministic alpha failure first", err)
 	}
 }

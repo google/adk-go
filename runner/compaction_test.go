@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
@@ -482,7 +483,7 @@ func TestPostInvocationCompactionPanicIsReportedNotUnwound(t *testing.T) {
 // A compaction record tells prompt assembly to drop a span of history and put
 // content in its place. EventActions is writable by tool code, and the REST
 // create-session body reaches the stored event, so a record can arrive from
-// outside the framework. If prompt assembly honoured any record it found, a
+// outside the framework. If prompt assembly honored any record it found, a
 // caller could erase a conversation and inject text into it as a model turn --
 // against an application that never enabled compaction at all.
 func TestCompactionRecordIsIgnoredWhenDisabled(t *testing.T) {
@@ -550,7 +551,10 @@ func TestCompactionRunsWhenConsumerStopsEarly(t *testing.T) {
 
 	// Consume one event, then stop, as a streaming caller does on the terminal
 	// event.
-	for range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}) {
+	for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
 		break
 	}
 
@@ -948,65 +952,72 @@ func textOfContent(c *genai.Content) string {
 	return b.String()
 }
 
-// TestCompactionSpanJoinsTheCallersTrace checks that compaction is traced
-// inside the caller's trace rather than in one of its own, and names the turn
-// that triggered it.
-//
-// Compaction runs from a defer, after the invocation has ended, so it is not a
-// child of the turn's span and should not pretend to be. What it must do is
-// stay in the caller's trace, and carry the invocation ID so the two can be
-// joined.
-//
-// Known gap, not asserted here because it is not yet true: with no ambient
-// caller span the compaction span is a root of its own, separate from the
-// turn's own root. Closing that needs the invocation's span context to reach
-// the runner, which it does not today, since the agent derives it internally
-// and only passes it to its own children.
-func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	telemetry.OverrideTracerForTesting(t, tp)
-
-	const userID, sessionID = "u", "s"
-	r, _ := newCompactionRunner(t, &scriptedModel{replyFmt: "answer %d"}, &compaction.Config{
-		CompactionInterval: 1,
-		Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
-	})
-
-	// A caller that traces its own work, which is the normal case in a server.
-	ctx, outer := tp.Tracer("test").Start(t.Context(), "caller")
-	drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
-	outer.End()
-
-	var compactionTrace, turnTrace, named string
-	for _, sp := range exp.GetSpans() {
-		switch {
-		case strings.HasPrefix(sp.Name, "compact_events"):
-			compactionTrace = sp.SpanContext.TraceID().String()
-			if !sp.Parent.IsValid() {
-				t.Error("the compaction span has no parent, so it escaped the caller's trace")
+// Compaction runs after the agent finishes, but still belongs to the
+// invocation's trace, including when the caller supplies no parent span.
+func TestCompactionSpanJoinsTheInvocationTrace(t *testing.T) {
+	forEachTraceSchema(t, func(t *testing.T) {
+		for _, parent := range []bool{false, true} {
+			name := "root"
+			if parent {
+				name = "parent"
 			}
-			for _, a := range sp.Attributes {
-				if string(a.Key) == "gcp.vertex.agent.invocation_id" {
-					named = a.Value.AsString()
+			t.Run(name, func(t *testing.T) {
+				exp := tracetest.NewInMemoryExporter()
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+				telemetry.OverrideTracerForTesting(t, tp)
+
+				const userID, sessionID = "u", "s"
+				r, _ := newCompactionRunner(t, &scriptedModel{replyFmt: "answer %d"}, &compaction.Config{
+					CompactionInterval: 1,
+					Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
+				})
+
+				ctx := t.Context()
+				if parent {
+					parentCtx, outer := tp.Tracer("test").Start(ctx, "caller")
+					defer outer.End()
+					ctx = parentCtx
 				}
-			}
-		case strings.HasPrefix(sp.Name, "invoke_agent"):
-			turnTrace = sp.SpanContext.TraceID().String()
+				drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+				invocation := invocationSpan(t, exp)
+
+				var compactionTrace, turnTrace, named string
+				for _, sp := range exp.GetSpans() {
+					switch {
+					case strings.HasPrefix(sp.Name, "compact_events"):
+						compactionTrace = sp.SpanContext.TraceID().String()
+						if !sp.Parent.IsValid() {
+							t.Error("the compaction span has no parent")
+						}
+						if !sp.Parent.Equal(invocation.SpanContext) {
+							t.Error("compaction is not a child of the invocation")
+						}
+						if sp.EndTime.After(invocation.EndTime) {
+							t.Error("compaction outlived the invocation")
+						}
+						for _, a := range sp.Attributes {
+							if string(a.Key) == "gcp.vertex.agent.invocation_id" {
+								named = a.Value.AsString()
+							}
+						}
+					case strings.HasPrefix(sp.Name, "invoke_agent"):
+						turnTrace = sp.SpanContext.TraceID().String()
+					}
+				}
+				if compactionTrace == "" || turnTrace == "" {
+					t.Fatalf("missing spans: compaction=%q turn=%q", compactionTrace, turnTrace)
+				}
+				if compactionTrace != turnTrace {
+					t.Errorf("compaction is in trace %s and the turn in %s, so they cannot be seen together",
+						compactionTrace, turnTrace)
+				}
+				// Keep the invocation ID for consumers that join spans by this attribute.
+				if named == "" {
+					t.Error("the compaction span does not name the invocation that triggered it")
+				}
+			})
 		}
-	}
-	if compactionTrace == "" || turnTrace == "" {
-		t.Fatalf("missing spans: compaction=%q turn=%q", compactionTrace, turnTrace)
-	}
-	if compactionTrace != turnTrace {
-		t.Errorf("compaction is in trace %s and the turn in %s, so they cannot be seen together",
-			compactionTrace, turnTrace)
-	}
-	// The correlation attribute is the only join between the two, so a span
-	// without it cannot be tied to its turn at all.
-	if named == "" {
-		t.Error("the compaction span does not name the invocation that triggered it")
-	}
+	})
 }
 
 // usageModel replies with a canned answer and reports a fixed prompt token
@@ -1188,7 +1199,7 @@ func TestRunnerBothStrategiesCoexist(t *testing.T) {
 	}
 
 	// Whatever mix of summaries accumulated, the prompt must stay coherent:
-	// every surviving compaction range is honoured and nothing is duplicated.
+	// every surviving compaction range is honored and nothing is duplicated.
 	var events []*session.Event
 	for ev := range sess.Events().All() {
 		events = append(events, ev)
@@ -1226,7 +1237,7 @@ func (s *cancelingSummarizer) SummarizeEvents(_ context.Context, _ []*session.Ev
 // TestTailRetentionCancelledSummarizerLeavesTheTurnIntact covers the case that
 // used to produce the worst possible outcome.
 //
-// A summarizer failing on a cancelled context yielded an error whose chain
+// A summarizer failing on a canceled context yielded an error whose chain
 // contained context.Canceled, and the workflow scheduler drops those, so the
 // turn ended with no answer, no events and no error either. Mid-turn compaction
 // failures are no longer yielded at all, so the turn simply runs on.
@@ -1653,7 +1664,7 @@ func TestPluginCannotSmuggleAFunctionCallIntoASummary(t *testing.T) {
 //
 // A plugin appending is the reliable way to reach the window, not the only one.
 // An event carries the timestamp it was created at rather than the one it was
-// stored at, so parallel tool responses and sub-agent events funnelled through
+// stored at, so parallel tool responses and sub-agent events funneled through
 // a channel are routinely created before a range ends and stored after it.
 func TestStragglerInThePluginWindowIsNotLost(t *testing.T) {
 	t.Parallel()
@@ -1813,5 +1824,81 @@ func TestPluginCannotPlantACompactionRecord(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "real question") {
 		t.Errorf("a planted record erased real history from the prompt:\n%s", prompt)
+	}
+}
+
+func TestBeforeRunPluginCannotPlantACompactionRecord(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"llm", "sequential"} {
+		for _, mode := range []string{"in_place_nil", "in_place_return", "copy"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				m := &scriptedModel{replyFmt: "reply %d"}
+				leaf, err := llmagent.New(llmagent.Config{Name: "assistant", Model: m})
+				if err != nil {
+					t.Fatal(err)
+				}
+				root := leaf
+				if kind == "sequential" {
+					root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "sequence", SubAgents: []agent.Agent{leaf}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				turn := 0
+				p, err := plugin.New(plugin.Config{
+					Name: "cache",
+					BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+						turn++
+						if turn == 1 {
+							return genai.NewContentFromText("cached reply", genai.RoleModel), nil
+						}
+						return nil, nil
+					},
+					OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+						if turn != 1 {
+							return nil, nil
+						}
+						target := ev
+						if mode == "copy" {
+							target = new(*ev)
+						}
+						target.Actions.Compaction = &session.EventCompaction{
+							StartTimestamp: time.Unix(0, 0), EndTimestamp: ev.Timestamp,
+							CompactedContent: genai.NewContentFromText("planted summary", genai.RoleModel),
+						}
+						if mode == "in_place_nil" {
+							return nil, nil
+						}
+						return target, nil
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				svc := session.InMemoryService()
+				r, err := New(Config{
+					AppName: "compaction_app", Agent: root, SessionService: svc, AutoCreateSession: true,
+					PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}},
+					Compaction:   &compaction.Config{CompactionInterval: 5, Summarizer: &recordingSummarizer{summary: "unused"}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				drain(t, r.Run(t.Context(), "u", "s", genai.NewContentFromText("original question", genai.RoleUser), agent.RunConfig{}))
+				drain(t, r.Run(t.Context(), "u", "s", genai.NewContentFromText("second question", genai.RoleUser), agent.RunConfig{}))
+				for ev := range getSession(t, svc, "u", "s").Events().All() {
+					if ev.Actions.Compaction != nil {
+						t.Error("plugin compaction record was persisted")
+					}
+				}
+				prompt := promptText(m.lastPrompt())
+				if strings.Contains(prompt, "planted summary") {
+					t.Error("plugin compaction content reached the model")
+				}
+				if !strings.Contains(prompt, "original question") {
+					t.Error("original question was removed from model history")
+				}
+			})
+		}
 	}
 }

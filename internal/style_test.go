@@ -49,7 +49,7 @@ func TestCopyrightHeader(t *testing.T) {
 
 	ignore := map[string]bool{
 		// Skip directories that are not relevant for copyright checks.
-		// The followings were copied from golang.org/x/tools.
+		// The following were copied from golang.org/x/tools.
 		"internal/jsonschema": true,
 		"internal/util":       true,
 		// The following was copied from golang.org/x/oscar.

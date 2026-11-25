@@ -17,6 +17,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -53,8 +54,18 @@ type Agent interface {
 	internal() *agent
 }
 
-// New creates an Agent with a custom logic defined by Run function.
+// New creates an Agent with a custom logic defined by Run function. It returns
+// an error if cfg.Name is empty or a sub-agent appears more than once in
+// cfg.SubAgents.
 func New(cfg Config) (Agent, error) {
+	// Under agenttool or as a transfer target, an empty name puts an empty
+	// function name or enum value in the parent's model request, which Vertex
+	// AI rejects. adk-python also requires a valid identifier other than
+	// "user"; that is not enforced here because it would reject names that
+	// work today, such as "research-agent".
+	if cfg.Name == "" {
+		return nil, fmt.Errorf("error creating agent: name must not be empty")
+	}
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
 		if _, ok := subAgentSet[subAgent]; ok {
@@ -90,21 +101,16 @@ type Config struct {
 	// allow agent transferring across the tree.
 	SubAgents []Agent
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []BeforeAgentCallback
-	// Run is the function that defines the agent's behavior.
+	// Run is the function that defines the agent's behavior. An agent without
+	// one can be built, for example as a node in an agent tree, but running it
+	// yields an error.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []AfterAgentCallback
 }
 
@@ -114,7 +120,9 @@ type Artifacts interface {
 	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
 	List(context.Context) (*artifact.ListResponse, error)
 	Load(ctx context.Context, name string) (*artifact.LoadResponse, error)
-	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
+	// LoadVersion loads the specified version of name, or the latest version
+	// when version is nil.
+	LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error)
 }
 
 // Memory interface provides methods to access agent memory across the
@@ -124,18 +132,20 @@ type Memory interface {
 	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
-// BeforeAgentCallback is a function that is called before the agent starts
-// its run.
-// If it returns non-nil content or error, the agent run will be skipped and a
-// new event will be created.
+// BeforeAgentCallback runs before the agent.
+// Non-nil content with no error is yielded as an event and skips the remaining
+// before-agent callbacks, the agent run, and the after-agent callbacks.
+//
+// An error takes precedence over content, skips the remaining before-agent
+// callbacks, and is yielded with a nil event. If the caller keeps iterating,
+// the agent and after-agent callbacks can still run.
 type BeforeAgentCallback func(Context) (*genai.Content, error)
 
-// AfterAgentCallback is a function that is called after the agent has completed
-// its run.
-// If it returns non-nil content or error, a new event will be created.
-//
-// The callback will be skipped also if EndInvocation was called before or
-// BeforeAgentCallbacks returned non-nil results.
+// AfterAgentCallback runs after the agent completes. It is skipped if the
+// invocation has ended or the caller stops iterating before that point.
+// Non-nil content or an error skips the remaining after-agent callbacks.
+// Content is yielded as an event; an error takes precedence and is yielded
+// with a nil event.
 type AfterAgentCallback func(Context) (*genai.Content, error)
 
 type agent struct {
@@ -182,7 +192,13 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
+		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
+			a.OnBeforeAgentCallbackEvent(event)
+		}
 		if event != nil || err != nil {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if !yield(event, err) {
 				return
 			}
@@ -192,7 +208,19 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			return
 		}
 
+		// Matches adk-python, where an agent without a run implementation is
+		// constructed fine and fails when run.
+		if a.run == nil {
+			err := fmt.Errorf("agent %q has no Run function", a.name)
+			runOnAgentErrorCallbacks(nodeCtx, err)
+			yield(nil, err)
+			return
+		}
+
 		for event, err := range a.run(nodeCtx) {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if event != nil && event.Author == "" {
 				event.Author = getAuthorForEvent(nodeCtx, event)
 			}
@@ -206,6 +234,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		event, err = runAfterAgentCallbacks(nodeCtx)
+		if err != nil {
+			runOnAgentErrorCallbacks(nodeCtx, err)
+		}
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -260,7 +291,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -301,7 +332,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
@@ -312,6 +343,30 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	return nil, nil
 }
 
+// runOnAgentErrorCallbacks notifies plugins that an error escaped the agent's
+// run. Notification only: the caller still yields err, so a callback cannot
+// recover from or replace the failure. An error is compared against the
+// failing agent's own context: when that context is done, a cancellation or
+// deadline error is not reported — including a deadline a parent agent or a
+// workflow node imposed on it, since that deadline lives on the agent's own
+// context.
+//
+// The context's cancellation cause, or any error wrapping it, is suppressed
+// too, because errors.Is cannot tell an echo of the cancellation from an
+// unrelated failure that wraps it; a caller that cancels with a cause should
+// use an error value it owns. Errors that escape while the agent's context is
+// still live are reported.
+func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx))) {
+		return
+	}
+	pluginManager := pluginManagerFromContext(ctx)
+	if pluginManager == nil {
+		return
+	}
+	pluginManager.RunOnAgentErrorCallback(NewCallbackContext(ctx, nil), ctx.Agent(), err)
+}
+
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content or a state modification
 // then it create a new event with the new content and state delta.
 func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
@@ -319,7 +374,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -364,7 +419,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
@@ -502,6 +557,7 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 type pluginManager interface {
 	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
 	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
+	RunOnAgentErrorCallback(cctx Context, a Agent, err error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)

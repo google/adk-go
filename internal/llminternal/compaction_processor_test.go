@@ -34,7 +34,7 @@ import (
 
 // seedWrappedSession stands in for the wrapper an agent installs over the real
 // session when it hands a sub-agent a synthetic first turn. It decorates the
-// session and is not a type any session service recognises.
+// session and is not a type any session service recognizes.
 type seedWrappedSession struct {
 	session.Session
 }
@@ -153,7 +153,7 @@ func TestCompactionProcessorAppendsThroughASessionWrapper(t *testing.T) {
 	}
 }
 
-// TestCompactionProcessorSkipsOnCancelledContext checks that a cancelled turn
+// TestCompactionProcessorSkipsOnCancelledContext checks that a canceled turn
 // does not spend a model call on compaction, nor write a summary the caller is
 // no longer waiting for.
 func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
@@ -175,14 +175,14 @@ func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
 	})
 	cancel()
 
-	for range llminternal.CompactionRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{}) { //nolint:revive
+	for range llminternal.CompactionRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{}) { //nolint:revive,errcheck // the canceled turn's error is not under test; the assertions below are on the summarizer and the store
 	}
 
 	if summarizer.calls != 0 {
-		t.Errorf("summarizer ran %d time(s) on a cancelled turn", summarizer.calls)
+		t.Errorf("summarizer ran %d time(s) on a canceled turn", summarizer.calls)
 	}
 	if got := len(storedCompactions(t, svc)); got != 0 {
-		t.Errorf("stored %d compaction events on a cancelled turn", got)
+		t.Errorf("stored %d compaction events on a canceled turn", got)
 	}
 }
 

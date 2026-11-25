@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -258,7 +259,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
-	var events []models.Event
+	// Not `var events []models.Event`: a nil slice encodes as JSON null, and
+	// clients expect a list, empty for a run that produced no events.
+	events := []models.Event{}
 	for _, event := range sessionEvents {
 		events = append(events, models.FromSessionEvent(*event))
 	}
@@ -331,7 +334,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
+		http.Error(rw, "failed to find the session: "+err.Error(), statusOf(err))
 		return
 	}
 
@@ -421,14 +424,29 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 	return nil
 }
 
+// validateSessionExists answers 404 before a run starts when the session is
+// missing.
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+	// When AutoCreateSession is enabled, the runner is responsible for
+	// creating a missing session. Skip the existence check so the request
+	// can reach the runner, matching ADK-Python behavior.
+	if c.autoCreateSession {
+		return nil
+	}
 	_, err := c.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
+		// A session the service reports missing, or one the request does not
+		// fully name, is the client's 404. A service that failed to answer is
+		// the server's fault, as in writeSessionServiceError.
+		code := http.StatusInternalServerError
+		if errors.Is(err, session.ErrNotFound) || appName == "" || userID == "" || sessionID == "" {
+			code = http.StatusNotFound
+		}
+		return newStatusError(fmt.Errorf("failed to get session: %w", err), code)
 	}
 	return nil
 }
@@ -470,6 +488,11 @@ func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	if err := d.Decode(&runAgentRequest); err != nil {
 		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
+	// A null part carries no content, so it is dropped; adk-python rejects the
+	// request instead.
+	runAgentRequest.NewMessage.Parts = slices.DeleteFunc(runAgentRequest.NewMessage.Parts, func(p *genai.Part) bool {
+		return p == nil
+	})
 	return runAgentRequest, nil
 }
 
@@ -569,8 +592,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 	// Once the keepalive gives up, neither a reader blocked in Send nor the
 	// loop below waiting on the agent would see the socket close. Closing the
-	// session returns both, except on a sequentialagent root, whose Close
-	// waits on the mutex a blocked Send holds (issue #1749).
+	// session returns both.
 	defer context.AfterFunc(peerGone, func() { _ = liveSession.Close() })()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
@@ -681,7 +703,7 @@ func (c *RuntimeAPIController) acquireLiveSlot() (release func(), ok bool) {
 // handler of the keepalive, so a peer that stops responding is dropped. The
 // keepalive's deadlines are set around each read and write, from
 // [RuntimeAPIController.liveDeadline]. It returns the function that stops the
-// pinger, which the caller must call, and a context that is cancelled once a
+// pinger, which the caller must call, and a context that is canceled once a
 // ping cannot be written within the timeout.
 func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func(), peerGone context.Context) {
 	if c.maxLiveMessageBytes > 0 {

@@ -18,29 +18,37 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/httptransport"
+	"golang.org/x/net/http2"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/clientcert"
 )
 
 const (
 	cloudPlatformScope      = "https://www.googleapis.com/auth/cloud-platform"
 	defaultAgentIdentityURL = "https://agentidentitycredentials.googleapis.com"
 	defaultConnectorURL     = "https://iamconnectorcredentials.googleapis.com"
+	// Unlike the two above, these request a client certificate.
+	defaultAgentIdentityMTLSURL = "https://agentidentitycredentials.mtls.googleapis.com"
+	defaultConnectorMTLSURL     = "https://iamconnectorcredentials.mtls.googleapis.com"
 
 	defaultPollTimeout = 10 * time.Second
 	// The credentials service documents an exponential polling backoff
@@ -117,13 +125,13 @@ type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
-	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
-	// THEM and replaced with "[redacted]", the text is lowercased wherever
-	// anything matched, and only the first kilobyte of the response is drawn on,
-	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
-	// on Body itself, which is not the same promise: one matched run becomes a
-	// ten-byte marker whatever it replaced, so bounding the source alone left the
-	// result several times larger.
+	// request's own UserID and ContinueURI, and its PriorToken on the route that
+	// sends it, are removed WHERE THE SCRUB CAN MATCH THEM and replaced with
+	// "[redacted]", the text is lowercased wherever anything matched, and only
+	// the first kilobyte of the response is drawn on, with "..." marking that the
+	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
+	// not the same promise: one matched run becomes a ten-byte marker whatever it
+	// replaced, so bounding the source alone left the result several times larger.
 	//
 	// Removal is best effort, and the guarantee is narrower than removal: no value
 	// this package was given is recoverable from Body by this package's own
@@ -182,11 +190,10 @@ type Client struct {
 	// cannot observe the identity a Client authenticates as. A caller-supplied
 	// HTTPClient is opaque by construction. So is Application Default
 	// Credentials: NewClient resolves it afresh on every call, so two ADC clients
-	// in one process need not be the same principal — the credentials file can be
-	// rewritten between them, and oauth2.HTTPClient in the context supplies the
-	// transport underneath the ADC one, which this package's own PollTimeout doc
-	// invites a caller to use. Erring towards a false miss costs a round trip;
-	// erring the other way discloses one principal's token to another.
+	// in one process need not be the same principal — the credentials file, or
+	// GOOGLE_APPLICATION_CREDENTIALS itself, can be rewritten between them.
+	// Erring towards a false miss costs a round trip; erring the other way
+	// discloses one principal's token to another.
 	//
 	// The converse is a precondition this package cannot enforce and states on
 	// Config.HTTPClient: one Client must not authenticate as several identities.
@@ -245,20 +252,90 @@ type Config struct {
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
 	//
-	// To bound requests without giving up ADC, put an [http.Client] carrying a
-	// Timeout in the context passed to [NewClient] under [oauth2.HTTPClient]:
-	// its Timeout is carried through to the ADC-backed client.
+	// To bound requests without giving up ADC, build a client with
+	// [httptransport.NewClient] and pass it as HTTPClient: DetectOpts naming
+	// the cloud-platform scope and a fresh, non-nil Headers map
+	// per client (the transport writes the quota project into the map it is
+	// given and drops it with a nil one, so a shared map carries the first
+	// client's quota project to the next), a Logger that discards (the default
+	// one writes token requests and responses to stderr when
+	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
+	// returning [http.ErrUseLastResponse], and then the Timeout. That client
+	// decides on a client certificate by the auth library's default, which is
+	// wider than the rule [NewClient] documents: set
+	// GOOGLE_API_USE_CLIENT_CERTIFICATE to true or to false to make the two
+	// agree.
 	PollTimeout time.Duration
 }
 
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
-// Credentials (cloud-platform scope) to authenticate calls to the services.
+// Credentials (cloud-platform scope) to authenticate calls to the services,
+// through the same transport the Google Cloud client libraries use: it sends the
+// quota project, when there is one, as X-Goog-User-Project, caches tokens and
+// refreshes them ahead of expiry, and presents the environment's client
+// certificate when the rule below turns it on.
 //
-// ctx is used for credential discovery only, and its cancellation is not
-// honored: the token source backing the returned client is detached from ctx,
-// so a Client built inside a request-scoped context keeps refreshing its token
-// after that request ends.
+// The client certificate follows adk-python's rule, as far as the Google auth
+// library for Go (cloud.google.com/go/auth) can load the certificate:
+//
+//   - GOOGLE_API_USE_CLIENT_CERTIFICATE decides when it is set: true, TRUE or
+//     True turns the certificate on, and any other value, the empty string
+//     included, turns it off.
+//   - Otherwise CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE, the variable
+//     gcloud reads, decides unless it is empty: true in any letter case turns
+//     the certificate on, and any other value turns it off.
+//   - Otherwise the certificate is on only if a certificate config has a
+//     workload section. The config is the file GOOGLE_API_CERTIFICATE_CONFIG
+//     names, or the one at gcloud's default path:
+//     ~/.config/gcloud/certificate_config.json, and
+//     %APPDATA%\gcloud\certificate_config.json on Windows.
+//
+// With GOOGLE_API_USE_CLIENT_CERTIFICATE unset, the certificate is on only in
+// the googleapis.com universe.
+//
+// A workload section names the certificate. Without one, a variable that
+// turns the certificate on selects an enterprise certificate proxy or
+// SecureConnect, if the machine has either, and the auth library runs that
+// source's helper program the first time a client is built. With both
+// variables unset that helper is not run, where the auth library by itself
+// would run it.
+//
+// While the certificate can be on, NewClient fails on a certificate config
+// that is not valid JSON or whose workload section lacks cert_path or
+// key_path, and on a proxy or SecureConnect setup the auth library cannot
+// use. A config file that is missing or cannot be read counts as no config.
+//
+// A certificate is only presented to an endpoint that requests one, so when
+// the client has one the default endpoints become the services' mTLS
+// hosts, agentidentitycredentials.mtls.googleapis.com and
+// iamconnectorcredentials.mtls.googleapis.com. GOOGLE_API_USE_MTLS_ENDPOINT
+// overrides that choice with the values the client libraries take: auto (the
+// default) as described, always for the mTLS hosts with or without a
+// certificate, and never for the plain hosts. Any other value fails NewClient.
+// [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint] each win over
+// the choice, and with [Config.HTTPClient] set none is made.
+// With a certificate, gcloud user credentials also fetch their tokens from
+// oauth2.mtls.googleapis.com, which requests it. A service-account key keeps
+// its token_uri.
+// A credentials file naming a universe domain other than the client's —
+// googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
+//
+// The quota project is GOOGLE_CLOUD_QUOTA_PROJECT when set, and otherwise the
+// credentials file's quota_project_id. The variable is not tied to the
+// credentials, so the header can name a project they do not, as it does for
+// metadata-server credentials, which name none.
+//
+// ctx does not bound the returned Client and nothing is read from it:
+// credential discovery reads the environment, and tokens are minted as requests
+// need them rather than on ctx, so a Client built inside a request-scoped
+// context keeps working after that request ends. Through v2.8.0 the ADC-backed
+// client took its transport and Timeout from an [http.Client] stored in ctx under
+// oauth2.HTTPClient, as the PollTimeout doc then advised. That value is no longer
+// read. Passing that same plain client as [Config.HTTPClient] is not the
+// replacement: HTTPClient is used as given, so it would send no credentials.
+// To keep a Timeout together with ADC, build the client the [Config.PollTimeout]
+// doc describes.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -274,34 +351,138 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		pollTimeout:      defaultPollTimeout,
 		initialBackoff:   defaultInitialBackoff,
 	}
-	if cfg.AgentIdentityEndpoint != "" {
-		c.agentIdentityURL = strings.TrimRight(cfg.AgentIdentityEndpoint, "/")
-	}
-	if cfg.ConnectorEndpoint != "" {
-		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
-	}
 	if cfg.PollTimeout > 0 {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
-		// The token source captures this context and reuses it for every later
-		// refresh, so it must outlive the call; discovery itself needs no
-		// cancellation (its only network probe bounds itself).
-		creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
+		mtlsMode, err := mtlsEndpointMode()
 		if err != nil {
-			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
+			return nil, err
 		}
-		hc := oauth2.NewClient(ctx, creds.TokenSource)
-		// oauth2.Transport re-signs every hop, below the layer where net/http
+		certSource, err := clientcert.Source()
+		if err != nil {
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
+		}
+		// The auth library's transport rather than a hand-written bearer header,
+		// so client certificates, the quota project header and token caching
+		// come from it. See the NewClient doc.
+		opts := &httptransport.Options{
+			// Non-nil on purpose: the transport adds the quota project header to
+			// this map, and with a nil map it allocates a private one that its
+			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
+			Headers: http.Header{},
+			// Discarded: the library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+			// response to stderr, signed assertion and minted token included.
+			// Credential detection gets this logger on both branches below.
+			Logger: slog.New(slog.DiscardHandler),
+			// Off, as through v2.8.0. Left on, the library opens a client span for
+			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
+			// on it the service's error message, which APIError.Body carries only
+			// scrubbed.
+			DisableTelemetry: true,
+		}
+		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}}
+		if certSource != nil {
+			// With a source the library also sends the token exchange through
+			// the certificate.
+			opts.ClientCertProvider = certSource
+			opts.DetectOpts = detect
+		} else {
+			// Left to its default the library would look for a certificate on
+			// its own, by a wider rule than clientcert.Source's, and use it
+			// for the token exchange as well. Handing it a source stops that
+			// lookup, which can run a certificate helper. With a source the
+			// library also moves credentials it detects to its mTLS token
+			// endpoint, so they are detected here.
+			detect.Logger = opts.Logger
+			creds, err := credentials.DetectDefault(detect)
+			if err != nil {
+				return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
+			}
+			opts.Credentials = creds
+			opts.ClientCertProvider = noClientCertificate
+			opts.BaseRoundTripper, _ = plainTransport(http.DefaultTransport)
+		}
+		hc, err := httptransport.NewClient(opts)
+		if err != nil {
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
+		}
+		// The transport re-signs every hop, below the layer where net/http
 		// strips credentials on a cross-host redirect, so a redirect would leak
 		// the token to whatever host it names.
 		hc.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
 		c.httpClient = hc
+		// One decision serves both services, since its inputs are environment
+		// variables and certificate files, not the host.
+		if mtlsMode == mtlsAlways || (mtlsMode == mtlsAuto && certSource != nil) {
+			c.agentIdentityURL = defaultAgentIdentityMTLSURL
+			c.connectorURL = defaultConnectorMTLSURL
+		}
+	}
+	if cfg.AgentIdentityEndpoint != "" {
+		c.agentIdentityURL = strings.TrimRight(cfg.AgentIdentityEndpoint, "/")
+	}
+	if cfg.ConnectorEndpoint != "" {
+		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
 	}
 	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+// noClientCertificate answers a server's certificate request with no
+// certificate.
+func noClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return &tls.Certificate{}, nil
+}
+
+// plainTransport returns the base transport the auth library builds from def,
+// the default transport, when it has no certificate source. Given a source,
+// even one that presents nothing, the library replaces the TLS configuration
+// an application set on the default transport.
+//
+// It returns nil when def is not an [http.Transport]. The library then starts
+// from a transport of its own, which has no configuration to lose. The second
+// result is the HTTP/2 side of the transport, for the tests.
+func plainTransport(def http.RoundTripper) (http.RoundTripper, *http2.Transport) {
+	t, ok := def.(*http.Transport)
+	if !ok {
+		return nil, nil
+	}
+	// The same steps as the library's (cloud.google.com/go/auth v0.24.4,
+	// httptransport.defaultBaseTransport): a larger idle pool, HTTP/2
+	// configured by golang.org/x/net/http2, and a health check that drops a
+	// connection gone quiet.
+	t = t.Clone()
+	t.MaxIdleConnsPerHost = 100
+	h2, err := http2.ConfigureTransports(t)
+	if err == nil {
+		h2.ReadIdleTimeout = 31 * time.Second
+	}
+	return t, h2
+}
+
+const (
+	mtlsAuto   = "auto"
+	mtlsAlways = "always"
+	mtlsNever  = "never"
+)
+
+// mtlsEndpointMode reads GOOGLE_API_USE_MTLS_ENDPOINT. An unknown value is an
+// error, as in the generated Python client adk-python uses. The Go client
+// libraries fall back to the plain endpoint without saying so.
+func mtlsEndpointMode() (string, error) {
+	v := os.Getenv("GOOGLE_API_USE_MTLS_ENDPOINT")
+	switch m := strings.ToLower(v); m {
+	case "", mtlsAuto:
+		return mtlsAuto, nil
+	case mtlsAlways, mtlsNever:
+		return m, nil
+	default:
+		return "", fmt.Errorf("gcp: GOOGLE_API_USE_MTLS_ENDPOINT is %q, want auto, always or never", v)
+	}
 }
 
 // CacheKey returns the key a credential for scheme, retrieved through c on
@@ -370,6 +551,14 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// PriorToken is the previously issued, now rejected, token. Setting it asks
+	// the service to mint a fresh credential rather than return the one it
+	// already has. Empty on a normal fetch.
+	//
+	// The two services spell the ask differently on the wire and this one field
+	// covers both — Agent Identity is sent the token, the IAM Connector a
+	// boolean. See the request types below.
+	PriorToken string
 }
 
 // Retrieval is the result of [Client.RetrieveCredential].
@@ -403,7 +592,13 @@ type Retrieval struct {
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one.
+// *json.SyntaxError stops finding one. On the ADC-backed client the error
+// behind a rejected cloud-platform token request is whatever the
+// cloud.google.com/go/auth credential for that source reports, where releases
+// through v2.8.0 reported golang.org/x/oauth2's. For a service-account key
+// that is a *cloud.google.com/go/auth.Error where it was an
+// *oauth2.RetrieveError. Which type the other credential sources wrap, if any,
+// is the library's choice, not this package's promise.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
@@ -459,7 +654,7 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrie
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI)
+			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI, req.PriorToken)
 			if err != nil {
 				return nil, err
 			}
@@ -567,13 +762,36 @@ func parseExpireTime(v lenientTime) time.Time {
 	return t
 }
 
-// retrieveRequest is the JSON body for both services' credentials:retrieve RPC
-// (the auth provider / connector is bound to the URL path, not the body).
-type retrieveRequest struct {
-	UserID      string   `json:"userId,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	ContinueURI string   `json:"continueUri,omitempty"`
-}
+// The two services agree on the retrieval body except for how a caller forces a
+// refresh, so that one field is all these types do not share.
+//
+// Agent Identity takes the rejected token itself, and documents that a caller
+// seeing a PERMISSION_DENIED should retry with it set
+// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+// RetrieveCredentialsRequest.forceRefreshToken). The IAM Connector takes a
+// boolean instead — it publishes no discovery document to anonymous callers, but
+// adk-python's generated client fills the field in, as force_refresh
+// (integrations/agent_identity/_iam_connector_credentials_provider.py). Sending
+// one service the other's field would leave the refresh unforced at best, and
+// rejected as an unknown field at worst.
+type (
+	// agentIdentityRequest is the JSON body for Agent Identity's
+	// credentials:retrieve (the auth provider is bound to the URL path, not the
+	// body).
+	agentIdentityRequest struct {
+		UserID            string   `json:"userId,omitempty"`
+		Scopes            []string `json:"scopes,omitempty"`
+		ContinueURI       string   `json:"continueUri,omitempty"`
+		ForceRefreshToken string   `json:"forceRefreshToken,omitempty"`
+	}
+	// connectorRequest is the same for the IAM Connector.
+	connectorRequest struct {
+		UserID       string   `json:"userId,omitempty"`
+		Scopes       []string `json:"scopes,omitempty"`
+		ContinueURI  string   `json:"continueUri,omitempty"`
+		ForceRefresh bool     `json:"forceRefresh,omitempty"`
+	}
+)
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential. Any other header
@@ -664,7 +882,7 @@ func validHeaderFieldName(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':

@@ -15,12 +15,15 @@
 package llminternal
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -108,3 +111,30 @@ type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
 func (s *State) internal() *State { return s }
 
 func Reveal(a Agent) *State { return a.internal() }
+
+// OutputArtifactReference is the text that replaces an agent's final reply
+// once the reply is saved as revision version of the artifact name.
+func OutputArtifactReference(name string, version int64) string {
+	return fmt.Sprintf("Saved artifact %q (version %d).", name, version)
+}
+
+// SavedOutputArtifact reports whether the agent already saved its reply on ev
+// as s.OutputArtifact. A model callback can save the same filename on the same
+// event, so a key in ArtifactDelta alone does not mark the agent's own save:
+// the event's text must also be the reference to the recorded revision.
+func (s *State) SavedOutputArtifact(ev *session.Event) bool {
+	if s.OutputArtifact == "" || ev == nil || ev.Content == nil {
+		return false
+	}
+	version, ok := ev.Actions.ArtifactDelta[s.OutputArtifact]
+	if !ok {
+		return false
+	}
+	var text strings.Builder
+	for _, part := range ev.Content.Parts {
+		if part != nil && !part.Thought {
+			text.WriteString(part.Text)
+		}
+	}
+	return text.String() == OutputArtifactReference(s.OutputArtifact, version)
+}

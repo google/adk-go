@@ -33,20 +33,26 @@ type Service interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
+	// The first version of a new artifact is 0, and each subsequent save increments the
+	// highest existing version by 1.
 	// Implementations that assign versions optimistically may fail to claim one
 	// while other writers save the same artifact; that failure is transient and
 	// the call can be retried.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
+	// If req.Version is nil, the latest version is loaded.
 	Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error)
-	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
+	// Delete deletes an artifact. If req.Version is nil, all versions are deleted,
+	// and deleting an artifact that does not exist is not an error. If req.Version
+	// is non-nil and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
 	// GetArtifactVersion gets the metadata for a specific version of an artifact.
+	// If req.Version is nil, metadata for the latest version is returned.
 	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
 }
 
@@ -56,7 +62,7 @@ type requiredField struct {
 	Value string
 }
 
-// SaveRequest is the parameter for [ArtifactService.Save].
+// SaveRequest is the parameter for [Service.Save].
 type SaveRequest struct {
 	AppName, UserID, SessionID, FileName string
 	// Part is the artifact to store.
@@ -69,8 +75,8 @@ type SaveRequest struct {
 	// when saving it and return the value as a string.
 	CustomMetadata map[string]any
 
-	// If set, the artifact will be saved with this version.
-	// If unset, a new version will be created.
+	// Deprecated: Save ignores Version. Every Save creates a new version and
+	// returns it in SaveResponse.Version.
 	Version int64
 }
 
@@ -88,6 +94,15 @@ func validateRequiredStrings(fields []requiredField) []string {
 
 // Validate checks if the struct is valid or if it is missing fields.
 func (req *SaveRequest) Validate() error {
+	return req.validate(false)
+}
+
+// validate is the shared request validation, with allowRef tolerating an
+// artifact reference part. Every Service calls Validate() (allowRef false),
+// which rejects a part that is neither text nor inline data; this is a shared
+// contract that backends such as GCS rely on. Only the in-memory service
+// understands references, so it is the sole caller that sets allowRef.
+func (req *SaveRequest) validate(allowRef bool) error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
 		{Name: "AppName", Value: req.AppName},
@@ -109,7 +124,10 @@ func (req *SaveRequest) Validate() error {
 		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
-	if req.Part.Text == "" && req.Part.InlineData == nil {
+	// A reference part carries neither Part.Text nor Part.InlineData; only the
+	// in-memory service accepts one, so the content rule tolerates it there and
+	// stays strict for every other caller.
+	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && isArtifactRef(req.Part)) {
 		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
 
@@ -127,17 +145,19 @@ func validateFileName(name string) error {
 	return nil
 }
 
-// SaveResponse is the return type of [ArtifactService.Save].
+// SaveResponse is the return type of [Service.Save].
 type SaveResponse struct {
 	Version int64
 }
 
-// LoadRequest is the parameter for [ArtifactService.Load].
+// LoadRequest is the parameter for [Service.Load].
 type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to load, or nil for the latest version.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
@@ -166,18 +186,20 @@ func (req *LoadRequest) Validate() error {
 	return nil
 }
 
-// LoadResponse is the return type of [ArtifactService.Load].
+// LoadResponse is the return type of [Service.Load].
 type LoadResponse struct {
 	// Part is the artifact stored.
 	Part *genai.Part
 }
 
-// DeleteRequest is the parameter for [ArtifactService.Delete].
+// DeleteRequest is the parameter for [Service.Delete].
 type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to delete, or nil to delete all versions.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
@@ -206,7 +228,7 @@ func (req *DeleteRequest) Validate() error {
 	return nil
 }
 
-// ListRequest is the parameter for [ArtifactService.List].
+// ListRequest is the parameter for [Service.List].
 type ListRequest struct {
 	AppName, UserID, SessionID string
 }
@@ -230,12 +252,12 @@ func (req *ListRequest) Validate() error {
 	return nil
 }
 
-// ListResponse is the return type of [ArtifactService.List].
+// ListResponse is the return type of [Service.List].
 type ListResponse struct {
 	FileNames []string
 }
 
-// VersionsRequest is the parameter for [ArtifactService.Versions].
+// VersionsRequest is the parameter for [Service.Versions].
 type VersionsRequest struct {
 	AppName, UserID, SessionID, FileName string
 }
@@ -266,7 +288,7 @@ func (req *VersionsRequest) Validate() error {
 	return nil
 }
 
-// VersionsResponse is the parameter for [ArtifactService.Versions].
+// VersionsResponse is the return type of [Service.Versions].
 type VersionsResponse struct {
 	Versions []int64
 }
@@ -290,16 +312,20 @@ type ArtifactVersion struct {
 	CreateTime time.Time
 
 	// MimeType is the media type associated with the stored part. It may be empty
-	// when the part was saved without a media type.
+	// when the part was saved without a media type, or when the stored part is a
+	// reference to another artifact, whose media type is only known once the
+	// reference is loaded.
 	MimeType string
 }
 
-// GetArtifactVersionRequest is the parameter for [ArtifactService.GetArtifactVersion].
+// GetArtifactVersionRequest is the parameter for [Service.GetArtifactVersion].
 type GetArtifactVersionRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to inspect, or nil for the latest version.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing a field.
@@ -328,7 +354,7 @@ func (req *GetArtifactVersionRequest) Validate() error {
 	return nil
 }
 
-// GetArtifactVersionResponse is the return type of [ArtifactService.GetArtifactVersion].
+// GetArtifactVersionResponse is the return type of [Service.GetArtifactVersion].
 type GetArtifactVersionResponse struct {
 	ArtifactVersion *ArtifactVersion
 }

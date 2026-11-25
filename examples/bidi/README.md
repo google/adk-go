@@ -35,7 +35,7 @@ The application uses ADK's `RuntimeAPIController` to manage the bidirectional st
 
 ## Prerequisites
 
-- **Go**: Ensure you have Go installed (Go 1.23+ recommended).
+- **Go**: Install a version that meets the minimum requirement in the root [go.mod](../../go.mod).
 - **API Key**: You need a Google API Key to access the Gemini models.
 
 ## Getting Started

@@ -10,17 +10,24 @@ formatters:
       local-prefixes:
         - google.golang.org/adk/v2
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true
       module-path: google.golang.org/adk/v2
 
 linters:
   enable:
+    - copyloopvar
     - forbidigo
     - goheader
+    - intrange
+    - misspell
+    - modernize
     - revive
+    - unconvert
+    - wastedassign
+    - whitespace
 
   settings:
-
     # Library code must not write diagnostics to a process-wide sink: an
     # application embedding ADK cannot silence, route or filter them. See
     # "Logging and error messages" in AGENTS.md for what to do instead.
@@ -47,12 +54,21 @@ linters:
           pkg: ^$
           msg: library code must not write to stderr; see "Logging and error messages" in AGENTS.md
 
+    misspell:
+      locale: US
+      # mode: restricted limits checks to comments only, preventing automatic
+      # rewriting of string literals in test prompts (e.g. favourite colour, summarise,
+      # recieve) that are bound to recorded HTTP test cassettes.
+      mode: restricted
+
     revive:
       rules:
         - name: exported
           arguments:
             - disableStutteringCheck
         - name: package-comments
+        - name: var-declaration
+        - name: use-slices-sort
 
     
     goheader:
@@ -117,3 +133,14 @@ linters:
       - path: '^plugin/loggingplugin/'
         linters:
           - forbidigo
+      - linters:
+          - misspell
+        text: '`CANCELLED` is a misspelling of `CANCELED`'
+      - path: 'internal/llminternal/contents_processor\.go'
+        linters:
+          - misspell
+        text: '`defualt` is a misspelling of `default`'
+      - path: 'model/openaimodel/internal/responses/response\.go'
+        linters:
+          - misspell
+        text: '`cancelled` is a misspelling of `canceled`'

@@ -89,7 +89,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 				},
 				"version": {
 					Type:        "INTEGER",
-					Description: "Optional 1-based revision number to load for each artifact in artifact_names. If omitted or 0, the latest revision is loaded.",
+					Description: "Optional revision number to load for each artifact in artifact_names. Revisions are numbered from 0. If omitted, the latest revision is loaded.",
 				},
 				"artifact_versions": {
 					Type:        "ARRAY",
@@ -103,7 +103,7 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 							},
 							"version": {
 								Type:        "INTEGER",
-								Description: "1-based revision number to load. If omitted or 0, the latest revision is loaded.",
+								Description: "Revision number to load. Revisions are numbered from 0. If omitted, the latest revision is loaded.",
 							},
 						},
 						Required: []string{"name"},
@@ -118,9 +118,11 @@ func (t *artifactsTool) Declaration() *genai.FunctionDeclaration {
 	}
 }
 
+// artifactVersionSelector names one artifact revision. A nil Version selects
+// the latest revision.
 type artifactVersionSelector struct {
-	Name    string `json:"name"`
-	Version int    `json:"version,omitempty"`
+	Name    string
+	Version *int64
 }
 
 // loadItem is one artifact a load_artifacts response asks for. position names
@@ -137,9 +139,30 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
 	}
-	artifactNames, err := parseStringSliceArg(m, "artifact_names")
-	if err != nil {
-		return nil, err
+	var artifactNames []string
+	artifactNamesRaw, exists := m["artifact_names"]
+	if !exists {
+		artifactNames = []string{}
+	} else {
+		// In order to cast properly from []any to []string we're gonna marshal and then
+		// unmarshal the artifact_names value.
+		artifactNamesJson, err := json.Marshal(artifactNamesRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
+		}
+		// Arguments the model can correct get an error result, not a tool
+		// error. A JSON null element would decode to "" without an error, so it
+		// is checked separately.
+		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil || hasNullElement(artifactNamesRaw) {
+			return map[string]any{
+				"error":      "'artifact_names' must be a list of strings.",
+				"error_code": "INVALID_ARGUMENTS",
+			}, nil
+		}
+		// Ensure the slice is not nil if it's empty
+		if artifactNames == nil {
+			artifactNames = []string{}
+		}
 	}
 	result := map[string]any{
 		"artifact_names": artifactNames,
@@ -150,9 +173,7 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, err
 		}
-		if version > 0 {
-			result["version"] = version
-		}
+		result["version"] = version
 	}
 
 	if rawSelectors, exists := m["artifact_versions"]; exists && rawSelectors != nil {
@@ -163,9 +184,9 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		if len(selectors) > 0 {
 			encoded := make([]map[string]any, len(selectors))
 			for i, sel := range selectors {
-				encoded[i] = map[string]any{
-					"name":    sel.Name,
-					"version": sel.Version,
+				encoded[i] = map[string]any{"name": sel.Name}
+				if sel.Version != nil {
+					encoded[i]["version"] = int(*sel.Version)
 				}
 			}
 			result["artifact_versions"] = encoded
@@ -191,6 +212,17 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 	return result, nil
 }
 
+// hasNullElement reports whether v is a list that holds a JSON null.
+func hasNullElement(v any) bool {
+	list, _ := v.([]any)
+	for _, e := range list {
+		if e == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
@@ -200,21 +232,21 @@ func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
-	if err := t.appendInitialInstructions(ctx, req); err != nil {
-		return err
-	}
-	return t.processLoadArtifactsFunctionCall(ctx, req)
-}
-
-func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
-	resp, err := ctx.Artifacts().List(ctx)
+	listed, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", redact(err))
 	}
-	if len(resp.FileNames) == 0 {
+	if err := appendInitialInstructions(req, listed.FileNames); err != nil {
+		return err
+	}
+	return t.processLoadArtifactsFunctionCall(ctx, req, listed.FileNames)
+}
+
+func appendInitialInstructions(req *model.LLMRequest, artifactNames []string) error {
+	if len(artifactNames) == 0 {
 		return nil
 	}
-	artifactNamesJSON, err := json.Marshal(resp.FileNames)
+	artifactNamesJSON, err := json.Marshal(artifactNames)
 	if err != nil {
 		return fmt.Errorf("failed to marshal artifact names: %w", err)
 	}
@@ -230,135 +262,57 @@ func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest, availableNames []string) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
-	lastContent := req.Contents[len(req.Contents)-1]
-	if lastContent == nil || len(lastContent.Parts) == 0 {
-		return nil
-	}
-	var functionResponse *genai.FunctionResponse
-	// Iterate over all parts in the last content turn to find load_artifacts responses.
-	// Note: adk-python only checks parts[0]; scanning all parts is intentional in Go to
-	// support parallel/multi-tool turns where load_artifacts may not be the first part.
-	for _, part := range lastContent.Parts {
-		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
-			functionResponse = part.FunctionResponse
-			// Keep only the first load_artifacts response if multiple exist in one turn.
-			break
+	responses := slices.DeleteFunc(utils.FunctionResponses(req.Contents[len(req.Contents)-1]), func(response *genai.FunctionResponse) bool {
+		return response.Name != t.Name()
+	})
+	// Like Python, keep other calls' results when a parallel response is
+	// malformed or names an unavailable artifact. Preserve Go's single-call errors.
+	parallel := len(responses) > 1
+	var jobs []loadJob
+	for i, response := range responses {
+		prefix := ""
+		if parallel {
+			prefix = fmt.Sprintf("load_artifacts[%d].", i)
 		}
-	}
-	if functionResponse == nil {
-		return nil
-	}
-
-	var artifactNames []string
-	if artifactNamesRaw, ok := functionResponse.Response["artifact_names"]; ok && artifactNamesRaw != nil {
-		switch names := artifactNamesRaw.(type) {
-		case []string:
-			artifactNames = names
-		case []any:
-			artifactNames = make([]string, len(names))
-			for i, name := range names {
-				s, ok := name.(string)
-				if !ok {
-					return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
-				}
-				artifactNames[i] = s
+		responseJobs, err := loadJobsFromResponse(response.Response, prefix)
+		if err != nil {
+			if parallel {
+				continue
 			}
-		default:
-			return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
-		}
-	}
-
-	version := 0
-	if rawVersion, ok := functionResponse.Response["version"]; ok && rawVersion != nil {
-		var err error
-		version, err = parseNonNegativeInt(rawVersion, "version")
-		if err != nil {
 			return err
 		}
+		jobs = append(jobs, responseJobs...)
 	}
-
-	var selectors []artifactVersionSelector
-	if rawSelectors, ok := functionResponse.Response["artifact_versions"]; ok && rawSelectors != nil {
-		var err error
-		selectors, err = parseArtifactVersionSelectors(rawSelectors)
-		if err != nil {
-			return err
-		}
+	if parallel {
+		jobs = slices.DeleteFunc(jobs, func(job loadJob) bool {
+			return !slices.Contains(availableNames, job.Name)
+		})
 	}
-
-	nameItems := make([]loadItem, len(artifactNames))
-	for i, name := range artifactNames {
-		nameItems[i] = loadItem{
-			artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
-			position:                fmt.Sprintf("artifact_names[%d]", i),
-		}
-	}
-
-	listVersions := false
-	if rawListVersions, ok := functionResponse.Response["list_versions"]; ok && rawListVersions != nil {
-		var extraNames []string
-		var err error
-		listVersions, extraNames, err = parseListVersionsArg(rawListVersions)
-		if err != nil {
-			return err
-		}
-		for i, name := range extraNames {
-			if !slices.Contains(artifactNames, name) {
-				artifactNames = append(artifactNames, name)
-				nameItems = append(nameItems, loadItem{
-					artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
-					position:                fmt.Sprintf("list_versions[%d]", i),
-				})
-			}
-		}
+	if len(jobs) == 0 {
+		return nil
 	}
 
 	artifactsService := ctx.Artifacts()
-	if listVersions {
-		if len(nameItems) == 0 {
-			return nil
-		}
-		results := make([]*genai.Content, len(nameItems))
-		group, childCtx := errgroup.WithContext(ctx)
-		for i, item := range nameItems {
-			group.Go(func() error {
-				content, err := t.listArtifactVersions(childCtx, artifactsService, item)
-				if err != nil {
-					return err
-				}
-				results[i] = content
-				return nil
-			})
-		}
-		if err := group.Wait(); err != nil {
-			return err
-		}
-		req.Contents = append(req.Contents, results...)
-		return nil
-	}
-
-	loadItems := nameItems
-	for i, sel := range selectors {
-		loadItems = append(loadItems, loadItem{
-			artifactVersionSelector: sel,
-			position:                fmt.Sprintf("artifact_versions[%d]", i),
-		})
-	}
-	if len(loadItems) == 0 {
-		return nil
-	}
-
-	results := make([]*genai.Content, len(loadItems))
+	results := make([]*genai.Content, len(jobs))
 	group, childCtx := errgroup.WithContext(ctx)
-
-	for i, item := range loadItems {
+	for i, job := range jobs {
 		group.Go(func() error {
-			content, err := t.loadIndividualArtifact(childCtx, artifactsService, item)
+			var content *genai.Content
+			var err error
+			if job.listVersions {
+				content, err = t.listArtifactVersions(childCtx, artifactsService, job.loadItem)
+			} else {
+				content, err = t.loadIndividualArtifact(childCtx, artifactsService, job.loadItem)
+			}
 			if err != nil {
+				// The file may have been removed after List completed.
+				if parallel && errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
 			results[i] = content
@@ -370,8 +324,109 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return err
 	}
 
-	req.Contents = append(req.Contents, results...)
+	for _, content := range results {
+		if content != nil {
+			req.Contents = append(req.Contents, content)
+		}
+	}
 	return nil
+}
+
+// loadJob is one artifact to load, or whose versions to list.
+type loadJob struct {
+	loadItem
+	listVersions bool
+}
+
+// loadJobsFromResponse returns the work one load_artifacts function response
+// asks for. prefix goes in front of each item's position, so items from
+// parallel responses can be told apart. When list_versions is set, the
+// response lists the versions of its names and loads nothing.
+func loadJobsFromResponse(response map[string]any, prefix string) ([]loadJob, error) {
+	var artifactNames []string
+	if raw, ok := response["artifact_names"]; ok && raw != nil {
+		var err error
+		artifactNames, err = artifactNamesFromResponse(raw)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var version *int64
+	if rawVersion, ok := response["version"]; ok && rawVersion != nil {
+		v, err := parseNonNegativeInt(rawVersion, "version")
+		if err != nil {
+			return nil, err
+		}
+		version = new(int64(v))
+	}
+
+	var selectors []artifactVersionSelector
+	if rawSelectors, ok := response["artifact_versions"]; ok && rawSelectors != nil {
+		var err error
+		selectors, err = parseArtifactVersionSelectors(rawSelectors)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	nameJobs := make([]loadJob, len(artifactNames))
+	for i, name := range artifactNames {
+		nameJobs[i] = loadJob{loadItem: loadItem{
+			artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
+			position:                fmt.Sprintf("%sartifact_names[%d]", prefix, i),
+		}}
+	}
+
+	if rawListVersions, ok := response["list_versions"]; ok && rawListVersions != nil {
+		listVersions, extraNames, err := parseListVersionsArg(rawListVersions)
+		if err != nil {
+			return nil, err
+		}
+		for i, name := range extraNames {
+			if !slices.Contains(artifactNames, name) {
+				artifactNames = append(artifactNames, name)
+				nameJobs = append(nameJobs, loadJob{loadItem: loadItem{
+					artifactVersionSelector: artifactVersionSelector{Name: name, Version: version},
+					position:                fmt.Sprintf("%slist_versions[%d]", prefix, i),
+				}})
+			}
+		}
+		if listVersions {
+			for i := range nameJobs {
+				nameJobs[i].listVersions = true
+			}
+			return nameJobs, nil
+		}
+	}
+
+	jobs := nameJobs
+	for i, sel := range selectors {
+		jobs = append(jobs, loadJob{loadItem: loadItem{
+			artifactVersionSelector: sel,
+			position:                fmt.Sprintf("%sartifact_versions[%d]", prefix, i),
+		}})
+	}
+	return jobs, nil
+}
+
+func artifactNamesFromResponse(raw any) ([]string, error) {
+	switch names := raw.(type) {
+	case []string:
+		return names, nil
+	case []any:
+		result := make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			result[i] = s
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("invalid artifact names type: %T, expected []string or []any", raw)
+	}
 }
 
 // redactFor redacts err, an error the artifact service returned for name. When
@@ -398,14 +453,14 @@ func redactFor(name string, err error) error {
 
 func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, item loadItem) (*genai.Content, error) {
 	artifactName, version := item.Name, item.Version
-	if version > 0 {
+	if version != nil {
 		resp, err := artifactsService.LoadVersion(ctx, artifactName, version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load artifact at %s (version %d): %w", item.position, version, redactFor(artifactName, err))
+			return nil, fmt.Errorf("failed to load artifact at %s (version %d): %w", item.position, *version, redactFor(artifactName, err))
 		}
 		return &genai.Content{
 			Parts: []*genai.Part{
-				genai.NewPartFromText(fmt.Sprintf("Artifact %s (version %d) is:", artifactName, version)),
+				genai.NewPartFromText(fmt.Sprintf("Artifact %s (version %d) is:", artifactName, *version)),
 				resp.Part,
 			},
 			Role: genai.RoleUser,
@@ -441,7 +496,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 
 	summaries := make([]artifactVersionSummary, 0, len(versions))
 	for _, v := range versions {
-		metaResp, err := artifactinternal.GetArtifactVersion(ctx, artifactsService, artifactName, int(v))
+		metaResp, err := artifactinternal.GetArtifactVersion(ctx, artifactsService, artifactName, v)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get version %d metadata for artifact at %s: %w", v, item.position, redactFor(artifactName, err))
 		}
@@ -598,13 +653,13 @@ func parseArtifactVersionSelectors(raw any) ([]artifactVersionSelector, error) {
 		if !ok || name == "" {
 			return nil, fmt.Errorf("invalid \"name\" in artifact_versions[%d]: expected non-empty string", i)
 		}
-		version := 0
+		var version *int64
 		if verRaw, exists := obj["version"]; exists && verRaw != nil {
-			var err error
-			version, err = parseNonNegativeInt(verRaw, fmt.Sprintf("artifact_versions[%d].version", i))
+			v, err := parseNonNegativeInt(verRaw, fmt.Sprintf("artifact_versions[%d].version", i))
 			if err != nil {
 				return nil, err
 			}
+			version = new(int64(v))
 		}
 		out[i] = artifactVersionSelector{Name: name, Version: version}
 	}

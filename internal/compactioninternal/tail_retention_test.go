@@ -870,7 +870,7 @@ func TestPromptTokenCountIgnoresOtherIsolationScopes(t *testing.T) {
 // Recording the attempt rather than the result disarmed compaction for the rest
 // of an invocation with nothing stored. Moving the call past the summarizer
 // fixed the transient-error case and left four others, because the caller can
-// still discard a perfectly good summary: a cancelled turn, a failed re-read, a
+// still discard a perfectly good summary: a canceled turn, a failed re-read, a
 // competing compaction, a failed append. Each closed the gate on a summary that
 // never existed, and Recovered cannot reopen it because the prompt never drops.
 func TestTailRetentionDoesNotRecordADiscardedSummary(t *testing.T) {

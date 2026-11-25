@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -847,6 +849,82 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 	}
 }
 
+// closeSignalingLiveSession unblocks the paired event stream when Close is called.
+type closeSignalingLiveSession struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *closeSignalingLiveSession) Send(agent.LiveRequest) error { return nil }
+
+func (s *closeSignalingLiveSession) Close() error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return nil
+}
+
+func TestSequentialAgent_RunLive_CloseDuringSubAgentRunLive(t *testing.T) {
+	subSess := &closeSignalingLiveSession{closed: make(chan struct{})}
+	t.Cleanup(func() { _ = subSess.Close() })
+	runLiveStarted := make(chan struct{})
+	releaseRunLive := make(chan struct{})
+	subEventsStarted := make(chan struct{})
+	subAgent := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "sub_agent"})),
+		runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			close(runLiveStarted)
+			<-releaseRunLive
+			return subSess, func(func(*session.Event, error) bool) {
+				close(subEventsStarted)
+				<-subSess.closed
+			}, nil
+		},
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             newSequentialAgent(t, []agent.Agent{subAgent}, "pipeline"),
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSess, events, err := r.RunLive(t.Context(), "user_id", "session_id", agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		for _, err := range events {
+			_ = err
+		}
+	}()
+
+	select {
+	case <-runLiveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent RunLive did not start")
+	}
+	// The sub-agent has no session yet, so this Close has nothing to close.
+	if err := liveSess.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	close(releaseRunLive)
+
+	select {
+	case <-eventsDone:
+	case <-subEventsStarted:
+		t.Fatal("closed sequence started reading the sub-agent session returned after Close")
+	case <-time.After(time.Second):
+		t.Fatal("live events did not end after Close")
+	}
+	select {
+	case <-subSess.closed:
+	default:
+		t.Error("sub-agent session returned after Close was left open")
+	}
+}
+
 // failingLLM fails every call, as a model does on a quota or auth error.
 type failingLLM struct {
 	calls int
@@ -901,5 +979,128 @@ func TestSequentialAgentStopsOnSubAgentError(t *testing.T) {
 	}
 	if secondLLM.callCounter != 0 {
 		t.Errorf("second agent's model called %d times after the first agent failed, want 0", secondLLM.callCounter)
+	}
+}
+
+// TestSequentialAgent_RunLive_StopsOnSubAgentError is the live counterpart of
+// TestSequentialAgentStopsOnSubAgentError: a sub-agent whose live stream yields
+// an error ends the sequence, and the next sub-agent is never started.
+func TestSequentialAgent_RunLive_StopsOnSubAgentError(t *testing.T) {
+	firstSess := &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}
+	first := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "first"})),
+		runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return firstSess, func(yield func(*session.Event, error) bool) {
+				yield(nil, fmt.Errorf("live connection failed"))
+			}, nil
+		},
+	}
+	secondStarted := false
+	second := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "second"})),
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			secondStarted = true
+			return &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}, func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "second"
+				yield(ev, nil)
+			}, nil
+		},
+	}
+
+	seqAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "pipeline", SubAgents: []agent.Agent{first, second}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveAgent, ok := seqAgent.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatal("sequential agent does not implement RunLive")
+	}
+	_, seqIter, err := liveAgent.RunLive(&mockInvocationContext{agent: seqAgent, invocationID: "inv", ctx: t.Context()})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	// Keep reading after an error, as the runner does.
+	var errs []error
+	var authors []string
+	for ev, err := range seqIter {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		authors = append(authors, ev.Author)
+	}
+
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "live connection failed") {
+		t.Errorf("got errors %v, want exactly one from the first sub-agent", errs)
+	}
+	if secondStarted {
+		t.Errorf("second sub-agent was started after the first one failed; events from: %v", authors)
+	}
+	if !firstSess.closed {
+		t.Error("first sub-agent's live session was not closed after its error")
+	}
+}
+
+// TestSequentialAgent_RunWithoutSessionOrFunctionResponse checks that an
+// ordinary turn does not read the session to look for a resume target.
+func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
+	ran := false
+	sub, err := agent.New(agent.Config{Name: "sub", Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) { ran = true }
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{sub}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: root})
+	for _, err := range root.Run(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !ran {
+		t.Error("sub-agent did not run")
+	}
+}
+
+func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
+	child := newCustomAgent(t, 0)
+	seq := newSequentialAgent(t, []agent.Agent{child}, "seq")
+	llmParent, err := llmagent.New(llmagent.Config{Name: "llm_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseParent, err := agent.New(agent.Config{Name: "base_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		root       agent.Agent
+		targetName string
+		want       agent.Agent
+	}{
+		{name: "own name", root: seq, targetName: "seq", want: seq},
+		{name: "through llm agent parent", root: llmParent, targetName: "seq", want: seq},
+		{name: "through base agent parent", root: baseParent, targetName: "seq", want: seq},
+		{name: "sub-agent", root: seq, targetName: "custom_agent_0", want: child},
+		{name: "unknown name", root: seq, targetName: "unknown", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.root.FindAgent(tc.targetName); got != tc.want {
+				t.Errorf("FindAgent(%q) = %T(%p), want %T(%p)", tc.targetName, got, got, tc.want, tc.want)
+			}
+		})
 	}
 }

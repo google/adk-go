@@ -166,7 +166,7 @@ func TestWriteHTTPStatusForAuthError(t *testing.T) {
 	}{
 		{
 			name:     "with error appends its message",
-			err:      (authz.NewStrict()).CanActAsUser(ctxWithUser("alice"), "bob"),
+			err:      authz.NewStrict().CanActAsUser(ctxWithUser("alice"), "bob"),
 			wantBody: "forbidden: " + authz.ErrUnauthorized.Error(),
 		},
 		{
