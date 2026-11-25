@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/auth"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	"google.golang.org/adk/v2/internal/credredirect"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -530,21 +531,24 @@ func mintAccessToken(ts oauth2.TokenSource) (string, error) {
 	return tok.AccessToken, nil
 }
 
-// a2aRequestTimeout restates the a2a client's own default. Auth has to build an
-// explicit http.Client to install CheckRedirect, and building one drops the
-// timeout a2aclient would otherwise have applied.
+// a2aRequestTimeout restates the a2a client's own default. NewA2A builds an
+// explicit http.Client, to install CheckRedirect for Auth and the client
+// certificate transport either way, and building one drops the timeout
+// a2aclient would otherwise have applied.
 const a2aRequestTimeout = 3 * time.Minute
 
 // authHTTPClient is the HTTP client used when Auth is set. It refuses a
 // redirect that leaves the card's host or downgrades its scheme, because the
 // transport applies the credential again on every hop, so nothing else bounds
 // where the secret travels. adk-python's HTTP client follows no redirects at
-// all by default; this one still follows a same-origin redirect.
+// all by default; this one still follows a same-origin redirect, and one
+// between a Google API host and its mTLS name over https (see
+// credredirect.Check).
 func authHTTPClient(provider auth.CredentialProvider) *http.Client {
 	return &http.Client{
 		Timeout:       a2aRequestTimeout,
 		CheckRedirect: checkRedirect,
-		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: http.DefaultTransport},
+		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: googlemtls.NewTransport(http.DefaultTransport)},
 	}
 }
 
