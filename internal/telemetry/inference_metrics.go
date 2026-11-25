@@ -93,12 +93,16 @@ func carriesOutput(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, p := range resp.Content.Parts {
-		switch {
-		case p == nil:
-		case p.Text != "",
-			p.InlineData != nil && len(p.InlineData.Data) > 0,
-			p.FunctionCall != nil && (p.FunctionCall.Name != "" || len(p.FunctionCall.Args) > 0 || len(p.FunctionCall.PartialArgs) > 0),
-			p.ToolCall != nil && (p.ToolCall.ToolType != "" || len(p.ToolCall.Args) > 0):
+		if p == nil {
+			continue
+		}
+		if p.Text != "" || (p.InlineData != nil && len(p.InlineData.Data) > 0) {
+			return true
+		}
+		if fc := p.FunctionCall; fc != nil && (fc.Name != "" || len(fc.Args) > 0 || len(fc.PartialArgs) > 0) {
+			return true
+		}
+		if tc := p.ToolCall; tc != nil && (tc.ToolType != "" || len(tc.Args) > 0) {
 			return true
 		}
 	}
