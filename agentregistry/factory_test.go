@@ -15,9 +15,17 @@
 package agentregistry
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -28,19 +36,153 @@ func TestIsGoogleAPI(t *testing.T) {
 		url  string
 		want bool
 	}{
-		{url: "https://googleapis.com/v1", want: true},
 		{url: "https://agentregistry.googleapis.com/v1", want: true},
 		{url: "https://agentregistry.mtls.googleapis.com/v1", want: true},
+		{url: "https://us-central1-aiplatform.googleapis.com/mcp", want: true},
+		{url: "https://AgentRegistry.GoogleAPIs.com/v1", want: true},
+		{url: "HTTPS://agentregistry.googleapis.com/v1", want: true},
+		{url: "https://agentregistry.googleapis.com:443/v1", want: true},
+		{url: "https://AZaz09.googleapis.com/v1", want: true},
+		// No such host exists, but it has the suffix, as in adk-python.
+		{url: "https://.googleapis.com/v1", want: true},
 		{url: "https://evil.com/googleapis.com", want: false},
 		{url: "https://notgoogleapis.com", want: false},
+		{url: "https://googleapis.com.evil.com/v1", want: false},
 		{url: "https://example.com", want: false},
 		{url: "://bad", want: false},
+		{url: "", want: false},
+		// The apex is not a service endpoint.
+		{url: "https://googleapis.com/v1", want: false},
+		// Credentials do not go out in clear text.
+		{url: "http://agentregistry.googleapis.com/v1", want: false},
+		{url: "https://googleapis.com@evil.com/v1", want: false},
+		{url: "https://user:pw@agentregistry.googleapis.com/v1", want: false},
+		{url: `https://evil.com\.googleapis.com/v1`, want: false},
+		// The zone of an IPv6 address can end in the suffix, and the address
+		// is anyone's.
+		{url: "https://[::1%25.googleapis.com]/mcp", want: false},
+		{url: "https://[::1%25.googleapis.com]:8443/mcp", want: false},
+		{url: "https://[2001:db8::1%25.googleapis.com]/mcp", want: false},
+		// Not the characters of a DNS name.
+		{url: "https://evil.com,foo.googleapis.com/v1", want: false},
+		{url: "https://my_api.googleapis.com/v1", want: false},
+		{url: "https://\u0130.googleapis.com/v1", want: false},
+		{url: "https://agentregistry.googleapis.com./v1", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.url, func(t *testing.T) {
 			if got := isGoogleAPI(tc.url); got != tc.want {
 				t.Errorf("isGoogleAPI(%q) = %t, want %t", tc.url, got, tc.want)
 			}
+		})
+	}
+}
+
+var errDialed = errors.New("dialed")
+
+// Unless the caller sets a client, the registry's credentials go to every URL
+// that isGoogleAPI accepts, so a request to one has to connect to a DNS name
+// under googleapis.com. The URLs are every string of up to three pieces in
+// each template.
+func TestIsGoogleAPIDestinationIsDialed(t *testing.T) {
+	pieces := []string{"a", "A", "1", ".", "-", "_", ":", "%", "%25", "[", "]", "@", "/", "\\", ",", "#", "?", " ", "\u0130", "::1", "1.2.3.4"}
+	templates := []string{
+		"https://%s.googleapis.com/v1",
+		"https://%s.googleapis.com:443/v1",
+		"https://%sgoogleapis.com/v1",
+		"https://[%s.googleapis.com]/v1",
+		"https://[::1%s.googleapis.com]/v1",
+		"https://[::1%s.googleapis.com]:443/v1",
+		"https://%sx.googleapis.com/v1",
+		"https://x.googleapis.com%s",
+	}
+	dnsName := regexp.MustCompile(`^[a-z0-9.-]*\.googleapis\.com$`)
+
+	var dialed string
+	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = addr
+		return nil, errDialed
+	}
+	client := &http.Client{Transport: &http.Transport{DialContext: dial, DialTLSContext: dial, DisableKeepAlives: true}}
+
+	// check reports whether isGoogleAPI accepts rawURL, after checking where
+	// a request to it would connect.
+	var connects int
+	check := func(t *testing.T, rawURL string) bool {
+		if !isGoogleAPI(rawURL) {
+			return false
+		}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rawURL, http.NoBody)
+		if err != nil {
+			return true // No request can be sent there.
+		}
+		dialed = ""
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("request to %q was sent", rawURL)
+		}
+		if !errors.Is(err, errDialed) {
+			return true // Refused before any connection.
+		}
+		connects++
+		host, _, err := net.SplitHostPort(dialed)
+		if err != nil {
+			t.Errorf("isGoogleAPI(%q) = true, and a request connects to %q, which is not host:port", rawURL, dialed)
+			return true
+		}
+		if _, err := netip.ParseAddr(host); err == nil {
+			t.Errorf("isGoogleAPI(%q) = true, and a request connects to the IP address %q", rawURL, dialed)
+		}
+		if !dnsName.MatchString(strings.ToLower(host)) {
+			t.Errorf("isGoogleAPI(%q) = true, and a request connects to %q, which is not a DNS name under googleapis.com", rawURL, dialed)
+		}
+		return true
+	}
+
+	for _, mode := range []struct {
+		name, godebug string
+		// only is a URL that url.Parse takes only with godebug.
+		only string
+	}{
+		{name: "default"},
+		// Since Go 1.26 url.Parse refuses an http or https host that holds
+		// more than one colon. The setting turns that off.
+		{name: "colons in the host", godebug: "urlstrictcolons=0", only: "https://evil.com:443,foo.googleapis.com:443/v1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			if mode.godebug != "" {
+				t.Setenv("GODEBUG", mode.godebug)
+				if _, err := url.Parse(mode.only); err != nil {
+					t.Skipf("GODEBUG=%s has no effect: %v", mode.godebug, err)
+				}
+				if check(t, mode.only) {
+					t.Errorf("isGoogleAPI(%q) = true", mode.only)
+				}
+			}
+			connects = 0
+			var total, accepted int
+			var walk func(prefix string, depth int)
+			walk = func(prefix string, depth int) {
+				for _, tmpl := range templates {
+					total++
+					if check(t, fmt.Sprintf(tmpl, prefix)) {
+						accepted++
+					}
+				}
+				if depth == 0 {
+					return
+				}
+				for _, piece := range pieces {
+					walk(prefix+piece, depth-1)
+				}
+			}
+			walk("", 3)
+			// Guards against a generator, or a dialer, that reaches nothing.
+			if total < 50000 || accepted < 500 || connects < accepted/2 {
+				t.Errorf("checked %d URLs, %d accepted, %d of those connecting: too few to mean anything", total, accepted, connects)
+			}
+			t.Logf("%d URLs, %d accepted, %d of those connecting", total, accepted, connects)
 		})
 	}
 }
@@ -70,6 +212,16 @@ func TestEgressClient(t *testing.T) {
 		{
 			name: "non-google uses default",
 			url:  "https://third-party.example/mcp",
+			want: http.DefaultClient,
+		},
+		{
+			name: "address with a googleapis.com zone uses default",
+			url:  "https://[::1%25.googleapis.com]/mcp",
+			want: http.DefaultClient,
+		},
+		{
+			name: "clear text uses default",
+			url:  "http://x.googleapis.com/mcp",
 			want: http.DefaultClient,
 		},
 	}
