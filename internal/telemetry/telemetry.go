@@ -103,6 +103,9 @@ type GenerateContentParams struct {
 	// Request is required.
 	Request *model.LLMRequest
 	Backend genai.Backend
+	// Provider is the provider the model reports for itself, if any. It wins
+	// over the one the model name and backend give.
+	Provider string
 	// Stream reports whether the model was asked to stream. A call that is not
 	// streamed ends at its one response, whether or not it reports a finish
 	// reason. Unlike adk-python, which waits for the generator to finish, so
@@ -136,7 +139,7 @@ func startGenerateContentSpan(ctx context.Context, params GenerateContentParams)
 		semconv.GenAIRequestModel(modelName),
 	}
 	if !useLegacySchema() {
-		attrs = append(attrs, providerName(params.ModelName, params.Backend))
+		attrs = append(attrs, providerName(params.Provider, params.ModelName, params.Backend))
 	}
 	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation

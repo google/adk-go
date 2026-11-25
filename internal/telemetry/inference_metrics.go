@@ -52,7 +52,7 @@ type clientInference struct {
 func newClientInference(params GenerateContentParams, start time.Time) *clientInference {
 	return &clientInference{
 		params:   params,
-		provider: providerName(params.ModelName, params.Backend),
+		provider: providerName(params.Provider, params.ModelName, params.Backend),
 		start:    start,
 	}
 }

@@ -43,6 +43,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -1276,6 +1277,9 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		Request:      req,
 		Backend:      googlellm.GetGoogleLLMVariant(m),
 		Stream:       useStream,
+	}
+	if r, ok := m.(genaiprovider.Reporter); ok {
+		params.Provider = string(r.GenAIProvider())
 	}
 	response := func(r *responseWithEventID) (*model.LLMResponse, string) { return r.LLMResponse, r.eventID }
 	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {

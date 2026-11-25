@@ -61,9 +61,24 @@ func TestProviderName(t *testing.T) {
 		{"apigee/v1/gemini-2.5-flash", genai.BackendUnspecified, "unknown"},
 	} {
 		t.Run(fmt.Sprintf("%s/%d", tc.model, tc.backend), func(t *testing.T) {
-			if got := providerName(tc.model, tc.backend).Value.AsString(); got != tc.want {
+			if got := providerName("", tc.model, tc.backend).Value.AsString(); got != tc.want {
 				t.Errorf("providerName(%q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProviderName_Reported(t *testing.T) {
+	for _, tc := range []struct {
+		model   string
+		backend genai.Backend
+	}{
+		{"claude-sonnet-4-5", genai.BackendUnspecified},
+		{"gemini-2.0-flash", genai.BackendGeminiAPI},
+		{"apigee/openai/gpt-4o", genai.BackendUnspecified},
+	} {
+		if got := providerName("gcp.vertex_ai", tc.model, tc.backend).Value.AsString(); got != "gcp.vertex_ai" {
+			t.Errorf("providerName(%q, %q, %v) = %q, want the reported gcp.vertex_ai", "gcp.vertex_ai", tc.model, tc.backend, got)
+		}
 	}
 }

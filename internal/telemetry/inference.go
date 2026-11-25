@@ -26,9 +26,12 @@ import (
 var genAIProviderName = attribute.Key("gen_ai.provider.name")
 
 // providerName is the provider a model call's span, log record and metrics
-// report: named by the model, else by the provider segment of an Apigee path,
-// else by the call's backend, else unknown.
-func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
+// report: the one the model reports, else named by the model name, else by the
+// provider segment of an Apigee path, else by the call's backend, else unknown.
+func providerName(reported, modelName string, backend genai.Backend) attribute.KeyValue {
+	if reported != "" {
+		return genAIProviderName.String(reported)
+	}
 	name := bareModelName(modelName)
 	if !strings.HasPrefix(name, "gemini-") {
 		if anthropicModel.MatchString(name) {

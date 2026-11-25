@@ -17,7 +17,10 @@ package llminternal
 import (
 	"context"
 	"errors"
+	"io"
 	"iter"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -30,11 +33,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/oauth2"
 	"google.golang.org/genai"
 
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/anthropicmodel"
 )
 
 type mockModelForTest struct {
@@ -446,5 +451,57 @@ func TestInferenceEventDescribesTheRequestTheSpanDoes(t *testing.T) {
 	})
 	if eventMessages != 2 {
 		t.Errorf("event gen_ai.input.messages holds %d messages, want 2", eventMessages)
+	}
+}
+
+type staticToken struct{}
+
+func (staticToken) Token() (*oauth2.Token, error) { return &oauth2.Token{AccessToken: "t"}, nil }
+
+// The provider follows the platform serving Claude, not its name.
+func TestGenerateContentProviderFollowsAnthropicBackend(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	telemetry.ApplyEnv()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(server.Close)
+	for _, tc := range []struct {
+		cfg  anthropicmodel.ClientConfig
+		want string
+	}{
+		{anthropicmodel.ClientConfig{Backend: anthropicmodel.BackendAnthropic, APIKey: "k", BaseURL: server.URL}, "anthropic"},
+		{anthropicmodel.ClientConfig{Backend: anthropicmodel.BackendVertex, Project: "p", Location: "us-east5", BaseURL: server.URL, TokenSource: staticToken{}}, "gcp.vertex_ai"},
+	} {
+		t.Run(string(tc.cfg.Backend), func(t *testing.T) {
+			spans := tracetest.NewInMemoryExporter()
+			telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans)))
+			m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5", tc.cfg)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			for _, err := range generateContent(ctx, m, &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)}}, false) {
+				if err != nil {
+					t.Fatalf("generateContent() error = %v", err)
+				}
+			}
+			var got string
+			for _, sp := range spans.GetSpans() {
+				if sp.Name != "generate_content claude-sonnet-4-5" {
+					continue
+				}
+				for _, kv := range sp.Attributes {
+					if kv.Key == "gen_ai.provider.name" {
+						got = kv.Value.AsString()
+					}
+				}
+			}
+			if got != tc.want {
+				t.Errorf("gen_ai.provider.name = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
