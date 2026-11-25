@@ -243,6 +243,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
+	var jsonParts []string
 	for _, part := range lastContent.Parts {
 		if part == nil || part.Thought {
 			continue
@@ -251,6 +252,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		switch {
 		case part.Text != "":
 			text = part.Text
+			jsonParts = append(jsonParts, text)
 		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
 			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
 		case part.ExecutableCode != nil:
@@ -275,9 +277,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
 		}
 		if agentOutputSchema := llminternal.Reveal(internalLlmAgent).OutputSchema; agentOutputSchema != nil {
-			// Assuming schemautils.ValidateOutputSchema parses the JSON string outputText
-			// and validates it against the agentOutputSchema, returning a map[string]any.
-			parsedOutput, err := utils.ValidateOutputSchema(outputText, agentOutputSchema)
+			// Validate only the text parts: executable-code and
+			// execution-result parts are not part of the structured output and
+			// would make the joined text fail json.Unmarshal.
+			parsedOutput, err := utils.ValidateOutputSchema(strings.Join(jsonParts, "\n"), agentOutputSchema)
 			if err != nil {
 				return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
 			}

@@ -396,6 +396,46 @@ func TestAgentTool_Run_CodeParts(t *testing.T) {
 	}
 }
 
+func TestAgentTool_Run_OutputValidationIgnoresCodeParts(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"is_valid": {Type: "BOOLEAN"},
+			"message":  {Type: "STRING"},
+		},
+		Required: []string{"is_valid", "message"},
+	}
+
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{
+					{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					{Text: `{"is_valid": true, "message": "success"}`},
+				},
+			},
+		},
+	}
+
+	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
+	agentTool := agenttool.New(agent, nil)
+	toolCtx := createToolContext(t, agent)
+	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "test"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	want := map[string]any{"is_valid": true, "message": "success"}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
 func TestAgentTool_Run_FiltersThoughtParts(t *testing.T) {
 	testLLM := &testutil.MockModel{
 		Responses: []*genai.Content{
