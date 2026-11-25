@@ -926,12 +926,20 @@ func TestLoadArtifactsTool_ProcessRequest_FirstRevisionIsZero(t *testing.T) {
 func TestLoadArtifactsTool_Declaration_RevisionsStartAtZero(t *testing.T) {
 	decl := loadartifactstool.New().(toolinternal.FunctionTool).Declaration()
 	props := decl.Parameters.Properties
+	version, ok := props["version"]
+	if !ok {
+		t.Fatal("declaration has no version parameter")
+	}
 	want := "Optional revision number to load for each artifact in artifact_names. Revisions are numbered from 0. If omitted, the latest revision is loaded."
-	if got := props["version"].Description; got != want {
+	if got := version.Description; got != want {
 		t.Errorf("version description = %q, want %q", got, want)
 	}
+	selectors, ok := props["artifact_versions"]
+	if !ok || selectors.Items == nil || selectors.Items.Properties["version"] == nil {
+		t.Fatal("declaration has no artifact_versions[].version parameter")
+	}
 	want = "Revision number to load. Revisions are numbered from 0. If omitted, the latest revision is loaded."
-	if got := props["artifact_versions"].Items.Properties["version"].Description; got != want {
+	if got := selectors.Items.Properties["version"].Description; got != want {
 		t.Errorf("artifact_versions[].version description = %q, want %q", got, want)
 	}
 }
