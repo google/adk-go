@@ -111,15 +111,6 @@ func callObligationKey(call *genai.FunctionCall, eventIndex int) string {
 	return fmt.Sprintf("\x00no-id\x00%d\x00%s", eventIndex, call.Name)
 }
 
-// LatestCompactionEvent returns the newest compaction event in events that no
-// other compaction subsumes, or nil when events holds no compaction at all.
-//
-// A compaction is subsumed when another compaction fully contains its range: a
-// strictly wider range, or an identical range appearing later in the stream.
-//
-// Ties are broken by stream position rather than by greatest end timestamp,
-// because the summary written later saw more history and supersedes the earlier
-// one even when both cover the same range.
 // LatestCompactionEventInScope is [LatestCompactionEvent] restricted to records
 // belonging to one branch and isolation scope.
 //
@@ -141,27 +132,22 @@ func LatestCompactionEventInScope(events []*session.Event, branch, isolationScop
 	return LatestCompactionEvent(scoped)
 }
 
+// LatestCompactionEvent returns the last surviving compaction event in stream
+// order, or nil if there are no compaction records.
+//
+// Records with no usable summary still count for this lookup. Window selection
+// and prompt assembly require [HasUsableSummary] for a record to cover original
+// events. Events without usable coverage remain eligible for future compaction.
 func LatestCompactionEvent(events []*session.Event) *session.Event {
-	// Records collected once: asking isCompactionSubsumed per record would
-	// rescan the whole session each time.
-	var at []int
 	var recs []*session.Event
-	for j, ev := range events {
+	for _, ev := range events {
 		if hasCompaction(ev) {
-			at = append(at, j)
 			recs = append(recs, ev)
 		}
 	}
 	var latest *session.Event
 	for k, ev := range recs {
-		i := at[k]
-		// hasCompaction, not HasUsableSummary, deliberately. A record with no
-		// usable content still marks how far compaction reached, so the next
-		// window must start after it. Requiring content here would make the
-		// next window re-summarize everything the broken record covered.
-		// Substitution keys off the stronger predicate, which is what stops a
-		// contentless record from standing in as conversation.
-		if isSubsumedAmong(i, ev.Actions.Compaction, at, recs) {
+		if isSubsumedAmong(ev.Actions.Compaction, recs[k+1:]) {
 			continue
 		}
 		latest = ev
@@ -169,75 +155,19 @@ func LatestCompactionEvent(events []*session.Event) *session.Event {
 	return latest
 }
 
-// isSubsumedAmong is isCompactionSubsumed against a pre-collected record list.
-// at[k] is the position of recs[k] in the original event slice.
-func isSubsumedAmong(i int, rng *session.EventCompaction, at []int, recs []*session.Event) bool {
-	for k, other := range recs {
-		j := at[k]
-		// HasUsableSummary rather than hasCompaction: only a record carrying
-		// usable content may evict another. Keying on the weaker predicate let
-		// a contentless record subsume a real summary, destroying one already
-		// paid for. Nothing then represented the range: the covered events fell
-		// back to raw and the boundary calculation went on pointing at the
-		// useless record.
-		if j == i || !HasUsableSummary(other) {
+// isSubsumedAmong reports whether a later record replaces the earlier compaction.
+// laterRecords must come after earlier's record in stream order.
+func isSubsumedAmong(earlier *session.EventCompaction, laterRecords []*session.Event) bool {
+	for _, record := range laterRecords {
+		if !HasUsableSummary(record) {
 			continue
 		}
-		o := other.Actions.Compaction
-		// An identical range is decided by stream position alone, before the
-		// coverage test below, and deliberately without comparing holes.
-		//
-		// Comparing them cannot work in both directions at once. The record
-		// with more holes covers fewer events, so it never "stands in for
-		// everything the other stood in for" and coversAllOf refuses it, while
-		// the record with fewer holes always passes. Whichever way the
-		// tiebreak is written, the fuller hole list loses, and that is the one
-		// a correction carries: when an event is stored inside a range after
-		// the summary was built, the only way to stop it being treated as
-		// summarized is to write the same range again naming it.
-		//
-		// Position is the right answer because the later record is the better
-		// informed one. What it costs is that events the loser covered and the
-		// winner excludes fall back to raw, which is visible, and visible is
-		// the safe direction. adk-python decides an identical range the same
-		// way, by position, with no hole comparison at all.
-		if sameRange(o, rng) {
-			// Later wins, and the holes of every record over this interval are
-			// folded into whichever survives, so a correction cannot take its
-			// straggler with it when it loses.
-			//
-			// This cannot tell a re-summarization from two independent
-			// summaries that happen to span one instant. Distinguishing them
-			// needs to know which events each record was built from, and the
-			// record stores holes rather than membership, deliberately, because
-			// membership grows with the conversation. Preferring the later
-			// record keeps the documented property that a re-summarized range
-			// never appears twice in one prompt, at the cost of the rarer case
-			// where two records over one instant describe different events.
-			if j > i {
-				return true
-			}
-			continue
-		}
-		// Subsuming means standing in for everything the other one stood in
-		// for. Discarding a record whose events the survivor does not cover
-		// would leave those events represented by nothing at all, which is the
-		// failure this whole model exists to remove.
-		if !coversAllOf(o, rng) {
-			continue
-		}
-		// Only a later record may subsume an earlier one, which is the same
-		// rule coverage uses.
-		//
-		// A summary never covers an event recorded after it, so a record that
-		// sits earlier in the stream cannot stand in for anything appended
-		// between the two, however much wider its timestamp range looks. Judging
-		// this on timestamps alone let an earlier wide record evict a later
-		// narrow one and then fail to cover the events that one had summarized,
-		// which put them back in the prompt raw and, because selection and
-		// assembly then disagreed about whether they were covered, left them
-		// permanently uncompactable.
-		if j > i {
+		later := record.Actions.Compaction
+		// For an identical range, prefer the later record even when it adds
+		// exclusions. A correction adds exclusions to keep events that arrived
+		// after summarization visible as raw events. adk-python also resolves
+		// identical ranges by stream position.
+		if sameRange(later, earlier) || coversAllOf(later, earlier) {
 			return true
 		}
 	}

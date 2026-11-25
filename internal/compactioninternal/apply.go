@@ -115,7 +115,7 @@ func substituteSummaries(events []*session.Event) []*session.Event {
 			// callers can also build directly.
 			continue
 		}
-		if isSubsumedAmong(i, ev.Actions.Compaction, recAt, recs) {
+		if isSubsumedAmong(ev.Actions.Compaction, recs[k+1:]) {
 			continue
 		}
 		pos, folded := foldCorrections(i, ev.Actions.Compaction, recAt, recs)
@@ -494,7 +494,7 @@ func newCoverIndex(events []*session.Event) coverIndex {
 		// not be summarized either, which puts it outside the bound tail
 		// retention exists to enforce, permanently, one event per lost append
 		// race.
-		if isSubsumedAmong(recAt[k], ev.Actions.Compaction, recAt, recs) {
+		if isSubsumedAmong(ev.Actions.Compaction, recs[k+1:]) {
 			continue
 		}
 		// Contentless records are skipped for the same reason, and this is the
@@ -756,7 +756,7 @@ func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 //
 // Prevention needs a primitive that does not exist, so this repairs instead.
 // The corrected record carries the same content over the same range and names
-// the straggler as a hole, and the identical-range rule in isCompactionSubsumed
+// the straggler as a hole, and the identical-range rule in isSubsumedAmong
 // lets it evict the record it corrects. The straggler falls back to raw, which
 // is what should have happened.
 //

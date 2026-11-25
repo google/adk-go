@@ -1140,21 +1140,15 @@ func TestSelectionSkipsASubsumedRecordItsHolesDoNotCover(t *testing.T) {
 	// other and their holes are not merged. The later one names x; the earlier
 	// one, which it evicts, does not.
 	earlier := compactionEvent("s1", 9, 1, 3, "summary A")
-	later := compactionEvent("s2", 10, 1, 3, "summary B", excl("inv2", 2))
+	tail := textEvent("tail", "inv4", 10, "q4")
+	later := compactionEvent("s2", 11, 1, 3, "summary B", excl("inv2", 2))
 
-	events := []*session.Event{e1, x, e3, earlier, later}
+	events := []*session.Event{e1, x, e3, earlier, tail, later}
 
-	if got := ids(Apply(events)); !slices.Contains(got, "x") {
-		t.Fatalf("prompt %v drops x, which the surviving record excludes", got)
+	if diff := cmp.Diff([]string{"s2", "x", "tail"}, ids(Apply(events))); diff != "" {
+		t.Errorf("Apply() mismatch (-want +got):\n%s", diff)
 	}
-
-	idx := newCoverIndex(events)
-	for i, ev := range events {
-		if hasCompaction(ev) || ev.ID != "x" {
-			continue
-		}
-		if idx.coversAfter(i, ev) {
-			t.Error("selection reports x covered by the record that was subsumed, while assembly keeps it raw: x can never be summarized")
-		}
+	if diff := cmp.Diff([]string{"x"}, ids(selectSlidingWindow(events, 1, 0))); diff != "" {
+		t.Errorf("selectSlidingWindow() mismatch (-want +got):\n%s", diff)
 	}
 }
