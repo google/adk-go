@@ -20,17 +20,206 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
+
+// TestModel_Generate and TestModel_GenerateStream replay recorded OpenAI
+// traffic. They send the same request and make the same assertions as their
+// model/gemini namesakes, once per API. Keep the two packages' suites in step.
+
+//go:generate go test -httprecord=^testdata[/\\]TestModel_Generate.*\.httprr$
+
+func TestModel_Generate(t *testing.T) {
+	tests := []struct {
+		name      string
+		api       API
+		modelName string
+		req       *model.LLMRequest
+		want      *model.LLMResponse
+		wantErr   bool
+	}{
+		{
+			name:      "ok",
+			api:       APIResponses,
+			modelName: "gpt-4o-mini",
+			req: &model.LLMRequest{
+				Contents: genai.Text("What is the capital of France? One word."),
+				Config: &genai.GenerateContentConfig{
+					Temperature: new(float32),
+				},
+			},
+			want: &model.LLMResponse{
+				Content: genai.NewContentFromText("Paris.", genai.RoleModel),
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+					CandidatesTokenCount:    3,
+					CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 3}},
+					PromptTokenCount:        17,
+					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 17}},
+					TotalTokenCount:         20,
+				},
+				CustomMetadata: map[string]any{
+					"openai_model":       "gpt-4o-mini-2024-07-18",
+					"openai_response_id": "resp_06e053846b995416006ad8a7fa167c87d2a13698c34da030c2",
+				},
+				ModelVersion: "gpt-4o-mini-2024-07-18",
+				FinishReason: "STOP",
+			},
+		},
+		{
+			name:      "ok",
+			api:       APIChatCompletions,
+			modelName: "gpt-4o-mini",
+			req: &model.LLMRequest{
+				Contents: genai.Text("What is the capital of France? One word."),
+				Config: &genai.GenerateContentConfig{
+					Temperature: new(float32),
+				},
+			},
+			want: &model.LLMResponse{
+				Content: genai.NewContentFromText("Paris.", genai.RoleModel),
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+					CandidatesTokenCount:    2,
+					CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 2}},
+					PromptTokenCount:        17,
+					PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: "TEXT", TokenCount: 17}},
+					TotalTokenCount:         19,
+				},
+				CustomMetadata: map[string]any{
+					"openai_model":       "gpt-4o-mini-2024-07-18",
+					"openai_response_id": "chatcmpl-EbPBrJD08ddE8z0voH01xywRLAnh1",
+				},
+				ModelVersion: "gpt-4o-mini-2024-07-18",
+				FinishReason: "STOP",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.api)+"_"+tt.name, func(t *testing.T) {
+			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
+
+			testModel, err := NewModel(t.Context(), tt.modelName, newTestClientConfig(t, httpRecordFilename, tt.api))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			n := 0
+			for got, err := range testModel.GenerateContent(t.Context(), tt.req, false) {
+				n++
+				if (err != nil) != tt.wantErr {
+					t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
+					return
+				}
+				if diff := cmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
+				}
+			}
+			if n != 1 {
+				t.Errorf("Model.Generate() yielded %d responses, want 1", n)
+			}
+		})
+	}
+}
+
+func TestModel_GenerateStream(t *testing.T) {
+	tests := []struct {
+		name      string
+		api       API
+		modelName string
+		req       *model.LLMRequest
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "ok",
+			api:       APIResponses,
+			modelName: "gpt-4o-mini",
+			req: &model.LLMRequest{
+				Contents: genai.Text("What is the capital of France? One word."),
+				Config: &genai.GenerateContentConfig{
+					Temperature: new(float32),
+				},
+			},
+			want: "Paris.",
+		},
+		{
+			name:      "ok",
+			api:       APIChatCompletions,
+			modelName: "gpt-4o-mini",
+			req: &model.LLMRequest{
+				Contents: genai.Text("What is the capital of France? One word."),
+				Config: &genai.GenerateContentConfig{
+					Temperature: new(float32),
+				},
+			},
+			want: "Paris.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.api)+"_"+tt.name, func(t *testing.T) {
+			httpRecordFilename := filepath.Join("testdata", strings.ReplaceAll(t.Name(), "/", "_")+".httprr")
+
+			model, err := NewModel(t.Context(), tt.modelName, newTestClientConfig(t, httpRecordFilename, tt.api))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := testutil.ReadTextResponse(model.GenerateContent(t.Context(), tt.req, true))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if diff := cmp.Diff(tt.want, got.PartialText); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.PartialText, tt.want, diff)
+			}
+			// Since we are expecting GenerateStream to aggregate partial events, the text should be the same
+			if diff := cmp.Diff(tt.want, got.FinalText); diff != "" {
+				t.Errorf("Model.GenerateStream() = %v, want %v\ndiff(-want +got):\n%v", got.FinalText, tt.want, diff)
+			}
+		})
+	}
+}
+
+// newTestClientConfig returns a ClientConfig that records to and replays from
+// rrfile, as testutil.NewGeminiTestClientConfig does for model/gemini. It lives
+// here rather than in testutil because testutil cannot import this package
+// without an import cycle in this package's own tests.
+func newTestClientConfig(t *testing.T, rrfile string, api API) *ClientConfig {
+	t.Helper()
+	rr, err := testutil.NewOpenAITransport(rrfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiKey := ""
+	if recording, _ := httprr.Recording(rrfile); !recording {
+		apiKey = "fakekey"
+	}
+	return &ClientConfig{
+		APIKey: apiKey,
+		// Pinned so that OPENAI_BASE_URL in the environment cannot send a
+		// recording elsewhere or make a replay miss.
+		BaseURL:    "https://api.openai.com/v1/",
+		HTTPClient: &http.Client{Transport: rr},
+		// A refused recording and a replay miss both reach openai-go as a
+		// transport error, which it would otherwise retry twice: live, while
+		// recording, and after a backoff, while replaying.
+		Options: []option.RequestOption{option.WithMaxRetries(0)},
+		API:     api,
+	}
+}
 
 // TestNewModel_SelectsAPI is the facade's whole job: turn the config field into
 // the right endpoint. It asserts on the path the request reached, because that
