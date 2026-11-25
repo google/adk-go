@@ -142,22 +142,35 @@ func TestResolveToolReferenceMcpToolsetStdioOptIn(t *testing.T) {
 		"tool_filter": []any{},
 	}
 	tests := []struct {
-		name  string
-		value string
-		unset bool
-		args  map[string]any
-		allow bool
+		name    string
+		value   string
+		unset   bool
+		args    map[string]any
+		wantErr string
 	}{
-		{name: "unset", unset: true, args: args},
-		{name: "empty", args: args},
-		{name: "zero", value: "0", args: args},
-		{name: "false", value: "false", args: args},
-		{name: "other", value: "yes", args: args},
-		{name: "whitespace", value: " true ", args: args},
-		{name: "missing args without opt-in"},
-		{name: "one", value: "1", args: args, allow: true},
-		{name: "true", value: "true", args: args, allow: true},
-		{name: "mixed case", value: "TrUe", args: args, allow: true},
+		{name: "unset", unset: true, args: args, wantErr: env},
+		{name: "empty", args: args, wantErr: env},
+		{name: "zero", value: "0", args: args, wantErr: env},
+		{name: "false", value: "false", args: args, wantErr: env},
+		{name: "other", value: "yes", args: args, wantErr: env},
+		{name: "whitespace", value: " true ", args: args, wantErr: env},
+		{name: "one", value: "1", args: args},
+		{name: "true", value: "true", args: args},
+		{name: "mixed case", value: "TrUe", args: args},
+		{
+			name:    "stdio server params without opt-in",
+			unset:   true,
+			args:    map[string]any{"stdio_server_params": map[string]any{"command": "echo"}},
+			wantErr: env,
+		},
+		{
+			name:  "SSE only without opt-in",
+			unset: true,
+			args: map[string]any{
+				"sse_connection_params": map[string]any{"url": "http://example.invalid/sse"},
+			},
+			wantErr: "stdio_connection_params not found in args",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,7 +182,7 @@ func TestResolveToolReferenceMcpToolsetStdioOptIn(t *testing.T) {
 			}
 
 			_, toolset, err := ResolveToolReference(t.Context(), "McpToolset", tc.args)
-			if tc.allow {
+			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatal("ResolveToolReference(McpToolset) returned an unexpected error")
 				}
@@ -178,8 +191,11 @@ func TestResolveToolReferenceMcpToolsetStdioOptIn(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), env) {
-				t.Errorf("ResolveToolReference(McpToolset) should return an error naming %s", env)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ResolveToolReference(McpToolset) should return an error containing %q", tc.wantErr)
+			}
+			if tc.wantErr != env && strings.Contains(err.Error(), env) {
+				t.Errorf("ResolveToolReference(McpToolset) error should not name %s", env)
 			}
 		})
 	}

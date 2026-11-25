@@ -58,6 +58,13 @@ var (
 	callbackRegistry = make(map[string]any)
 )
 
+const allowConfigStdioServersEnv = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
+
+func allowConfigStdioServers() bool {
+	v := os.Getenv(allowConfigStdioServersEnv)
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 func init() {
 	if err := Register("LlmAgent", newLLMAgent); err != nil {
 		panic(err)
@@ -199,10 +206,10 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
-		// This factory only supports stdio, so it can check the opt-in before parsing.
-		const allowStdioEnv = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
-		if v := os.Getenv(allowStdioEnv); v != "1" && !strings.EqualFold(v, "true") {
-			return nil, fmt.Errorf("stdio MCP servers are not allowed in agent configs: set %s=1 only if you trust every config this process loads", allowStdioEnv)
+		_, hasConnectionParams := args["stdio_connection_params"]
+		_, hasServerParams := args["stdio_server_params"]
+		if (hasConnectionParams || hasServerParams) && !allowConfigStdioServers() {
+			return nil, fmt.Errorf("stdio MCP servers are not allowed in agent configs: set %s=1 only if you trust every config this process loads", allowConfigStdioServersEnv)
 		}
 
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
