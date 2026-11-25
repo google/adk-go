@@ -15,6 +15,8 @@
 package utils
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -118,6 +120,78 @@ func TestCanonicalSchemaJSON_TypeUnionOrder(t *testing.T) {
 
 	if diff := cmp.Diff(string(out1), string(out2)); diff != "" {
 		t.Errorf("canonicalSchemaJSON mismatch for reordered type union (-want +got):\n%s", diff)
+	}
+}
+
+func TestCanonicalSchemaJSON_LiteralArrayOrder(t *testing.T) {
+	literal := map[string]any{
+		"nested": []any{map[string]any{
+			"required": []string{"b", "a"},
+			"type":     []string{"string", "null"},
+		}},
+	}
+	var constant any = literal
+	tests := []struct {
+		name   string
+		schema *jsonschema.Schema
+		want   string
+	}{
+		{
+			name:   "enum",
+			schema: &jsonschema.Schema{Enum: []any{literal}},
+			want:   `{"enum":[{"nested":[{"required":["b","a"],"type":["string","null"]}]}]}`,
+		},
+		{
+			name:   "const",
+			schema: &jsonschema.Schema{Const: &constant},
+			want:   `{"const":{"nested":[{"required":["b","a"],"type":["string","null"]}]}}`,
+		},
+		{
+			name:   "default",
+			schema: &jsonschema.Schema{Default: json.RawMessage(`{"nested":[{"required":["b","a"],"type":["string","null"]}]}`)},
+			want:   `{"default":{"nested":[{"required":["b","a"],"type":["string","null"]}]}}`,
+		},
+		{
+			name:   "examples",
+			schema: &jsonschema.Schema{Examples: []any{literal}},
+			want:   `{"examples":[{"nested":[{"required":["b","a"],"type":["string","null"]}]}]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CanonicalSchemaJSON(tc.schema)
+			if err != nil {
+				t.Fatalf("CanonicalSchemaJSON() failed: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, string(got)); diff != "" {
+				t.Errorf("CanonicalSchemaJSON() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestCanonicalSchemaJSON_SchemaMaps(t *testing.T) {
+	for _, keyword := range []string{"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"} {
+		for _, name := range []string{"const", "enum", "default", "examples", "properties"} {
+			t.Run(keyword+"/"+name, func(t *testing.T) {
+				// Schema map keys are user-defined names, even when they match
+				// a keyword whose value normally contains literal data.
+				input := fmt.Sprintf(`{%q:{%q:{"required":["b","a"],"type":["string","null"],"const":{"required":["b","a"],"type":["string","null"]}}}}`, keyword, name)
+				var schema jsonschema.Schema
+				if err := json.Unmarshal([]byte(input), &schema); err != nil {
+					t.Fatalf("failed to decode schema: %v", err)
+				}
+				got, err := CanonicalSchemaJSON(&schema)
+				if err != nil {
+					t.Fatalf("CanonicalSchemaJSON() failed: %v", err)
+				}
+				want := fmt.Sprintf(`{%q:{%q:{"const":{"required":["b","a"],"type":["string","null"]},"required":["a","b"],"type":["null","string"]}}}`, keyword, name)
+				if diff := cmp.Diff(want, string(got)); diff != "" {
+					t.Errorf("CanonicalSchemaJSON() mismatch (-want +got):\n%s", diff)
+				}
+			})
+		}
 	}
 }
 

@@ -15,6 +15,8 @@
 package toolinternal_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"google.golang.org/genai"
@@ -75,4 +77,58 @@ func (*nonDeferringTool) Declaration() *genai.FunctionDeclaration {
 
 func (*nonDeferringTool) Run(_ agent.Context, _ any) (map[string]any, error) {
 	return nil, nil
+}
+
+// ModelErrorText promises that a recovered panic becomes the generic message
+// however deeply it is wrapped, because an error on its way out of a tool is
+// wrapped once per agent and node it passes through.
+func TestModelErrorText(t *testing.T) {
+	t.Parallel()
+
+	panicErr := toolinternal.NewPanicError("testTool", "secret-user-data-123", []byte("goroutine 28 [running]:\n"))
+	wrap := func(err error, depth int) error {
+		for range depth {
+			err = fmt.Errorf("calling the tool failed: %w", err)
+		}
+		return err
+	}
+
+	for _, tc := range []struct {
+		name         string
+		err          error
+		wantText     string
+		wantPanicked bool
+	}{
+		{name: "unwrapped panic", err: panicErr, wantText: "Invoking `testTool()` failed with an internal error.", wantPanicked: true},
+		{name: "panic wrapped once", err: wrap(panicErr, 1), wantText: "Invoking `testTool()` failed with an internal error.", wantPanicked: true},
+		{name: "panic wrapped twice", err: wrap(panicErr, 2), wantText: "Invoking `testTool()` failed with an internal error.", wantPanicked: true},
+		{name: "panic wrapped five deep", err: wrap(panicErr, 5), wantText: "Invoking `testTool()` failed with an internal error.", wantPanicked: true},
+		{
+			// The check walks a join tree as well as a wrap chain, which is
+			// what distinguishes errors.AsType from unwrapping a fixed number
+			// of times. No path into ModelErrorText joins errors today.
+			name:         "panic joined with another error",
+			err:          errors.Join(errors.New("cleanup failed"), panicErr),
+			wantText:     "Invoking `testTool()` failed with an internal error.",
+			wantPanicked: true,
+		},
+		{
+			// Returning an error is how a Go tool tells the model what went
+			// wrong, so an ordinary error keeps its text at any depth.
+			name:     "ordinary error",
+			err:      wrap(errors.New("order not found"), 2),
+			wantText: "calling the tool failed: calling the tool failed: order not found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			text, panicked := toolinternal.ModelErrorText("testTool", tc.err)
+			if text != tc.wantText {
+				t.Errorf("ModelErrorText() text = %q, want %q", text, tc.wantText)
+			}
+			if panicked != tc.wantPanicked {
+				t.Errorf("ModelErrorText() panicked = %t, want %t", panicked, tc.wantPanicked)
+			}
+		})
+	}
 }
