@@ -15,8 +15,10 @@
 package loadartifactstool_test
 
 import (
+	"context"
 	"errors"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,11 +26,16 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/artifact"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
@@ -41,11 +48,16 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
 	}
 
+	// Arguments the model can correct get an error result, not a Go error.
+	invalidArtifactNamesResult := map[string]any{
+		"error":      "'artifact_names' must be a list of strings.",
+		"error_code": "INVALID_ARGUMENTS",
+	}
+
 	tests := []struct {
-		name    string
-		args    map[string]any
-		want    map[string]any
-		wantErr bool
+		name string
+		args map[string]any
+		want map[string]any
 	}{
 		{
 			name: "basic string slice",
@@ -104,25 +116,45 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			args: map[string]any{
 				"artifact_names": "not a slice",
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "incorrect type (object)",
+			args: map[string]any{
+				"artifact_names": map[string]any{"name": "fileA"},
+			},
+			want: invalidArtifactNamesResult,
 		},
 		{
 			name: "any slice with non-string",
 			args: map[string]any{
 				"artifact_names": []any{"fileA", 123},
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "any slice with empty string",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", ""},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"fileA", ""},
+			},
+		},
+		{
+			name: "any slice with null",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", nil},
+			},
+			want: invalidArtifactNamesResult,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := toolImpl.Run(tc, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
 			}
 
 			if diff := cmp.Diff(tt.want, result); diff != "" {
@@ -414,7 +446,7 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 	otherFR := &genai.FunctionResponse{
 		Name: "other_function",
 		Response: map[string]any{
-			"status": "ok",
+			"artifact_names": []string{"unrelated.txt"},
 		},
 	}
 	loadArtifactsFR := &genai.FunctionResponse{
@@ -459,6 +491,10 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 				t.Fatalf("Failed to save artifact: %v", err)
 			}
 
+			if _, err := tc.Artifacts().Save(t.Context(), "unrelated.txt", genai.NewPartFromText("unrelated body")); err != nil {
+				t.Fatalf("Save() error = %v", err)
+			}
+
 			llmRequest := &model.LLMRequest{
 				Contents: []*genai.Content{
 					{
@@ -495,6 +531,160 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 			if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
 				t.Errorf("Second part of appended content: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
 			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
+	const (
+		app, user, sid    = "app", "user", "session"
+		january, february = "january body", "february body"
+	)
+	backendError := errors.New("storage unavailable")
+	for _, tc := range []struct {
+		name        string
+		firstArgs   []any
+		secondFile  string
+		failLoadFor string
+		loadErr     error
+		wantBodies  []string
+		wantErr     error
+	}{
+		{name: "two successful calls", firstArgs: []any{"january.txt"}, secondFile: "february.txt", wantBodies: []string{january, february}},
+		{name: "invalid arguments before successful call", firstArgs: []any{123}, secondFile: "february.txt", wantBodies: []string{february}},
+		{name: "missing file follows successful call", firstArgs: []any{"january.txt"}, secondFile: "missing.txt", wantBodies: []string{january}},
+		{name: "missing file precedes successful call", firstArgs: []any{"missing.txt"}, secondFile: "february.txt", wantBodies: []string{february}},
+		{name: "invalid filename follows successful call", firstArgs: []any{"january.txt"}, secondFile: "dir/february.txt", wantBodies: []string{january}},
+		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "january.txt", loadErr: fs.ErrNotExist, wantBodies: []string{february}},
+		{name: "backend failure", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "february.txt", loadErr: backendError, wantErr: backendError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			artifacts := artifact.InMemoryService()
+			for name, text := range map[string]string{"january.txt": january, "february.txt": february} {
+				if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+					AppName: app, UserID: user, SessionID: sid, FileName: name,
+					Part: genai.NewPartFromText(text),
+				}); err != nil {
+					t.Fatalf("Save() error = %v", err)
+				}
+			}
+			first := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{"artifact_names": tc.firstArgs})
+			first.FunctionCall.ID = "call-1"
+			second := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{"artifact_names": []any{tc.secondFile}})
+			second.FunctionCall.ID = "call-2"
+			mock := &testutil.MockModel{Responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{first, second}},
+				genai.NewContentFromText("done", genai.RoleModel),
+			}}
+			a, err := llmagent.New(llmagent.Config{
+				Name: "reader", Model: mock, Tools: []tool.Tool{loadartifactstool.New()},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			sessions := session.InMemoryService()
+			if _, err := sessions.Create(ctx, &session.CreateRequest{AppName: app, UserID: user, SessionID: sid}); err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			if tc.loadErr != nil {
+				artifacts = &failingArtifactLoad{Service: artifacts, name: tc.failLoadFor, err: tc.loadErr}
+			}
+			r, err := runner.New(runner.Config{
+				AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
+			})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+			prompt := genai.NewContentFromText("Compare January and February", genai.RoleUser)
+			for _, err := range r.Run(ctx, user, sid, prompt, agent.RunConfig{}) {
+				if err != nil {
+					if tc.wantErr != nil && errors.Is(err, tc.wantErr) {
+						return
+					}
+					t.Fatalf("Run() returned an unexpected error of type %T", err)
+				}
+			}
+			if tc.wantErr != nil {
+				t.Fatal("Run() succeeded despite a backend failure")
+			}
+			if len(mock.Requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(mock.Requests))
+			}
+			var responses int
+			var bodies []string
+			for _, content := range mock.Requests[1].Contents {
+				if content == nil {
+					t.Fatal("request includes nil content")
+				}
+				for _, part := range content.Parts {
+					if part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+						responses++
+					}
+					if part.Text == january || part.Text == february {
+						bodies = append(bodies, part.Text)
+					}
+				}
+			}
+			if responses != 2 {
+				t.Errorf("load_artifacts responses = %d, want 2", responses)
+			}
+			if len(bodies) != len(tc.wantBodies) {
+				t.Fatalf("attached artifact bodies = %d, want %d", len(bodies), len(tc.wantBodies))
+			}
+			if !slices.Equal(bodies, tc.wantBodies) {
+				t.Error("artifact bodies do not match the expected tool response order")
+			}
+		})
+	}
+}
+
+type failingArtifactLoad struct {
+	artifact.Service
+	name string
+	err  error
+}
+
+func (s *failingArtifactLoad) Load(ctx context.Context, req *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	if req.FileName == s.name {
+		return nil, s.err
+	}
+	return s.Service.Load(ctx, req)
+}
+
+func TestLoadArtifactsTool_ProcessRequest_MalformedResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		malformed any
+	}{
+		{"not a list", "bad.txt"},
+		{"list with a non-string element", []any{"bad.txt", 123}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := createToolContext(t)
+			for _, name := range []string{"ok.txt", "bad.txt"} {
+				if _, err := ctx.Artifacts().Save(t.Context(), name, genai.NewPartFromText("body")); err != nil {
+					t.Fatalf("Save() returned an error of type %T", err)
+				}
+			}
+			processor := loadartifactstool.New().(toolinternal.RequestProcessor)
+			malformed := genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": tc.malformed})
+			valid := genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"ok.txt"}})
+			t.Run("single", func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{malformed}}}}
+				if err := processor.ProcessRequest(ctx, req); err == nil {
+					t.Fatal("ProcessRequest() accepted a malformed response")
+				}
+			})
+			t.Run("parallel", func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{malformed, valid}}}}
+				if err := processor.ProcessRequest(ctx, req); err != nil {
+					t.Fatalf("ProcessRequest() returned an error of type %T", err)
+				}
+				if len(req.Contents) != 2 || req.Contents[1].Parts[0].Text != "Artifact ok.txt is:" {
+					t.Fatal("ProcessRequest() did not attach exactly the valid artifact")
+				}
+			})
 		})
 	}
 }

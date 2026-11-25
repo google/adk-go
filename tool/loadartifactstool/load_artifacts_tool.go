@@ -20,7 +20,10 @@ package loadartifactstool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"slices"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -101,8 +104,14 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
 		}
-		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal artifact_names from JSON to []string: %w", err)
+		// Arguments the model can correct get an error result, not a tool
+		// error. A JSON null element would decode to "" without an error, so it
+		// is checked separately.
+		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil || hasNullElement(artifactNamesRaw) {
+			return map[string]any{
+				"error":      "'artifact_names' must be a list of strings.",
+				"error_code": "INVALID_ARGUMENTS",
+			}, nil
 		}
 		// Ensure the slice is not nil if it's empty
 		if artifactNames == nil {
@@ -115,6 +124,17 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 	return result, nil
 }
 
+// hasNullElement reports whether v is a list that holds a JSON null.
+func hasNullElement(v any) bool {
+	list, _ := v.([]any)
+	for _, e := range list {
+		if e == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcessRequest processes the LLM request. It packs the tool, appends initial
 // instructions, and processes any load artifacts function calls.
 func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
@@ -124,21 +144,21 @@ func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 	if err := toolutils.PackTool(req, t); err != nil {
 		return err
 	}
-	if err := t.appendInitialInstructions(ctx, req); err != nil {
-		return err
-	}
-	return t.processLoadArtifactsFunctionCall(ctx, req)
-}
-
-func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
-	resp, err := ctx.Artifacts().List(ctx)
+	listed, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
 	}
-	if len(resp.FileNames) == 0 {
+	if err := appendInitialInstructions(req, listed.FileNames); err != nil {
+		return err
+	}
+	return t.processLoadArtifactsFunctionCall(ctx, req, listed.FileNames)
+}
+
+func appendInitialInstructions(req *model.LLMRequest, artifactNames []string) error {
+	if len(artifactNames) == 0 {
 		return nil
 	}
-	artifactNamesJSON, err := json.Marshal(resp.FileNames)
+	artifactNamesJSON, err := json.Marshal(artifactNames)
 	if err != nil {
 		return fmt.Errorf("failed to marshal artifact names: %w", err)
 	}
@@ -154,47 +174,36 @@ func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest, availableNames []string) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
-	lastContent := req.Contents[len(req.Contents)-1]
-	if lastContent == nil || len(lastContent.Parts) == 0 {
-		return nil
-	}
-	var functionResponse *genai.FunctionResponse
-	// Iterate over all parts in the last content turn to find load_artifacts responses.
-	// Note: adk-python only checks parts[0]; scanning all parts is intentional in Go to
-	// support parallel/multi-tool turns where load_artifacts may not be the first part.
-	for _, part := range lastContent.Parts {
-		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
-			functionResponse = part.FunctionResponse
-			// Keep only the first load_artifacts response if multiple exist in one turn.
-			break
-		}
-	}
-	if functionResponse == nil {
-		return nil
-	}
-	artifactNamesRaw, ok := functionResponse.Response["artifact_names"]
-	if !ok {
-		return nil
-	}
+	responses := slices.DeleteFunc(utils.FunctionResponses(req.Contents[len(req.Contents)-1]), func(response *genai.FunctionResponse) bool {
+		return response.Name != t.Name()
+	})
+	// Like Python, keep other calls' results when a parallel response is
+	// malformed or names an unavailable artifact. Preserve Go's single-call errors.
+	parallel := len(responses) > 1
 	var artifactNames []string
-	switch names := artifactNamesRaw.(type) {
-	case []string:
-		artifactNames = names
-	case []any:
-		artifactNames = make([]string, len(names))
-		for i, name := range names {
-			s, ok := name.(string)
-			if !ok {
-				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
-			}
-			artifactNames[i] = s
+	for _, response := range responses {
+		raw, ok := response.Response["artifact_names"]
+		if !ok {
+			// Invalid arguments produce a tool error result without artifact_names.
+			continue
 		}
-	default:
-		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
+		names, err := artifactNamesFromResponse(raw)
+		if err != nil {
+			if parallel {
+				continue
+			}
+			return err
+		}
+		artifactNames = append(artifactNames, names...)
+	}
+	if parallel {
+		artifactNames = slices.DeleteFunc(artifactNames, func(name string) bool {
+			return !slices.Contains(availableNames, name)
+		})
 	}
 	if len(artifactNames) == 0 {
 		return nil
@@ -206,9 +215,12 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 
 	for i, artifactName := range artifactNames {
 		group.Go(func() error {
-			// Although not used, we need to pass childCtx for early return in case of an error.
 			content, err := t.loadIndividualArtifact(childCtx, artifactsService, artifactName)
 			if err != nil {
+				// The file may have been removed after List completed.
+				if parallel && errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
 			results[i] = content
@@ -220,14 +232,37 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return err
 	}
 
-	req.Contents = append(req.Contents, results...)
+	for _, content := range results {
+		if content != nil {
+			req.Contents = append(req.Contents, content)
+		}
+	}
 	return nil
+}
+
+func artifactNamesFromResponse(raw any) ([]string, error) {
+	switch names := raw.(type) {
+	case []string:
+		return names, nil
+	case []any:
+		result := make([]string, len(names))
+		for i, name := range names {
+			s, ok := name.(string)
+			if !ok {
+				return nil, fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+			}
+			result[i] = s
+		}
+		return result, nil
+	default:
+		return nil, fmt.Errorf("invalid artifact names type: %T, expected []string or []any", raw)
+	}
 }
 
 func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
 	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
+		return nil, fmt.Errorf("failed to load artifact: %w", err)
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{

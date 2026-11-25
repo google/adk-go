@@ -584,8 +584,29 @@ func TestAgentTransfer_ProcessRequest(t *testing.T) {
 }
 
 func TestTransferToAgentToolRun(t *testing.T) {
+	// newTool returns the transfer tool of an agent with a single sub-agent,
+	// "TestAgent".
+	newTool := func(t *testing.T) *llminternal.TransferToAgentTool {
+		t.Helper()
+		llm := &struct{ model.LLM }{}
+		sub, err := llmagent.New(llmagent.Config{Name: "TestAgent", Model: llm})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, err := llmagent.New(llmagent.Config{Name: "Root", Model: llm, SubAgents: []agent.Agent{sub}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: root})
+		curTool, err := llminternal.NewTransferToAgentTool(invCtx, root, nil, []agent.Agent{sub})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return curTool
+	}
+
 	t.Run("Success", func(t *testing.T) {
-		curTool := &llminternal.TransferToAgentTool{}
+		curTool := newTool(t)
 
 		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 		ctx := agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
@@ -600,23 +621,40 @@ func TestTransferToAgentToolRun(t *testing.T) {
 		}
 	})
 
+	t.Run("UnknownAgent", func(t *testing.T) {
+		curTool := newTool(t)
+
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		ctx := agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+
+		args := map[string]any{"agent_name": "nobody"}
+		_, err := curTool.Run(ctx, args)
+		if err == nil || !strings.Contains(err.Error(), "TestAgent") {
+			t.Fatalf("Run(%v) error = %v, want an error naming the available agents", args, err)
+		}
+		if got := ctx.Actions().TransferToAgent; got != "" {
+			t.Errorf("Run(%v) set TransferToAgent = %q, want it unset", args, got)
+		}
+	})
+
 	t.Run("InvalidArguments", func(t *testing.T) {
 		testCases := []struct {
-			name string
-			args map[string]any
+			name    string
+			args    map[string]any
+			wantErr string
 		}{
-			{name: "NoAgentName", args: map[string]any{}},
-			{name: "NilArg", args: nil},
-			{name: "InvalidType", args: map[string]any{"agent_name": 123}},
-			{name: "InvalidValue", args: map[string]any{"agent_name": ""}},
+			{name: "NoAgentName", args: map[string]any{}, wantErr: "empty agent_name"},
+			{name: "NilArg", args: nil, wantErr: "empty agent_name"},
+			{name: "InvalidType", args: map[string]any{"agent_name": 123}, wantErr: "empty agent_name"},
+			{name: "InvalidValue", args: map[string]any{"agent_name": ""}, wantErr: "empty agent_name"},
 		}
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
-				curTool := &llminternal.TransferToAgentTool{}
+				curTool := newTool(t)
 				ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "", nil, nil)
-				if got, err := curTool.Run(ctx, tc.args); err == nil {
-					t.Fatalf("Run(%v) = (%v, %v), want error", tc.args, got, err)
+				if got, err := curTool.Run(ctx, tc.args); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Run(%v) = (%v, %v), want error containing %q", tc.args, got, err, tc.wantErr)
 				}
 			})
 		}

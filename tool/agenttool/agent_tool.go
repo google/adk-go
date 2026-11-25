@@ -20,6 +20,8 @@ package agenttool
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
@@ -109,22 +112,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
-	}
-
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := workflowinternal.InputSchema(t.agent)
 
 	var content *genai.Content
 	var err error
@@ -148,6 +138,14 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 			inputText = fmt.Sprint(input)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
+	}
+
+	// Set only once the input is valid, so an argument error goes back to the
+	// parent model instead of ending its turn.
+	if t.skipSummarization {
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = true
+		}
 	}
 
 	sessionService := session.InMemoryService()
@@ -194,12 +192,18 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
+	// Only this sub-runner keeps the calling run's plugins, so they also see
+	// the sub-agent's agents, models and tools.
+	eventCh := r.Run(plugininternal.WithInheritedPlugins(toolCtx), subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 		MaxLLMCalls:   maxLLMCalls,
 	})
 
 	var lastEvent *session.Event
+	// Long-running calls that are never answered before the run ends (e.g. a
+	// tool confirmation) leave the sub-agent paused. Its session is discarded,
+	// so the pause can never be resumed.
+	pendingIDs := map[string]bool{}
 	for event, err := range eventCh {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
@@ -207,15 +211,38 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
+		// Partial chunks carry IDs the flow never acts on; a streamed call
+		// gets its final ID only on the aggregated event.
+		if !event.Partial {
+			for _, id := range event.LongRunningToolIDs {
+				pendingIDs[id] = true
+			}
+			for _, fr := range utils.FunctionResponses(event.LLMResponse.Content) {
+				delete(pendingIDs, fr.ID)
+			}
+		}
 		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
 	}
 
-	if lastEvent == nil {
-		return map[string]any{}, nil
+	if len(pendingIDs) > 0 {
+		// The parent model must see this error, so don't end its turn here,
+		// whatever set SkipSummarization on this call.
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = false
+		}
+		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
 	}
 
+	if lastEvent == nil {
+		return map[string]any{"result": ""}, nil
+	}
+
+	var outputSchema *genai.Schema
+	if llmAgent, ok := t.agent.(llminternal.Agent); ok && llmAgent != nil {
+		outputSchema = llminternal.Reveal(llmAgent).OutputSchema
+	}
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
 	for _, part := range lastContent.Parts {
@@ -226,6 +253,12 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		switch {
 		case part.Text != "":
 			text = part.Text
+		case outputSchema != nil:
+			// adk-python includes code artifacts in the text it validates and
+			// joins parts with "\n". This port keeps only answer text (the way
+			// LlmAgent selects text when saving OutputKey) and joins with "",
+			// so the two ports can produce different JSON for the same reply.
+			continue
 		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
 			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
 		case part.ExecutableCode != nil:
@@ -235,28 +268,30 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 			textParts = append(textParts, text)
 		}
 	}
-	outputText := strings.Join(textParts, "\n")
-
-	if outputText == "" {
-		return map[string]any{}, nil
+	// A reply without text is an empty result even when the agent has an
+	// output schema, because there is nothing to validate. adk-python
+	// validates the empty text against the schema when the reply has parts,
+	// and raises.
+	if len(textParts) == 0 {
+		return map[string]any{"result": ""}, nil
 	}
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
+	if outputSchema != nil {
+		// Reassemble JSON fragments from answer text, the way LlmAgent
+		// collects text when saving OutputKey. Whitespace-only answer text is
+		// an empty reply here, matching how the child skips it, not something
+		// to parse.
+		joined := strings.Join(textParts, "")
+		if strings.TrimSpace(joined) == "" {
+			return map[string]any{"result": ""}, nil
 		}
-		if agentOutputSchema := llminternal.Reveal(internalLlmAgent).OutputSchema; agentOutputSchema != nil {
-			// Assuming schemautils.ValidateOutputSchema parses the JSON string outputText
-			// and validates it against the agentOutputSchema, returning a map[string]any.
-			parsedOutput, err := utils.ValidateOutputSchema(outputText, agentOutputSchema)
-			if err != nil {
-				return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
-			}
-			return parsedOutput, nil
+		parsedOutput, err := utils.ValidateOutputSchema(joined, outputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
 		}
+		return parsedOutput, nil
 	}
 
-	return map[string]any{"result": outputText}, nil
+	return map[string]any{"result": strings.Join(textParts, "\n")}, nil
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.

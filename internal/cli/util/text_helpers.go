@@ -50,7 +50,7 @@ func CenterString(s string, w int) string {
 func ValidateDockerfileSafe(s, label string) error {
 	// Deliberately a byte loop rather than a rune loop: the property being
 	// enforced is about the bytes written to the file.
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if c := s[i]; c == '"' || c == '`' || c == '\\' || c < 0x20 {
 			return fmt.Errorf("%s %q contains a character (quote, backtick, backslash, or a control character) that is not allowed in a value embedded in generated Dockerfile content", label, s)
 		}
@@ -82,7 +82,7 @@ func ValidateShellArgSafe(s, label string) error {
 	// A byte loop, for the same reason as in ValidateDockerfileSafe. Every byte
 	// of a multi-byte rune is >= 0x80, so the class can be applied per byte and
 	// the UTF-8 check below rules out a stray high byte that is not part of one.
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		switch {
 		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':

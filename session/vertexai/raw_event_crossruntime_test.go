@@ -15,7 +15,8 @@
 package vertexai
 
 import (
-	"sort"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -56,11 +57,7 @@ func TestRawEventWireKeysAreCamelCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eventToRawEvent() error = %v", err)
 	}
-	got := make([]string, 0, len(raw.GetFields()))
-	for k := range raw.GetFields() {
-		got = append(got, k)
-	}
-	sort.Strings(got)
+	got := slices.Sorted(maps.Keys(raw.GetFields()))
 
 	want := []string{
 		"actions", "author", "branch", "content", "id", "inputTranscription",

@@ -15,22 +15,27 @@
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // TODO: Confirm error handling and target semantic for REST API.
@@ -75,7 +80,33 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			return
 		}
 	}
-	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest)
+	// Null parts are dropped rather than rejected; see decodeRequestBody.
+	for _, event := range createSessionRequest.Events {
+		if event.Content != nil {
+			event.Content.Parts = slices.DeleteFunc(event.Content.Parts, func(p *genai.Part) bool {
+				return p == nil
+			})
+		}
+	}
+	// Validate before anything is created, so a rejected request leaves no
+	// session behind.
+	if err := validateSessionInitializationEvents(createSessionRequest.Events); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Convert every event before creating anything, so an event the request
+	// cannot carry is a 400 with no session left behind, rather than a 500
+	// after the session is already stored.
+	events := make([]*session.Event, 0, len(createSessionRequest.Events))
+	for i, event := range createSessionRequest.Events {
+		sessionEvent, err := models.ToSessionEvent(event)
+		if err != nil {
+			http.Error(rw, fmt.Sprintf("events[%d]: %v", i, err), http.StatusBadRequest)
+			return
+		}
+		events = append(events, sessionEvent)
+	}
+	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest.State, events)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
@@ -83,23 +114,107 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	EncodeJSONResponse(respSession, http.StatusOK, rw)
 }
 
-func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {
+func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, state map[string]any, events []*session.Event) (models.Session, error) {
 	session, err := c.service.Create(ctx, &session.CreateRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
-		State:     createSessionRequest.State,
+		State:     state,
 	})
 	if err != nil {
 		return models.Session{}, err
 	}
-	for _, event := range createSessionRequest.Events {
-		err = c.service.AppendEvent(ctx, session.Session, models.ToSessionEvent(event))
+	for _, event := range events {
+		err = c.service.AppendEvent(ctx, session.Session, event)
 		if err != nil {
 			return models.Session{}, err
 		}
 	}
 	return models.FromSession(session.Session)
+}
+
+// adkProtocolFunctionNames are the function calls ADK generates itself to drive
+// human-in-the-loop flows, as opposed to calls to a tool.
+var adkProtocolFunctionNames = []string{
+	toolconfirmation.FunctionCallName,
+	toolauth.RequestCredentialFunctionCallName,
+	workflow.WorkflowInputFunctionCallName,
+}
+
+// validateSessionInitializationEvents rejects events submitted with a new
+// session that claim to be ADK-generated: ones carrying event actions,
+// long-running tool IDs, workflow routes, an input request, or a call to or
+// response from one of [adkProtocolFunctionNames].
+//
+// Those fields are runtime output. Accepting them from a client would let it
+// write app- and user-scoped state through Actions.StateDelta, which other
+// sessions and users read, or plant the calls ADK reserves for its own
+// confirmation, credential and input requests. Ordinary messages, tool calls
+// and tool responses are allowed, so a conversation that used tools can still
+// be restored.
+//
+// This mirrors adk-python's _validate_session_initialization_events. Routes
+// and RequestedInput have no counterpart there because Python carries them
+// elsewhere — the route in EventActions, the input request in the
+// adk_request_input call — where its check already rejects them. Go keeps
+// them on the event, so they are checked explicitly.
+func validateSessionInitializationEvents(events []models.Event) error {
+	for i, event := range events {
+		var disallowed string
+		switch {
+		case len(event.LongRunningToolIDs) > 0:
+			disallowed = "long-running tool IDs"
+		case hasEventActions(event.Actions):
+			disallowed = "event actions"
+		case len(event.Routes) > 0:
+			disallowed = "workflow routes"
+		case event.RequestedInput != nil:
+			disallowed = "an input request"
+		case callsADKProtocolFunction(event.Content):
+			disallowed = "ADK protocol function calls"
+		default:
+			continue
+		}
+		return fmt.Errorf("session initialization event %d cannot include %s", i, disallowed)
+	}
+	return nil
+}
+
+// hasEventActions reports whether any field of actions is set. It checks every
+// field by reflection rather than by name, so a field added to
+// [models.EventActions] is covered without changing this function. An empty
+// map counts as unset: every event the runtime writes reads back with
+// "stateDelta": {} and "artifactDelta": {}.
+func hasEventActions(actions models.EventActions) bool {
+	for _, field := range reflect.ValueOf(actions).Fields() {
+		switch field.Kind() {
+		case reflect.Map, reflect.Slice:
+			if field.Len() > 0 {
+				return true
+			}
+		default:
+			if !field.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// callsADKProtocolFunction reports whether content holds a function call or
+// function response named in [adkProtocolFunctionNames].
+func callsADKProtocolFunction(content *genai.Content) bool {
+	for _, call := range utils.FunctionCalls(content) {
+		if slices.Contains(adkProtocolFunctionNames, call.Name) {
+			return true
+		}
+	}
+	for _, response := range utils.FunctionResponses(content) {
+		if slices.Contains(adkProtocolFunctionNames, response.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeleteSessionHandler handles deleting a specific session.
@@ -225,8 +340,8 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	// app sees.
 	//
 	// What the client echoes back is not a write, so drop that first. See
-	// dropEchoedScopedKeys.
-	stateDelta := dropEchoedScopedKeys(updateRequest.StateDelta, storedSession.Session.State())
+	// dropEchoedKeys.
+	stateDelta := dropEchoedKeys(updateRequest.StateDelta, storedSession.Session.State())
 	if scoped := scopedStateKeys(stateDelta); len(scoped) > 0 {
 		http.Error(rw, fmt.Sprintf(
 			"stateDelta may only contain session-scoped keys; remove %v (the %q, %q and %q prefixes write outside this session)",
@@ -333,28 +448,27 @@ func isScopedStateKey(key string) bool {
 		strings.HasPrefix(key, session.KeyPrefixTemp)
 }
 
-// dropEchoedScopedKeys returns delta without the scoped keys whose submitted
-// value already matches what the session holds.
+// dropEchoedKeys returns delta without the keys a client sent back as a read
+// returned them: scoped keys, and keys whose value a read returns with
+// credential secrets stripped.
 //
 // The web UI's session list renames a session by posting back the whole state
 // map it read, with one metadata key changed. A read merges app- and
-// user-scoped state in, so that payload carries scoped keys the user never
-// touched. Refusing it breaks rename for every agent that uses scoped state,
-// and the UI discards the error, so the name silently does not change.
+// user-scoped state in and strips credential secrets, so that payload carries
+// scoped keys the user never touched and credentials without their secrets.
+// Refusing the scoped keys breaks rename for every agent that uses scoped
+// state, and writing the redacted credentials back overwrites the stored
+// secrets.
 //
-// A key echoed back unchanged would write the value that is already there, so
-// dropping it leaves the session exactly as accepting it would. That is the
-// whole exception: a scoped key carrying a different value is still a write
-// outside this session, and is still refused.
-//
-// Values are compared as JSON rather than with reflect.DeepEqual, because the
-// submitted value has been through a JSON round-trip and the stored one has
-// not. An agent that wrote int64(5) gets float64(5) back from the client, and
-// those are not equal in Go.
-func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+// Dropping such a key leaves the session as it stands. A scoped key carrying a
+// different value is still a write outside this session, and is still
+// refused. Every other key is written as submitted, changed or not.
+func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
 	for key, value := range delta {
-		if isScopedStateKey(key) && matchesStoredValue(stored, key, value) {
+		readValue, ok := read[key]
+		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
 			continue
 		}
 		kept[key] = value
@@ -362,24 +476,27 @@ func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) ma
 	return kept
 }
 
-// matchesStoredValue reports whether stored already holds value under key. A
-// key the session does not have, or a value that will not marshal, counts as a
-// change: the caller then treats it as a write and refuses it.
-func matchesStoredValue(stored session.ReadonlyState, key string, value any) bool {
-	if stored == nil {
-		return false
-	}
-	current, err := stored.Get(key)
+// strippedOnRead reports whether readValue, the value a read returns for key,
+// lacks credential secrets that the stored value holds.
+func strippedOnRead(stored session.ReadonlyState, key string, readValue json.RawMessage) bool {
+	value, err := stored.Get(key)
+	return err == nil && !sameJSON(readValue, value)
+}
+
+// sameJSON reports whether encoded and value are the same JSON value once both
+// are decoded the way a request body is. A number then compares as the float64
+// a client sends back: an echo matches a stored 1.0, 1e3 or 9007199254740993,
+// which a read writes as it was stored, and an agent's int64(5) matches the
+// float64(5) the client returns. A value that will not encode or decode counts
+// as different, so the caller treats it as a write.
+func sameJSON(encoded json.RawMessage, value any) bool {
+	b, err := json.Marshal(value)
 	if err != nil {
 		return false
 	}
-	encodedCurrent, err := json.Marshal(current)
-	if err != nil {
+	var want, got any
+	if json.Unmarshal(encoded, &want) != nil || json.Unmarshal(b, &got) != nil {
 		return false
 	}
-	encodedValue, err := json.Marshal(value)
-	if err != nil {
-		return false
-	}
-	return bytes.Equal(encodedCurrent, encodedValue)
+	return reflect.DeepEqual(want, got)
 }

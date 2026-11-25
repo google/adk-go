@@ -72,8 +72,8 @@ type Media struct {
 	// MIMEType is the type as the part declared it, parameters and all, for an
 	// endpoint to send or to name in a rejection.
 	MIMEType string
-	// Filename is the part's display name, empty when it had none. Chat
-	// Completions requires one alongside inline file data; Responses does not.
+	// Filename is the part's display name, with "inline_data" as the fallback
+	// for unnamed inline data. It may be empty for file IDs and URLs.
 	Filename string
 
 	// Data is the raw bytes, set only when Source is [MediaSourceData].

@@ -59,13 +59,13 @@ func (m *anthropicModel) generateStreaming(
 			switch event.ContentBlock.Type {
 			case "text":
 				if !unwrapOutput && event.ContentBlock.Text != "" {
-					if !yieldPartialPart(yield, string(acc.Model), genai.NewPartFromText(event.ContentBlock.Text)) {
+					if !yieldPartialPart(yield, acc.Model, genai.NewPartFromText(event.ContentBlock.Text)) {
 						return
 					}
 				}
 			case "thinking":
 				if event.ContentBlock.Thinking != "" {
-					if !yieldPartialPart(yield, string(acc.Model), &genai.Part{
+					if !yieldPartialPart(yield, acc.Model, &genai.Part{
 						Thought: true,
 						Text:    event.ContentBlock.Thinking,
 					}) {
@@ -80,13 +80,13 @@ func (m *anthropicModel) generateStreaming(
 			switch event.Delta.Type {
 			case "text_delta":
 				if !unwrapOutput && event.Delta.Text != "" {
-					if !yieldPartialPart(yield, string(acc.Model), genai.NewPartFromText(event.Delta.Text)) {
+					if !yieldPartialPart(yield, acc.Model, genai.NewPartFromText(event.Delta.Text)) {
 						return
 					}
 				}
 			case "thinking_delta":
 				if event.Delta.Thinking != "" {
-					if !yieldPartialPart(yield, string(acc.Model), &genai.Part{
+					if !yieldPartialPart(yield, acc.Model, &genai.Part{
 						Thought: true,
 						Text:    event.Delta.Thinking,
 					}) {

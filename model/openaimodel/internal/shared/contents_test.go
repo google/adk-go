@@ -15,6 +15,7 @@
 package shared
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -22,10 +23,11 @@ import (
 
 func TestFlattenContentText(t *testing.T) {
 	tests := []struct {
-		name    string
-		content *genai.Content
-		want    string
-		wantErr bool
+		name        string
+		content     *genai.Content
+		want        string
+		wantErr     bool
+		wantErrText string
 	}{
 		{
 			name:    "nil content",
@@ -50,7 +52,85 @@ func TestFlattenContentText(t *testing.T) {
 					{FunctionCall: &genai.FunctionCall{Name: "fn"}},
 				},
 			},
-			wantErr: true,
+			wantErr:     true,
+			wantErrText: "non-text system instruction part",
+		},
+		{
+			name: "media part without text keeps the non-text error",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "non-text system instruction part",
+		},
+		{
+			// The instruction is sent as a string, so the image would be
+			// dropped while the text beside it goes out.
+			name: "text part carrying inline data",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "describe it", InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "InlineData",
+		},
+		{
+			// The text gathered before the refused part is not returned.
+			name: "text part carrying file data after a text part",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "part1"},
+					{Text: "describe it", FileData: &genai.FileData{MIMEType: "image/png", FileURI: "https://example.com/a.png"}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "FileData",
+		},
+		{
+			name: "text part carrying executable code",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "run this", ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "ExecutableCode",
+		},
+		{
+			// UnsupportedPayload counts a call as sent, which holds for
+			// contents but not for an instruction.
+			name: "text part carrying a function call",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "be terse", FunctionCall: &genai.FunctionCall{Name: "fn"}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "FunctionCall",
+		},
+		{
+			name: "text part carrying a function response",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "be terse", FunctionResponse: &genai.FunctionResponse{Name: "fn", Response: map[string]any{"ok": true}}},
+				},
+			},
+			wantErr:     true,
+			wantErrText: "FunctionResponse",
+		},
+		{
+			// A signature and caller metadata carry nothing a model reads, so
+			// the text still goes out alone.
+			name: "text part with fields that carry no payload",
+			content: &genai.Content{
+				Parts: []*genai.Part{
+					{Text: "part1", ThoughtSignature: []byte{1}, PartMetadata: map[string]any{"k": "v"}},
+				},
+			},
+			want: "part1",
 		},
 	}
 
@@ -59,6 +139,9 @@ func TestFlattenContentText(t *testing.T) {
 			txt, err := FlattenContentText(tc.content)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("FlattenContentText() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), tc.wantErrText) {
+				t.Errorf("FlattenContentText() error = %q, want it to name %q", err, tc.wantErrText)
 			}
 			if txt != tc.want {
 				t.Fatalf("FlattenContentText() = %q, want %q", txt, tc.want)
@@ -133,6 +216,50 @@ func TestUnsupportedPayload_EmittingMediaDoesNotHideAnythingElse(t *testing.T) {
 	}
 	if got := UnsupportedPayload(part, PartFieldMedia); got != "ExecutableCode" {
 		t.Errorf("UnsupportedPayload(PartFieldMedia) = %q, want %q", got, "ExecutableCode")
+	}
+	if got := UnsupportedPayload(part, PartFieldMedia, PartFieldCodeExecution); got != "" {
+		t.Errorf("UnsupportedPayload(PartFieldMedia, PartFieldCodeExecution) = %q, want %q", got, "")
+	}
+}
+
+func TestCodeExecutionText(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+		want string
+	}{
+		{name: "nil", part: nil, want: ""},
+		{name: "neither field", part: &genai.Part{Text: "hi"}, want: ""},
+		{
+			name: "code",
+			part: &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+			want: "Code:```python\nprint(1)\n```",
+		},
+		{
+			name: "result",
+			part: &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}},
+			want: "Execution Result:```code_output\n1\n```",
+		},
+		{
+			name: "both, code first",
+			part: &genai.Part{
+				ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+				CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+			},
+			want: "Code:```python\nprint(1)\n```\nExecution Result:```code_output\n1\n```",
+		},
+		{
+			name: "empty code is still labeled",
+			part: &genai.Part{ExecutableCode: &genai.ExecutableCode{}},
+			want: "Code:```python\n\n```",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CodeExecutionText(tt.part); got != tt.want {
+				t.Errorf("CodeExecutionText() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

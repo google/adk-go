@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 
 	"go.opentelemetry.io/otel"
@@ -156,8 +157,8 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 		return r.Response.UsageMetadata
 	}
 	responses := r.responses()
-	for i := len(responses) - 1; i >= 0; i-- {
-		if u := responses[i].UsageMetadata; u != nil {
+	for _, response := range slices.Backward(responses) {
+		if u := response.UsageMetadata; u != nil {
 			return u
 		}
 	}
@@ -303,10 +304,19 @@ func RecordError(span trace.Span, err error) {
 	}
 }
 
+// RecordPanic records err, the error for a recovered panic, as an exception on
+// span when content capture on spans is enabled. Otherwise it records nothing,
+// because the text of err carries the panic value, which may be user data, and
+// the goroutine stack.
+func RecordPanic(span trace.Span, err error) {
+	if captureContentOnSpans() {
+		span.RecordError(err)
+	}
+}
+
 // errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
 func errorType(err error) attribute.KeyValue {
-	var apiErr genai.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
 		return semconv.ErrorTypeKey.String(strconv.Itoa(apiErr.Code))
 	}
 	return semconv.ErrorType(err)

@@ -15,9 +15,11 @@
 package mcptoolset
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 )
 
 // headerRecorder records the headers of every request a test server receives.
@@ -51,7 +54,7 @@ func (r *headerRecorder) all() []http.Header {
 
 func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "ua_server", Version: "v1"}, nil)
-	want := version.TrackingHeader()
+	want := version.TrackingHeader(nil)
 
 	tests := []struct {
 		name      string
@@ -159,7 +162,7 @@ func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 }
 
 func TestTrackingTransportMergesCallerHeaders(t *testing.T) {
-	adk := version.TrackingHeader()
+	adk := version.TrackingHeader(nil)
 	tests := []struct {
 		name     string
 		header   http.Header
@@ -171,10 +174,10 @@ func TestTrackingTransportMergesCallerHeaders(t *testing.T) {
 		{name: "caller value is kept after ADK tokens", header: http.Header{"User-Agent": {"my-app/1.0"}}, want: adk + " my-app/1.0"},
 		{name: "duplicate tokens are dropped", header: http.Header{"User-Agent": {"my-app/1.0 " + adk}}, want: adk + " my-app/1.0"},
 		{name: "repeated header values are joined", header: http.Header{"User-Agent": {"a/1", "b/2"}}, want: adk + " a/1 b/2"},
+		{name: "non-canonical key is merged", header: http.Header{"user-agent": {"my-app/1.0"}}, want: adk + " my-app/1.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Parallel, so -race catches RoundTrip writing to the shared adkTokens.
 			t.Parallel()
 			req := httptest.NewRequest(http.MethodPost, "https://mcp.example/mcp", nil)
 			req.Header = tt.header
@@ -280,6 +283,97 @@ func TestAuthCredentialBypassesDefaultClientTransport(t *testing.T) {
 	defer mu.Unlock()
 	if len(gotAuth) != 1 || gotAuth[0] != "Bearer user-tok" {
 		t.Errorf("server received Authorization %q, want [%q]", gotAuth, "Bearer user-tok")
+	}
+}
+
+// The hosting runtime is reported to Google API endpoints only.
+func TestTrackingTransportRuntimeSuffix(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	t.Setenv("K_SERVICE", "svc")
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	for _, tt := range []struct {
+		url  string
+		want string
+	}{
+		{url: "https://bigquery.googleapis.com/mcp", want: tagged},
+		{url: "https://mcp.example/mcp", want: plain},
+		{url: "http://bigquery.googleapis.com/mcp", want: plain},
+		{url: "http://127.0.0.1:8080/mcp", want: plain},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tt.url, nil)
+		var sent *http.Request
+		rt := &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sent = r
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		})}
+		if _, err := rt.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip(%s) error = %v", tt.url, err)
+		}
+		for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+			if got := sent.Header.Values(name); len(got) != 1 || got[0] != tt.want {
+				t.Errorf("request to %s: %s = %q, want [%q]", tt.url, name, got, tt.want)
+			}
+		}
+	}
+}
+
+// Each hop of a redirect is labeled for its own URL.
+func TestTrackingTransportRuntimeSuffixOnRedirect(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	t.Setenv("K_SERVICE", "svc")
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+	const google, other = "https://bigquery.googleapis.com/mcp", "https://mcp.example/mcp"
+
+	for _, tt := range []struct {
+		from, to string
+		want     []string
+	}{
+		{from: google, to: other, want: []string{tagged, plain}},
+		{from: other, to: google, want: []string{plain, tagged}},
+	} {
+		var got []string
+		client := &http.Client{Transport: &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = append(got, r.Header.Get("User-Agent"), r.Header.Get("X-Goog-Api-Client"))
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: r}
+			if r.URL.String() == tt.from {
+				resp.StatusCode = http.StatusTemporaryRedirect
+				resp.Header.Set("Location", tt.to)
+			}
+			return resp, nil
+		})}}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tt.from, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do(%s) error = %v", tt.from, err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{tt.want[0], tt.want[0], tt.want[1], tt.want[1]}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s redirected to %s: labels per hop = %q, want %q", tt.from, tt.to, got, want)
+		}
+	}
+}
+
+// A request without a URL is the base transport's to refuse, as it was before
+// the labels depended on the URL.
+func TestTrackingTransportRequestWithoutURL(t *testing.T) {
+	errBase := errors.New("refused by base")
+	rt := &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got, want := r.Header.Get("User-Agent"), version.TrackingHeader(nil); got != want {
+			t.Errorf("User-Agent = %q, want %q", got, want)
+		}
+		return nil, errBase
+	})}
+	if _, err := rt.RoundTrip(&http.Request{Header: http.Header{}}); !errors.Is(err, errBase) {
+		t.Errorf("RoundTrip() error = %v, want %v", err, errBase)
 	}
 }
 

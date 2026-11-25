@@ -16,11 +16,14 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"iter"
+	"slices"
 	"sync/atomic"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -110,10 +113,17 @@ func TestScheduler_HitlNode_PausesAndForwardsRequest(t *testing.T) {
 
 // TestScheduler_HitlNode_AutoGeneratesInterruptID verifies the
 // scheduler-side contract that an empty InterruptID supplied by the
-// node author becomes a non-empty UUID by the time the request
-// reaches the consumer.
+// node author is generated through the configured UUID provider.
 func TestScheduler_HitlNode_AutoGeneratesInterruptID(t *testing.T) {
+	// Each draw returns a new ID, so the checks below can tell which
+	// draw filled which field.
+	var draws []string
 	mockCtx := newSeededMockCtx(t)
+	mockCtx.Context = platform.WithUUIDProvider(mockCtx.Context, func() string {
+		id := fmt.Sprintf("provider-uuid-%d", len(draws)+1)
+		draws = append(draws, id)
+		return id
+	})
 
 	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
 		// InterruptID intentionally left empty.
@@ -128,8 +138,56 @@ func TestScheduler_HitlNode_AutoGeneratesInterruptID(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected exactly 1 RequestedInput event, got %d", count)
 	}
+	wantID := req.RequestedInput.InterruptID
+	i := slices.Index(draws, wantID)
+	if i < 0 {
+		t.Fatalf("InterruptID = %q, want a provider UUID from %v", wantID, draws)
+	}
+	// The interrupt ID is drawn just before the event ID.
+	if i+1 >= len(draws) || req.ID != draws[i+1] {
+		t.Errorf("event ID = %q, want the draw after InterruptID %q (draws: %v)", req.ID, wantID, draws)
+	}
+	call := req.Content.Parts[0].FunctionCall
+	if call.ID != wantID {
+		t.Errorf("FunctionCall.ID = %q, want %q", call.ID, wantID)
+	}
+	if got := call.Args["interruptId"]; got != wantID {
+		t.Errorf("FunctionCall.Args[interruptId] = %v, want %q", got, wantID)
+	}
+	if got := req.LongRunningToolIDs; len(got) != 1 || got[0] != wantID {
+		t.Errorf("LongRunningToolIDs = %v, want [%s]", got, wantID)
+	}
+}
+
+// TestScheduler_HitlNode_EmptyProviderUUIDStillPauses verifies that
+// a UUID provider returning "" does not stop the node from pausing.
+func TestScheduler_HitlNode_EmptyProviderUUIDStillPauses(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+	mockCtx.Context = platform.WithUUIDProvider(mockCtx.Context, func() string { return "" })
+
+	var downstreamRan atomic.Bool
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		yield(NewRequestInputEvent(ctx, session.RequestInput{Message: "approve?"}), nil)
+	})
+	downstream := newHitlNode("downstream", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		downstreamRan.Store(true)
+	})
+	w := mustNew(t, []Edge{
+		{From: Start, To: asker},
+		{From: asker, To: downstream},
+	})
+
+	events := drain(t, w.Run(mockCtx))
+
+	if downstreamRan.Load() {
+		t.Error("downstream node ran; an empty provider UUID must not skip the pause")
+	}
+	req, count := findRequestedInputEvent(events)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 RequestedInput event, got %d", count)
+	}
 	if req.RequestedInput.InterruptID == "" {
-		t.Error("InterruptID is empty; engine must auto-generate when caller omits it")
+		t.Error("InterruptID is empty; engine must fall back to a non-empty ID")
 	}
 }
 

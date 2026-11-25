@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -226,6 +227,11 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
+	// A complete error event ends the turn even when it carries a function
+	// response or a code execution result; only a function call keeps it open.
+	if e.LLMResponse.ErrorCode != "" && !e.LLMResponse.Partial && !hasFunctionCalls(&e.LLMResponse) {
+		return true
+	}
 
 	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
@@ -255,6 +261,18 @@ type EventActions struct {
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+
+	// RequestedAuthConfigs holds the credential requests that tools made in
+	// this event, keyed by function call ID, since one function response event
+	// can answer several calls.
+	//
+	// Session services persist a request and the Agent Engine server sends it
+	// to clients unredacted, so it must not carry the secrets the tool was
+	// configured with: store the output of [toolauth.Config.WithoutSecrets], as
+	// adk-python's request_credential does. The in-memory, database and Vertex
+	// AI session services refuse to append an event whose request does not
+	// decode as a [toolauth.Config], such as one with a zero AuthScheme.
+	RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.
@@ -392,8 +410,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 			if p == nil {
 				continue
 			}
-			part := *p
-			content.Parts[i] = &part
+			content.Parts[i] = new(*p)
 		}
 		out.CompactedContent = &content
 	}
@@ -440,7 +457,7 @@ func hasFunctionCalls(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			return true
 		}
 	}
@@ -452,20 +469,27 @@ func hasFunctionResponses(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			return true
 		}
 	}
 	return false
 }
 
-// Returns whether the event has a trailing code execution result.
+// Returns whether the event has a trailing code execution result. Nil Parts
+// entries are skipped the way hasFunctionCalls and hasFunctionResponses skip
+// them: the trailing part is the last non-nil one, so a stray nil after a
+// code execution result does not change the classification.
 func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+	if resp == nil || resp.Content == nil {
 		return false
 	}
-	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
-	return lastPart.CodeExecutionResult != nil
+	for _, part := range slices.Backward(resp.Content.Parts) {
+		if part != nil {
+			return part.CodeExecutionResult != nil
+		}
+	}
+	return false
 }
 
 // Bounds on a decoded numeric event timestamp, in microseconds: years 1 and
