@@ -188,6 +188,18 @@ func Rotate(t *testing.T, configPath string) (der []byte) {
 	return der
 }
 
+// Certificate returns a new client certificate that no config names, for a
+// caller to present on its own, and its DER bytes.
+func Certificate(t *testing.T) (cert tls.Certificate, der []byte) {
+	t.Helper()
+	certPath, keyPath, der := writeCertificate(t, t.TempDir())
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert, der
+}
+
 // BrokenWorkload writes a certificate config whose workload section names no
 // certificate, and returns its path.
 func BrokenWorkload(t *testing.T) (configPath string) {
