@@ -4745,8 +4745,7 @@ func (inv *invocationTrace) launcherLockedCounted(act any, excluded []bool) (int
 // When no open activation is on the context chain and the resolved parent (or
 // any ancestor of it) belongs to an unmatched multi-member concurrent lookalike
 // group, each encountered group moves parent up to the nearest open span
-// enclosing the witnesses returned by appendPossibleOwnersLocked /
-// appendPossibleOwnersWithIndexLocked:
+// enclosing the witnesses returned by appendPossibleOwnersWithIndexLocked:
 //   - When an outer peer matched goid or origin.parent through a descendant
 //     witness bm on a different goroutine, only the inner peers inside bm
 //     remain in unmatched (keptInsideBm), so ambiguity demotion stays inside bm.
@@ -5140,104 +5139,6 @@ func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecor
 	}
 	steps += len(mIdxs)
 	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps + (qual.inspections - beforeQualInsp)
-}
-
-// appendPossibleOwnersLocked assigns each non-excluded qualifying open span to
-// its nearest enclosing member of recs, and appends enclosing witnesses to dst
-// together with the exact number of visited positions/member steps only when
-// at least two members match on their own (or when recs shares id's own
-// (agentName, branch, path), in which case all non-excluded members of recs are
-// appended as peers). When selected has a non-empty path containing id.path,
-// only spans fitting both id and selected's branch and node path qualify (except
-// when id.path equals selected.path and selected inherited selected.path rather
-// than opening a node there, in which case peers on exact selected.path with
-// a compatible ancestor branch remain eligible); otherwise any span fitting id
-// qualifies. For each matched member k, when another member follows inside k's
-// subtree (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k appends first[k] and
-// last[k] (omitting last[k] if equal) (even when first[k] == inv.agentStack[mIdx]
-// or when no inner member matched) so tree.enclosing stops at the nearest common
-// ancestor inside k (or at k itself when matched spans straddle inner members)
-// when possible, or above k when k matched itself; otherwise it appends
-// inv.agentStack[mIdx]. Outside -race builds, up to 16 members use stack
-// buffers without allocating when given a prebuilt openSpanTree and sufficient
-// dst capacity. inv.mu must be held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) ([]*spanRecord, int) {
-	var mIdxBuf [16]int
-	mIdxs, steps := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
-	if len(mIdxs) < 2 {
-		return dst, steps
-	}
-	if isPeerLookalikeGroup(recs, id) {
-		start := len(dst)
-		for _, mIdx := range mIdxs {
-			steps++
-			if !exclude[inv.agentStack[mIdx].spanID] {
-				dst = append(dst, inv.agentStack[mIdx])
-			}
-		}
-		if len(dst)-start < 2 {
-			return dst[:start], steps
-		}
-		return dst, steps
-	}
-	requireSelected := selected != nil && selected.path != "" && atOrBelowPath(id.path, selected.path)
-	var firstBuf, lastBuf [16]*spanRecord
-	var first, last []*spanRecord
-	if len(mIdxs) <= len(firstBuf) {
-		first, last = firstBuf[:len(mIdxs)], lastBuf[:len(mIdxs)]
-	} else {
-		first, last = make([]*spanRecord, len(mIdxs)), make([]*spanRecord, len(mIdxs))
-	}
-	var activeBuf [16]int
-	active := activeBuf[:0]
-	owners := 0
-	for next := 0; next < len(mIdxs); {
-		topEnd := tree.tout[mIdxs[next]]
-		active = active[:0]
-		for pos := tree.tin[mIdxs[next]] - 1; pos < topEnd; pos++ {
-			steps++
-			for len(active) > 0 && tree.tout[mIdxs[active[len(active)-1]]] <= pos {
-				steps++
-				active = active[:len(active)-1]
-			}
-			if next < len(mIdxs) && tree.tin[mIdxs[next]]-1 == pos {
-				active = append(active, next)
-				next++
-			}
-			owner := active[len(active)-1]
-			ownerIdx := mIdxs[owner]
-			hasDesc := owner+1 < len(mIdxs) && tree.tin[mIdxs[owner+1]] <= tree.tout[ownerIdx]
-			if first[owner] != inv.agentStack[ownerIdx] {
-				rec := inv.agentStack[tree.dfsSeq[pos]]
-				if spanQualifiesForOwner(rec, exclude, id, selected, requireSelected) {
-					if first[owner] == nil {
-						first[owner] = rec
-						owners++
-					}
-					last[owner] = rec
-				}
-			}
-			// Progress invariant: every member in active has tout > pos and every
-			// unpushed member mIdxs[next] inside owner has tin-1 > pos (because any
-			// member starting at pos was just pushed above). Jumping to
-			// max(pos, target) ensures pos increases strictly after the loop's pos++,
-			// skipping remaining non-descendant nodes of owner (or resuming at
-			// dfsSeq[tree.tout[ownerIdx]] right after owner pops) without skipping
-			// mIdxs[next].
-			if first[owner] != nil && (!hasDesc || first[owner] == inv.agentStack[ownerIdx]) {
-				target := tree.tout[ownerIdx] - 1
-				if next < len(mIdxs) && tree.tin[mIdxs[next]] <= tree.tout[ownerIdx] {
-					target = tree.tin[mIdxs[next]] - 2
-				}
-				pos = max(pos, target)
-			}
-		}
-	}
-	if owners < 2 {
-		return dst, steps
-	}
-	steps += len(mIdxs)
-	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps
 }
 
 // hasSegmentPrefix reports whether s starts with prefix followed immediately by

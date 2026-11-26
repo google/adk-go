@@ -31410,9 +31410,9 @@ func spanIDs(recs []*spanRecord) []string {
 }
 
 // TestParentForRunLocked_NestedLookalikeNearestOwner pins that
-// appendPossibleOwnersLocked assigns each qualifying open span to its nearest
-// enclosing lookalike member, demoting only when distinct members match on
-// their own and emitting first/last witnesses for outer matching members so
+// appendPossibleOwnersWithIndexLocked assigns each qualifying open span to its
+// nearest enclosing lookalike member, demoting only when distinct members match
+// on their own and emitting first/last witnesses for outer matching members so
 // enclosing stops at the nearest common ancestor instead of over-demoting.
 func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 	leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
@@ -31481,13 +31481,14 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		}
 
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w1, w2, w3}, leaf, selA)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selA)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{w1, w2, w3}, leaf)
 		if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer worker-3]", spanIDs(out))
 		}
 	})
 
-	t.Run("appendPossibleOwnersLocked allocates nothing for up to 16 nested lookalikes", func(t *testing.T) {
+	t.Run("appendPossibleOwnersWithIndexLocked allocates nothing for up to 16 nested lookalikes", func(t *testing.T) {
 		// Behavioral checks run unconditionally (including under -race CI);
 		// the zero-alloc checks apply outside -race builds given a prebuilt
 		// openSpanTree / qualifyingIndex, sufficient dst capacity, and <= 16
@@ -31506,9 +31507,6 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		recs := []*spanRecord{w1, w2, w3}
 		unsortedRecs := []*spanRecord{w3, w1, w2}
 		dst := make([]*spanRecord, 0, 4)
-		if out, _ := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA); len(out) != 2 || out[0] != selOuter || out[1] != w3 {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
-		}
 		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selA)
 		if out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, recs, leaf); len(out) != 2 || out[0] != selOuter || out[1] != w3 {
 			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer worker-3]", spanIDs(out))
@@ -31517,14 +31515,6 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 			t.Fatalf("appendPossibleOwnersWithIndexLocked(unsorted) = %v, want [sel-outer worker-3]", spanIDs(out))
 		}
 		if !raceEnabled {
-			if allocs := testing.AllocsPerRun(100, func() {
-				out, _ := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA)
-				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
-					t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
-				}
-			}); allocs != 0 {
-				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
-			}
 			if allocs := testing.AllocsPerRun(100, func() {
 				out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, recs, leaf)
 				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
@@ -31544,7 +31534,7 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		}
 
 		// Verify >=64-byte node paths still avoid per-span prefix string
-		// allocations across both unindexed and indexed paths.
+		// allocations in the indexed path.
 		longPrefix := strings.Repeat("segment_", 9) + "wf@1"
 		longLeaf := identity{agentName: "leaf", branch: "selected", path: longPrefix + "/leaf@1"}
 		invLong := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-long-path-allocs", time.Unix(1_700_000_000, 0))
@@ -31559,22 +31549,11 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 
 		treeLong := invLong.buildOpenSpanTreeLocked(nil)
 		recsLong := []*spanRecord{w1L, w2L, w3L}
-		if out, _ := invLong.appendPossibleOwnersLocked(dst[:0], treeLong, nil, recsLong, longLeaf, selAL); len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
-			t.Fatalf("appendPossibleOwnersLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
-		}
 		qualLong := invLong.buildQualifyingIndexLocked(treeLong, nil, longLeaf, selAL)
 		if out, _ := invLong.appendPossibleOwnersWithIndexLocked(dst[:0], treeLong, nil, &qualLong, recsLong, longLeaf); len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
 			t.Fatalf("appendPossibleOwnersWithIndexLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
 		}
 		if !raceEnabled {
-			if allocs := testing.AllocsPerRun(100, func() {
-				out, _ := invLong.appendPossibleOwnersLocked(dst[:0], treeLong, nil, recsLong, longLeaf, selAL)
-				if len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
-					t.Fatalf("appendPossibleOwnersLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
-				}
-			}); allocs != 0 {
-				t.Errorf("appendPossibleOwnersLocked(long path) allocated %v times per call, want 0", allocs)
-			}
 			if allocs := testing.AllocsPerRun(100, func() {
 				out, _ := invLong.appendPossibleOwnersWithIndexLocked(dst[:0], treeLong, nil, &qualLong, recsLong, longLeaf)
 				if len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
@@ -31648,9 +31627,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, mid.spanID, wOuter.spanID, root.spanID)
 		}
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{wOuter, wA, wB}, leaf, selB)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selB)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{wOuter, wA, wB}, leaf)
 		if len(out) != 2 || out[0] != wA || out[1] != wB {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [worker-a worker-b]", spanIDs(out))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [worker-a worker-b]", spanIDs(out))
 		}
 	})
 
@@ -31671,9 +31651,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wOuter.spanID)
 		}
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w1, wOuter, wInner}, leaf, selAfter2)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selAfter2)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{w1, wOuter, wInner}, leaf)
 		if len(out) != 3 || out[0] != selAfter1 || out[1] != selAfter2 || out[2] != wInner {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-after-1 sel-after-2 worker-inner]", spanIDs(out))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-after-1 sel-after-2 worker-inner]", spanIDs(out))
 		}
 
 		// Also verify self-match skip (first[inner] == inner) when outer is excluded directly.
@@ -31687,9 +31668,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		invSelf.agentStack = append(invSelf.agentStack, rootS, wOuterS, wInnerS, skippedS, selAfter1S, selAfter2S)
 		excl := map[string]bool{wOuterS.spanID: true}
 		treeS := invSelf.buildOpenSpanTreeLocked(excl)
-		outS, _ := invSelf.appendPossibleOwnersLocked(nil, treeS, excl, []*spanRecord{wOuterS, wInnerS}, leaf, selAfter2S)
+		qualS := invSelf.buildQualifyingIndexLocked(treeS, excl, leaf, selAfter2S)
+		outS, _ := invSelf.appendPossibleOwnersWithIndexLocked(nil, treeS, excl, &qualS, []*spanRecord{wOuterS, wInnerS}, leaf)
 		if len(outS) != 3 || outS[0] != selAfter1S || outS[1] != selAfter2S || outS[2] != wInnerS {
-			t.Fatalf("appendPossibleOwnersLocked(self skip) = %v, want [sel-after-1 sel-after-2 worker-inner]", spanIDs(outS))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked(self skip) = %v, want [sel-after-1 sel-after-2 worker-inner]", spanIDs(outS))
 		}
 	})
 
@@ -31751,9 +31733,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		}
 
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w1, w2, w3}, leaf, selA)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selA)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{w1, w2, w3}, leaf)
 		if len(out) != 3 || out[0] != selOuter1 || out[1] != selOuter2 || out[2] != w3 {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer-1 sel-outer-2 worker-3]", spanIDs(out))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer-1 sel-outer-2 worker-3]", spanIDs(out))
 		}
 	})
 
@@ -31776,9 +31759,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		}
 
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w2, w3}, leaf, selA)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selA)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{w2, w3}, leaf)
 		if len(out) != 2 || out[0] != w2 || out[1] != w3 {
-			t.Fatalf("appendPossibleOwnersLocked = %v, want [worker-2 worker-3]", spanIDs(out))
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [worker-2 worker-3]", spanIDs(out))
 		}
 	})
 
@@ -31797,14 +31781,15 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		}
 
 		tree := inv.buildOpenSpanTreeLocked(nil)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selected)
 		for _, recs := range [][]*spanRecord{
 			{w1, w2, w3},
 			{w3, w1, w2},
 			{w3, w3},
 			{w3, w1, w2, w3, w1},
 		} {
-			if out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, recs, leaf, selected); len(out) != 0 {
-				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want empty", spanIDs(recs), spanIDs(out))
+			if out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, recs, leaf); len(out) != 0 {
+				t.Fatalf("appendPossibleOwnersWithIndexLocked(%v) = %v, want empty", spanIDs(recs), spanIDs(out))
 			}
 		}
 
@@ -31823,14 +31808,15 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 			t.Fatalf("parentForRunLocked(interleaved multi) = %s, want %s", got.spanID, w1M.spanID)
 		}
 		treeM := invMulti.buildOpenSpanTreeLocked(nil)
+		qualM := invMulti.buildQualifyingIndexLocked(treeM, nil, leaf, selA)
 		for _, recs := range [][]*spanRecord{
 			{w1M, w2M, w3M},
 			{w3M, w1M, w2M},
 			{w3M, w1M, w2M, w1M, w3M},
 		} {
-			out, _ := invMulti.appendPossibleOwnersLocked(nil, treeM, nil, recs, leaf, selA)
+			out, _ := invMulti.appendPossibleOwnersWithIndexLocked(nil, treeM, nil, &qualM, recs, leaf)
 			if len(out) != 2 || out[0] != selOuter || out[1] != w3M {
-				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want [sel-outer worker-3]", spanIDs(recs), spanIDs(out))
+				t.Fatalf("appendPossibleOwnersWithIndexLocked(%v) = %v, want [sel-outer worker-3]", spanIDs(recs), spanIDs(out))
 			}
 		}
 	})
@@ -31865,8 +31851,9 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		reversed := slices.Clone(recs)
 		slices.Reverse(reversed)
 		tree := inv.buildOpenSpanTreeLocked(nil)
-		if out, _ := inv.appendPossibleOwnersLocked(nil, tree, nil, reversed, leaf, selected); len(out) != 0 {
-			t.Fatalf("appendPossibleOwnersLocked(21 workers reversed) = %v, want empty", spanIDs(out))
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selected)
+		if out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, reversed, leaf); len(out) != 0 {
+			t.Fatalf("appendPossibleOwnersWithIndexLocked(21 workers reversed) = %v, want empty", spanIDs(out))
 		}
 
 		// Multi-owner with >16 members: wOuter also owns a matching child -> demotes to wOuter.
@@ -40214,5 +40201,57 @@ func TestParentForRunLocked_LauncherExclusionReverseGroupsLinearWork(t *testing.
 	}
 	if maxWant := 2 * len(inv.agentStack); inv.lastLauncherExcludeVisits <= 0 || inv.lastLauncherExcludeVisits > maxWant {
 		t.Fatalf("lastLauncherExcludeVisits = %d, want in (0, %d] for %d open spans", inv.lastLauncherExcludeVisits, maxWant, len(inv.agentStack))
+	}
+}
+
+func TestParentForRunLocked_SelectedPathNotEnclosingChildDemotes(t *testing.T) {
+	t.Run("selected_path_does_not_enclose_child", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-selected-path-not-enclosing", time.Unix(1_700_000_000, 0))
+		mid1 := &spanRecord{spanID: "mid-1", kind: spanKindAgent, name: "mid", parent: inv.agentStack[0], goroutineID: 101}
+		mid2 := &spanRecord{spanID: "mid-2", kind: spanKindAgent, name: "mid", parent: inv.agentStack[0], goroutineID: 102}
+		sel := &spanRecord{spanID: "sel", kind: spanKindAgent, name: "sel", branch: "b", path: "p/q@1", parent: mid2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, mid1, mid2, sel)
+
+		child := identity{agentName: "worker", branch: "b.x"}
+		if got := inv.parentForRunLocked(child, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
+		}
+	})
+
+	t.Run("empty_selected_path", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-empty-selected-path", time.Unix(1_700_000_000, 0))
+		mid1 := &spanRecord{spanID: "mid-1", kind: spanKindAgent, name: "mid", parent: inv.agentStack[0], goroutineID: 101}
+		mid2 := &spanRecord{spanID: "mid-2", kind: spanKindAgent, name: "mid", parent: inv.agentStack[0], goroutineID: 102}
+		sel := &spanRecord{spanID: "sel", kind: spanKindAgent, name: "sel", branch: "selected", parent: mid2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, mid1, mid2, sel)
+
+		childEmptyPath := identity{agentName: "worker", branch: "selected"}
+		if got := inv.parentForRunLocked(childEmptyPath, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
+			t.Fatalf("parentForRunLocked(empty path) = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
+		}
+		childNestedPath := identity{agentName: "worker", branch: "selected", path: "node@1"}
+		if got := inv.parentForRunLocked(childNestedPath, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
+			t.Fatalf("parentForRunLocked(nested path) = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
+		}
+	})
+}
+
+func TestParentForRunLocked_ZeroGoidWithActivationExcludesPeerLookalike(t *testing.T) {
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-zero-goid-activation", time.Unix(1_700_000_000, 0))
+	actW1 := &lineageContext{Context: context.Background()}
+	cancelCtx, cancel := context.WithCancel(actW1)
+	defer cancel()
+	childAct := &lineageContext{Context: context.WithValue(cancelCtx, lineageKey{}, 1)}
+	defer runtime.KeepAlive(childAct)
+	defer runtime.KeepAlive(actW1)
+
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101, activation: actW1}
+	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+	inv.agentStack = append(inv.agentStack, root, w1, w2)
+
+	leaf := identity{agentName: "leaf"}
+	if got := inv.parentForRunLocked(leaf, nil, 0, goroutineOrigin{}, childAct); got != w1 {
+		t.Fatalf("parentForRunLocked(goid=0, activation) = %s, want %s (not %s)", got.spanID, w1.spanID, w2.spanID)
 	}
 }
