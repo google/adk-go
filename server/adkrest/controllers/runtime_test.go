@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
@@ -310,20 +310,6 @@ func TestRunHandlersAutoCreateSession(t *testing.T) {
 	}
 }
 
-// recordingSessionService records every Get request it serves.
-type recordingSessionService struct {
-	session.Service
-	mu   sync.Mutex
-	gets []session.GetRequest
-}
-
-func (s *recordingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
-	s.mu.Lock()
-	s.gets = append(s.gets, *req)
-	s.mu.Unlock()
-	return s.Service.Get(ctx, req)
-}
-
 // The existence check before a run must not read the events, since the runner
 // reads them again. One turn therefore costs one events read.
 func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
@@ -336,7 +322,7 @@ func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
 			if err != nil {
 				t.Fatalf("agent.New failed: %v", err)
 			}
-			svc := &recordingSessionService{Service: session.InMemoryService()}
+			svc := &testutil.RecordingSessionService{Service: session.InMemoryService()}
 			if _, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "s1"}); err != nil {
 				t.Fatalf("Create failed: %v", err)
 			}
@@ -366,8 +352,9 @@ func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
 				t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 			}
 
+			gets := svc.Gets()
 			var full, light int
-			for _, g := range svc.gets {
+			for _, g := range gets {
 				if g.ExcludeEvents {
 					light++
 				} else {
@@ -375,7 +362,7 @@ func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
 				}
 			}
 			if full != 1 || light != 1 {
-				t.Errorf("session reads = %d with events and %d without, want 1 and 1 (requests: %+v)", full, light, svc.gets)
+				t.Errorf("session reads = %d with events and %d without, want 1 and 1 (requests: %+v)", full, light, gets)
 			}
 		})
 	}

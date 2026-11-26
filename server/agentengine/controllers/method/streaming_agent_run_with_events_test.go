@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
@@ -135,7 +136,7 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 		t.Fatalf("Create() failed: %v", err)
 	}
 
-	recorder := &recordingSessionService{Service: sessionService}
+	recorder := &testutil.RecordingSessionService{Service: sessionService}
 	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: recorder}, "app", "streaming_agent_run_with_events", "async_stream")
 	req := &models.StreamingAgentRunWithEventsRunRequest{
 		UserID:    "jan@example.com",
@@ -149,20 +150,10 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 		t.Errorf("SessionID = %q, want existing backend session %q", req.SessionID, created.Session.ID())
 	}
 	// The runner reads the events when the run starts, so this check must not.
-	if len(recorder.gets) != 1 || !recorder.gets[0].ExcludeEvents {
-		t.Errorf("session reads = %+v, want one read with ExcludeEvents", recorder.gets)
+	gets := recorder.Gets()
+	if len(gets) != 1 || !gets[0].ExcludeEvents {
+		t.Errorf("session reads = %+v, want one read with ExcludeEvents", gets)
 	}
-}
-
-// recordingSessionService records every Get request it serves.
-type recordingSessionService struct {
-	session.Service
-	gets []session.GetRequest
-}
-
-func (s *recordingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
-	s.gets = append(s.gets, *req)
-	return s.Service.Get(ctx, req)
 }
 
 func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
