@@ -86,29 +86,18 @@ func appendUserTurn(t *testing.T, svc session.Service, sess session.Session, tex
 	}
 }
 
-// runCompactionProcessorWithRequest runs the processor in the state the
-// default chain leaves it in, for an agent configured with the same
-// instruction and tools: the instructions processor has already put the system
-// instruction on req, and the tools processor has already collected the
-// agent's tools into the flow. Their declarations are copied onto req only
-// after every request processor has run, so the processor sees them on the
-// flow, not on req.
+// runCompactionProcessorWithRequest runs the processor with the system
+// instruction on req and the tools on the flow, which is where the default
+// chain leaves them: the instructions processor puts the resolved instruction
+// on req, and the tools processor collects the agent's tools, toolsets
+// included, into the flow. Tool declarations are copied onto req only after
+// every request processor has run. The agent itself is bare, so an estimate
+// must read req and the flow rather than the agent's configuration.
 func runCompactionProcessorWithRequest(t *testing.T, svc session.Service, sess session.Session, req *model.LLMRequest, tools []tool.Tool, cfg *compaction.Config) {
 	t.Helper()
 
 	ctx := compactionctx.ToContext(t.Context(), compactionctx.New(cfg, svc))
-	var instruction string
-	if req.Config != nil && req.Config.SystemInstruction != nil {
-		for _, p := range req.Config.SystemInstruction.Parts {
-			instruction += p.Text
-		}
-	}
-	testAgent := utils.Must(llmagent.New(llmagent.Config{
-		Name:        "assistant",
-		Model:       &testModel{},
-		Instruction: instruction,
-		Tools:       tools,
-	}))
+	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "assistant", Model: &testModel{}}))
 	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Agent:   testAgent,
 		Session: sess,
@@ -270,8 +259,8 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			wantCompaction: false,
 		},
 		{
-			// The count is plausible on its own, but the whole prompt,
-			// instruction included, is well above the threshold.
+			// The contents alone stay under the threshold, but the whole
+			// prompt, instruction included, is well above it.
 			name:           "reported 1 with a large instruction above the threshold",
 			reported:       1,
 			textChars:      200,
@@ -301,7 +290,7 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			name:           "accurate report with tools on the flow and a later turn stays under the threshold",
 			reported:       3500,
 			textChars:      100,
-			tools:          10,
+			tools:          15,
 			trailingChars:  100,
 			wantCompaction: false,
 		},
