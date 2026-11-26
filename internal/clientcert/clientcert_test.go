@@ -17,11 +17,16 @@ package clientcert
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
 )
@@ -428,3 +433,48 @@ func TestSourceReportsAFailedSearch(t *testing.T) {
 		}
 	}
 }
+
+// TestPlainTransport compares with what the auth library does to its own base
+// transport: see PlainTransport.
+func TestPlainTransport(t *testing.T) {
+	if got, h2 := PlainTransport(roundTripperFunc(nil)); got != nil || h2 != nil {
+		t.Errorf("PlainTransport() = %v, %v for a default transport that is not an http.Transport, want nil", got, h2)
+	}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Proto)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	// Built by hand, a transport with a TLS configuration of its own speaks
+	// HTTP/1.1 unless told otherwise. The library turns HTTP/2 on regardless.
+	def := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+
+	base, h2 := PlainTransport(def)
+	got, ok := base.(*http.Transport)
+	if !ok || got == def {
+		t.Fatalf("PlainTransport() = %v, want a copy of the default transport", base)
+	}
+	if got.MaxIdleConnsPerHost != 100 || h2 == nil || h2.ReadIdleTimeout != 31*time.Second {
+		t.Errorf("PlainTransport() idle connections per host = %d, HTTP/2 side = %+v; want 100 and a 31s read idle timeout", got.MaxIdleConnsPerHost, h2)
+	}
+	if def.MaxIdleConnsPerHost != 0 || len(def.TLSClientConfig.NextProtos) != 0 || def.TLSNextProto != nil || def.Protocols != nil || def.HTTP2 != nil {
+		t.Error("PlainTransport() changed the default transport")
+	}
+	// The server is trusted only through the default transport's roots.
+	resp, err := (&http.Client{Transport: base}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("Get() through PlainTransport() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Errorf("request through PlainTransport() used %s, want HTTP/2", resp.Proto)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

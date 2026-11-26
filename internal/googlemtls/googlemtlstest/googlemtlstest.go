@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,6 +60,9 @@ type Server struct {
 	// Roots trusts the server's certificate.
 	Roots      *x509.CertPool
 	clientCert tls.Certificate
+
+	mu      sync.Mutex
+	headers []http.Header
 }
 
 // NewServer starts a Server that is closed when the test ends.
@@ -110,6 +114,9 @@ func NewServer(t testing.TB) *Server {
 		if len(r.TLS.PeerCertificates) > 0 {
 			req.Leaf = Fingerprint(r.TLS.PeerCertificates[0].Raw)
 		}
+		s.mu.Lock()
+		s.headers = append(s.headers, r.Header.Clone())
+		s.mu.Unlock()
 		s.Requests <- req
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -148,6 +155,13 @@ func (s *Server) Configure(tr *http.Transport) {
 	tr.TLSClientConfig.RootCAs = s.Roots
 }
 
+// Headers returns the headers of every request served so far, in order.
+func (s *Server) Headers() []http.Header {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]http.Header(nil), s.headers...)
+}
+
 // Leaf returns the Fingerprint of the certificate Provider presents.
 func (s *Server) Leaf() string { return Fingerprint(s.clientCert.Certificate[0]) }
 
@@ -157,18 +171,19 @@ func Fingerprint(der []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Route makes transports that googlemtls.NewTransport creates during the test
-// send their mTLS requests to s, while the certificate source stays the one
-// in place, the environment's unless a test replaced it. The test must not
-// run in parallel.
+// Route makes transports that googlemtls.NewTransport and
+// googlemtls.NewTransportAllHosts create during the test send their mTLS
+// requests to s, while the certificate source stays the one in place, the
+// environment's unless a test replaced it. The test must not run in parallel.
 func (s *Server) Route(t testing.TB) {
 	t.Helper()
 	t.Cleanup(googlemtls.SetTestHooks(nil, s.Configure))
 }
 
-// Install makes transports that googlemtls.NewTransport creates during the
-// test present the server's client certificate and send their mTLS requests
-// to s. The test must not run in parallel.
+// Install makes transports that googlemtls.NewTransport and
+// googlemtls.NewTransportAllHosts create during the test present the server's
+// client certificate and send their mTLS requests to s. The test must not run
+// in parallel.
 func (s *Server) Install(t testing.TB) {
 	t.Helper()
 	restore := googlemtls.SetTestHooks(func() (func(*tls.CertificateRequestInfo) (*tls.Certificate, error), error) {

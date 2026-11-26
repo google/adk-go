@@ -17,6 +17,7 @@ package googlemtls
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net/http"
@@ -468,5 +469,93 @@ func TestNewTransportNilBaseUsesCurrentDefaultTransport(t *testing.T) {
 	}
 	if len(rec.urls) != 1 {
 		t.Errorf("http.DefaultTransport got %v, want the request", rec.urls)
+	}
+}
+
+func TestAllHostsRoute(t *testing.T) {
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
+	p := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return nil, nil }
+	for _, tc := range []struct {
+		name     string
+		url      string
+		provider provider
+		wantMTLS bool
+		wantHost string
+	}{
+		{name: "other https host with a certificate", url: "https://proxy.example.test/v1", provider: p, wantMTLS: true, wantHost: "proxy.example.test"},
+		{name: "Google host with a certificate", url: "https://aiplatform.googleapis.com/v1", provider: p, wantMTLS: true, wantHost: "aiplatform.mtls.googleapis.com"},
+		{name: "other https host without a certificate", url: "https://proxy.example.test/v1"},
+		{name: "plain http host with a certificate", url: "http://proxy.example.test/v1", provider: p},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain, mtls := &recordingTransport{}, &recordingTransport{}
+			src, _ := countingSource(tc.provider, nil)
+			tr := &transport{base: plain, source: src, allHosts: true}
+			// A transport built from a provider is cached, so it can be
+			// replaced by one that records what reaches it.
+			tr.mtls = &http.Transport{}
+			tr.mtls.RegisterProtocol("https", mtls)
+			if _, err := get(t, tr, tc.url); err != nil {
+				t.Fatalf("RoundTrip error = %v", err)
+			}
+			if !tc.wantMTLS {
+				if len(plain.urls) != 1 || plain.urls[0] != tc.url || len(mtls.urls) != 0 {
+					t.Errorf("plain got %v, mTLS got %v; want %s on the plain transport only", plain.urls, mtls.urls, tc.url)
+				}
+				return
+			}
+			if len(plain.urls) != 0 || len(mtls.urls) != 1 {
+				t.Fatalf("plain got %v, mTLS got %v; want one request on the mTLS transport", plain.urls, mtls.urls)
+			}
+			if u, err := url.Parse(mtls.urls[0]); err != nil || u.Host != tc.wantHost {
+				t.Errorf("mTLS transport got %s, want host %s", mtls.urls[0], tc.wantHost)
+			}
+		})
+	}
+}
+
+func TestAllHostsSourceErrorFailsOtherHost(t *testing.T) {
+	src, _ := countingSource(nil, errors.New("bad cert config"))
+	tr := &transport{base: failingTransport{t}, source: src, allHosts: true}
+	if _, err := get(t, tr, "https://proxy.example.test/v1"); err == nil || !strings.Contains(err.Error(), "bad cert config") {
+		t.Errorf("RoundTrip error = %v, want the source error", err)
+	}
+}
+
+// The mTLS transport applies the auth library's idle-pool and HTTP/2 settings
+// without mutating http.DefaultTransport.
+func TestMTLSTransportTunesIdlePoolAndHTTP2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Proto)
+	}))
+	srv.EnableHTTP2 = true
+	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	def := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+	t.Cleanup(def.CloseIdleConnections)
+	orig := http.DefaultTransport
+	http.DefaultTransport = def
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	p := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &tls.Certificate{}, nil }
+	tr := newMTLSTransport(p)
+	t.Cleanup(tr.CloseIdleConnections)
+	if tr.MaxIdleConnsPerHost != 100 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 100", tr.MaxIdleConnsPerHost)
+	}
+	if def.MaxIdleConnsPerHost != 0 || len(def.TLSClientConfig.NextProtos) != 0 || def.TLSNextProto != nil || def.Protocols != nil || def.HTTP2 != nil {
+		t.Error("newMTLSTransport() changed http.DefaultTransport")
+	}
+	resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Errorf("request through newMTLSTransport() used %s, want HTTP/2", resp.Proto)
 	}
 }

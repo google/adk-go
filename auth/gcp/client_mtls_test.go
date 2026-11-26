@@ -26,7 +26,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
 )
@@ -431,47 +430,6 @@ func TestNewClientLeavesSecureConnectAlone(t *testing.T) {
 	c := retrieve()
 	if got := peers(); c.agentIdentityURL != defaultAgentIdentityMTLSURL || len(got) != 1 || !bytes.Equal(got[0], leaf) {
 		t.Errorf("with gcloud's variable true: agent identity endpoint %q, %d client certificates; want the mTLS endpoint and the helper's certificate", c.agentIdentityURL, len(got))
-	}
-}
-
-// TestPlainTransport compares with what the auth library does to its own base
-// transport: see plainTransport.
-func TestPlainTransport(t *testing.T) {
-	if got, h2 := plainTransport(roundTripperFunc(nil)); got != nil || h2 != nil {
-		t.Errorf("plainTransport() = %v, %v for a default transport that is not an http.Transport, want nil", got, h2)
-	}
-
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, r.Proto)
-	}))
-	srv.EnableHTTP2 = true
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	roots := x509.NewCertPool()
-	roots.AddCert(srv.Certificate())
-	// Built by hand, a transport with a TLS configuration of its own speaks
-	// HTTP/1.1 unless told otherwise. The library turns HTTP/2 on regardless.
-	def := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
-
-	base, h2 := plainTransport(def)
-	got, ok := base.(*http.Transport)
-	if !ok || got == def {
-		t.Fatalf("plainTransport() = %v, want a copy of the default transport", base)
-	}
-	if got.MaxIdleConnsPerHost != 100 || h2 == nil || h2.ReadIdleTimeout != 31*time.Second {
-		t.Errorf("plainTransport() idle connections per host = %d, HTTP/2 side = %+v; want 100 and a 31s read idle timeout", got.MaxIdleConnsPerHost, h2)
-	}
-	if def.MaxIdleConnsPerHost != 0 || len(def.TLSClientConfig.NextProtos) != 0 || def.TLSNextProto != nil || def.Protocols != nil || def.HTTP2 != nil {
-		t.Error("plainTransport() changed the default transport")
-	}
-	// The server is trusted only through the default transport's roots.
-	resp, err := (&http.Client{Transport: base}).Get(srv.URL)
-	if err != nil {
-		t.Fatalf("Get() through plainTransport() error = %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.ProtoMajor != 2 {
-		t.Errorf("request through plainTransport() used %s, want HTTP/2", resp.Proto)
 	}
 }
 
