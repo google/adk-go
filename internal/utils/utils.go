@@ -16,6 +16,7 @@ package utils
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -79,12 +80,12 @@ func Content(ev *session.Event) *genai.Content {
 // TODO: Use generics.
 // FunctionCalls extracts all FunctionCall parts from the content.
 func FunctionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
-	return (&model.LLMResponse{Content: c}).FunctionCalls()
+	return slices.Collect((&model.LLMResponse{Content: c}).FunctionCalls())
 }
 
 // FunctionResponses extracts all FunctionResponse parts from the content.
 func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
-	return (&model.LLMResponse{Content: c}).FunctionResponses()
+	return slices.Collect((&model.LLMResponse{Content: c}).FunctionResponses())
 }
 
 // TextParts extracts all Text parts from the content.

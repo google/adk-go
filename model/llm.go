@@ -108,36 +108,37 @@ type LLMResponse struct {
 	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
 }
 
-// FunctionCalls returns the FunctionCall of each part of r.Content that has
-// one, in part order. It returns nil when r is nil, r.Content is nil, or no
-// part holds a function call. Nil entries in r.Content.Parts are skipped.
-// The returned pointers are the ones stored in r.Content; they are not copies.
-func (r *LLMResponse) FunctionCalls() []*genai.FunctionCall {
-	if r == nil || r.Content == nil {
-		return nil
-	}
-	var calls []*genai.FunctionCall
-	for _, p := range r.Content.Parts {
-		if p != nil && p.FunctionCall != nil {
-			calls = append(calls, p.FunctionCall)
-		}
-	}
-	return calls
+// FunctionCalls returns an iterator over the FunctionCall of each part of
+// r.Content that has one, in part order. Nil entries in r.Content.Parts are
+// skipped, and the iterator yields nothing when r or r.Content is nil. It
+// yields the pointers stored in r.Content, not copies.
+func (r *LLMResponse) FunctionCalls() iter.Seq[*genai.FunctionCall] {
+	return partValues(r, func(p *genai.Part) *genai.FunctionCall { return p.FunctionCall })
 }
 
-// FunctionResponses returns the FunctionResponse of each part of r.Content
-// that has one, in part order, under the same rules as FunctionCalls.
-func (r *LLMResponse) FunctionResponses() []*genai.FunctionResponse {
-	if r == nil || r.Content == nil {
-		return nil
-	}
-	var responses []*genai.FunctionResponse
-	for _, p := range r.Content.Parts {
-		if p != nil && p.FunctionResponse != nil {
-			responses = append(responses, p.FunctionResponse)
+// FunctionResponses returns an iterator over the FunctionResponse of each part
+// of r.Content that has one, in part order, under the same rules as
+// FunctionCalls.
+func (r *LLMResponse) FunctionResponses() iter.Seq[*genai.FunctionResponse] {
+	return partValues(r, func(p *genai.Part) *genai.FunctionResponse { return p.FunctionResponse })
+}
+
+// partValues returns an iterator over the non-nil values that field returns
+// for the non-nil parts of r.Content, in part order.
+func partValues[T any](r *LLMResponse, field func(*genai.Part) *T) iter.Seq[*T] {
+	return func(yield func(*T) bool) {
+		if r == nil || r.Content == nil {
+			return
+		}
+		for _, p := range r.Content.Parts {
+			if p == nil {
+				continue
+			}
+			if v := field(p); v != nil && !yield(v) {
+				return
+			}
 		}
 	}
-	return responses
 }
 
 // HasTrailingCodeExecutionResult reports whether the last non-nil part of

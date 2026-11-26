@@ -305,11 +305,20 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
-	hasCalls := len(e.FunctionCalls()) > 0
+	hasCalls := hasAny(e.FunctionCalls())
 	if e.ErrorCode != "" && !e.Partial && !hasCalls {
 		return true
 	}
-	return !hasCalls && len(e.FunctionResponses()) == 0 && !e.Partial && !e.HasTrailingCodeExecutionResult()
+	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !e.HasTrailingCodeExecutionResult()
+}
+
+// hasAny reports whether seq yields at least one value. It stops seq after the
+// first one.
+func hasAny[T any](seq iter.Seq[T]) bool {
+	for range seq {
+		return true
+	}
+	return false
 }
 
 // NewEvent creates a new event defining now as the timestamp.

@@ -15,6 +15,7 @@
 package model_test
 
 import (
+	"slices"
 	"testing"
 
 	"google.golang.org/genai"
@@ -22,8 +23,8 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-// A response with nothing to report gives nil slices, not empty ones, and a
-// nil *LLMResponse is valid input.
+// A response with nothing to report yields nothing, and a nil *LLMResponse is
+// valid input.
 func TestLLMResponseAccessorsNoResult(t *testing.T) {
 	tests := []struct {
 		name string
@@ -35,11 +36,11 @@ func TestLLMResponseAccessorsNoResult(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.resp.FunctionCalls(); got != nil {
-				t.Errorf("FunctionCalls() = %#v, want nil", got)
+			if got := slices.Collect(tc.resp.FunctionCalls()); len(got) != 0 {
+				t.Errorf("FunctionCalls() yielded %v, want nothing", got)
 			}
-			if got := tc.resp.FunctionResponses(); got != nil {
-				t.Errorf("FunctionResponses() = %#v, want nil", got)
+			if got := slices.Collect(tc.resp.FunctionResponses()); len(got) != 0 {
+				t.Errorf("FunctionResponses() yielded %v, want nothing", got)
 			}
 			if got := tc.resp.HasTrailingCodeExecutionResult(); got {
 				t.Errorf("HasTrailingCodeExecutionResult() = true, want false")
@@ -48,7 +49,7 @@ func TestLLMResponseAccessorsNoResult(t *testing.T) {
 	}
 }
 
-// The accessors return the pointers stored in the content, in part order,
+// The accessors yield the pointers stored in the content, in part order,
 // including unnamed ones, skip text and nil parts, and leave the content
 // unchanged.
 func TestLLMResponseAccessorsReturnStoredValues(t *testing.T) {
@@ -65,11 +66,11 @@ func TestLLMResponseAccessorsReturnStoredValues(t *testing.T) {
 		{FunctionResponse: respB},
 	}}}
 
-	calls := resp.FunctionCalls()
+	calls := slices.Collect(resp.FunctionCalls())
 	if len(calls) != 2 || calls[0] != callA || calls[1] != callB {
 		t.Errorf("FunctionCalls() = %v, want the stored pointers [a, unnamed]", calls)
 	}
-	responses := resp.FunctionResponses()
+	responses := slices.Collect(resp.FunctionResponses())
 	if len(responses) != 2 || responses[0] != respA || responses[1] != respB {
 		t.Errorf("FunctionResponses() = %v, want the stored pointers [ra, unnamed]", responses)
 	}
@@ -78,6 +79,37 @@ func TestLLMResponseAccessorsReturnStoredValues(t *testing.T) {
 	}
 	if len(resp.Content.Parts) != 6 || resp.Content.Parts[1] != nil {
 		t.Errorf("Content.Parts changed: len %d, Parts[1] nil = %v; want len 6 with Parts[1] nil", len(resp.Content.Parts), len(resp.Content.Parts) > 1 && resp.Content.Parts[1] == nil)
+	}
+}
+
+// Breaking out of a range over FunctionCalls or FunctionResponses stops the
+// iterator. An iterator that kept yielding would make the range loop panic.
+func TestLLMResponseAccessorsStopWhenTheLoopBreaks(t *testing.T) {
+	callA := &genai.FunctionCall{Name: "a"}
+	respA := &genai.FunctionResponse{Name: "ra"}
+	resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+		{FunctionCall: callA},
+		{FunctionCall: &genai.FunctionCall{Name: "b"}},
+		{FunctionResponse: respA},
+		{FunctionResponse: &genai.FunctionResponse{Name: "rb"}},
+	}}}
+
+	var firstCall *genai.FunctionCall
+	for fc := range resp.FunctionCalls() {
+		firstCall = fc
+		break
+	}
+	var firstResponse *genai.FunctionResponse
+	for fr := range resp.FunctionResponses() {
+		firstResponse = fr
+		break
+	}
+
+	if firstCall != callA {
+		t.Errorf("first FunctionCalls() value = %v, want the stored call a", firstCall)
+	}
+	if firstResponse != respA {
+		t.Errorf("first FunctionResponses() value = %v, want the stored response ra", firstResponse)
 	}
 }
 
