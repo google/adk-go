@@ -16,6 +16,7 @@ package mcptoolset_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2011,5 +2012,108 @@ func TestAuthRedirectCap(t *testing.T) {
 				t.Errorf("longest chain reached hop %d, want %d", got, tc.wantMaxHop)
 			}
 		})
+	}
+}
+
+func TestElicitationHandler(t *testing.T) {
+	const (
+		loginURL      = "https://idp.example.com/login"
+		elicitationID = "elicitation-1"
+	)
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	server.AddTool(&mcp.Tool{
+		Name:        "gateway_tool",
+		Description: "elicits a login before responding",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Protocol version 2026-07-28 forbids server-initiated
+		// elicitation/create while serving a request (SEP-2322); the server
+		// returns InputRequests and the client retries with InputResponses.
+		res, ok := req.Params.InputResponses["login"].(*mcp.ElicitResult)
+		if !ok {
+			return &mcp.CallToolResult{
+				InputRequests: mcp.InputRequestMap{
+					"login": &mcp.ElicitParams{
+						Mode:          "url",
+						Message:       "please log in",
+						URL:           loginURL,
+						ElicitationID: elicitationID,
+					},
+				},
+			}, nil
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "elicitation " + res.Action + "ed"}},
+		}, nil
+	})
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotURL, gotMode string
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			gotURL, gotMode = req.Params.URL, req.Params.Mode
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools call failed: %v", err)
+	}
+	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+
+	fnTool := tools[0].(toolinternal.FunctionTool)
+	result, err := fnTool.Run(toolCtx, map[string]any{})
+	if err != nil {
+		t.Fatalf("Tool call failed: %v", err)
+	}
+
+	if gotURL != loginURL {
+		t.Errorf("Elicitation handler got URL %q, want %q", gotURL, loginURL)
+	}
+	if gotMode != "url" {
+		t.Errorf("Elicitation handler got mode %q, want %q", gotMode, "url")
+	}
+	want := map[string]any{"output": "elicitation accepted"}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Tool result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewRejectsElicitationHandlerWithCustomClient(t *testing.T) {
+	clientTransport, _ := mcp.NewInMemoryTransports()
+
+	_, err := mcptoolset.New(mcptoolset.Config{
+		Client:    mcp.NewClient(&mcp.Implementation{Name: "custom", Version: "v1.0.0"}, nil),
+		Transport: clientTransport,
+		ElicitationHandler: func(ctx context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when combining ElicitationHandler with a custom Client, got nil")
+	}
+}
+
+func TestNewRejectsElicitationCompleteHandlerWithoutElicitationHandler(t *testing.T) {
+	clientTransport, _ := mcp.NewInMemoryTransports()
+
+	_, err := mcptoolset.New(mcptoolset.Config{
+		Transport: clientTransport,
+		ElicitationCompleteHandler: func(context.Context, *mcp.ElicitationCompleteNotificationRequest) {
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when setting ElicitationCompleteHandler without ElicitationHandler, got nil")
 	}
 }
