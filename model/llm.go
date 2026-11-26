@@ -32,6 +32,41 @@ type LLM interface {
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
 }
 
+// LiveConnector is an optional capability of an [LLM] that serves bidirectional
+// live sessions.
+type LiveConnector interface {
+	// Connect opens a session using req.Config and req.LiveConnectConfig.
+	// The flow sends req.Contents separately with SendHistory. Implementations
+	// must treat the request and its fields as read-only. The context may be
+	// canceled during setup if the live session closes. On success Connect
+	// returns a non-nil connection, which the caller closes.
+	Connect(ctx context.Context, req *LLMRequest) (LiveConnection, error)
+}
+
+// LiveConnection is an open live session with a model.
+//
+// The flow serializes calls to the Send methods and may iterate Receive
+// concurrently with them. Close may run concurrently with either and must
+// unblock any pending sends or receives.
+type LiveConnection interface {
+	// SendHistory sends earlier turns immediately after connecting. The model
+	// should reply if the final turn is the user's.
+	SendHistory(ctx context.Context, history []*genai.Content) error
+	// SendContent sends a user turn or answers the model's tool calls. Tool
+	// response content must contain only function response parts.
+	SendContent(ctx context.Context, content *genai.Content) error
+	// SendRealtime accepts live input such as *genai.Blob, *genai.ActivityStart,
+	// or *genai.ActivityEnd. It returns an error for unsupported input types.
+	SendRealtime(ctx context.Context, input any) error
+	// Receive is called once per connection. Returning without an error ends
+	// the session cleanly. A resumable transport error such as io.EOF allows
+	// the flow to reconnect, using the latest SessionResumptionHandle if set.
+	// The flow may retain yielded responses, so implementations must leave
+	// their contents intact after yielding.
+	Receive(ctx context.Context) iter.Seq2[*LLMResponse, error]
+	Close() error
+}
+
 // Capabilities holds the resolved capabilities of an [LLM] instance.
 //
 // Each field reports whether the model supports a specific optional feature.
@@ -56,6 +91,10 @@ type LLMRequest struct {
 	Model    string
 	Contents []*genai.Content
 	Config   *genai.GenerateContentConfig
+
+	// LiveConnectConfig holds settings from the live invocation. It is nil for
+	// non-live requests.
+	LiveConnectConfig *genai.LiveConnectConfig `json:",omitempty"`
 
 	Tools map[string]any `json:"-"`
 

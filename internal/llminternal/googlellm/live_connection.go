@@ -17,6 +17,7 @@ package googlellm
 import (
 	"context"
 	"fmt"
+	"iter"
 	"log"
 	"reflect"
 	"strings"
@@ -35,6 +36,25 @@ type LiveConnection struct {
 	inputTranscriptionText  string
 	outputTranscriptionText string
 	bufferedResponses       []*model.LLMResponse
+}
+
+// ConnectLive opens a Gemini Live session using the preprocessed request.
+// modelName is the bound model's name, which determines Gemini's live routing
+// even when a request processor has rewritten req.Model.
+func ConnectLive(ctx context.Context, client *genai.Client, modelName string, req *model.LLMRequest) (model.LiveConnection, error) {
+	var cfg genai.LiveConnectConfig
+	if req.LiveConnectConfig != nil {
+		cfg = *req.LiveConnectConfig
+	}
+	if req.Config != nil {
+		cfg.SystemInstruction = req.Config.SystemInstruction
+		cfg.Tools = req.Config.Tools
+	}
+	session, err := client.Live.Connect(ctx, modelName, &cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewLiveConnection(session, modelName), nil
 }
 
 // NewLiveConnection creates a new LiveConnection.
@@ -223,6 +243,18 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 		})
 	default:
 		return fmt.Errorf("unsupported real-time input type: %T", input)
+	}
+}
+
+// Receive streams responses until a read fails or the consumer stops.
+func (c *LiveConnection) Receive(ctx context.Context) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for {
+			resp, err := c.Recv(ctx)
+			if !yield(resp, err) || err != nil {
+				return
+			}
+		}
 	}
 }
 

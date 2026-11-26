@@ -660,6 +660,74 @@ func TestModel_NoSideEffects(t *testing.T) {
 	}
 }
 
+func TestModel_ConnectPreservesLiveSetup(t *testing.T) {
+	frames := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var upgrader websocket.Upgrader
+		socket, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Error("upgrading the live test socket failed")
+			return
+		}
+		defer func() { _ = socket.Close() }()
+		if err := socket.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Error("setting the live setup read deadline failed")
+			return
+		}
+		_, frame, err := socket.ReadMessage()
+		if err != nil {
+			t.Error("reading the live setup frame failed")
+			return
+		}
+		frames <- frame
+		if err := socket.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`)); err != nil {
+			t.Error("writing live setup completion failed")
+		}
+	}))
+	defer server.Close()
+
+	const name = "gemini-live-test"
+	ctx := t.Context()
+	llm, err := NewModel(ctx, name, &genai.ClientConfig{
+		Backend:     genai.BackendGeminiAPI,
+		APIKey:      "fakekey",
+		HTTPOptions: genai.HTTPOptions{BaseURL: strings.Replace(server.URL, "http://", "ws://", 1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &model.LLMRequest{
+		Model: "rewritten",
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: genai.NewContentFromText("Keep it brief.", genai.RoleUser),
+			Tools:             []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup"}}}},
+		},
+		LiveConnectConfig: &genai.LiveConnectConfig{ResponseModalities: []genai.Modality{genai.ModalityText}},
+	}
+	// Build the setup the old Client() path handed to the SDK.
+	legacyConfig := *req.LiveConnectConfig
+	legacyConfig.SystemInstruction = req.Config.SystemInstruction
+	legacyConfig.Tools = req.Config.Tools
+	legacy, err := llm.(*geminiModel).Client().Live.Connect(ctx, name, &legacyConfig)
+	if err != nil {
+		t.Fatalf("legacy Live.Connect failed: %v", err)
+	}
+	_ = legacy.Close()
+
+	conn, err := llm.(model.LiveConnector).Connect(ctx, req)
+	if err != nil {
+		t.Fatalf("model Connect failed: %v", err)
+	}
+	_ = conn.Close()
+	want, got := <-frames, <-frames
+	if !cmp.Equal(got, want) {
+		t.Error("model Connect changed the Gemini setup frame")
+	}
+	if req.LiveConnectConfig.SystemInstruction != nil || len(req.LiveConnectConfig.Tools) != 0 {
+		t.Error("Connect modified the caller's live config")
+	}
+}
+
 func TestModel_LiveTrackingHeaders(t *testing.T) {
 	adk := version.TrackingHeader(nil)
 	tests := []struct {
