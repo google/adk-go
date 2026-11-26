@@ -39810,6 +39810,249 @@ func TestRunner_ConcurrentNestedLookalike_DirectWorkflowDescendantLeafKeepsSubWF
 	}
 }
 
+func TestRunner_ConcurrentNestedLookalike_EmptyCallerPathWorkflowDescendantLeafKeepsSubWF(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafFromInner := newOneEventAgent(t, "leaf_from_inner", nil)
+	leafDetachedEmpty := newOneEventAgent(t, "leaf_detached_empty", nil)
+	leafOtherWF := newOneEventAgent(t, "leaf_other_wf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	w1Ready := make(chan struct{})
+	w2Ready := make(chan struct{})
+	otherReady := make(chan struct{})
+	subWFReady := make(chan struct{})
+	releaseSubWF := make(chan struct{})
+	var w1ReadyOnce, w2ReadyOnce, otherReadyOnce, subWFReadyOnce, releaseOnce sync.Once
+	signalW1Ready := func() { w1ReadyOnce.Do(func() { close(w1Ready) }) }
+	signalW2Ready := func() { w2ReadyOnce.Do(func() { close(w2Ready) }) }
+	signalOtherReady := func() { otherReadyOnce.Do(func() { close(otherReady) }) }
+	signalSubWFReady := func() { subWFReadyOnce.Do(func() { close(subWFReady) }) }
+	release := func() { releaseOnce.Do(func() { close(releaseSubWF) }) }
+	t.Cleanup(func() {
+		signalW1Ready()
+		signalW2Ready()
+		signalOtherReady()
+		signalSubWFReady()
+		release()
+	})
+
+	runOpaqueHelperLeaf := func(ctx context.Context, leaf agent.Agent) ([]*session.Event, error) {
+		ic, ok := ctx.(agent.InvocationContext)
+		if !ok {
+			return nil, errors.New("expected InvocationContext")
+		}
+		var opaquePlain context.Context = noValueContext{parent: ic}
+		opaqueDelta := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{
+				Context: &opaquePlain,
+			},
+		})
+		out := make(chan item, 4)
+		go func() {
+			go func() {
+				defer close(out)
+				for ev, runErr := range leaf.Run(opaqueDelta) {
+					out <- item{ev: ev, err: runErr}
+				}
+			}()
+		}()
+		var events []*session.Event
+		for it := range out {
+			if it.err != nil {
+				return nil, it.err
+			}
+			events = append(events, it.ev)
+		}
+		return events, nil
+	}
+
+	innerNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		const wantPath = "sub_wf@1/inner_node@1"
+		if gotPath := ctx.Path(); gotPath != wantPath {
+			return nil, fmt.Errorf("inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
+		}
+		events, runErr := runOpaqueHelperLeaf(ctx, leafFromInner)
+		if runErr != nil {
+			return nil, runErr
+		}
+		for _, ev := range events {
+			if emitErr := emit(ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		signalSubWFReady()
+		select {
+		case <-releaseSubWF:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	subWF, err := workflowagent.New(workflowagent.Config{
+		Name:  "sub_wf",
+		Edges: workflow.Chain(workflow.Start, innerNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(sub_wf): %v", err)
+	}
+
+	otherNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		const wantPath = "other_wf@1/inner_node@1"
+		if gotPath := ctx.Path(); gotPath != wantPath {
+			return nil, fmt.Errorf("other_wf inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
+		}
+		signalOtherReady()
+		select {
+		case <-subWFReady:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		ic, ok := ctx.(agent.InvocationContext)
+		if !ok {
+			return nil, errors.New("expected InvocationContext in other_node")
+		}
+		selectedBranch := "selected"
+		branched := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+		events, runErr := runOpaqueHelperLeaf(branched, leafOtherWF)
+		if runErr != nil {
+			return nil, runErr
+		}
+		for _, ev := range events {
+			if emitErr := emit(ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	otherWF, err := workflowagent.New(workflowagent.Config{
+		Name:  "other_wf",
+		Edges: workflow.Chain(workflow.Start, otherNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(other_wf): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					defer release()
+					signalW1Ready()
+					select {
+					case <-w2Ready:
+					case <-ctx.Done():
+						return
+					}
+					for ev, runErr := range otherWF.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+					selectedBranch := "selected"
+					branched := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					events, runErr := runOpaqueHelperLeaf(branched, leafDetachedEmpty)
+					if runErr != nil {
+						yield(nil, runErr)
+						return
+					}
+					for _, ev := range events {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				default:
+					signalW2Ready()
+					select {
+					case <-otherReady:
+					case <-ctx.Done():
+						return
+					}
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					for ev, runErr := range subWF.Run(branchedCtx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var w1Done sync.WaitGroup
+				w1Events := make(chan item, 8)
+				w1Done.Go(func() {
+					defer close(w1Events)
+					for ev, runErr := range worker.Run(ctx) {
+						w1Events <- item{ev: ev, err: runErr}
+					}
+				})
+				select {
+				case <-w1Ready:
+				case <-ctx.Done():
+					release()
+					w1Done.Wait()
+					return
+				}
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						release()
+						w1Done.Wait()
+						return
+					}
+				}
+				for it := range w1Events {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+				w1Done.Wait()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", got)
+	}
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	subWFSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "sub_wf")["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_from_inner")["parent_span_id"].(string); got != subWFSpan {
+		t.Errorf("leaf_from_inner parent_span_id = %q, want %q (sub_wf at empty caller path, not root %q)", got, subWFSpan, rootSpan)
+	}
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_detached_empty")["parent_span_id"].(string); got != rootSpan {
+		t.Errorf("leaf_detached_empty parent_span_id = %q, want %q (root for empty path, not sub_wf %q)", got, rootSpan, subWFSpan)
+	}
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_other_wf")["parent_span_id"].(string); got != rootSpan {
+		t.Errorf("leaf_other_wf parent_span_id = %q, want %q (root for other_wf path, not sub_wf %q)", got, rootSpan, subWFSpan)
+	}
+}
+
 func TestRunner_ConcurrentPeerLookalikes_CompatibilityWalkSkipsRetiredAncestor(t *testing.T) {
 	p, requests, _ := setupTestPlugin(t)
 	type item struct {
@@ -40213,6 +40456,9 @@ func TestParentForRunLocked_SelectedPathNotEnclosingChildDemotes(t *testing.T) {
 		inv.agentStack = append(inv.agentStack, mid1, mid2, sel)
 
 		child := identity{agentName: "worker", branch: "b.x"}
+		if got := inv.parentFor(child); got != sel {
+			t.Fatalf("parentFor(precondition) = %s, want %s", got.spanID, sel.spanID)
+		}
 		if got := inv.parentForRunLocked(child, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
 			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
 		}
@@ -40226,12 +40472,107 @@ func TestParentForRunLocked_SelectedPathNotEnclosingChildDemotes(t *testing.T) {
 		inv.agentStack = append(inv.agentStack, mid1, mid2, sel)
 
 		childEmptyPath := identity{agentName: "worker", branch: "selected"}
+		if got := inv.parentFor(childEmptyPath); got != sel {
+			t.Fatalf("parentFor(empty path precondition) = %s, want %s", got.spanID, sel.spanID)
+		}
 		if got := inv.parentForRunLocked(childEmptyPath, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
 			t.Fatalf("parentForRunLocked(empty path) = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
 		}
 		childNestedPath := identity{agentName: "worker", branch: "selected", path: "node@1"}
+		if got := inv.parentFor(childNestedPath); got != sel {
+			t.Fatalf("parentFor(nested path precondition) = %s, want %s", got.spanID, sel.spanID)
+		}
 		if got := inv.parentForRunLocked(childNestedPath, nil, 500, goroutineOrigin{parent: 499}, nil); got != inv.agentStack[0] {
 			t.Fatalf("parentForRunLocked(nested path) = %s, want %s (not %s)", got.spanID, inv.agentStack[0].spanID, sel.spanID)
+		}
+	})
+}
+
+func TestParentForRunLocked_EmptyCallerPathWorkflowDescendant(t *testing.T) {
+	newTree := func(traceID string) (*invocationTrace, *spanRecord, *spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, traceID, time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		subWF := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "", parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, subWF)
+		return inv, root, subWF
+	}
+
+	t.Run("empty_caller_path_workflow_descendant_keeps_sub_wf", func(t *testing.T) {
+		inv, root, subWF := newTree("trace-empty-caller-wf-desc")
+		descLeaf := identity{agentName: "leaf", branch: "selected", path: "sub_wf@1/inner_node@1"}
+		if got := inv.parentFor(descLeaf); got != subWF {
+			t.Fatalf("parentFor(descLeaf precondition) = %s, want %s", got.spanID, subWF.spanID)
+		}
+		if got := inv.parentForRunLocked(descLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != subWF {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, subWF.spanID, root.spanID)
+		}
+	})
+
+	t.Run("empty_path_and_other_workflow_path_demote_to_root", func(t *testing.T) {
+		inv, root, subWF := newTree("trace-empty-caller-wf-demote")
+		for _, tc := range []struct {
+			name string
+			path string
+		}{
+			{name: "empty path", path: ""},
+			{name: "other workflow", path: "other_wf@1/inner_node@1"},
+			{name: "prefix trick workflow", path: "sub_wf_extra@1/inner_node@1"},
+		} {
+			leaf := identity{agentName: "leaf", branch: "selected", path: tc.path}
+			if got := inv.parentFor(leaf); got != subWF {
+				t.Fatalf("%s parentFor(precondition) = %s, want %s", tc.name, got.spanID, subWF.spanID)
+			}
+			if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != root {
+				t.Fatalf("%s parentForRunLocked = %s, want %s (not %s)", tc.name, got.spanID, root.spanID, subWF.spanID)
+			}
+		}
+	})
+
+	t.Run("insideWorkflowNode_edges_and_zero_allocs", func(t *testing.T) {
+		subWF := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: true, path: ""}
+		subWFNested := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: true, path: "fn@1"}
+		nonWF := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: false, path: ""}
+		emptyNameWF := &spanRecord{kind: spanKindAgent, name: "", isWorkflow: true, path: ""}
+
+		for _, tc := range []struct {
+			name string
+			path string
+			wf   *spanRecord
+			want bool
+		}{
+			{name: "root sub_wf node", path: "sub_wf@1", wf: subWF, want: true},
+			{name: "root sub_wf child node", path: "sub_wf@1/inner@1", wf: subWF, want: true},
+			{name: "root empty path", path: "", wf: subWF, want: false},
+			{name: "root exact name without at", path: "sub_wf", wf: subWF, want: false},
+			{name: "root prefix boundary mismatch", path: "sub_wf_2@1", wf: subWF, want: false},
+			{name: "root other workflow", path: "other_wf@1/sub_wf@1", wf: subWF, want: false},
+			{name: "nested sub_wf node", path: "fn@1/sub_wf@1", wf: subWFNested, want: true},
+			{name: "nested sub_wf child node", path: "fn@1/sub_wf@1/inner@1", wf: subWFNested, want: true},
+			{name: "nested caller path exact", path: "fn@1", wf: subWFNested, want: false},
+			{name: "nested caller prefix mismatch", path: "fn@10/sub_wf@1", wf: subWFNested, want: false},
+			{name: "nested without caller path", path: "sub_wf@1", wf: subWFNested, want: false},
+			{name: "non-workflow span", path: "sub_wf@1/inner@1", wf: nonWF, want: false},
+			{name: "empty workflow name", path: "@1/inner@1", wf: emptyNameWF, want: false},
+			{name: "nil workflow span", path: "sub_wf@1/inner@1", wf: nil, want: false},
+		} {
+			if got := insideWorkflowNode(tc.path, tc.wf); got != tc.want {
+				t.Errorf("%s: insideWorkflowNode(%q, %+v) = %v, want %v", tc.name, tc.path, tc.wf, got, tc.want)
+			}
+		}
+
+		if !raceEnabled {
+			longName := strings.Repeat("wf_", 24) + "sub"
+			longWF := &spanRecord{kind: spanKindAgent, name: longName, isWorkflow: true, path: "fn@1"}
+			longPath := "fn@1/" + longName + "@1/inner@1"
+			if allocs := testing.AllocsPerRun(100, func() {
+				if !insideWorkflowNode(longPath, longWF) {
+					t.Fatal("expected insideWorkflowNode(longPath, longWF) = true")
+				}
+			}); allocs != 0 {
+				t.Errorf("insideWorkflowNode(long wf.name) allocated %v times per call, want 0", allocs)
+			}
 		}
 	})
 }

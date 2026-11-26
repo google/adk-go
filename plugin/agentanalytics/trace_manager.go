@@ -4947,10 +4947,26 @@ func (q *qualifyingIndex) lastQualifyingInRange(r int) int {
 	return q.prevQual[r]
 }
 
+// insideWorkflowNode reports whether node path path lies inside a node of the
+// workflow activation wf.
+func insideWorkflowNode(path string, wf *spanRecord) bool {
+	if wf == nil || !wf.isWorkflow || wf.name == "" {
+		return false
+	}
+	rest := path
+	if wf.path != "" {
+		if !hasPathSegmentPrefix(path, wf.path) {
+			return false
+		}
+		rest = path[len(wf.path)+1:]
+	}
+	return hasSegmentPrefix(rest, wf.name, '@')
+}
+
 func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclude map[string]bool, id identity, selected *spanRecord) qualifyingIndex {
 	m := len(tree.dfsSeq)
 	qualifies := make([]bool, len(inv.agentStack))
-	requireSelected := selected != nil && selected.path != "" && atOrBelowPath(id.path, selected.path)
+	requireSelected := selected != nil && ((selected.path != "" && atOrBelowPath(id.path, selected.path)) || insideWorkflowNode(id.path, selected))
 	inspections := 0
 	for _, u := range tree.dfsSeq[1:] {
 		inspections++
@@ -5065,6 +5081,19 @@ func checkQualifyingGap(tree *openSpanTree, stack []*spanRecord, qual *qualifyin
 	return 0
 }
 
+// appendPossibleOwnersWithIndexLocked assigns each non-excluded qualifying
+// open span in qual to its nearest enclosing member of recs, and appends
+// witnesses to dst together with the exact number of visited positions/member
+// steps only when at least two members match on their own (or when recs shares
+// id's own (agentName, branch, path), in which case all non-excluded members
+// are appended as peers). For each matched member k, when another member
+// follows inside k's subtree (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k
+// appends first[k] and last[k] (omitting last[k] if equal) so tree.enclosing
+// stops at their nearest common ancestor inside k when possible, or above k
+// when k matched itself; otherwise it appends inv.agentStack[mIdx]. Outside
+// -race builds, up to 16 members use stack buffers without allocating given a
+// prebuilt openSpanTree, qualifyingIndex, and sufficient dst capacity.
+// inv.mu must be held.
 func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, qual *qualifyingIndex, recs []*spanRecord, id identity) ([]*spanRecord, int) {
 	beforeQualInsp := qual.inspections
 	var mIdxBuf [16]int
