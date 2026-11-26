@@ -47,7 +47,10 @@ func (storageSession) TableName() string {
 
 // Helper to map from internal struct to GORM struct
 func createStorageSession(ctx context.Context, s *localSession) (*storageSession, error) {
-	now := platform.Now(ctx)
+	// Keep only microseconds. MySQL stores no more and by default rounds the
+	// rest, and rounding up would make the row newer than the session Create
+	// returns, so the first AppendEvent on that session would fail as stale.
+	now := platform.Now(ctx).Truncate(time.Microsecond)
 	return &storageSession{
 		UserID:     s.userID,
 		AppName:    s.appName,
