@@ -165,6 +165,11 @@ var modelsWithoutExplicitCaching sync.Map // map[explicitCachingRefusalKey]struc
 
 // isExplicitCachingUnsupported reports whether err is a provider API error
 // stating that the model does not support explicit context caching.
+//
+// Unlike adk-python's _is_explicit_caching_unsupported
+// (models/gemini_context_cache_manager.py), which matches str(error).lower()
+// on any exception, this inspects only genai.APIError.Message so non-API or
+// transport errors cannot permanently disable caching for a model.
 func isExplicitCachingUnsupported(err error) bool {
 	var apiErr genai.APIError
 	if !errors.As(err, &apiErr) {
