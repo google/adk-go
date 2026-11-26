@@ -20,7 +20,6 @@ import (
 	"iter"
 	"log"
 	"maps"
-	"reflect"
 	"slices"
 
 	"google.golang.org/genai"
@@ -263,14 +262,14 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(utils.Content(ev))
+		content := copyContent(utils.Content(ev))
 		if content == nil {
 			continue
 		}
 
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
 			// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
-			if p == nil || reflect.ValueOf(*p).IsZero() {
+			if p == nil || isZeroPart(p) {
 				return true
 			}
 			// The live audio cache records its blobs as artifact:// refs that
@@ -347,7 +346,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
 				cleaned := *part
 				cleaned.FunctionResponse = nil
-				if reflect.ValueOf(cleaned).IsZero() {
+				if isZeroPart(&cleaned) {
 					continue
 				}
 				part = &cleaned
@@ -1149,4 +1148,101 @@ func cloneEvent(e *session.Event) *session.Event {
 	}
 
 	return newEvent
+}
+
+// copyContent returns the same copy as clone(c): pointers, slices (with the
+// same length and capacity) and maps are fresh, while values held in
+// interface-typed fields, such as the entries of FunctionCall.Args, stay
+// shared. It copies Content and Part field by field and byte slices in one
+// block, and leaves the less common nested types to clone.
+func copyContent(c *genai.Content) *genai.Content {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.Parts != nil {
+		out.Parts = make([]*genai.Part, len(c.Parts), cap(c.Parts))
+		for i, p := range c.Parts {
+			out.Parts[i] = copyPart(p)
+		}
+	}
+	return &out
+}
+
+func copyPart(p *genai.Part) *genai.Part {
+	if p == nil {
+		return nil
+	}
+	// Assign every field, then replace each one that refers to memory.
+	// TestCopyPartCoversEveryField fails when genai.Part gains such a field
+	// that is not replaced here.
+	out := *p
+	out.ThoughtSignature = cloneSlice(p.ThoughtSignature)
+	if p.InlineData != nil {
+		blob := *p.InlineData
+		blob.Data = cloneSlice(blob.Data)
+		out.InlineData = &blob
+	}
+	if p.FileData != nil {
+		fd := *p.FileData
+		out.FileData = &fd
+	}
+	if p.FunctionCall != nil {
+		fc := *p.FunctionCall
+		fc.Args = maps.Clone(fc.Args)
+		fc.PartialArgs = clone(fc.PartialArgs)
+		fc.WillContinue = clone(fc.WillContinue)
+		out.FunctionCall = &fc
+	}
+	if p.FunctionResponse != nil {
+		fr := *p.FunctionResponse
+		fr.Response = maps.Clone(fr.Response)
+		fr.Parts = clone(fr.Parts)
+		fr.WillContinue = clone(fr.WillContinue)
+		out.FunctionResponse = &fr
+	}
+	out.MediaResolution = clone(p.MediaResolution)
+	out.CodeExecutionResult = clone(p.CodeExecutionResult)
+	out.ExecutableCode = clone(p.ExecutableCode)
+	out.VideoMetadata = clone(p.VideoMetadata)
+	out.ToolCall = clone(p.ToolCall)
+	out.ToolResponse = clone(p.ToolResponse)
+	out.PartMetadata = maps.Clone(p.PartMetadata)
+	out.AudioTranscription = clone(p.AudioTranscription)
+	out.SpeechMetadata = clone(p.SpeechMetadata)
+	return &out
+}
+
+// cloneSlice copies s into a new slice of the same length and capacity, and
+// keeps nil and empty apart.
+func cloneSlice[S ~[]E, E any](s S) S {
+	if s == nil {
+		return nil
+	}
+	out := make(S, len(s), cap(s))
+	copy(out, s)
+	return out
+}
+
+// isZeroPart reports whether reflect.ValueOf(*p).IsZero() would, without
+// reflection. TestIsZeroPartCoversEveryField fails when genai.Part gains a
+// field this list does not name.
+func isZeroPart(p *genai.Part) bool {
+	return p.Text == "" &&
+		!p.Thought &&
+		p.ThoughtSignature == nil &&
+		p.InlineData == nil &&
+		p.FileData == nil &&
+		p.FunctionCall == nil &&
+		p.FunctionResponse == nil &&
+		p.ToolCall == nil &&
+		p.ToolResponse == nil &&
+		p.ExecutableCode == nil &&
+		p.CodeExecutionResult == nil &&
+		p.VideoMetadata == nil &&
+		p.MediaResolution == nil &&
+		p.AudioTranscription == nil &&
+		p.SpeechMetadata == nil &&
+		p.MediaProcessing == "" &&
+		p.PartMetadata == nil
 }
