@@ -412,7 +412,11 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// Context cache state has no column either. Without it the next
 		// invocation cannot find the cache the last one created, and creates
 		// another while the first stays on the provider until its TTL runs out.
-		event.CacheMetadata != nil
+		event.CacheMetadata != nil ||
+		// SessionEvent has no column for a workflow agent's checkpoint either,
+		// and adk-python keeps it in raw_event only.
+		event.Actions.AgentState != nil ||
+		event.Actions.EndOfAgent
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
