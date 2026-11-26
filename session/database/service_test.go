@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,6 +415,44 @@ func Test_databaseServiceFromDB(t *testing.T) {
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyServiceFromDB(t)
 	})
+}
+
+// ExcludeEvents must skip the events query, not just drop its rows: that query
+// is the cost the field exists to avoid.
+func Test_databaseService_GetExcludeEvents_skipsEventsQuery(t *testing.T) {
+	s := emptyService(t)
+	resp, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := s.AppendEvent(t.Context(), resp.Session, &session.Event{ID: "e1", Author: "user", InvocationID: "inv1", Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	var eventQueries atomic.Int32
+	countEvents := func(tx *gorm.DB) {
+		if tx.Statement.Table == "events" {
+			eventQueries.Add(1)
+		}
+	}
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:count_events_queries", countEvents); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	if _, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1", ExcludeEvents: true}); err != nil {
+		t.Fatalf("Get(ExcludeEvents) error = %v", err)
+	}
+	if n := eventQueries.Load(); n != 0 {
+		t.Errorf("events queries = %d, want 0", n)
+	}
+
+	// Control: a full Get is counted, so the zero above is not a callback
+	// that never fires.
+	if _, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1"}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := eventQueries.Load(); n != 1 {
+		t.Errorf("events queries after a full Get = %d, want 1", n)
+	}
 }
 
 func emptyServiceFromDB(t *testing.T) *databaseService {

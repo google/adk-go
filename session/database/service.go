@@ -243,9 +243,13 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}
 
 	var storageEvents []storageEvent
-	if err := eventQuery.Find(&storageEvents).Error; err != nil {
-		// This is a system failure, not a "not found"
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
+	// Building eventQuery above sends nothing, so skipping Find skips the whole
+	// events read.
+	if !req.ExcludeEvents {
+		if err := eventQuery.Find(&storageEvents).Error; err != nil {
+			// This is a system failure, not a "not found"
+			return nil, fmt.Errorf("database error while fetching events: %w", err)
+		}
 	}
 
 	// fetch app and user states
