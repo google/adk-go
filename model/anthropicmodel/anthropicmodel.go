@@ -33,6 +33,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/vertex"
 	"golang.org/x/oauth2/google"
 
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
@@ -434,6 +435,16 @@ func firstNonEmpty(values ...string) string {
 // Name returns the model name passed to [NewModel].
 func (m *anthropicModel) Name() string {
 	return m.name
+}
+
+var _ genaiprovider.Reporter = (*anthropicModel)(nil)
+
+// GenAIProvider is the platform serving the model.
+func (m *anthropicModel) GenAIProvider() genaiprovider.Name {
+	if m.backend == BackendVertex {
+		return "gcp.vertex_ai"
+	}
+	return "anthropic"
 }
 
 func (m *anthropicModel) logger() *slog.Logger {

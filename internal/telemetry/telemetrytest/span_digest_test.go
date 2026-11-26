@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -70,7 +71,7 @@ func TestBuildDigest(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := BuildDigest(tt.spans, tt.logs)
+			_, err := BuildDigest(tt.spans, tt.logs, metricdata.ResourceMetrics{})
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Errorf("BuildDigest() error = %v, want error: %t", err, tt.wantErr)
 			}

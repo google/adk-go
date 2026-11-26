@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/modelmetadata"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -52,6 +54,7 @@ var (
 	gcpVertexAgentToolResponseName  = attribute.Key("gcp.vertex.agent.tool_response")
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
+	genAIUsageCacheWriteInputTokens = attribute.Key("gen_ai.usage.cache_write.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
 	genAIToolCallArguments          = attribute.Key("gen_ai.tool.call.arguments")
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
@@ -112,12 +115,30 @@ type GenerateContentParams struct {
 	// Request is required.
 	Request *model.LLMRequest
 	Backend genai.Backend
+	// Provider is the provider the model reports for itself, if any. It wins
+	// over the one the model name and backend give.
+	Provider string
 	// Stream reports whether the model was asked to stream. A call that is not
 	// streamed ends at its one response, whether or not it reports a finish
 	// reason. Unlike adk-python, which waits for the generator to finish, so
 	// the tool a model without finish reasons asks for is not traced inside
 	// the inference.
 	Stream bool
+}
+
+// elapsed is the ended span's duration from its own timestamps, or
+// fallbackEnd minus fallbackStart when the span does not expose them.
+func elapsed(span trace.Span, fallbackStart, fallbackEnd time.Time) time.Duration {
+	if s, ok := span.(interface {
+		StartTime() time.Time
+		EndTime() time.Time
+	}); ok {
+		// From wall-clock readings, without the monotonic one, so the result
+		// equals the duration exporters compute from the span's timestamps
+		// even when the system clock is adjusted while the span is open.
+		return s.EndTime().Round(0).Sub(s.StartTime().Round(0))
+	}
+	return fallbackEnd.Sub(fallbackStart)
 }
 
 // startGenerateContentSpan starts a new semconv generate_content span.
@@ -129,8 +150,8 @@ func startGenerateContentSpan(ctx context.Context, params GenerateContentParams)
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
 	}
-	if provider, ok := providerName(params.ModelName, params.Backend); ok && !useLegacySchema() {
-		attrs = append(attrs, provider)
+	if !useLegacySchema() {
+		attrs = append(attrs, providerName(params.Provider, params.ModelName, params.Backend))
 	}
 	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation
@@ -183,16 +204,19 @@ func (r generateContentResult) responseModel() string {
 	return r.RequestModel
 }
 
-// usage is the token usage of the latest response that reports any, as a
-// stream may repeat it on every chunk or put it on one.
-func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetadata {
+// usageResponse is the latest response that reports token usage, as a stream
+// may repeat it on every chunk or put it on one.
+func (r generateContentResult) usageResponse() *model.LLMResponse {
 	if useLegacySchema() {
-		return r.Response.UsageMetadata
+		if r.Response.UsageMetadata == nil {
+			return nil
+		}
+		return r.Response
 	}
 	responses := r.responses()
 	for _, response := range slices.Backward(responses) {
-		if u := response.UsageMetadata; u != nil {
-			return u
+		if response.UsageMetadata != nil {
+			return response
 		}
 	}
 	return nil
@@ -230,7 +254,8 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 	if model := params.responseModel(); model != "" {
 		attrs = append(attrs, semconv.GenAIResponseModel(model))
 	}
-	if u := params.usage(); u != nil {
+	if resp := params.usageResponse(); resp != nil {
+		u := resp.UsageMetadata
 		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
 			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
@@ -244,6 +269,9 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 			genAIUsageCacheReadInputTokens.Int(int(u.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(u.ThoughtsTokenCount)),
 		)
+		if n, _ := resp.CustomMetadata[modelmetadata.AnthropicCacheCreationInputTokens].(int64); n > 0 {
+			attrs = append(attrs, genAIUsageCacheWriteInputTokens.Int64(n))
+		}
 	}
 	return attrs
 }

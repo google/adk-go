@@ -54,14 +54,18 @@
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               }
             ]
           }
@@ -70,5 +74,40 @@
       }
     ],
     "logs": []
+  },
+  "metric_points": {
+    "gen_ai.client.inference.duration": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.operation.input_tokens": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.operation.output_tokens": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": 0
+      }
+    ]
   }
 }

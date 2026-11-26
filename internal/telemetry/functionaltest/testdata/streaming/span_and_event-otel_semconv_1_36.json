@@ -60,7 +60,11 @@
                     "type": "text"
                   }
                 ]
-              }
+              },
+              "gen_ai.usage.cache_read.input_tokens": 60,
+              "gen_ai.usage.input_tokens": 150,
+              "gen_ai.usage.output_tokens": 50,
+              "gen_ai.usage.reasoning.output_tokens": 15
             },
             "status": "UNSET",
             "children": [],
@@ -70,7 +74,9 @@
                 "body": {
                   "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_root_agent\". The description about you is \"A sample root agent.\"."
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
@@ -84,7 +90,9 @@
                     "role": "user"
                   }
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.choice",
@@ -100,7 +108,9 @@
                   "finish_reason": "STOP",
                   "index": 0
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               }
             ]
           }
@@ -109,5 +119,118 @@
       }
     ],
     "logs": []
+  },
+  "metric_points": {
+    "gen_ai.client.inference.duration": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.operation.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 150
+      }
+    ],
+    "gen_ai.client.inference.operation.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 50
+      }
+    ],
+    "gen_ai.client.inference.time_per_output_chunk": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.time_to_first_chunk": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.usage.cache_read.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 60
+      }
+    ],
+    "gen_ai.client.inference.usage.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 150
+      }
+    ],
+    "gen_ai.client.inference.usage.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 35
+      },
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 15
+      }
+    ],
+    "gen_ai.client.inference.usage.reasoning.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 15
+      }
+    ]
   }
 }

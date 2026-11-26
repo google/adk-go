@@ -26,16 +26,19 @@ import (
 
 // newStreaming has no tool call, unlike adk-python's: MockModel streams every
 // call in StreamResponsesCount chunks, a tool call included.
+// Each chunk reports the same usage.
 func newStreaming(t *testing.T) agent.Agent {
 	t.Helper()
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "some_root_agent",
 		Description: "A sample root agent.",
 		Model: &testutil.MockModel{
+			Backend: genai.BackendGeminiAPI,
 			Responses: []*genai.Content{
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text "}}},
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "response"}}},
 			},
+			Usage:                []*genai.GenerateContentResponseUsageMetadata{streamChunkUsage(), streamChunkUsage()},
 			StreamResponsesCount: 2,
 		},
 		Instruction: "you are helpful",

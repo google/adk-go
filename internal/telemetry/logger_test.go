@@ -660,28 +660,31 @@ func toGoKeyValues(kvs []attribute.KeyValue) []goKeyValue {
 	return values
 }
 
-// Not covered by goldens, whose mock model has no backend.
 func TestGenerateContentProviderName(t *testing.T) {
 	for _, tc := range []struct {
 		schema     string
 		backend    genai.Backend
+		reported   string
 		want       any
+		wantMetric string
 		wantEvents int
 	}{
-		{"otel_semconv_1_44", genai.BackendVertexAI, "gcp.vertex_ai", 1},
-		{"otel_semconv_1_44", genai.BackendGeminiAPI, "gcp.gemini", 1},
-		{"otel_semconv_1_44", genai.BackendUnspecified, nil, 1},
-		{"otel_semconv_1_36", genai.BackendVertexAI, nil, 0},
+		{"otel_semconv_1_44", genai.BackendVertexAI, "", "gcp.vertex_ai", "gcp.vertex_ai", 1},
+		{"otel_semconv_1_44", genai.BackendGeminiAPI, "", "gcp.gemini", "gcp.gemini", 1},
+		{"otel_semconv_1_44", genai.BackendUnspecified, "", "unknown", "unknown", 1},
+		{"otel_semconv_1_44", genai.BackendUnspecified, "gcp.vertex_ai", "gcp.vertex_ai", "gcp.vertex_ai", 1},
+		{"otel_semconv_1_36", genai.BackendVertexAI, "", nil, "gcp.vertex_ai", 0},
 	} {
-		t.Run(tc.schema+"/"+tc.backend.String(), func(t *testing.T) {
+		t.Run(tc.schema+"/"+tc.backend.String()+"/"+tc.reported, func(t *testing.T) {
 			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			reader := setupTestMeter(t)
 			spans := setupTestTracer(t)
 			logs := &inMemoryExporter{}
 			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
 			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
 				return func(yield func(*model.LLMResponse, error) bool) { yield(&model.LLMResponse{}, nil) }
 			}
-			params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Backend: tc.backend}
+			params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Backend: tc.backend, Provider: tc.reported}
 			for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
 				if err != nil {
 					t.Fatalf("InstrumentGenerateContent() error = %v", err)
@@ -719,6 +722,9 @@ func TestGenerateContentProviderName(t *testing.T) {
 			}
 			if events != tc.wantEvents {
 				t.Errorf("got %d %s events, want %d", events, inferenceOperationDetailsEventName, tc.wantEvents)
+			}
+			if got := collectMetrics(t, reader)["gen_ai.client.inference.duration"][0].Attrs[genAIProviderName]; got != tc.wantMetric {
+				t.Errorf("metric gen_ai.provider.name = %q, want %q", got, tc.wantMetric)
 			}
 		})
 	}

@@ -25,6 +25,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -99,13 +101,19 @@ func record(t *testing.T, tc testcasedata.Case) *telemetrytest.Digest {
 	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
 	logExp := telemetrytest.NewInMemoryLogExporter()
 	telemetry.OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp))))
+	metricReader := sdkmetric.NewManualReader()
+	telemetry.OverrideMeterForTesting(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader)))
 
 	err := testcaseimpl.Run(t, tc.Scenario)
 	if gotErr := err != nil; gotErr != tc.Scenario.WantErr() {
 		t.Fatalf("run error = %v, want error: %t", err, tc.Scenario.WantErr())
 	}
 
-	d, err := telemetrytest.BuildDigest(spanExp.GetSpans(), logExp.Records())
+	var metrics metricdata.ResourceMetrics
+	if err := metricReader.Collect(t.Context(), &metrics); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	d, err := telemetrytest.BuildDigest(spanExp.GetSpans(), logExp.Records(), metrics)
 	if err != nil {
 		t.Fatalf("build digest: %v", err)
 	}

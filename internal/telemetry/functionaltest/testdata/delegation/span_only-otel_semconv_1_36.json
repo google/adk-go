@@ -63,7 +63,11 @@
                     "type": "text"
                   }
                 ]
-              }
+              },
+              "gen_ai.usage.cache_read.input_tokens": 40,
+              "gen_ai.usage.input_tokens": 100,
+              "gen_ai.usage.output_tokens": 25,
+              "gen_ai.usage.reasoning.output_tokens": 5
             },
             "status": "UNSET",
             "children": [],
@@ -73,14 +77,18 @@
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.choice",
@@ -89,7 +97,9 @@
                   "finish_reason": "STOP",
                   "index": 0
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               }
             ]
           },
@@ -175,7 +185,11 @@
                                 "type": "text"
                               }
                             ]
-                          }
+                          },
+                          "gen_ai.usage.cache_read.input_tokens": 30,
+                          "gen_ai.usage.input_tokens": 70,
+                          "gen_ai.usage.output_tokens": 13,
+                          "gen_ai.usage.reasoning.output_tokens": 3
                         },
                         "status": "UNSET",
                         "children": [],
@@ -185,14 +199,18 @@
                             "body": {
                               "content": "<elided>"
                             },
-                            "attributes": {}
+                            "attributes": {
+                              "gen_ai.system": "gcp.gemini"
+                            }
                           },
                           {
                             "event_name": "gen_ai.user.message",
                             "body": {
                               "content": "<elided>"
                             },
-                            "attributes": {}
+                            "attributes": {
+                              "gen_ai.system": "gcp.gemini"
+                            }
                           },
                           {
                             "event_name": "gen_ai.choice",
@@ -201,7 +219,9 @@
                               "finish_reason": "STOP",
                               "index": 0
                             },
-                            "attributes": {}
+                            "attributes": {
+                              "gen_ai.system": "gcp.gemini"
+                            }
                           }
                         ]
                       }
@@ -283,7 +303,11 @@
                     "type": "text"
                   }
                 ]
-              }
+              },
+              "gen_ai.usage.cache_read.input_tokens": 60,
+              "gen_ai.usage.input_tokens": 150,
+              "gen_ai.usage.output_tokens": 50,
+              "gen_ai.usage.reasoning.output_tokens": 15
             },
             "status": "UNSET",
             "children": [],
@@ -293,28 +317,36 @@
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.user.message",
                 "body": {
                   "content": "<elided>"
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               },
               {
                 "event_name": "gen_ai.choice",
@@ -323,7 +355,9 @@
                   "finish_reason": "STOP",
                   "index": 0
                 },
-                "attributes": {}
+                "attributes": {
+                  "gen_ai.system": "gcp.gemini"
+                }
               }
             ]
           }
@@ -332,5 +366,108 @@
       }
     ],
     "logs": []
+  },
+  "metric_points": {
+    "gen_ai.client.inference.duration": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.operation.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 320
+      }
+    ],
+    "gen_ai.client.inference.operation.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 88
+      }
+    ],
+    "gen_ai.client.inference.time_to_first_chunk": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.usage.cache_read.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 130
+      }
+    ],
+    "gen_ai.client.inference.usage.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 320
+      }
+    ],
+    "gen_ai.client.inference.usage.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 65
+      },
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 23
+      }
+    ],
+    "gen_ai.client.inference.usage.reasoning.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 23
+      }
+    ]
   }
 }

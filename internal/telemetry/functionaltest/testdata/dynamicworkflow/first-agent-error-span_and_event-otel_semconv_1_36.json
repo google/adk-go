@@ -83,7 +83,9 @@
                         "body": {
                           "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"
                         },
-                        "attributes": {}
+                        "attributes": {
+                          "gen_ai.system": "gcp.gemini"
+                        }
                       },
                       {
                         "event_name": "gen_ai.user.message",
@@ -97,7 +99,9 @@
                             "role": "user"
                           }
                         },
-                        "attributes": {}
+                        "attributes": {
+                          "gen_ai.system": "gcp.gemini"
+                        }
                       }
                     ]
                   }
@@ -112,5 +116,40 @@
       }
     ],
     "logs": []
+  },
+  "metric_points": {
+    "gen_ai.client.inference.duration": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.operation.input_tokens": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.operation.output_tokens": [
+      {
+        "attributes": {
+          "error.type": "*errors.errorString",
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock"
+        },
+        "value": 0
+      }
+    ]
   }
 }

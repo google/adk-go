@@ -72,6 +72,49 @@ func Run(t *testing.T, s testcasedata.Scenario) error {
 	return nil
 }
 
+// Token usage the mock model reports, with counts from adk-python's
+// tests/unittests/telemetry/functional/scenarios/conversation.py. Within a
+// scenario every count is distinct, so a golden shows which call a number
+// came from.
+
+// firstCallUsage is the usage of a scenario's first model call.
+func firstCallUsage() *genai.GenerateContentResponseUsageMetadata {
+	return textUsage(100, 40, 20, 5)
+}
+
+// secondCallUsage is the usage of a scenario's second model call.
+func secondCallUsage() *genai.GenerateContentResponseUsageMetadata {
+	return textUsage(150, 60, 35, 15)
+}
+
+// delegateCallUsage is the usage of the delegate agent's model call.
+func delegateCallUsage() *genai.GenerateContentResponseUsageMetadata {
+	return textUsage(70, 30, 10, 3)
+}
+
+// streamChunkUsage is the usage each streamed chunk reports.
+func streamChunkUsage() *genai.GenerateContentResponseUsageMetadata {
+	return textUsage(150, 60, 35, 15)
+}
+
+// textUsage is a usage report whose breakdowns mark the prompt, cached and
+// candidates tokens as text. Reasoning tokens have no breakdown.
+func textUsage(prompt, cached, candidates, thoughts int32) *genai.GenerateContentResponseUsageMetadata {
+	text := func(n int32) []*genai.ModalityTokenCount {
+		return []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}}
+	}
+	return &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        prompt,
+		PromptTokensDetails:     text(prompt),
+		CachedContentTokenCount: cached,
+		CacheTokensDetails:      text(cached),
+		CandidatesTokenCount:    candidates,
+		CandidatesTokensDetails: text(candidates),
+		ThoughtsTokenCount:      thoughts,
+		TotalTokenCount:         prompt + candidates + thoughts,
+	}
+}
+
 // Cases returns every case of every scenario build knows.
 func Cases() []testcasedata.Case {
 	return slices.Concat(toolcall.Matrix(), streaming.Matrix(), delegation.Matrix(), dynamicworkflow.Matrix())

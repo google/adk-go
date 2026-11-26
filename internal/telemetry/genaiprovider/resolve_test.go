@@ -12,20 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package telemetry
+package genaiprovider_test
 
 import (
+	"fmt"
 	"testing"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 )
 
 // Cases from https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/tests/unittests/telemetry/test_spans.py#L2208-L2302
-func TestProviderName(t *testing.T) {
+func TestResolve(t *testing.T) {
 	for _, tc := range []struct {
 		model   string
 		backend genai.Backend
-		want    any
+		want    string
 	}{
 		{"claude-sonnet-4-5", genai.BackendVertexAI, "anthropic"},
 		{"claude-3-5-haiku-latest", genai.BackendUnspecified, "anthropic"},
@@ -42,22 +45,42 @@ func TestProviderName(t *testing.T) {
 		{"models/gemini-2.0-flash", genai.BackendGeminiAPI, "gcp.gemini"},
 		{"gemini-2.0-flash/001", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"models/claude-3-haiku", genai.BackendGeminiAPI, "anthropic"},
-		{"apigee/openai/gpt-4o", genai.BackendUnspecified, nil},
+		{"apigee/openai/gpt-4o", genai.BackendUnspecified, "openai"},
+		{"apigee/vertex_ai/gemini-2.5-flash", genai.BackendUnspecified, "gcp.vertex_ai"},
+		{"apigee/vertex_ai/gemini-2.5-flash", genai.BackendGeminiAPI, "gcp.vertex_ai"},
+		{"apigee/gemini/gemini-2.5-flash", genai.BackendUnspecified, "gcp.gemini"},
+		{"apigee/vertex_ai/v1beta/gemini-2.5-flash", genai.BackendUnspecified, "gcp.vertex_ai"},
+		{"apigee/vertex_ai/claude-sonnet-4-5", genai.BackendUnspecified, "anthropic"},
+		{"apigee/v1/gemini-2.5-flash", genai.BackendVertexAI, "gcp.vertex_ai"},
+		{"gemini-2.0-flash", genai.BackendEnterprise, "gcp.vertex_ai"},
+		{"gemini-2.0-flash", genai.Backend(99), "unknown"},
 		{"some-model", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"/foo", genai.BackendVertexAI, "gcp.vertex_ai"},
-		// ADK Python guesses from the environment here.
-		{"gemini-2.0-flash", genai.BackendUnspecified, nil},
-		{"some-model", genai.BackendUnspecified, nil},
-		{"", genai.BackendUnspecified, nil},
+		{"gemini-2.0-flash", genai.BackendUnspecified, "unknown"},
+		{"some-model", genai.BackendUnspecified, "unknown"},
+		{"", genai.BackendUnspecified, "unknown"},
+		{"apigee/gemini-2.5-flash", genai.BackendUnspecified, "unknown"},
+		{"apigee/v1/gemini-2.5-flash", genai.BackendUnspecified, "unknown"},
 	} {
-		t.Run(tc.model+"/"+tc.backend.String(), func(t *testing.T) {
-			var got any
-			if kv, ok := providerName(tc.model, tc.backend); ok {
-				got = kv.Value.AsString()
-			}
-			if got != tc.want {
-				t.Errorf("providerName(%q, %v) = %v, want %v", tc.model, tc.backend, got, tc.want)
+		t.Run(fmt.Sprintf("%s/%d", tc.model, tc.backend), func(t *testing.T) {
+			if got := genaiprovider.Resolve("", tc.model, tc.backend); got != tc.want {
+				t.Errorf("Resolve(\"\", %q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolve_Reported(t *testing.T) {
+	for _, tc := range []struct {
+		model   string
+		backend genai.Backend
+	}{
+		{"claude-sonnet-4-5", genai.BackendUnspecified},
+		{"gemini-2.0-flash", genai.BackendGeminiAPI},
+		{"apigee/openai/gpt-4o", genai.BackendUnspecified},
+	} {
+		if got := genaiprovider.Resolve("gcp.vertex_ai", tc.model, tc.backend); got != "gcp.vertex_ai" {
+			t.Errorf("Resolve(%q, %q, %v) = %q, want the reported gcp.vertex_ai", "gcp.vertex_ai", tc.model, tc.backend, got)
+		}
 	}
 }

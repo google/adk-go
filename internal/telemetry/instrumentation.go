@@ -16,13 +16,16 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"time"
 
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -76,62 +79,144 @@ func InstrumentInvocation(ctx context.Context, root AgentLike, sessionID string,
 	}
 }
 
-// InstrumentGenerateContent wraps a model call in its span and log records.
+// InstrumentGenerateContent wraps a model call in its span, log records and
+// client inference metrics.
 // The span ends before the response that ends the call is yielded: an error,
 // a response reporting a finish reason, or the one response of a call that is
 // not streamed. The legacy schema ends it at the first response not marked
 // partial instead.
 func InstrumentGenerateContent[T any](ctx context.Context, params GenerateContentParams, response func(T) (*model.LLMResponse, string), call func(context.Context) iter.Seq2[T, error]) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
+		// The tracer chooses the span's times. When they cannot be read, the
+		// duration is timed on the context's clock instead.
+		fallbackStart := platform.Now(ctx)
 		ctx, span := startGenerateContentSpan(ctx, params)
-		logRequest(ctx, params.Request, params.Backend)
-		details := operationDetails{span: span}
-		details.noteLLMRequest(params.Request)
-
-		result := generateContentResult{RequestModel: params.ModelName}
-		ended := false
-		end := func() {
-			if ended {
-				return
-			}
-			ended = true
-			traceGenerateContentResult(span, result)
-			details.noteLLMRequest(params.Request)
-			details.emit(ctx, params, result)
-			span.End()
+		// Chunks are timed on the wall clock, from the span's start when it
+		// can be read.
+		start := time.Now()
+		if s, ok := span.(interface{ StartTime() time.Time }); ok {
+			start = s.StartTime()
 		}
-		defer end()
-		legacy := useLegacySchema()
-		for v, err := range call(ctx) {
-			resp, eventID := response(v)
-			switch {
-			case legacy:
-				result = generateContentResult{Response: resp, EventID: eventID, Error: err, RequestModel: params.ModelName}
-				if err != nil {
-					end()
-				} else if !resp.Partial {
-					logResponse(ctx, resp, params.Backend)
-					end()
-				}
-			case ended || (resp == nil && err == nil):
-				// After the end, what an aggregator assembles from the chunks
-				// already recorded.
-			default:
-				result.Error = err
-				if resp != nil {
-					result.Response, result.EventID = resp, eventID
-					result.Responses = append(result.Responses, resp)
-				}
-				// Partial is set by ADK's aggregator rather than the model, and a
-				// model.LLM may leave it unset; the finish reason comes from the
-				// model, as in adk-python's _instrumentation.py.
-				if err != nil || reportedFinishReason(resp, nil) != "" || !params.Stream {
-					end()
-				}
+		logRequest(ctx, params.Request, params.Backend)
+		c := &generateContentCall[T]{
+			params:        params,
+			response:      response,
+			span:          span,
+			details:       operationDetails{span: span},
+			metrics:       newClientInference(params, start),
+			fallbackStart: fallbackStart,
+			result:        generateContentResult{RequestModel: params.ModelName},
+		}
+		c.details.noteLLMRequest(params.Request)
+		completed := false
+		// The metrics count responses that arrive after the span ended, such
+		// as an aggregate carrying usage, so they wait for the whole call.
+		defer func() {
+			if !completed && !c.ended {
+				c.reportError(errInferencePanicked)
 			}
-			if !yield(v, err) {
-				return
+			c.end(ctx)
+			c.metrics.record(ctx, c.duration)
+		}()
+		// Any return from relay is a normal end, so only a panic skips
+		// setting completed.
+		c.relay(ctx, call, yield)
+		completed = true
+	}
+}
+
+// generateContentCall is the state of one model call that
+// [InstrumentGenerateContent] instruments.
+type generateContentCall[T any] struct {
+	params   GenerateContentParams
+	response func(T) (*model.LLMResponse, string)
+	span     trace.Span
+	details  operationDetails
+	metrics  *clientInference
+	// fallbackStart times the call when the span's times cannot be read.
+	fallbackStart time.Time
+	result        generateContentResult
+	duration      time.Duration
+	ended         bool
+}
+
+// end records the result on the span and its event and ends the span. Only
+// the first call does anything.
+func (c *generateContentCall[T]) end(ctx context.Context) {
+	if c.ended {
+		return
+	}
+	c.ended = true
+	traceGenerateContentResult(c.span, c.result)
+	c.details.noteLLMRequest(c.params.Request)
+	c.details.emit(ctx, c.params, c.result)
+	c.span.End()
+	c.duration = elapsed(c.span, c.fallbackStart, platform.Now(ctx))
+}
+
+// reportError hands an error of the call to every signal: the span and its
+// event, which record it if they have not ended, and the metrics, which record
+// the first one. A cancellation reaches none of them.
+func (c *generateContentCall[T]) reportError(err error) {
+	if err = notCanceledError(err); err == nil {
+		return
+	}
+	c.result.Error = err
+	if c.metrics.err == nil {
+		c.metrics.err = err
+	}
+}
+
+// relay passes the model's responses to yield and ends the span when the call
+// is over. It returns when the model is done or yield asks to stop.
+func (c *generateContentCall[T]) relay(ctx context.Context, call func(context.Context) iter.Seq2[T, error], yield func(T, error) bool) {
+	legacy := useLegacySchema()
+	for v, err := range call(ctx) {
+		resp, eventID := c.response(v)
+		c.metrics.observe(ctx, resp, err, !c.ended)
+		if err != nil {
+			c.reportError(err)
+		}
+		switch {
+		case legacy:
+			c.result.Response, c.result.EventID = resp, eventID
+			if err != nil {
+				c.end(ctx)
+			} else if !resp.Partial {
+				logResponse(ctx, resp, c.params.Backend)
+				c.end(ctx)
 			}
+		case c.ended || (resp == nil && err == nil):
+			// After the end, what an aggregator assembles from the chunks
+			// already recorded.
+		default:
+			if resp != nil {
+				c.result.Response, c.result.EventID = resp, eventID
+				c.result.Responses = append(c.result.Responses, resp)
+			}
+			// Partial is set by ADK's aggregator rather than the model, and a
+			// model.LLM may leave it unset; the finish reason comes from the
+			// model.
+			if err != nil || reportedFinishReason(resp, nil) != "" || !c.params.Stream {
+				c.end(ctx)
+			}
+		}
+		if !yield(v, err) {
+			return
 		}
 	}
+}
+
+// errInferencePanicked stands for a panic that unwound a model call while its
+// span was open.
+var errInferencePanicked = errors.New("model call panicked")
+
+// notCanceledError is the error the inference span, its event and its metrics
+// record for a model error. A canceled call did not fail, so it records none:
+// the span keeps an unset status and nothing gets an error type.
+func notCanceledError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
