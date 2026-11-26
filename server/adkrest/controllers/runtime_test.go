@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -304,6 +305,77 @@ func TestRunHandlersAutoCreateSession(t *testing.T) {
 			_, err = sessionService.Get(t.Context(), &session.GetRequest{AppName: "testApp", UserID: "testUser", SessionID: "newSession"})
 			if gotSession := err == nil; gotSession != tt.wantSession {
 				t.Errorf("session exists after the run = %v, want %v (Get error: %v)", gotSession, tt.wantSession, err)
+			}
+		})
+	}
+}
+
+// recordingSessionService records every Get request it serves.
+type recordingSessionService struct {
+	session.Service
+	mu   sync.Mutex
+	gets []session.GetRequest
+}
+
+func (s *recordingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.mu.Lock()
+	s.gets = append(s.gets, *req)
+	s.mu.Unlock()
+	return s.Service.Get(ctx, req)
+}
+
+// The existence check before a run must not read the events, since the runner
+// reads them again. One turn therefore costs one events read.
+func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{
+				Name: "testApp",
+				Run:  testAgent([]testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello")}}),
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			svc := &recordingSessionService{Service: session.InMemoryService()}
+			if _, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "s1"}); err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: svc,
+				AgentLoader:    agent.NewSingleLoader(fakeAgent),
+				SSETimeout:     10 * time.Second,
+			})
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				UserId:     "testUser",
+				SessionId:  "s1",
+				Streaming:  streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+			if streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+
+			var full, light int
+			for _, g := range svc.gets {
+				if g.ExcludeEvents {
+					light++
+				} else {
+					full++
+				}
+			}
+			if full != 1 || light != 1 {
+				t.Errorf("session reads = %d with events and %d without, want 1 and 1 (requests: %+v)", full, light, svc.gets)
 			}
 		})
 	}
