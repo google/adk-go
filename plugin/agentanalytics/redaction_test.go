@@ -327,6 +327,8 @@ func TestSanitizeURIComponents(t *testing.T) {
 		{"query key with plus-joined sensitive suffix", "https://h/p?my+X__API__KEY=V", "https://h/p?my+X__API__KEY=" + r},
 		{"query key with slash-joined sensitive suffix", "https://h/p?a/X__API__KEY=V", "https://h/p?a/X__API__KEY=" + r},
 		{"URL in a query value", "https://h/redirect?next=https://inner/p?token=SECRET123", "https://h/redirect?next=https%3A%2F%2Finner%2Fp%3Ftoken%3D" + r},
+		{"percent-encoded redirect URL with userinfo", "https://app.example/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40evil.example%2Fp", "https://app.example/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
+		{"benign percent-encoded redirect URL stays untouched", "https://app.example/cb?next=https%3A%2F%2Fapp.example%2Fdashboard", "https://app.example/cb?next=https%3A%2F%2Fapp.example%2Fdashboard"},
 		{"double-redirect signed file URI", "https://a.example/redirect?next=https%3A%2F%2Fb.example%2Fr%3Fnext%3Dhttps%253A%252F%252Fc.example%252Ff%253Faccess_token%253DSECRET", "https://a.example/redirect?next=%5BREDACTED_SENSITIVE_TEXT%5D"},
 		{"query key with empty value", "https://h/p?X-Amz-Security-Token=", "https://h/p?X-Amz-Security-Token="},
 		{"cursors and counters", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3"},
@@ -394,6 +396,7 @@ func TestSanitizeURIComponents(t *testing.T) {
 			{"fragment before a full stop", "redirect to https://app.example.com/cb#access_token=SECRET123&state=1.", "redirect to https://app.example.com/cb#access_token=" + r + "&state=1."},
 			{"pair in a path redacts the rest of the path", "fetch https://example.com/v1/password=SECRET123/token=SECRET123/key=SECRET123 done", "fetch https://example.com/v1/password=[REDACTED] done"},
 			{"URL in a query value", "https://a/b?u=http://c/d?token=SECRET123 e://f", "https://a/b?u=http%3A%2F%2Fc%2Fd%3Ftoken%3D" + r + " e://f"},
+			{"percent-encoded redirect URL with userinfo", "err: https://app.example/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40evil.example%2Fp done", "err: https://app.example/cb?next=%5BREDACTED_SENSITIVE_URI%5D done"},
 			{"mixed parameters", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=SECRET1", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=" + r},
 			{"vertical tab does not end a URI", "see https://u:p@h/x\vSECRET123 ok", "see [REDACTED_SENSITIVE_URI] ok"},
 			{"vertical tab in a path value", "https://h/token/SEC\vRET123", redactedURIPlaceholder},
@@ -610,6 +613,42 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"stacked bare temp: chained bracket containers", "temp:a:[c]:[d e]: S3CR3T", "temp:a:[REDACTED]"},
 			{"double-quoted padded key containing single quote", `log: "foo'bar/token " = S3CR3T`, `log: "foo'bar/token "=[REDACTED]`},
 			{"single-quoted padded key containing double quote", `log: 'foo"bar/token ': S3CR3T`, `log: 'foo"bar/token ':[REDACTED]`},
+			{"padded quoted slash path ending in compound uppercase key", `log: 'secrets/DB_PASSWORD ' = S3CR3T`, `log: 'secrets/DB_PASSWORD '=[REDACTED]`},
+			{"padded quoted nested slash path ending in camelCase key", `log: 'svc/prod/dbPassword ' = S3CR3T`, `log: 'svc/prod/dbPassword '=[REDACTED]`},
+			{"padded quoted Windows path ending in camelCase key", `log: 'svc\prod\dbPassword ' = S3CR3T`, `log: 'svc\prod\dbPassword '=[REDACTED]`},
+			{"padded quoted key exceeding 256 bytes of trailing spaces", `log: 'password` + strings.Repeat(" ", 248) + `' = S3CR3T`, `log: 'password` + strings.Repeat(" ", 248) + `'=[REDACTED]`},
+			{"padded quoted directory path exceeding 256 bytes", `log: '` + strings.Repeat("a/", 140) + `token ' = S3CR3T`, `log: '` + strings.Repeat("a/", 140) + `token '=[REDACTED]`},
+			{"unterminated quote after indented bare temp: key", "credentials:\n  temp:a: 'xtemp:a = S3CR3T", "credentials:\n  temp:a:[REDACTED]"},
+			{"unterminated quote immediately after indented bare temp: key", "credentials:\n  temp:a:'xtemp:a = S3CR3T", "credentials:[REDACTED]"},
+			{"unterminated single quote after bare temp: prefix", "temp:a: 'xtemp:a = S3CR3T", "temp:a:[REDACTED]"},
+			{"unterminated double quote after bare temp: prefix", `temp:a: "xtemp:a = S3CR3T`, "temp:a:[REDACTED]"},
+			{"unterminated single quote before equals after bare temp: prefix", "temp:a: 'foo = S3CR3T", "temp:a:[REDACTED]"},
+			{"already-redacted temp: segment before equals", "temp:a:[REDACTED] = S3CR3T", "temp:a:[REDACTED]"},
+			{"already-redacted temp: segment stays idempotent", "temp:a:[REDACTED]", "temp:a:[REDACTED]"},
+			{"closed single quote before equals after bare temp: prefix keeps tail", "temp:a: 'foo' = S3CR3T", "temp:a:'[REDACTED]' = S3CR3T"},
+			{"closed backslash-double-quoted value before equals after bare temp: prefix keeps tail", `temp:a: \"foo\" = ok`, `temp:a:\"[REDACTED]\" = ok`},
+			{"closed backslash-single-quoted value before equals after bare temp: prefix keeps tail", `temp:a: \'foo\' = ok`, `temp:a:\'[REDACTED]\' = ok`},
+			{"already-redacted backslash-double-quoted temp: segment stays idempotent", `temp:a: \"[REDACTED]\" = ok`, `temp:a: \"[REDACTED]\" = ok`},
+			{"already-redacted compact backslash-double-quoted temp: segment stays idempotent", `temp:a:\"[REDACTED]\" = ok`, `temp:a:\"[REDACTED]\" = ok`},
+			{"closed backslash-double-quoted value with escaped quote after bare temp: prefix keeps tail", `temp:a: \"a\\\"b\" = ok`, `temp:a:\"[REDACTED]\" = ok`},
+			{"unterminated backslash-double-quote after bare temp: prefix", `temp:a: \"xtemp:a = S3CR3T`, "temp:a:[REDACTED]"},
+			{"unterminated backslash-single-quote after bare temp: prefix", `temp:a: \'xtemp:a = S3CR3T`, "temp:a:[REDACTED]"},
+			{"doubled single closing key quote", "log: 'password'': S3CR3T", "log: 'password':[REDACTED]"},
+			{"doubled double closing key quote", `log: "password"": S3CR3T`, `log: "password":[REDACTED]`},
+			{"stray mixed closing key quote", `log: "client_secret"': S3CR3T`, `log: "client_secret":[REDACTED]`},
+			{"leading padded doubled double closing key quote", `log: " password"": S3CR3T`, `log: " password":[REDACTED]`},
+			{"both-sides padded doubled double closing key quote", `log: " password "": S3CR3T`, `log: " password ":[REDACTED]`},
+			{"doubled double closing key quote on temp: key", `log: "temp:a"": S3CR3T`, `log: "temp:a":[REDACTED]`},
+			{"doubled single closing key quote on temp: key", `log: 'temp:a'': S3CR3T`, `log: 'temp:a':[REDACTED]`},
+			{"doubled double closing key quote on colon-prefixed key", `log: "app:password"": S3CR3T`, `log: "app:password":[REDACTED]`},
+			{"doubled single closing key quote on colon-prefixed uppercase key", `log: 'user:DB_PASSWORD'': S3CR3T`, `log: 'user:DB_PASSWORD':[REDACTED]`},
+			{"doubled double closing key quote on stacked temp: key", `log: "temp:a:b"": S3CR3T`, `log: "temp:a:b":[REDACTED]`},
+			{"non-sensitive colon key with doubled quote is kept", `log: "a:b"": ok`, `log: "a:b"": ok`},
+			{"indented quoted value glued to equals", "credentials:\n  \"label\"=V", `credentials:"[REDACTED]"`},
+			{"indented quoted value glued to colon", "credentials:\n  \"account\":V", `credentials:"[REDACTED]"`},
+			{"indented padded quoted value glued to equals", "credentials:\n  \"  note  \"=V", `credentials:"[REDACTED]"`},
+			{"indented quoted value before colon and space keeps following value", "credentials:\n  \"label\": \"V\"", `credentials:"[REDACTED]": "V"`},
+			{"indented quoted value glued to brace container", "credentials:\n  \"label\"={token: V} password=S3CR3T", `credentials:"[REDACTED]" password=[REDACTED]`},
 			{
 				"sensitive and plain keys",
 				"DB_PASSWORD=S1 my_api_key=S2 auth_token=S3 client-secret=S4 dbPassword=S5 temp:k=S6 user:temp:k=S7 app:client_secret=S8 app:region=us",
@@ -709,6 +748,24 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			`log: "password": "foo token": ` + secret,
 			`log: "password": 'x"secret": "' token"=` + secret,
 			`log: "password": 'x"secret": "' token": ` + secret,
+			`log: "dbPassword": [abc]&'password` + strings.Repeat(" ", 300) + `' = ` + secret,
+			`log: "temp:a": 'x'' config/github.token  '=` + secret,
+			`log: "password": 'x'' config/github.token  ': ` + secret,
+			`log: "password": "x"" config/github.token  ": ` + secret,
+			`log: "password": ''' config/github.token '=` + secret,
+			`log: "password": 'x'' ` + strings.Repeat("a/", 300) + `token ' = ` + secret,
+			`log: "password": 'x''` + strings.Repeat(" ", 600) + `token ' = ` + secret,
+			`log: "dbPassword": [abc]&'password` + strings.Repeat(" ", 600) + `'' = ` + secret,
+			`log: "password": \"x\"\" ` + strings.Repeat("a/", 300) + `token \" = ` + secret,
+			`log: "password": \"x\"\" ` + strings.Repeat("a/", 127) + `token \" = ` + secret,
+			`log: "password": a&token= '` + strings.Repeat(" ", 600) + `token ' = ` + secret,
+			`log: "password": a&token= '` + strings.Repeat("a/", 300) + `token ' = ` + secret,
+			`log: "password": a&token= '` + strings.Repeat(" ", 600) + `secrets/DB_PASSWORD ' = ` + secret,
+			`log: "password": a&token= 'token=` + strings.Repeat("a/", 300) + `token ' = ` + secret,
+			`log: "password": a&token= 'token=a/token ' = ` + secret,
+			`log: "password": a&token= 'x token=y ` + strings.Repeat("a/", 300) + `token ' = ` + secret,
+			`log: "password": 'token=a/token ' = ` + secret,
+			`log: "password": "foo token ": ` + secret,
 		}
 		for _, in := range cases {
 			gotErr := redactErrorMessage(in)
@@ -733,6 +790,22 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 				t.Errorf("smartTruncate(%q) leaked secret: %s", in, truncBytes)
 			}
 		}
+		checkRedaction(t, []redactionCase{
+			{"inner token in long quoted path followed by assignment", `log: "password": a&token= 'token=` + strings.Repeat("a/", 300) + `token ' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"inner token in short quoted path followed by assignment", `log: "password": a&token= 'token=a/token ' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"inner token with spaces and long quoted path followed by assignment", `log: "password": a&token= 'x token=y ` + strings.Repeat("a/", 300) + `token ' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"direct quoted path with inner token followed by assignment", `log: "password": 'token=a/token ' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"direct quoted spaced sensitive key followed by colon", `log: "password": "foo token ": S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"doubled single closing quote before assignment", `log: "password": 'token=a/token '' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"doubled double closing quote before assignment", `log: "password": "token=a/token "" = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"doubled escaped single closing quote before assignment", `log: "password": \'token=a/token \'\' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"doubled escaped double closing quote before assignment", `log: "password": \"token=a/token \"\" = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"mixed adjacent closing quotes before assignment", `log: "password": 'token=a/token '" = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"long inner token with doubled single closing quote", `log: "password": a&token= 'token=` + strings.Repeat("a/", 300) + `token '' = S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"triple closing quote stays unextended", `log: "password": 'token=a/token ''' = S3CR3T`, `log: "password":"[REDACTED]" = S3CR3T`},
+			{"prose with spaced quoted sensitive key stays intact", `he said "use DB_PASSWORD " = "v"`, `he said "use DB_PASSWORD " = "v"`},
+			{"quoted value ending in non-sensitive word after inner token stays intact", `log: "password": 'x token=y foo ' = S3CR3T`, `log: "password":"[REDACTED]" = S3CR3T`},
+		})
 		spacedContainerJoined := `dbPassword={a: b}/password: ` + secret
 		wantSpacedContainerJoined := `dbPassword=[REDACTED]`
 		if got := redactErrorMessage(spacedContainerJoined); got != wantSpacedContainerJoined {
@@ -784,6 +857,8 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{name: "path error", in: "open /etc/ssl/private.key: no such file or directory"},
 			{name: "path error without a directory", in: "stat signing.key: permission denied"},
 			{name: "path error with a Windows path", in: `open C:\ssl\secret.key: access denied`},
+			{name: "path error with quoted reason", in: `open signing.key: "ordinary47"`},
+			{name: "path error with bracketed reason", in: `open signing.key: [ordinary47]`},
 			{name: "wrapped path errors", in: "tls: failed to load /etc/ssl/api.key: open /etc/ssl/signing.key: permission denied"},
 		}
 		for i := range kept {
@@ -793,6 +868,8 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 		checkRedaction(t, []redactionCase{
 			{"credential next to cursors", "startPageToken=abc resumeToken=jkl eot_token=pqr startToken=vwx", "startPageToken=abc resumeToken=jkl eot_token=pqr startToken=[REDACTED]"},
 			{".key name with a value", "private.key: SECRET123", "private.key:[REDACTED]"},
+			{".key name with a quoted value", `private.key: "S3CR3T"`, `private.key:"[REDACTED]"`},
+			{".key name after a slash with a quoted value directly after colon", `/etc/ssl/api.key:"S3CR3T"`, `/etc/ssl/api.key:"[REDACTED]"`},
 			{".key name assigned after a file verb", "open private.key=SECRET123", "open private.key=[REDACTED]"},
 			{"quoted .key path with a value", `"/etc/ssl/private.key": "SECRET123"`, `"/etc/ssl/private.key":"[REDACTED]"`},
 		})
@@ -1349,6 +1426,25 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 			return "password=token=" + strings.Repeat("a.temp:a:", n/18) + strings.Repeat("b", max(300, n/2)) + " = SECRET"
 		}},
 		{"stacked bare temp with bracketed containers before closer", 64 << 10, func(n int) string { return "(temp:a:" + strings.Repeat("b:[a]:", n/6) + ") tail" }},
+		{"repeated long-padded quoted keys", 64 << 10, func(n int) string {
+			return strings.Repeat("'password"+strings.Repeat(" ", 300)+"' = S ", n/316) + "password=SECRET"
+		}},
+		{"repeated unmatched closing quotes", 64 << 10, func(n int) string { return strings.Repeat("x' = ", n/5) + "'password ' = SECRET" }},
+		{"repeated escaped-backslash single quotes", 64 << 10, func(n int) string { return `\'a` + strings.Repeat(`\\'=`, n/4) + "password=SECRET" }},
+		{"repeated escaped-backslash double quotes", 64 << 10, func(n int) string { return `\" ` + strings.Repeat(`\\"=x `, n/6) + "password=SECRET" }},
+		{"repeated unterminated quotes after temp:", 64 << 10, func(n int) string { return "temp:a: '" + strings.Repeat("x:", n/2) + "a = SECRET" }},
+		{"repeated bare temp pairs with escaped quotes", 64 << 10, func(n int) string { return strings.Repeat(`temp:k: x\' `, n/12) + "password=SECRET" }},
+		{"repeated bare temp pairs with escaped quotes and trailing quote", 64 << 10, func(n int) string { return strings.Repeat(`temp:k: x\' `, n/12) + "' password=SECRET" }},
+		{"repeated bare temp pairs with escaped backslash quotes", 64 << 10, func(n int) string { return strings.Repeat(`temp:k: \"x\\\" `, n/16) + "password=SECRET" }},
+		{"repeated bare temp pairs with trailing escaped backslash quotes", 64 << 10, func(n int) string { return strings.Repeat(`temp:k: x\\\' `, n/15) + "password=SECRET" }},
+		{"repeated JSON pairs with escaped quotes", 64 << 10, func(n int) string { return strings.Repeat(`"password": 'x\' `, n/17) + "password=SECRET" }},
+		{"repeated JSON pairs with doubled quotes", 64 << 10, func(n int) string { return strings.Repeat(`"password": 'x'' `, n/17) + "password=SECRET" }},
+		{"repeated window slides in extendOverlappingTextPair", 64 << 10, func(n int) string {
+			return `log: "password": ` + strings.Repeat(`token="x `, n/9) + `x" password=SECRET`
+		}},
+		{"repeated quoted values with inner token in extendOverlappingTextPair", 64 << 10, func(n int) string {
+			return `log: "password": a&` + strings.Repeat("token= 'token=a/b ' ", n/20) + "token=SECRET"
+		}},
 		{"bare delimiters", 1 << 20, func(n int) string { return strings.Repeat("=", n) }},
 		{"redacted pairs", 256 << 10, func(n int) string { return strings.Repeat("DB_PASSWORD=SECRET1 dbPassword=SECRET2 ", n/39) }},
 		{"header lines", 256 << 10, func(n int) string { return strings.Repeat("Authorization: Bearer SECRET\n", n/29) }},

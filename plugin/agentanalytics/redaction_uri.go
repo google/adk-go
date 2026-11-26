@@ -288,7 +288,7 @@ func redactURIComponent(s string) (string, bool) {
 	if s == "" || isKnownSentinel(s) {
 		return s, false
 	}
-	scrubbed := scrubTextPatterns(s)
+	scrubbed := scrubTextPatterns(scrubNestedUserinfoURIs(s))
 	if exposesEncodedPattern(scrubbed, scrubErrorTokens) ||
 		hasBackslashEscapedCredentialWith(s, scrubbed, canonicalizeCredentialMarker) ||
 		(scrubbed != s && strings.Contains(s, `\\u`) && hasBackslashEscapedCredentialWith(s, scrubbed, func(v string) string {
@@ -304,6 +304,31 @@ func redactURIComponent(s string) (string, bool) {
 		scrubbed = scrubTextPatterns(scrubbed)
 	}
 	return scrubbed, scrubbed != s
+}
+
+func scrubNestedUserinfoURIs(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	spans := uriTokenRe.FindAllStringIndex(s, -1)
+	if len(spans) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range spans {
+		trimmed := trimTrailingPunctuation(s[loc[0]:loc[1]])
+		if u, err := url.Parse(trimmed); err != nil || u.User != nil {
+			b.WriteString(s[last:loc[0]])
+			b.WriteString(redactedURIPlaceholder)
+			last = loc[0] + len(trimmed)
+		}
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }
 
 func scrubURITokens(msg string) string {

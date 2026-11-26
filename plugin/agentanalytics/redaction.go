@@ -800,7 +800,7 @@ func scrubErrorText(msg string) string {
 // non-redacted fragments that must still appear in order after unescaping.
 func keptLiterals(scrubbed string) []string {
 	parts := []string{scrubbed}
-	for _, sentinel := range []string{redactedURIPlaceholder, redactedValue, url.QueryEscape(redactedValue)} {
+	for _, sentinel := range []string{redactedURIPlaceholder, url.QueryEscape(redactedURIPlaceholder), redactedValue, url.QueryEscape(redactedValue)} {
 		var next []string
 		for _, part := range parts {
 			for piece := range strings.SplitSeq(part, sentinel) {
@@ -1033,10 +1033,12 @@ func redactJSONPatternPairs(s string) string {
 	}
 	var b strings.Builder
 	followedByAssign := func(pos int) bool {
-		d := skipSpace(s, pos, delimSpace)
+		d := skipSpace(s, skipOneClosingQuote(s, pos), delimSpace)
 		return d < len(s) && (s[d] == ':' || s[d] == '=')
 	}
 	last, coveredEnd := 0, 0
+	nextQuoteOrBarrier := [4]int{-1, -1, -1, -1}
+	nextTempQuote := [4]int{-1, -1, -1, -1}
 	for i, loc := range matches {
 		if loc[0] < coveredEnd {
 			continue
@@ -1093,10 +1095,10 @@ func redactJSONPatternPairs(s string) string {
 			if kind, _ := nestsSensitiveKeyInMatches(s, tailStart, valEnd, !nextIsValidKey && !tailIsContainer && lineStart && !isBaseSensitiveKey(trimmedKey, false), nil, 0); !nextIsValidKey && !tailIsContainer && kind == nestedKey {
 				continue
 			} else if kind != notNestedKey {
-				valEnd = extendOverlappingTextPair(s, tailStart, valEnd)
+				valEnd = extendOverlappingTextPair(s, tailStart, valEnd, &nextQuoteOrBarrier, &nextTempQuote)
 			} else if valEnd < len(s) {
-				if _, q := unquoteValue(s[tailStart:valEnd]); q == "" || followedByAssign(valEnd) {
-					valEnd = extendOverlappingTextPair(s, tailStart, valEnd)
+				if !isCompleteQuotedValue(s[tailStart:valEnd]) || followedByAssign(valEnd) {
+					valEnd = extendOverlappingTextPair(s, tailStart, valEnd, &nextQuoteOrBarrier, &nextTempQuote)
 				}
 			}
 		}
@@ -1133,7 +1135,7 @@ func redactJSONPatternPairs(s string) string {
 				if s[nv] == '"' || s[nv] == '\'' || s[nv] == '\\' {
 					if cand := matchValueTokenCached(s, nv, regexpSpace+",}", &bareEnd); cand > valEnd {
 						valEnd = cand
-						if _, q := unquoteValue(s[nv:valEnd]); (q == "" || followedByAssign(valEnd)) && extStart < 0 {
+						if extStart < 0 && (!isCompleteQuotedValue(s[nv:valEnd]) || followedByAssign(valEnd)) {
 							extStart = nv
 						}
 					}
@@ -1152,7 +1154,7 @@ func redactJSONPatternPairs(s string) string {
 			if valEnd <= prevEnd || valEnd >= len(s) || extStart < 0 || extStart >= valEnd {
 				break
 			}
-			ext := extendOverlappingTextPair(s, extStart, valEnd)
+			ext := extendOverlappingTextPair(s, extStart, valEnd, &nextQuoteOrBarrier, &nextTempQuote)
 			if ext <= valEnd {
 				break
 			}
@@ -1201,7 +1203,11 @@ func stripClosingKeyQuote(s string, quoteEnd, floor int) int {
 	keyEnd := quoteEnd
 	if keyEnd > floor && (s[keyEnd-1] == '"' || s[keyEnd-1] == '\'') {
 		keyEnd--
-		if keyEnd > floor && s[keyEnd-1] == '\\' {
+		bs := 0
+		for p := keyEnd; p > floor && s[p-1] == '\\'; p-- {
+			bs++
+		}
+		if bs%2 == 1 {
 			keyEnd--
 		}
 	}
@@ -1273,9 +1279,44 @@ func validQuotedTempKey(s string) bool {
 	return !strings.ContainsAny(rest, "=\"' \t\r\n\f,}") && !strings.HasSuffix(rest, ":") && !strings.Contains(rest, "::")
 }
 
-func matchQuotedKeySpan(s string, quoteStart, quoteEnd, sensFloor int) (openStart, keyStart, keyEnd int, ok bool) {
+func isCompleteQuotedValue(v string) bool {
+	return v != "" && (v[0] == '"' || v[0] == '\'' || v[0] == '\\') && len(quotedValueRe.FindString(v)) == len(v)
+}
+
+func skipOneClosingQuote(s string, pos int) int {
+	if pos < len(s) && (s[pos] == '\'' || s[pos] == '"') {
+		return pos + 1
+	}
+	if pos+1 < len(s) && s[pos] == '\\' && (s[pos+1] == '\'' || s[pos+1] == '"') {
+		return pos + 2
+	}
+	return pos
+}
+
+func quotedAssignSpan(s string, start, end int) (qEnd, afterQuote int, ok bool) {
+	if start >= end || (s[start] != '"' && s[start] != '\'' && s[start] != '\\') {
+		return 0, 0, false
+	}
+	q := quotedValueRe.FindString(s[start:end])
+	if q == "" {
+		return 0, 0, false
+	}
+	qEnd = start + len(q)
+	if qEnd == end {
+		return qEnd, skipOneClosingQuote(s, end), true
+	}
+	if skipOneClosingQuote(s, qEnd) == end {
+		return qEnd, end, true
+	}
+	return 0, 0, false
+}
+
+func matchQuotedKeySpan(s string, quoteStart, quoteEnd, sensFloor int, noQuoteBefore *int) (openStart, keyStart, keyEnd int, ok bool) {
 	q := s[quoteStart:quoteEnd]
-	limit := max(sensFloor, quoteStart-maxNestedKeyLen*2)
+	if len(q) == 2 && !isUnescapedQuoteAt(s, sensFloor, quoteStart) {
+		return 0, 0, 0, false
+	}
+	limit := max(sensFloor, *noQuoteBefore)
 	openIdx := -1
 	if len(q) == 2 {
 		for i := quoteStart - 2; i >= limit; i-- {
@@ -1302,6 +1343,7 @@ func matchQuotedKeySpan(s string, quoteStart, quoteEnd, sensFloor int) (openStar
 			}
 		}
 	}
+	*noQuoteBefore = max(*noQuoteBefore, quoteStart)
 	if openIdx < 0 {
 		return 0, 0, 0, false
 	}
@@ -1348,7 +1390,71 @@ func matchQuotedKeySpan(s string, quoteStart, quoteEnd, sensFloor int) (openStar
 	if ks := sensitiveKeyStart(s, kFrom, kTo); ks >= 0 {
 		return openIdx, ks, kTo, true
 	}
+	if slash := strings.LastIndexAny(sub, `/\`); slash >= 0 && slash+1 < len(sub) {
+		if ks := sensitiveKeyStart(s, kFrom+slash+1, kTo); ks >= 0 {
+			return openIdx, ks, kTo, true
+		}
+	}
 	return 0, 0, 0, false
+}
+
+func quoteTypeIdx(v string) int {
+	if len(v) >= 2 && v[0] == '\\' {
+		switch v[1] {
+		case '\'':
+			return 2
+		case '"':
+			return 3
+		}
+	}
+	if len(v) >= 1 {
+		switch v[0] {
+		case '\'':
+			return 0
+		case '"':
+			return 1
+		}
+	}
+	return -1
+}
+
+func quotedValueEndsInSensitiveKey(s string, start, end int) bool {
+	_, q := unquoteValue(s[start:end])
+	if q == "" {
+		return false
+	}
+	localFloor := start
+	if _, _, _, ok := matchQuotedKeySpan(s, end-len(q), end, start, &localFloor); ok {
+		return true
+	}
+	kTo := end - len(q)
+	kFrom := min(skipAnySpace(s, start+len(q)), kTo)
+	for kTo > kFrom {
+		sz := prevAnySpaceSize(s, kTo, kFrom)
+		if sz == 0 {
+			break
+		}
+		kTo -= sz
+	}
+	if kFrom >= kTo {
+		return false
+	}
+	segStart := kTo
+	for segStart > kFrom {
+		if sz := prevAnySpaceSize(s, segStart, kFrom); sz > 0 {
+			break
+		}
+		if c := s[segStart-1]; c < utf8.RuneSelf {
+			if c == '/' || c == '\\' {
+				break
+			}
+			segStart--
+			continue
+		}
+		_, sz := utf8.DecodeLastRuneInString(s[kFrom:segStart])
+		segStart -= sz
+	}
+	return segStart < kTo && (sensitiveKeyStart(s, segStart, kTo) >= 0 || validQuotedTempKey(s[segStart:kTo]))
 }
 
 func skipAnySpace(s string, pos int) int {
@@ -1379,6 +1485,7 @@ func isTempSegByte(c byte) bool {
 // over the key name, and filtering with sensitiveKeyStart before appending.
 func textKeyPrefixSpans(s string) []textKeyMatch {
 	var out []textKeyMatch
+	var quoteFloor [4]int
 	failedTempUntil := 0
 	for from, floor, sensFloor := 0, 0, 0; from < len(s); {
 		rel := strings.IndexAny(s[from:], "=:")
@@ -1407,19 +1514,81 @@ func textKeyPrefixSpans(s string) []textKeyMatch {
 			}
 			start -= sz
 		}
+		var savedQuoteFloor [4]int
+		if quoteStart < quoteEnd {
+			savedQuoteFloor = quoteFloor
+		}
 		if keyEnd < quoteEnd && (padded || start == keyEnd || (start > floor && (s[start-1] == '/' || s[start-1] == '\\' || s[start-1] == '\v'))) {
-			if os, ks, ke, ok := matchQuotedKeySpan(s, quoteStart, quoteEnd, sensFloor); ok {
+			qIdx := 0
+			if s[quoteEnd-1] == '"' {
+				qIdx = 1
+			}
+			if quoteEnd-quoteStart == 2 {
+				qIdx += 2
+			}
+			if os, ks, ke, ok := matchQuotedKeySpan(s, quoteStart, quoteEnd, sensFloor, &quoteFloor[qIdx]); ok {
 				out = append(out, textKeyMatch{os, ks, ke, quoteEnd, delim + 1})
 				sensFloor = delim + 1
 				from = delim + 1
 				floor = delim + 1
 				continue
 			}
-			if padded || start == keyEnd {
-				from = delim + 1
-				floor = delim + 1
-				continue
+		}
+		if quoteStart < quoteEnd && quoteStart > floor && (s[quoteStart-1] == '\'' || s[quoteStart-1] == '"') &&
+			!(quoteStart-1 > floor && s[quoteStart-2] == '\\') {
+			q2End := quoteStart
+			q2Start := q2End - 1
+			q2KeyEnd := q2Start
+			q2Padded := false
+			for sz := prevAnySpaceSize(s, q2KeyEnd, floor); sz > 0; sz = prevAnySpaceSize(s, q2KeyEnd, floor) {
+				q2KeyEnd -= sz
+				q2Padded = true
 			}
+			q2From := q2KeyEnd
+			for q2From > floor {
+				sz := prevKeyRuneSize(s, q2From, floor)
+				if sz == 0 {
+					break
+				}
+				q2From -= sz
+			}
+			if q2Padded || q2From == q2KeyEnd || (q2From > floor && (s[q2From-1] == '/' || s[q2From-1] == '\\' || s[q2From-1] == '\v')) ||
+				(q2From == floor && floor > sensFloor && s[floor-1] == ':') {
+				q2Idx := 0
+				if s[q2Start] == '"' {
+					q2Idx = 1
+				}
+				retryFloor := savedQuoteFloor[q2Idx]
+				os, ks, ke, ok := matchQuotedKeySpan(s, q2Start, q2End, sensFloor, &retryFloor)
+				quoteFloor[q2Idx] = max(quoteFloor[q2Idx], retryFloor)
+				if ok {
+					out = append(out, textKeyMatch{os, ks, ke, q2End, delim + 1})
+					sensFloor = delim + 1
+					from = delim + 1
+					floor = delim + 1
+					continue
+				}
+			} else if q2From < q2KeyEnd {
+				if ks := sensitiveKeyStart(s, q2From, q2KeyEnd); ks >= 0 {
+					openAfter := q2From
+					for sz := prevAnySpaceSize(s, openAfter, floor); sz > 0; sz = prevAnySpaceSize(s, openAfter, floor) {
+						openAfter -= sz
+					}
+					if q := s[q2KeyEnd:q2End]; hasMatchingOpeningQuote(s, openAfter, floor, q) {
+						openStart := openAfter - len(q)
+						out = append(out, textKeyMatch{openStart, ks, q2KeyEnd, q2End, delim + 1})
+						sensFloor = delim + 1
+						from = delim + 1
+						floor = delim + 1
+						continue
+					}
+				}
+			}
+		}
+		if keyEnd < quoteEnd && (padded || start == keyEnd) {
+			from = delim + 1
+			floor = delim + 1
+			continue
 		}
 		if start == keyEnd {
 			from = delim + 1
@@ -1499,6 +1668,11 @@ func textKeyPrefixSpans(s string) []textKeyMatch {
 							look = len(s)
 							break
 						}
+						if nq > next && nOpen < tempStart && nd == nq && (s[nd] == '\'' || s[nd] == '"') {
+							if nd2 := skipSpace(s, nd+1, delimSpace); nd2 < len(s) && (s[nd2] == '=' || s[nd2] == ':') {
+								nd = nd2
+							}
+						}
 						if nq > next && (s[nd] == '=' || s[nd] == ':') {
 							kEnd = next
 							matchedQEnd, matchedOpen = nq, nOpen
@@ -1521,6 +1695,9 @@ func textKeyPrefixSpans(s string) []textKeyMatch {
 					}
 				}
 				d := skipSpace(s, qEnd, delimSpace)
+				if qEnd > kEnd && openStart < tempStart && d == qEnd && d < len(s) && (s[d] == '\'' || s[d] == '"') {
+					d = skipSpace(s, d+1, delimSpace)
+				}
 				if d < len(s) && (s[d] == '=' || s[d] == ':') {
 					out = append(out, textKeyMatch{openStart, tempStart, kEnd, qEnd, d + 1})
 					from = d + 1
@@ -1550,25 +1727,145 @@ func textKeyPrefixSpans(s string) []textKeyMatch {
 	return out
 }
 
-func extendOverlappingTextPair(s string, valStart, valEnd int) int {
-	windowEndFor := func(pos int) int {
+func extendOverlappingTextPair(s string, valStart, valEnd int, nextQuoteOrBarrier, nextTempQuote *[4]int) int {
+	if nextQuoteOrBarrier == nil {
+		local := [4]int{-1, -1, -1, -1}
+		nextQuoteOrBarrier = &local
+	}
+	if nextTempQuote == nil {
+		local := [4]int{-1, -1, -1, -1}
+		nextTempQuote = &local
+	}
+	windowEndFor := func(cur, pos int) int {
 		w := min(len(s), pos+maxNestedKeyLen*2)
+		qIdx, qPos, qLen, qByte := -1, -1, 0, byte(0)
+		for i := pos - 1; i >= cur; i-- {
+			c := s[i]
+			if c == ',' || c == '{' || c == '}' {
+				break
+			}
+			if (c == '\'' || c == '"') && isUnescapedQuoteAt(s, cur, i) {
+				if c == '\'' {
+					qIdx = 0
+				} else {
+					qIdx = 1
+				}
+				qPos, qLen, qByte = i, 1, c
+				break
+			}
+			if i > cur && s[i-1] == '\\' && (c == '\'' || c == '"') && isUnescapedQuoteAt(s, cur, i-1) {
+				if c == '\'' {
+					qIdx = 2
+				} else {
+					qIdx = 3
+				}
+				qPos, qLen, qByte = i-1, 2, c
+				break
+			}
+		}
+		if qPos >= 0 && !strings.ContainsAny(s[pos:w], ",{}") {
+			if nextQuoteOrBarrier[qIdx] < w {
+				k := w
+				if qLen == 2 && k > pos && k < len(s) && s[k-1] == '\\' && s[k] == qByte && isUnescapedQuoteAt(s, 0, k-1) {
+					k--
+				}
+				for k < len(s) {
+					c := s[k]
+					if c == ',' || c == '{' || c == '}' {
+						break
+					}
+					if qLen == 1 {
+						if c == qByte && isUnescapedQuoteAt(s, 0, k) {
+							break
+						}
+					} else if c == '\\' && k+1 < len(s) && s[k+1] == qByte && isUnescapedQuoteAt(s, 0, k) {
+						break
+					}
+					k++
+				}
+				nextQuoteOrBarrier[qIdx] = k
+			}
+			if k := nextQuoteOrBarrier[qIdx]; k < len(s) && s[k] != ',' && s[k] != '{' && s[k] != '}' {
+				w = k + qLen
+				if w < len(s) && (s[w] == '\'' || s[w] == '"') {
+					w++
+				} else if w+1 < len(s) && s[w] == '\\' && (s[w+1] == '\'' || s[w+1] == '"') {
+					w += 2
+				}
+			}
+		}
+		w = skipAnySpace(s, w)
+		for range 2 {
+			if w < len(s) && (s[w] == '"' || s[w] == '\'') {
+				w++
+			} else if w+1 < len(s) && s[w] == '\\' && (s[w+1] == '"' || s[w+1] == '\'') {
+				w += 2
+			} else {
+				break
+			}
+		}
 		return min(len(s), skipSpace(s, w, delimSpace)+1)
 	}
-	base := valStart
-	windowEnd := windowEndFor(valEnd)
-	spans := textKeyPrefixSpans(s[base:windowEnd])
 	bareCache, tempCache := 0, 0
-	for idx, cur := 0, valStart; cur < valEnd; {
+	var quotedAssignEnd [4]int
+	extendQuotedAssign := func(start, end int) int {
+		for {
+			qEnd, afterQuote, ok := quotedAssignSpan(s, start, end)
+			if !ok {
+				break
+			}
+			qIdx := quoteTypeIdx(s[start:qEnd])
+			if qIdx < 0 || qEnd <= quotedAssignEnd[qIdx] {
+				break
+			}
+			quotedAssignEnd[qIdx] = qEnd
+			d := skipSpace(s, afterQuote, delimSpace)
+			if d >= len(s) || (s[d] != ':' && s[d] != '=') || !quotedValueEndsInSensitiveKey(s, start, qEnd) {
+				break
+			}
+			nv2 := skipSpace(s, d+1, delimSpace)
+			if nv2 >= len(s) {
+				return nv2
+			}
+			var next int
+			if s[nv2] == '{' || (s[nv2] == '[' && !isRedactedPlaceholderPrefix(s[nv2:], false)) {
+				next = max(end, sensitiveValueEnd(s, nv2, nv2), matchValueTokenCached(s, nv2, regexpSpace+",;&", &bareCache))
+			} else if valueStartsAt(s, nv2) {
+				next = max(end, matchValueTokenCached(s, nv2, regexpSpace+",;&", &bareCache))
+			} else {
+				break
+			}
+			if next <= end {
+				break
+			}
+			start, end = nv2, next
+		}
+		return end
+	}
+	enclosingQuoteStart, enclosingQuoteEnd := -1, -1
+	if qEnd, _, ok := quotedAssignSpan(s, valStart, valEnd); ok {
+		enclosingQuoteStart, enclosingQuoteEnd = valStart, qEnd
+	}
+	valEnd = extendQuotedAssign(valStart, valEnd)
+	base := valStart
+	windowEnd := windowEndFor(valStart, valEnd)
+	spans := textKeyPrefixSpans(s[base:windowEnd])
+	for idx, cur := 0, valStart; cur < valEnd && valEnd < len(s); {
+		if enclosingQuoteStart >= 0 && cur >= enclosingQuoteEnd {
+			enclosingQuoteStart, enclosingQuoteEnd = -1, -1
+		}
 		for idx < len(spans) && base+spans[idx].openStart < cur {
 			idx++
 		}
 		if idx >= len(spans) {
-			nextWin := windowEndFor(valEnd)
+			nextWin := windowEndFor(cur, valEnd)
 			if nextWin <= windowEnd {
 				break
 			}
-			base = max(cur, min(valEnd, windowEnd-maxNestedKeyLen*2))
+			base = cur
+			if enclosingQuoteStart >= 0 && cur < enclosingQuoteEnd {
+				base = min(cur, enclosingQuoteStart)
+			}
 			windowEnd = nextWin
 			spans = textKeyPrefixSpans(s[base:windowEnd])
 			idx = 0
@@ -1591,7 +1888,7 @@ func extendOverlappingTextPair(s string, valStart, valEnd int) int {
 			cEnd := sensitiveValueEnd(s, nv, nv)
 			nextEnd = max(nextEnd, cEnd)
 			if isBareTemp && nextEnd < len(s) {
-				if stackedEnd := stackedBareTempTailEnd(s, nv, 0, &tempCache); stackedEnd > nextEnd {
+				if stackedEnd := stackedBareTempTailEnd(s, nv, 0, &tempCache, nextTempQuote); stackedEnd > nextEnd {
 					nextEnd = stackedEnd
 				}
 			}
@@ -1600,8 +1897,14 @@ func extendOverlappingTextPair(s string, valStart, valEnd int) int {
 			cur = nv
 			continue
 		} else {
+			if qEnd, _, ok := quotedAssignSpan(s, nv, tokEnd); ok {
+				if qEnd > enclosingQuoteEnd {
+					enclosingQuoteStart, enclosingQuoteEnd = nv, qEnd
+				}
+				nextEnd = max(nextEnd, extendQuotedAssign(nv, tokEnd))
+			}
 			if isBareTemp && nextEnd < len(s) {
-				if stackedEnd := stackedBareTempTailEnd(s, nv, 0, &tempCache); stackedEnd > nextEnd {
+				if stackedEnd := stackedBareTempTailEnd(s, nv, 0, &tempCache, nextTempQuote); stackedEnd > nextEnd {
 					nextEnd = stackedEnd
 				}
 			}
@@ -1614,7 +1917,7 @@ func extendOverlappingTextPair(s string, valStart, valEnd int) int {
 
 // isPathPrefixedDottedKey skips bare Go *os.PathError filenames such as
 // "open /etc/ssl/private.key: no such file" while still redacting assignments.
-func isPathPrefixedDottedKey(s string, floor, keyStart, keyEnd int, delim byte, valStart int) bool {
+func isPathPrefixedDottedKey(s string, floor, keyStart, keyEnd int, delim byte, afterDelim int) bool {
 	k := s[keyStart:keyEnd]
 	if delim != ':' || hasFoldPrefix(k, session.KeyPrefixTemp) {
 		return false
@@ -1622,8 +1925,8 @@ func isPathPrefixedDottedKey(s string, floor, keyStart, keyEnd int, delim byte, 
 	if dot := strings.LastIndexByte(k, '.'); dot <= 0 || !strings.EqualFold(k[dot+1:], "key") {
 		return false
 	}
-	if valStart < len(s) && (strings.IndexByte(`"'{[`, s[valStart]) >= 0 ||
-		(s[valStart] == '\\' && valStart+1 < len(s) && (s[valStart+1] == '"' || s[valStart+1] == '\''))) {
+	if afterDelim < len(s) && (strings.IndexByte(`"'{[`, s[afterDelim]) >= 0 ||
+		(s[afterDelim] == '\\' && afterDelim+1 < len(s) && (s[afterDelim+1] == '"' || s[afterDelim+1] == '\''))) {
 		return false
 	}
 	if keyStart > 0 && (s[keyStart-1] == '/' || s[keyStart-1] == '\\') {
@@ -1649,10 +1952,13 @@ func isPathPrefixedDottedKey(s string, floor, keyStart, keyEnd int, delim byte, 
 	return false
 }
 
-func stackedBareTempTailEnd(s string, valStart, open int, tempCache *int) int {
-	if valStart >= len(s) || (tempCache != nil && valStart < *tempCache) ||
-		(s[valStart] == '[' && isRedactedPlaceholderPrefix(s[valStart:], false)) {
+func stackedBareTempTailEnd(s string, valStart, open int, tempCache *int, nextQuote *[4]int) int {
+	if valStart >= len(s) || (tempCache != nil && valStart < *tempCache) {
 		return 0
+	}
+	if nextQuote == nil {
+		local := [4]int{-1, -1, -1, -1}
+		nextQuote = &local
 	}
 	cur, best, bestRaw, bareCache, containerCache, lastContainerStart, lastContainerEnd := valStart, 0, 0, 0, 0, -1, 0
 	for cur < len(s) {
@@ -1666,7 +1972,69 @@ func stackedBareTempTailEnd(s string, valStart, open int, tempCache *int) int {
 				containerCache = max(containerCache, j)
 			}
 		} else {
-			for j < len(s) && isTempSegByte(s[j]) && strings.IndexByte(regexpSpace+",;&", s[j]) < 0 {
+			for j < len(s) {
+				if s[j] == '\\' && j+1 < len(s) && (s[j+1] == '\'' || s[j+1] == '"') && isUnescapedQuoteAt(s, cur, j) {
+					qi, qByte := 2, s[j+1]
+					if qByte == '"' {
+						qi = 3
+					}
+					if nextQuote[qi] <= j {
+						k := j + 2
+						for k < len(s) {
+							if s[k] == '\\' && k+1 < len(s) {
+								if s[k+1] == qByte {
+									break
+								}
+								if s[k+1] == '\\' {
+									k += 2
+									if k < len(s) && s[k] == '\\' {
+										k += 2
+									} else if k < len(s) && s[k] != qByte {
+										k++
+									}
+									continue
+								}
+								k += 2
+								continue
+							}
+							k++
+						}
+						nextQuote[qi] = min(k, len(s))
+					}
+					if nextQuote[qi] < len(s) {
+						break
+					}
+					j += 2
+					continue
+				}
+				if s[j] == '\'' || s[j] == '"' {
+					qi := 0
+					if s[j] == '"' {
+						qi = 1
+					}
+					if nextQuote[qi] <= j {
+						k := j + 1
+						for k < len(s) {
+							if s[k] == '\\' {
+								k += 2
+								continue
+							}
+							if s[k] == s[j] {
+								break
+							}
+							k++
+						}
+						nextQuote[qi] = min(k, len(s))
+					}
+					if nextQuote[qi] < len(s) {
+						break
+					}
+					j++
+					continue
+				}
+				if !isTempSegByte(s[j]) || strings.IndexByte(regexpSpace+",;&", s[j]) >= 0 {
+					break
+				}
 				j++
 			}
 		}
@@ -1734,13 +2102,14 @@ func redactTextPatternPairs(s string) string {
 	var b strings.Builder
 	var brackets openBrackets
 	last, coveredEnd := 0, 0
+	nextTempQuote := [4]int{-1, -1, -1, -1}
 	for i, loc := range matches {
 		keyStart := loc.start
 		if keyStart < coveredEnd {
 			continue
 		}
 		valStart := skipSpace(s, loc.end, delimSpace)
-		if valStart >= len(s) || (loc.keyEnd == loc.quoteEnd && isPathPrefixedDottedKey(s, last, keyStart, loc.keyEnd, s[loc.end-1], valStart)) {
+		if valStart >= len(s) || (loc.keyEnd == loc.quoteEnd && isPathPrefixedDottedKey(s, last, keyStart, loc.keyEnd, s[loc.end-1], loc.end)) {
 			continue
 		}
 		valEnd := matchValueToken(s, valStart, regexpSpace+",;&")
@@ -1755,9 +2124,11 @@ func redactTextPatternPairs(s string) string {
 		var end, containerEnd int
 		jStart := i + 1
 		bareCache, checkedBareEnd, tempCache := 0, 0, 0
+		_, valQuote := unquoteValue(s[valStart:valEnd])
+		gluedQuoted := false
 		if kind == valueEndingInKeyName {
 			var lastIdx int
-			end, lastIdx, containerEnd = nestedPairEndInMatches(s, pairIdx, valEnd, open, matches, nil, nil, &tempCache)
+			end, lastIdx, containerEnd = nestedPairEndInMatches(s, pairIdx, valEnd, open, matches, nil, nil, &tempCache, &nextTempQuote)
 			jStart = max(jStart, lastIdx+1)
 		} else {
 			if s[valStart] == '{' || (s[valStart] == '[' && !isRedactedPlaceholderPrefix(s[valStart:], false)) {
@@ -1766,13 +2137,26 @@ func redactTextPatternPairs(s string) string {
 			} else {
 				end = textValueEnd(s, valStart, valEnd, open)
 			}
+			if kind == notNestedKey && valQuote != "" && end < len(s) && (s[end] == '=' || s[end] == ':') &&
+				end+1 < len(s) && strings.IndexByte(regexpSpace+",;&}])", s[end+1]) < 0 {
+				gv := end + 1
+				if s[gv] == '{' || (s[gv] == '[' && !isRedactedPlaceholderPrefix(s[gv:], false)) {
+					cEnd := sensitiveValueEnd(s, gv, gv)
+					containerEnd = max(containerEnd, cEnd)
+					tokEnd := bareValueEnd(s, gv, regexpSpace+",;&", &bareCache)
+					end = max(cEnd, cEnd+len(trimEnclosingClosers(s[cEnd:max(tokEnd, cEnd)], open)))
+				} else {
+					vEnd := matchValueTokenCached(s, gv, regexpSpace+",;&", &bareCache)
+					end = textValueEnd(s, gv, vEnd, open)
+				}
+				gluedQuoted = true
+			}
 			if loc.keyEnd == loc.quoteEnd && s[loc.end-1] == ':' && hasFoldPrefix(s[keyStart:loc.keyEnd], session.KeyPrefixTemp) && end < len(s) {
-				if stackedEnd := stackedBareTempTailEnd(s, valStart, open, &tempCache); stackedEnd > end {
+				if stackedEnd := stackedBareTempTailEnd(s, valStart, open, &tempCache, &nextTempQuote); stackedEnd > end {
 					end = stackedEnd
 				}
 			}
 		}
-		_, valQuote := unquoteValue(s[valStart:valEnd])
 		for j := jStart; j < len(matches) && matches[j].openStart < end && end < len(s); j++ {
 			if matches[j].start < containerEnd || !valueStartsAt(s, matches[j].end) {
 				continue
@@ -1798,7 +2182,7 @@ func redactTextPatternPairs(s string) string {
 				!(s[nv] == '\\' && nv+1 < len(s) && (s[nv+1] == '"' || s[nv+1] == '\'')) {
 				continue
 			}
-			ext, lastIdx, cEnd := nestedPairEndInMatches(s, j, end, open, matches, &bareCache, &checkedBareEnd, &tempCache)
+			ext, lastIdx, cEnd := nestedPairEndInMatches(s, j, end, open, matches, &bareCache, &checkedBareEnd, &tempCache, &nextTempQuote)
 			if ext > end {
 				end = ext
 			}
@@ -1818,6 +2202,9 @@ func redactTextPatternPairs(s string) string {
 			valSpan = s[valStart:valEnd]
 		}
 		inner, quote := unquoteValue(valSpan)
+		if quote == "" && gluedQuoted {
+			quote = valQuote
+		}
 		if kind != valueEndingInKeyName && isRedactedValue(inner) {
 			coveredEnd = end
 			continue
@@ -1965,7 +2352,7 @@ func classifyNestedCandidate(s, name string, at int, lineStart bool, matches []t
 // when the terminal value starts with "{" or "[". When bareCache and
 // checkedBareEnd are non-nil (quoted-value scan), repeated bare scans and
 // dominated closer trims are skipped in O(1).
-func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKeyMatch, bareCache, checkedBareEnd, tempCache *int) (end, lastIdx, containerEnd int) {
+func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKeyMatch, bareCache, checkedBareEnd, tempCache *int, nextQuote *[4]int) (end, lastIdx, containerEnd int) {
 	if idx < 0 || idx >= len(matches) {
 		return fallback, idx, 0
 	}
@@ -1989,7 +2376,7 @@ func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKey
 				if bareCache != nil {
 					if max(valEnd, containerEnd) <= fallback {
 						if isBareTemp && valEnd < len(s) && (tempCache == nil || valStart >= *tempCache) {
-							if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache); stackedEnd > fallback {
+							if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache, nextQuote); stackedEnd > fallback {
 								return stackedEnd, lastIdx, containerEnd
 							}
 						}
@@ -1997,7 +2384,7 @@ func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKey
 					}
 					if checkedBareEnd != nil && valEnd > containerEnd && containerEnd < *checkedBareEnd && valEnd == *checkedBareEnd {
 						if isBareTemp && valEnd < len(s) && (tempCache == nil || valStart >= *tempCache) {
-							if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache); stackedEnd > fallback {
+							if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache, nextQuote); stackedEnd > fallback {
 								return stackedEnd, lastIdx, containerEnd
 							}
 						}
@@ -2006,7 +2393,7 @@ func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKey
 				}
 				end = containerEnd + len(trimEnclosingClosers(s[containerEnd:max(valEnd, containerEnd)], open))
 				if isBareTemp && end < len(s) {
-					if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache); stackedEnd > end {
+					if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache, nextQuote); stackedEnd > end {
 						end = stackedEnd
 					}
 				}
@@ -2017,7 +2404,7 @@ func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKey
 			}
 			if bareCache != nil && valEnd <= fallback {
 				if isBareTemp && valEnd < len(s) && (tempCache == nil || valStart >= *tempCache) {
-					if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache); stackedEnd > fallback {
+					if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache, nextQuote); stackedEnd > fallback {
 						return stackedEnd, lastIdx, 0
 					}
 				}
@@ -2028,7 +2415,7 @@ func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKey
 			}
 			end = textValueEnd(s, valStart, valEnd, open)
 			if isBareTemp && end < len(s) {
-				if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache); stackedEnd > end {
+				if stackedEnd := stackedBareTempTailEnd(s, valStart, open, tempCache, nextQuote); stackedEnd > end {
 					end = stackedEnd
 				}
 			}
