@@ -24,12 +24,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log"
 	"maps"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -63,9 +63,8 @@ func checkPhonePrice(_ agent.Context, in CheckPhonePriceInput) (CheckPhonePriceO
 		"Pixel 10 Pro XL":   1199.0,
 		"Pixel 10 Pro Fold": 1799.0,
 	}
-	keys := slices.Collect(maps.Keys(prices))
-	sort.Slice(keys, func(i, j int) bool {
-		return len(keys[i]) > len(keys[j])
+	keys := slices.SortedFunc(maps.Keys(prices), func(a, b string) int {
+		return cmp.Compare(len(b), len(a))
 	})
 
 	for _, key := range keys {

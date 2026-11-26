@@ -350,11 +350,10 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 	// Create response sessions, transform the storageSessions into
 	responseSessions := make([]session.Session, 0, len(foundSessions))
 	for _, storage := range foundSessions {
-		s := storage
-		sess, err := createSessionFromStorageSession(&s)
+		sess, err := createSessionFromStorageSession(&storage)
 		if err != nil {
 			// If we encounter a single mapping error, we fail the whole request.
-			return nil, fmt.Errorf("failed to map storage object for session %s: %w", s.ID, err)
+			return nil, fmt.Errorf("failed to map storage object for session %s: %w", storage.ID, err)
 		}
 
 		userState, ok := userStates[sess.UserID()]
@@ -437,6 +436,18 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
+	// Like adk-python, keep temporary state local even if persistence fails.
+	sess.mu.Lock()
+	if sess.appendGate == nil {
+		sess.appendGate = make(chan struct{}, 1)
+	}
+	appendGate := sess.appendGate
+	for key, value := range event.Actions.StateDelta {
+		if strings.HasPrefix(key, session.KeyPrefixTemp) {
+			sess.state[key] = value
+		}
+	}
+	sess.mu.Unlock()
 
 	// adk-python keeps one lock per session and holds it across the stale
 	// check, the commit and the update of the last update time. Without it
@@ -450,42 +461,26 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	})
 	if err != nil {
 		// The request was canceled while it waited for an append it shared
-		// the session with. It has touched nothing, so returning the
-		// context error is enough; the holder finishes on its own.
+		// the session with. Only temporary state was applied, as it is even
+		// when persistence fails; the holder finishes on its own.
 		return err
 	}
 	defer unlock()
 
-	// Trim temp state before persisting. The in-memory session below still
-	// receives the untrimmed event, which is what keeps temp: keys readable
-	// for the rest of the invocation, the way the in-memory and the Vertex
-	// AI session services do.
-	persisted := trimTempDeltaState(event)
-	// applyChanges and persist them
-	err = s.applyEvent(ctx, sess, persisted)
-	if err != nil {
+	select {
+	case appendGate <- struct{}{}:
+		defer func() { <-appendGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	event = trimTempDeltaState(event)
+	// Publish persistent state, history and update time only after Commit succeeds.
+	if err := s.applyEvent(ctx, sess, event); err != nil {
 		return err
 	}
 
-	// Append to the in-memory session only after the commit, so that a
-	// failed append does not leave its event behind and the in-memory
-	// order matches the order the events were committed in.
-	if err := sess.appendEvent(event); err != nil {
-		return err
-	}
-
-	// update local session last update time
-	//
-	// The write is not guarded by the session's own lock, so it still
-	// races a reader of LastUpdateTime. #1244 tracks that race and is
-	// still open. Before this change the field was written twice, once
-	// inside the transaction and once after it, and both writes were
-	// unguarded; only the post-commit write is left, and the lock above
-	// is what keeps a concurrent append from seeing the window between
-	// the commit and this write, where the session holds an older update
-	// time than storage.
-	sess.updatedAt = event.Timestamp
-	return nil
+	return sess.appendEvent(event)
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
@@ -556,7 +551,7 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.updatedAt.UnixMicro()
+		sessionUpdateTime := sess.LastUpdateTime().UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
 				"stale session error: last update time from request (%s) is older than in database (%s)",

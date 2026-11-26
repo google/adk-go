@@ -17,17 +17,22 @@ package mcptoolset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/credredirect"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -210,7 +215,9 @@ func (t *commandTransport) reconnectTransport() *mcp.CommandTransport {
 // httpClient returns a shallow copy of base whose Transport adds the ADK
 // tracking headers and, when provider is non-nil, applies provider to every
 // request. A nil base stands for http.DefaultClient, as it does in the SDK,
-// except with a provider (see Config.Auth).
+// except with a provider (see Config.Auth). A nil Transport is replaced by
+// one that presents the environment's client certificate to Google API hosts
+// (see Config.Transport).
 func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
 	var c http.Client
 	switch {
@@ -219,12 +226,138 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 	case provider == nil:
 		c = *http.DefaultClient
 	}
+	if c.Transport == nil {
+		c.Transport = googlemtls.NewTransport(nil)
+	}
 	c.Transport = &trackingTransport{base: c.Transport}
 	if provider != nil {
 		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+		c.CheckRedirect = authCheckRedirect(c.CheckRedirect)
 	}
 	return &c
 }
+
+// authCheckRedirect wraps next, the caller's redirect policy, which may be nil.
+// auth.Transport applies the credential again on every hop, so only this check
+// bounds where it travels, and next may refuse more but never allow more.
+func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		method := via[0].Method
+		if err := credredirect.Check(req, via); err != nil {
+			return refuseRedirect(method, err)
+		}
+		if next == nil {
+			if len(via) >= credredirect.MaxRedirects {
+				return fmt.Errorf("mcptoolset: stopped after %d redirects", credredirect.MaxRedirects)
+			}
+			return nil
+		}
+		// net/http sends req as next leaves it, and next can edit via too, so
+		// judge the hop again against copies taken before next ran, and
+		// report it by the method the chain started with. Check also holds
+		// the Host header, path and opaque URL to the URL's host, which a
+		// forward proxy or a front end would otherwise route by.
+		orig, prev := *via[0].URL, *via[len(via)-1].URL
+		if err := next(req, via); err != nil {
+			return err
+		}
+		if err := credredirect.Check(req, []*http.Request{{URL: &orig}, {URL: &prev}}); err != nil {
+			return refuseRedirect(method, err)
+		}
+		return nil
+	}
+}
+
+// refuseRedirect reports a hop the policy refused. On a GET chain it hands
+// net/http the 3xx unfollowed instead of an error. The SDK sends a GET for
+// its optional server-to-client stream, on protocol versions before
+// 2026-07-28, and to resume a call's event stream with Last-Event-ID. An
+// error from client.Do on the stream GET is retried with growing delays and
+// then fails the session, while a 3xx that is not labeled text/event-stream
+// on the first stream request reads as a server without a stream and the
+// session goes on. A 3xx labeled text/event-stream, one on a stream
+// reconnect, or one on a resume fails the session or the call with the
+// status text as the reason. The JSON-RPC traffic is POST, where the error is
+// the clearer failure. Either way the next hop is not sent.
+func refuseRedirect(method string, err error) error {
+	if method == http.MethodGet {
+		return http.ErrUseLastResponse
+	}
+	return &redirectRefusedError{err: err}
+}
+
+// redirectRefusedError marks a refusal from authCheckRedirect so that
+// redactRedirectTarget can find it under the layers the SDK and net/http add.
+type redirectRefusedError struct{ err error }
+
+func (e *redirectRefusedError) Error() string {
+	return "mcptoolset: " + e.err.Error() + ": Config.Auth is set and the credential would follow"
+}
+
+func (e *redirectRefusedError) Unwrap() error { return e.err }
+
+// redactRedirectTarget strips the redirect target out of a refused redirect's
+// error. net/http wraps a CheckRedirect error in a *url.Error whose URL is the
+// server's Location header as sent, query string and all, and a cross-host
+// Location is often an SSO bounce carrying a code or a token. The refusal
+// itself already names both origins, so the *url.Error is replaced by it.
+func redactRedirectTarget(err error) error {
+	var refused *redirectRefusedError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || urlErr.Err != refused {
+		return err
+	}
+	return replaceLeaf(err, urlErr, refused)
+}
+
+// replaceLeaf returns err with the wrapped error old replaced by new, keeping
+// the message of every layer above it and every other error those layers
+// wrap. It follows fmt.Errorf's %w chains, including one wrapping two errors,
+// which the SDK uses between a request and its transport error.
+func replaceLeaf(err, old, new error) error {
+	if err == old {
+		return new
+	}
+	var inner []error
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		inner = u.Unwrap()
+	case interface{ Unwrap() error }:
+		if e := u.Unwrap(); e != nil {
+			inner = []error{e}
+		}
+	}
+	msg := err.Error()
+	for i, e := range inner {
+		replaced := replaceLeaf(e, old, new)
+		if replaced == e {
+			continue
+		}
+		// Rebuild the layer around the replaced error when its message
+		// carries the old one; otherwise the layer added nothing worth
+		// keeping over the redacted error.
+		before, after, ok := strings.Cut(msg, e.Error())
+		if !ok {
+			return replaced
+		}
+		errs := append(append(append([]error{}, inner[:i]...), replaced), inner[i+1:]...)
+		return &wrappedErrors{msg: before + replaced.Error() + after, errs: errs}
+	}
+	return err
+}
+
+// wrappedErrors is a rebuilt error layer: the layer's message with the
+// redacted error's text in place of the old, over the same wrapped errors.
+type wrappedErrors struct {
+	msg  string
+	errs []error
+}
+
+func (e *wrappedErrors) Error() string   { return e.msg }
+func (e *wrappedErrors) Unwrap() []error { return e.errs }
 
 // Config provides initial configuration for the MCP ToolSet.
 type Config struct {
@@ -237,10 +370,24 @@ type Config struct {
 	// either have no effect. A nil HTTPClient stands for http.DefaultClient,
 	// except with Auth (see there). The copied client puts the ADK client
 	// labels ("google-adk/<version> gl-go/<version>") at the front of the
-	// User-Agent and X-Goog-Api-Client headers of every request. The
-	// HTTPClient's own Transport runs after that. A User-Agent it
-	// sets with Header.Set replaces the labels, and one it adds with
-	// Header.Add is not sent, because net/http sends only the first value.
+	// User-Agent and X-Goog-Api-Client headers of every request. On a request
+	// to an https host under googleapis.com, the first label also names the
+	// runtime when ADK runs on Agent Engine, Cloud Run or Kubernetes, as in
+	// "google-adk/<version>+cloud_run". The HTTPClient's own Transport runs
+	// after that. A User-Agent it sets with Header.Set replaces the labels,
+	// and one it adds with Header.Add is not sent, because net/http sends
+	// only the first value.
+	//
+	// When that HTTPClient has no Transport of its own, an https request to a
+	// *.googleapis.com host presents the client certificate the environment
+	// provides, if any, and goes to the host's .mtls.googleapis.com name,
+	// which is where Google APIs accept a certificate-bound token. Whether
+	// there is a certificate follows the rule
+	// [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
+	// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given, and so do
+	// the multi-region *.us.rep and *.eu.rep hosts, which have no such name.
+	// Requests to other hosts are sent by http.DefaultTransport as before. An
+	// HTTPClient with a Transport is left to manage TLS itself.
 	//
 	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
 	// called, so the server can be started again after the connection is
@@ -283,8 +430,31 @@ type Config struct {
 	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
 	// than a copy of http.DefaultClient, so the credential never reaches
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
-	// user's requests are not kept in its Jar. Requests are sent by
-	// http.DefaultTransport.
+	// user's requests are not kept in its Jar. Requests are sent as described
+	// under Transport for an HTTPClient without a Transport.
+	//
+	// With Auth, a redirect is followed only when it stays on the endpoint's
+	// host and port and either keeps the scheme or upgrades http to https,
+	// each scheme's default port counting as the same port, because the
+	// credential is applied again on every hop. The bound covers the
+	// redirects the http.Client follows: a Transport supplied through the
+	// HTTPClient sits below the credential and is outside it. A
+	// CheckRedirect on the HTTPClient runs after that check, not instead of
+	// it, and may not point the request at another host through its Host
+	// header, path or opaque URL either. A refused redirect fails the call,
+	// except on a GET, where the unfollowed 3xx goes back to the SDK. The SDK
+	// sends a GET for its optional server-to-client stream, on protocol
+	// versions before 2026-07-28, and to resume a call's event stream. With
+	// the SDK release in go.mod, a 3xx not labeled text/event-stream on the
+	// first stream request means no stream and the session goes on, while
+	// one labeled text/event-stream, one on a stream reconnect, or one on a
+	// resume fails the session or the call with the status text as the
+	// reason.
+	//
+	// For that bound a *.googleapis.com host and its .mtls.googleapis.com
+	// name are one host, between https URLs: with a client certificate the
+	// request goes to the mTLS name (see Transport), so the server may
+	// redirect from one name to the other.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
