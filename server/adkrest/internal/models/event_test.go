@@ -142,6 +142,78 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 }
 
+// TestAgentStateIsReadOnlyOverREST pins that a client can read a workflow
+// agent's checkpoint but not plant one. A planted state would tell a resumed
+// sequence where to continue from, letting a client skip a sub-agent such as
+// an approval step.
+func TestAgentStateIsReadOnlyOverREST(t *testing.T) {
+	t.Parallel()
+
+	state := map[string]any{"current_sub_agent": "after_approval"}
+
+	in := models.Event{Actions: models.EventActions{AgentState: state, EndOfAgent: true}}
+	got, err := models.ToSessionEvent(in)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.AgentState != nil || got.Actions.EndOfAgent {
+		t.Errorf("ToSessionEvent kept a client-supplied checkpoint (AgentState=%v, EndOfAgent=%v); it must be dropped", got.Actions.AgentState, got.Actions.EndOfAgent)
+	}
+
+	stored := session.Event{Actions: session.EventActions{AgentState: state, EndOfAgent: true}}
+	out := models.FromSessionEvent(stored)
+	if diff := cmp.Diff(state, out.Actions.AgentState); diff != "" {
+		t.Errorf("FromSessionEvent AgentState mismatch (-want +got):\n%s", diff)
+	}
+	if !out.Actions.EndOfAgent {
+		t.Error("FromSessionEvent dropped EndOfAgent; reads should show it")
+	}
+}
+
+// TestAgentStateJSONKeepsEmptyApartFromNone pins the encoded REST output. An
+// allocated empty AgentState is a checkpoint of its own (the agent started and
+// has nothing to save yet), so it has to reach clients as {} rather than be
+// dropped like nil.
+func TestAgentStateJSONKeepsEmptyApartFromNone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state map[string]any
+		want  string // the encoded agentState value, or "" for an absent key
+	}{
+		{name: "nil", state: nil, want: ""},
+		{name: "empty", state: map[string]any{}, want: `{}`},
+		{name: "populated", state: map[string]any{"current_sub_agent": "b"}, want: `{"current_sub_agent":"b"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := models.FromSessionEvent(session.Event{Actions: session.EventActions{AgentState: tc.state}})
+			data, err := json.Marshal(out)
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			var decoded struct {
+				Actions map[string]json.RawMessage `json:"actions"`
+			}
+			if err := json.Unmarshal(data, &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() failed: %v", err)
+			}
+			got, ok := decoded.Actions["agentState"]
+			if tc.want == "" {
+				if ok {
+					t.Errorf("agentState = %s, want the key absent", got)
+				}
+				return
+			}
+			if string(got) != tc.want {
+				t.Errorf("agentState = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // decodeKeepingNumbers decodes data into v with numbers as json.Number, so two
 // numbers compare equal only when their digits do.
 func decodeKeepingNumbers(data []byte, v any) error {

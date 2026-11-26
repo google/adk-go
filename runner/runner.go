@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	"google.golang.org/adk/v2/internal/agentstate"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -102,6 +103,21 @@ type Config struct {
 	//
 	// optional
 	ContextCache *model.ContextCacheConfig
+
+	// Resumable lets an invocation that stopped on a long-running call
+	// continue where it was once the call is answered, like adk-python's
+	// ResumabilityConfig.is_resumable. Sequential, loop and parallel agents
+	// stop on such a call and save their position on events (as
+	// session.EventActions.AgentState). When a later message answers the
+	// call, the runner runs the root agent again in the same invocation, and
+	// each workflow agent continues from its saved position.
+	//
+	// Without it, sequential and loop agents keep running their sub-agents
+	// after a long-running call, and the answer goes straight to the agent
+	// that made the call.
+	//
+	// optional
+	Resumable bool
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -182,6 +198,7 @@ func New(cfg Config) (*Runner, error) {
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
 		contextCache:      contextCache,
+		resumable:         cfg.Resumable,
 	}, nil
 }
 
@@ -276,6 +293,8 @@ type Runner struct {
 	// contextCache is nil when context caching is disabled. Otherwise it is
 	// a validated copy of Config.ContextCache.
 	contextCache *model.ContextCacheConfig
+
+	resumable bool
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -486,6 +505,31 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	return nil
 }
 
+// frameworkActions holds the fields of an event's actions that only the
+// framework writes, captured before a plugin runs so fromPlugin can put them
+// back.
+type frameworkActions struct {
+	compaction *session.EventCompaction
+	agentState map[string]any
+	endOfAgent bool
+}
+
+// frameworkActionsOf captures ev's framework-owned actions. AgentState is
+// copied so a plugin that edits the map in place does not edit the capture.
+func frameworkActionsOf(ev *session.Event) frameworkActions {
+	return frameworkActions{
+		compaction: ev.Actions.Compaction,
+		agentState: maps.Clone(ev.Actions.AgentState),
+		endOfAgent: ev.Actions.EndOfAgent,
+	}
+}
+
+func (f frameworkActions) restore(ev *session.Event) {
+	ev.Actions.Compaction = f.compaction
+	ev.Actions.AgentState = f.agentState
+	ev.Actions.EndOfAgent = f.endOfAgent
+}
+
 // fromPlugin returns the event a plugin gave back, with the compaction record
 // the framework put on the original rather than any the plugin supplied.
 //
@@ -500,7 +544,9 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 //
 // The record is restored rather than cleared, because an ordinary event should
 // carry none and a summary carries the real one. Both cases are then the same
-// rule: whatever the framework decided, not whatever came back.
+// rule: whatever the framework decided, not whatever came back. The same goes
+// for AgentState and EndOfAgent: a planted checkpoint would tell a resumed
+// workflow to skip a sub-agent such as an approval step.
 //
 // A replacement also keeps the identity of the event it replaces: its ID,
 // invocation ID and timestamp, and its author when the replacement names none,
@@ -513,7 +559,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 //
 // The post-invocation summary path does not use this. A plugin is invited to
 // rewrite a summary there, and SanitizeSummary re-checks the result.
-func fromPlugin(original, modified *session.Event, record *session.EventCompaction) *session.Event {
+func fromPlugin(original, modified *session.Event, record frameworkActions) *session.Event {
 	// The record is restored on whatever comes back, including the original,
 	// before any early return.
 	//
@@ -524,11 +570,11 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 	// plugin had planted. The framework decides what a compaction record says,
 	// not a plugin.
 	if modified == nil || modified == original {
-		original.Actions.Compaction = record
+		record.restore(original)
 		return original
 	}
 	out := *modified
-	out.Actions.Compaction = record
+	record.restore(&out)
 	out.ID = original.ID
 	out.InvocationID = original.InvocationID
 	out.Timestamp = original.Timestamp
@@ -697,6 +743,22 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
+		// In a resumable run, the workflow agents continue from the
+		// checkpoints this invocation saved. The store is attached before the
+		// two dispatch paths split, so a workflow agent reached by a transfer
+		// from a root LLM agent has it too. It is kept in a local, for the
+		// same reason as rootCtx below.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		stateCtx := ctx
+		var states *agentstate.Store
+		if r.resumable {
+			states = agentstate.New()
+			if invocationID != "" {
+				states.Populate(storedSession.Events(), invocationID, r.rootAgent)
+			}
+			stateCtx = agentstate.ToContext(ctx, states)
+		}
+
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
 		// an LlmAgent root).
@@ -730,7 +792,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// accumulate wrappers. The non-LlmAgent path below does assign back,
 			// but this branch returns before reaching it, so on this path the
 			// iterator really is clean for a re-range.
-			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
+			rootCtx := llminternal.WithBoundMode(stateCtx, r.rootAgent.Name(), llmInternalState, rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
@@ -750,7 +812,10 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// when the chat coordinator has task-mode sub-agents,
 			// the wrapper handles delegation via ctx.run_node. Don't let
 			// the legacy sub-agent picker bypass the coordinator on resume.
-			if hasTaskSubAgent() {
+			// A root that stopped partway through the invocation being
+			// answered runs again and resumes the agent it transferred to, as
+			// on the path below.
+			if hasTaskSubAgent() || states != nil && states.Resumes(r.rootAgent.Name()) {
 				agentToRun = r.rootAgent
 			} else {
 				agentToRun, err = r.findAgentToRun(storedSession, msg)
@@ -764,7 +829,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = parentmap.ToContext(stateCtx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
@@ -834,9 +899,13 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// (#2204). The workflow resumes the interrupted node only for an
 		// adk_request_input response; any other response restarts the graph.
 		// The first response in the message decides the route.
+		//
+		// In a resumable run, the root runs again whenever it stopped partway
+		// through the invocation being answered, and each workflow agent
+		// continues from the position it saved.
 		agentToRun, branch := r.rootAgent, ""
 		routedToCaller := false
-		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
+		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil && (states == nil || !states.Resumes(r.rootAgent.Name())) {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
 				routedToCaller = true
@@ -850,7 +919,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// does an answer whose caller is not in the agent tree, since that
 		// caller can be a workflow node agent missing from the workflow's
 		// sub-agents; adk-python starts a new invocation there.
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
 		if spansInvocations && routedToCaller {
 			invocationID = ""
 		}
@@ -919,7 +987,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				// event in place has already overwritten this field by the time
 				// the callback returns, so reading it afterwards reads the
 				// plugin's value rather than the framework's.
-				record := event.Actions.Compaction
+				record := frameworkActionsOf(event)
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
 					if !yield(nil, err) {
@@ -970,7 +1038,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	event.Author = ctx.Agent().Name()
 	event.Content = content
 
-	record := event.Actions.Compaction
+	record := frameworkActionsOf(event)
 	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
 	if err != nil {
 		return nil, err
@@ -1227,7 +1295,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				// Captured before the plugin runs: one that mutates the event in
 				// place has already overwritten this field by the time the callback
 				// returns.
-				record := event.Actions.Compaction
+				record := frameworkActionsOf(event)
 				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
 				if pluginErr != nil {
 					if !yield(nil, pluginErr) {
