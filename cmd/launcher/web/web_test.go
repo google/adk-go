@@ -184,7 +184,7 @@ func TestRunDoesNotLeakListenerWhenTelemetryInitFails(t *testing.T) {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		if err == nil {

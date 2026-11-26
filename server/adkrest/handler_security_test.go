@@ -103,6 +103,7 @@ func TestMaxBytesMiddlewarePinsTheDefaultLimit(t *testing.T) {
 // without it, MaxBytesReader would be installed with a limit of 0 and reject
 // that request too.
 func TestServerUsesDefaultMaxPayloadSize(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		max  int64
@@ -111,6 +112,7 @@ func TestServerUsesDefaultMaxPayloadSize(t *testing.T) {
 		{name: "negative", max: -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			srv, err := adkrest.NewServer(adkrest.ServerConfig{
 				SessionService: session.InMemoryService(),
 				MaxPayloadSize: tc.max,
