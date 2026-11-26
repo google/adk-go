@@ -656,14 +656,15 @@ func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
 		failLoadFor string
 		loadErr     error
 		wantBodies  []string
+		wantNote    string
 		wantErr     error
 	}{
 		{name: "two successful calls", firstArgs: []any{"january.txt"}, secondFile: "february.txt", wantBodies: []string{january, february}},
 		{name: "invalid arguments before successful call", firstArgs: []any{123}, secondFile: "february.txt", wantBodies: []string{february}},
-		{name: "missing file follows successful call", firstArgs: []any{"january.txt"}, secondFile: "missing.txt", wantBodies: []string{january}},
-		{name: "missing file precedes successful call", firstArgs: []any{"missing.txt"}, secondFile: "february.txt", wantBodies: []string{february}},
-		{name: "invalid filename follows successful call", firstArgs: []any{"january.txt"}, secondFile: "dir/february.txt", wantBodies: []string{january}},
-		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "january.txt", loadErr: fs.ErrNotExist, wantBodies: []string{february}},
+		{name: "missing file follows successful call", firstArgs: []any{"january.txt"}, secondFile: "missing.txt", wantBodies: []string{january}, wantNote: `artifact "missing.txt" was not found`},
+		{name: "missing file precedes successful call", firstArgs: []any{"missing.txt"}, secondFile: "february.txt", wantBodies: []string{february}, wantNote: `artifact "missing.txt" was not found`},
+		{name: "invalid filename follows successful call", firstArgs: []any{"january.txt"}, secondFile: "dir/february.txt", wantBodies: []string{january}, wantNote: `artifact "dir/february.txt" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "january.txt", loadErr: fs.ErrNotExist, wantBodies: []string{february}, wantNote: `artifact "january.txt" was not found`},
 		{name: "backend failure", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "february.txt", loadErr: backendError, wantErr: backendError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -743,6 +744,27 @@ func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
 			if !slices.Equal(bodies, tc.wantBodies) {
 				t.Error("artifact bodies do not match the expected tool response order")
 			}
+			// Request contents: user prompt, model calls, function responses,
+			// one content per loaded artifact, plus one note content if any failed.
+			wantContents := 3 + len(tc.wantBodies)
+			if tc.wantNote != "" {
+				wantContents++
+			}
+			if len(mock.Requests[1].Contents) != wantContents {
+				t.Fatalf("len(mock.Requests[1].Contents) = %d, want %d", len(mock.Requests[1].Contents), wantContents)
+			}
+			if tc.wantNote != "" {
+				last := mock.Requests[1].Contents[len(mock.Requests[1].Contents)-1]
+				if last.Role != genai.RoleUser {
+					t.Errorf("last content role = %q, want %q", last.Role, genai.RoleUser)
+				}
+				if len(last.Parts) != 1 {
+					t.Fatalf("len(last.Parts) = %d, want 1", len(last.Parts))
+				}
+				if diff := cmp.Diff(tc.wantNote, last.Parts[0].Text); diff != "" {
+					t.Errorf("note text diff (-want +got):\n%s", diff)
+				}
+			}
 		})
 	}
 }
@@ -758,6 +780,13 @@ func (s *failingArtifactLoad) Load(ctx context.Context, req *artifact.LoadReques
 		return nil, s.err
 	}
 	return s.Service.Load(ctx, req)
+}
+
+func (s *failingArtifactLoad) Versions(ctx context.Context, req *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
+	if req.FileName == s.name {
+		return nil, s.err
+	}
+	return s.Service.Versions(ctx, req)
 }
 
 func TestLoadArtifactsTool_ProcessRequest_MalformedResponse(t *testing.T) {
@@ -798,24 +827,34 @@ func TestLoadArtifactsTool_ProcessRequest_MalformedResponse(t *testing.T) {
 }
 
 func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
+	storageErr := errors.New("storage unavailable")
 	tests := []struct {
 		name          string
 		artifactNames []string
 	}{
 		{
-			name:          "missing artifact",
-			artifactNames: []string{"missing.txt"},
+			name:          "storage error",
+			artifactNames: []string{"broken.txt"},
 		},
 		{
-			name:          "missing artifact alongside a saved one",
-			artifactNames: []string{"doc1.txt", "missing.txt"},
+			name:          "storage error alongside a saved artifact",
+			artifactNames: []string{"doc1.txt", "broken.txt"},
+		},
+		{
+			name:          "storage error alongside missing and invalid names",
+			artifactNames: []string{"missing.txt", "src/main.go", "broken.txt"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			loadArtifactsTool := loadartifactstool.New()
-			tc := createToolContext(t)
+			svc := &failingArtifactLoad{
+				Service: artifact.InMemoryService(),
+				name:    "broken.txt",
+				err:     storageErr,
+			}
+			tc := createToolContextWithService(t, t.Context(), svc)
 			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", &genai.Part{Text: "This is the content of doc1.txt"}); err != nil {
 				t.Fatalf("Failed to save artifact: %v", err)
 			}
@@ -845,8 +884,344 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 			if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
 				t.Errorf("error names the failure %d times, want once: %v", got, err)
 			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true, got: %v", err)
+			if !errors.Is(err, storageErr) {
+				t.Errorf("errors.Is(err, storageErr) = false, want true, got: %v", err)
+			}
+			if len(llmRequest.Contents) != 1 {
+				t.Errorf("len(llmRequest.Contents) = %d, want 1 on fatal load error", len(llmRequest.Contents))
+			}
+		})
+	}
+}
+
+// contextCheckingArtifactLoad overrides only Load so List succeeds on
+// InMemoryService and ProcessRequest reaches the per-artifact Load path.
+type contextCheckingArtifactLoad struct {
+	artifact.Service
+}
+
+func (s *contextCheckingArtifactLoad) Load(ctx context.Context, req *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.Service.Load(ctx, req)
+}
+
+func TestLoadArtifactsTool_ProcessRequest_CanceledContext(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+	svc := &contextCheckingArtifactLoad{Service: artifact.InMemoryService()}
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	tc := createToolContextWithService(t, canceledCtx, svc)
+
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{"doc1.txt"},
+					}),
+				},
+			},
+		},
+	}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("ProcessRequest should return an error when context is canceled, but got nil")
+	}
+	if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
+		t.Errorf("error names the failure %d times, want once: %v", got, err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, want true, got: %v", err)
+	}
+	if len(llmRequest.Contents) != 1 {
+		t.Errorf("len(llmRequest.Contents) = %d, want 1 on canceled context", len(llmRequest.Contents))
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ModelFixableErrors(t *testing.T) {
+	const docBody = "This is the content of doc1.txt"
+
+	tests := []struct {
+		name       string
+		response   map[string]any
+		wantLoaded []string
+		wantNotes  []string
+	}{
+		{
+			name:      "missing artifact",
+			response:  map[string]any{"artifact_names": []string{"missing.txt"}},
+			wantNotes: []string{`artifact "missing.txt" was not found`},
+		},
+		{
+			name:       "missing artifact alongside a saved one",
+			response:   map[string]any{"artifact_names": []string{"doc1.txt", "missing.txt"}},
+			wantLoaded: []string{"doc1.txt"},
+			wantNotes:  []string{`artifact "missing.txt" was not found`},
+		},
+		{
+			name:      "forward slash path separator",
+			response:  map[string]any{"artifact_names": []string{"src/main.go"}},
+			wantNotes: []string{`artifact "src/main.go" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		},
+		{
+			name:       "backslash path separator alongside a saved one",
+			response:   map[string]any{"artifact_names": []string{"doc1.txt", `src\main.go`}},
+			wantLoaded: []string{"doc1.txt"},
+			wantNotes:  []string{`artifact "src\\main.go" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		},
+		{
+			name:      "empty artifact name",
+			response:  map[string]any{"artifact_names": []string{""}},
+			wantNotes: []string{`artifact "" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		},
+		{
+			name:       "empty artifact name alongside a saved one",
+			response:   map[string]any{"artifact_names": []string{"doc1.txt", ""}},
+			wantLoaded: []string{"doc1.txt"},
+			wantNotes:  []string{`artifact "" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		},
+		{
+			name:       "multiple failing names alongside a saved one",
+			response:   map[string]any{"artifact_names": []string{"missing.txt", "src/main.go", "", "doc1.txt"}},
+			wantLoaded: []string{"doc1.txt"},
+			wantNotes: []string{
+				`artifact "missing.txt" was not found`,
+				`artifact "src/main.go" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+				`artifact "" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+			},
+		},
+		{
+			name: "missing artifact version alongside a saved artifact",
+			response: map[string]any{
+				"artifact_names":    []string{"doc1.txt"},
+				"artifact_versions": []any{map[string]any{"name": "doc1.txt", "version": float64(7)}},
+			},
+			wantLoaded: []string{"doc1.txt"},
+			wantNotes:  []string{`artifact "doc1.txt" (version 7) was not found`},
+		},
+		{
+			name: "invalid backslash name in artifact_versions",
+			response: map[string]any{
+				"artifact_versions": []any{map[string]any{"name": `reports\q3.pdf`, "version": float64(2)}},
+			},
+			wantNotes: []string{`artifact "reports\\q3.pdf" is not a valid artifact name; names must be non-empty plain filenames without path separators`},
+		},
+		{
+			name: "list_versions for missing and invalid names",
+			response: map[string]any{
+				"artifact_names": []any{"missing.txt", "reports/q3.pdf", ""},
+				"list_versions":  true,
+			},
+			wantNotes: []string{
+				`artifact "missing.txt" was not found`,
+				`artifact "reports/q3.pdf" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+				`artifact "" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+			},
+		},
+		{
+			name: "list_versions ignores top-level version in missing note",
+			response: map[string]any{
+				"artifact_names": []any{"missing.txt"},
+				"version":        float64(7),
+				"list_versions":  true,
+			},
+			wantNotes: []string{`artifact "missing.txt" was not found`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loadArtifactsTool := loadartifactstool.New()
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", &genai.Part{Text: docBody}); err != nil {
+				t.Fatalf("Failed to save artifact: %v", err)
+			}
+
+			llmRequest := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							genai.NewPartFromFunctionResponse("load_artifacts", tt.response),
+						},
+					},
+				},
+			}
+
+			requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+			}
+
+			if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+				t.Fatalf("ProcessRequest() error = %v, want nil", err)
+			}
+
+			wantContents := 1 + len(tt.wantLoaded) + 1
+			if len(llmRequest.Contents) != wantContents {
+				t.Fatalf("len(llmRequest.Contents) = %d, want %d", len(llmRequest.Contents), wantContents)
+			}
+
+			for i, name := range tt.wantLoaded {
+				c := llmRequest.Contents[1+i]
+				if c.Role != genai.RoleUser {
+					t.Errorf("loaded content[%d] role = %q, want %q", i, c.Role, genai.RoleUser)
+				}
+				if len(c.Parts) != 2 {
+					t.Fatalf("len(loaded content[%d].Parts) = %d, want 2", i, len(c.Parts))
+				}
+				if wantHeader := "Artifact " + name + " is:"; c.Parts[0].Text != wantHeader {
+					t.Errorf("loaded content[%d] header = %q, want %q", i, c.Parts[0].Text, wantHeader)
+				}
+				if c.Parts[1].Text != docBody {
+					t.Errorf("loaded content[%d] body = %q, want %q", i, c.Parts[1].Text, docBody)
+				}
+			}
+
+			noteContent := llmRequest.Contents[len(llmRequest.Contents)-1]
+			if noteContent.Role != genai.RoleUser {
+				t.Errorf("note content role = %q, want %q", noteContent.Role, genai.RoleUser)
+			}
+			if len(noteContent.Parts) != 1 {
+				t.Fatalf("len(noteContent.Parts) = %d, want 1", len(noteContent.Parts))
+			}
+			wantText := strings.Join(tt.wantNotes, "\n")
+			if diff := cmp.Diff(wantText, noteContent.Parts[0].Text); diff != "" {
+				t.Errorf("note text diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_RunnerRecovery(t *testing.T) {
+	const (
+		app, user, sid = "app", "user", "session"
+		docBody        = "saved artifact body"
+		recoveryReply  = "Recovered after load failure."
+	)
+
+	tests := []struct {
+		name          string
+		saveDoc       bool
+		artifactNames []any
+		wantDocLoaded bool
+		wantNote      string
+	}{
+		{
+			name:          "path separator name with empty artifact store",
+			artifactNames: []any{"src/main.go"},
+			wantNote:      `artifact "src/main.go" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+		},
+		{
+			name:          "missing artifact with empty artifact store",
+			artifactNames: []any{"missing.txt"},
+			wantNote:      `artifact "missing.txt" was not found`,
+		},
+		{
+			name:          "empty name alongside saved artifact",
+			saveDoc:       true,
+			artifactNames: []any{"doc1.txt", ""},
+			wantDocLoaded: true,
+			wantNote:      `artifact "" is not a valid artifact name; names must be non-empty plain filenames without path separators`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			artifacts := artifact.InMemoryService()
+			if tt.saveDoc {
+				if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+					AppName: app, UserID: user, SessionID: sid, FileName: "doc1.txt",
+					Part: genai.NewPartFromText(docBody),
+				}); err != nil {
+					t.Fatalf("Save() error = %v", err)
+				}
+			}
+
+			call := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{"artifact_names": tt.artifactNames})
+			call.FunctionCall.ID = "call-1"
+			mock := &testutil.MockModel{Responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{call}},
+				genai.NewContentFromText(recoveryReply, genai.RoleModel),
+			}}
+
+			a, err := llmagent.New(llmagent.Config{
+				Name:  "repro",
+				Model: mock,
+				Tools: []tool.Tool{loadartifactstool.New()},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			sessions := session.InMemoryService()
+			if _, err := sessions.Create(ctx, &session.CreateRequest{AppName: app, UserID: user, SessionID: sid}); err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
+			})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+
+			var finalText string
+			for ev, err := range r.Run(ctx, user, sid, genai.NewContentFromText("show me the artifact", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run() returned unexpected error: %v", err)
+				}
+				if ev.Content == nil {
+					continue
+				}
+				for _, p := range ev.Content.Parts {
+					if p.Text != "" {
+						finalText = p.Text
+					}
+				}
+			}
+
+			if len(mock.Requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(mock.Requests))
+			}
+			if finalText != recoveryReply {
+				t.Errorf("finalText = %q, want %q", finalText, recoveryReply)
+			}
+
+			secondReq := mock.Requests[1]
+			lastContent := secondReq.Contents[len(secondReq.Contents)-1]
+			if lastContent.Role != genai.RoleUser {
+				t.Errorf("last content role = %q, want %q", lastContent.Role, genai.RoleUser)
+			}
+			if len(lastContent.Parts) != 1 {
+				t.Fatalf("len(lastContent.Parts) = %d, want 1", len(lastContent.Parts))
+			}
+			if diff := cmp.Diff(tt.wantNote, lastContent.Parts[0].Text); diff != "" {
+				t.Errorf("note text diff (-want +got):\n%s", diff)
+			}
+
+			var sawDocBody bool
+			for _, content := range secondReq.Contents {
+				if content == nil {
+					t.Fatal("request includes nil content")
+				}
+				for _, p := range content.Parts {
+					if p != nil && p.Text == docBody {
+						sawDocBody = true
+					}
+				}
+			}
+			if sawDocBody != tt.wantDocLoaded {
+				t.Errorf("sawDocBody = %v, want %v", sawDocBody, tt.wantDocLoaded)
 			}
 		})
 	}
@@ -854,15 +1229,20 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 
 func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
+	return createToolContextWithService(t, t.Context(), artifact.InMemoryService())
+}
+
+func createToolContextWithService(t *testing.T, parentCtx context.Context, svc artifact.Service) agent.Context {
+	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{
-		Service:   artifact.InMemoryService(),
+		Service:   svc,
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",
 	}
 
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+	ctx := icontext.NewInvocationContext(parentCtx, icontext.InvocationContextParams{
 		Artifacts: artifacts,
 	})
 
@@ -1094,13 +1474,13 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 	t.Run("omits model-supplied artifact names from versioned load and list errors", func(t *testing.T) {
 		for _, tcErr := range []struct {
 			name     string
-			ctx      agent.Context
+			failing  string
 			response map[string]any
 			secret   string
 		}{
 			{
-				name: "LoadVersion error",
-				ctx:  tc,
+				name:    "LoadVersion error",
+				failing: "Load",
 				response: map[string]any{
 					"artifact_versions": []any{
 						map[string]any{"name": "patient-jane-doe-hiv-results.pdf", "version": float64(7)},
@@ -1109,8 +1489,8 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 				secret: "patient-jane-doe-hiv-results.pdf",
 			},
 			{
-				name: "Versions error",
-				ctx:  tc,
+				name:    "Versions error",
+				failing: "Versions",
 				response: map[string]any{
 					"artifact_names": []any{"never-saved-x.pdf"},
 					"list_versions":  true,
@@ -1118,15 +1498,8 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 				secret: "never-saved-x.pdf",
 			},
 			{
-				name: "GetArtifactVersion error",
-				ctx: agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
-					Artifacts: &artifactinternal.Artifacts{
-						Service:   failingGetVersionService{Service: svc},
-						AppName:   "app",
-						UserID:    "user",
-						SessionID: "session",
-					},
-				}), "call-meta", &session.EventActions{}, nil),
+				name:    "GetArtifactVersion error",
+				failing: "GetArtifactVersion",
 				response: map[string]any{
 					"artifact_names": []any{"design.md"},
 					"list_versions":  true,
@@ -1135,6 +1508,14 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 			},
 		} {
 			t.Run(tcErr.name, func(t *testing.T) {
+				errCtx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+					Artifacts: &artifactinternal.Artifacts{
+						Service:   identifyingErrorService{Service: svc, failing: tcErr.failing, cause: fs.ErrPermission},
+						AppName:   "app",
+						UserID:    "user",
+						SessionID: "session",
+					},
+				}), "call-err", &session.EventActions{}, nil)
 				llmReq := &model.LLMRequest{
 					Contents: []*genai.Content{{
 						Role: genai.RoleUser,
@@ -1143,9 +1524,9 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 						},
 					}},
 				}
-				err := requestProcessor.ProcessRequest(tcErr.ctx, llmReq)
-				if !errors.Is(err, fs.ErrNotExist) {
-					t.Fatalf("ProcessRequest error = %v, want errors.Is(_, fs.ErrNotExist)", err)
+				err := requestProcessor.ProcessRequest(errCtx, llmReq)
+				if !errors.Is(err, fs.ErrPermission) {
+					t.Fatalf("ProcessRequest error = %v, want errors.Is(_, fs.ErrPermission)", err)
 				}
 				if strings.Contains(err.Error(), tcErr.secret) {
 					t.Errorf("ProcessRequest error %q embeds model-supplied artifact name %q", err.Error(), tcErr.secret)
@@ -1153,14 +1534,6 @@ func TestLoadArtifactsTool_ProcessRequest_RevisionsAndMetadata(t *testing.T) {
 			})
 		}
 	})
-}
-
-type failingGetVersionService struct {
-	artifact.Service
-}
-
-func (f failingGetVersionService) GetArtifactVersion(context.Context, *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
-	return nil, fs.ErrNotExist
 }
 
 func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testing.T) {
@@ -1195,30 +1568,30 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 		{
 			name:     "artifact_versions with a version",
 			failing:  "Load",
-			cause:    fs.ErrNotExist,
+			cause:    fs.ErrPermission,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(7)}}},
-			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): permission denied",
 		},
 		{
 			name:     "in-process artifact_versions with a version",
 			failing:  "Load",
-			cause:    fs.ErrNotExist,
+			cause:    fs.ErrPermission,
 			response: map[string]any{"artifact_versions": []map[string]any{{"name": fileName, "version": 7}}},
-			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0] (version 7): permission denied",
 		},
 		{
 			name:     "artifact_names with top-level version",
 			failing:  "Load",
-			cause:    fs.ErrNotExist,
+			cause:    fs.ErrPermission,
 			response: map[string]any{"artifact_names": []any{fileName}, "version": float64(7)},
-			wantErr:  "failed to load artifact at artifact_names[0] (version 7): file does not exist",
+			wantErr:  "failed to load artifact at artifact_names[0] (version 7): permission denied",
 		},
 		{
 			name:     "artifact_versions without a version",
 			failing:  "Load",
-			cause:    fs.ErrNotExist,
+			cause:    fs.ErrPermission,
 			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName}}},
-			wantErr:  "failed to load artifact at artifact_versions[0]: file does not exist",
+			wantErr:  "failed to load artifact at artifact_versions[0]: permission denied",
 		},
 		{
 			name:     "artifact_versions with version 0",
@@ -1230,9 +1603,9 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 		{
 			name:     "artifact_names",
 			failing:  "Load",
-			cause:    fs.ErrNotExist,
+			cause:    context.Canceled,
 			response: map[string]any{"artifact_names": []any{fileName}},
-			wantErr:  "failed to load artifact at artifact_names[0]: file does not exist",
+			wantErr:  "failed to load artifact at artifact_names[0]: context canceled",
 		},
 		{
 			name:     "artifact_names denied by the service",
@@ -1251,9 +1624,9 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testin
 		{
 			name:     "list_versions reading revision metadata",
 			failing:  "GetArtifactVersion",
-			cause:    fs.ErrNotExist,
+			cause:    fs.ErrPermission,
 			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
-			wantErr:  "failed to get version 0 metadata for artifact at artifact_names[0]: file does not exist",
+			wantErr:  "failed to get version 0 metadata for artifact at artifact_names[0]: permission denied",
 		},
 	}
 	for _, tt := range tests {
@@ -1334,32 +1707,37 @@ func TestLoadArtifactsTool_ProcessRequest_ErrorsIdentifyFailingItem(t *testing.T
 			name: "second of two selectors with the same version",
 			response: map[string]any{"artifact_versions": []any{
 				map[string]any{"name": "doc1.txt", "version": float64(0)},
-				map[string]any{"name": "missing.txt", "version": float64(0)},
+				map[string]any{"name": "broken.txt", "version": float64(0)},
 			}},
-			wantErr: "failed to load artifact at artifact_versions[1] (version 0): file does not exist",
+			wantErr: "failed to load artifact at artifact_versions[1] (version 0): permission denied",
 		},
 		{
 			name: "selector after artifact_names",
 			response: map[string]any{
 				"artifact_names":    []any{"doc1.txt"},
-				"artifact_versions": []any{map[string]any{"name": "missing.txt"}},
+				"artifact_versions": []any{map[string]any{"name": "broken.txt"}},
 			},
-			wantErr: "failed to load artifact at artifact_versions[0]: file does not exist",
+			wantErr: "failed to load artifact at artifact_versions[0]: permission denied",
 		},
 		{
 			name:     "list_versions over several names",
-			response: map[string]any{"artifact_names": []any{"doc1.txt", "missing.txt"}, "list_versions": true},
-			wantErr:  "failed to list versions of artifact at artifact_names[1]: file does not exist",
+			response: map[string]any{"artifact_names": []any{"doc1.txt", "broken.txt"}, "list_versions": true},
+			wantErr:  "failed to list versions of artifact at artifact_names[1]: permission denied",
 		},
 		{
 			name:     "name given only in list_versions",
-			response: map[string]any{"artifact_names": []any{"doc1.txt"}, "list_versions": []any{"doc1.txt", "missing.txt"}},
-			wantErr:  "failed to list versions of artifact at list_versions[1]: file does not exist",
+			response: map[string]any{"artifact_names": []any{"doc1.txt"}, "list_versions": []any{"doc1.txt", "broken.txt"}},
+			wantErr:  "failed to list versions of artifact at list_versions[1]: permission denied",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc := createToolContext(t)
+			svc := &failingArtifactLoad{
+				Service: artifact.InMemoryService(),
+				name:    "broken.txt",
+				err:     fs.ErrPermission,
+			}
+			tc := createToolContextWithService(t, t.Context(), svc)
 			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", genai.NewPartFromText("v1")); err != nil {
 				t.Fatalf("Save: %v", err)
 			}
@@ -1372,8 +1750,8 @@ func TestLoadArtifactsTool_ProcessRequest_ErrorsIdentifyFailingItem(t *testing.T
 			if got := fmt.Sprint(err); got != tt.wantErr {
 				t.Errorf("ProcessRequest error = %q, want %q", got, tt.wantErr)
 			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true")
+			if !errors.Is(err, fs.ErrPermission) {
+				t.Errorf("errors.Is(err, fs.ErrPermission) = false, want true")
 			}
 		})
 	}
@@ -1408,6 +1786,22 @@ func TestLoadArtifactsTool_ProcessRequest_ParallelErrorNamesCall(t *testing.T) {
 	}
 }
 
+// nonSentinelFailService returns a plain non-sentinel error for Load and
+// Versions so redactFor's name annotations can be exercised independently of
+// fs.ErrInvalid handling.
+type nonSentinelFailService struct {
+	artifact.Service
+	err error
+}
+
+func (s nonSentinelFailService) Load(context.Context, *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	return nil, s.err
+}
+
+func (s nonSentinelFailService) Versions(context.Context, *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
+	return nil, s.err
+}
+
 func TestLoadArtifactsTool_ProcessRequest_InvalidNameKeepsReason(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1437,7 +1831,11 @@ func TestLoadArtifactsTool_ProcessRequest_InvalidNameKeepsReason(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc := createToolContext(t)
+			svc := nonSentinelFailService{
+				Service: artifact.InMemoryService(),
+				err:     errors.New("backend failure"),
+			}
+			tc := createToolContextWithService(t, t.Context(), svc)
 			req := &model.LLMRequest{Contents: []*genai.Content{{
 				Role:  genai.RoleUser,
 				Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", tt.response)},
@@ -1480,16 +1878,27 @@ func TestLoadArtifactsTool_ProcessRequest_ServiceAcceptsNestedName(t *testing.T)
 		Role:  genai.RoleUser,
 		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"reports/q4.pdf"}})},
 	}}}
-	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, missing)
-	if got, want := fmt.Sprint(err), "failed to load artifact at artifact_names[0]: file does not exist"; got != want {
-		t.Errorf("ProcessRequest error for a missing nested name = %q, want %q", got, want)
+	if err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, missing); err != nil {
+		t.Fatalf("ProcessRequest for a missing nested name = %v, want nil", err)
+	}
+	if got := len(missing.Contents); got != 2 {
+		t.Fatalf("len(missing.Contents) = %d, want 2", got)
+	}
+	if got := missing.Contents[1].Role; got != genai.RoleUser {
+		t.Errorf("missing note role = %q, want %q", got, genai.RoleUser)
+	}
+	if len(missing.Contents[1].Parts) != 1 {
+		t.Fatalf("len(missing.Contents[1].Parts) = %d, want 1", len(missing.Contents[1].Parts))
+	}
+	if got, want := missing.Contents[1].Parts[0].Text, `artifact "reports/q4.pdf" was not found`; got != want {
+		t.Errorf("missing nested name note = %q, want %q", got, want)
 	}
 
 	unreachable := &model.LLMRequest{Contents: []*genai.Content{{
 		Role:  genai.RoleUser,
 		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{"artifact_names": []any{"reports/offline.pdf"}})},
 	}}}
-	err = loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, unreachable)
+	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, unreachable)
 	if got, want := fmt.Sprint(err), "failed to load artifact at artifact_names[0]: artifact service error of type *net.DNSError; the name contains a path separator, which the in-memory and GCS artifact services reject"; got != want {
 		t.Errorf("ProcessRequest error for a storage failure on a nested name = %q, want %q", got, want)
 	}
