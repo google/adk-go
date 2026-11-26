@@ -15,7 +15,10 @@
 package gcp
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -131,6 +134,7 @@ func referenceBounded(ls string, limit int, lowered []string) (string, bool) {
 // is the bound, so it spends its budget on length instead — bodies to eight bytes
 // over two letters, where a secret can tile the body and still straddle a cut.
 func TestRedactLoweredMatchesReferenceAtEveryBound(t *testing.T) {
+	t.Parallel()
 	alphabet := []byte("ab")
 	var words []string
 	var gen func(prefix string, n int)
@@ -156,27 +160,54 @@ func TestRedactLoweredMatchesReferenceAtEveryBound(t *testing.T) {
 		}
 	}
 
-	checked, mismatches := 0, 0
-	for _, body := range words {
-		for _, s1 := range secrets {
-			for _, s2 := range secrets {
-				lowered := []string{s1, s2}
-				// Every bound, and one on each side of the text: both ends are
-				// reachable, since visibleLimit returns len(s) for a short text and
-				// can back a cut all the way to 0 on a body that is not UTF-8.
-				for limit := -1; limit <= len(body)+1; limit++ {
-					checked++
-					got, gotHit := redactLowered(body, limit, lowered)
-					want, wantHit := referenceBounded(body, limit, lowered)
-					if got == want && gotHit == wantHit {
-						continue
+	workers := runtime.GOMAXPROCS(0)
+	type workerResult struct {
+		checked    int
+		mismatches int
+		errs       []string
+	}
+	results := make([]workerResult, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			var res workerResult
+			for idx := w; idx < len(words); idx += workers {
+				body := words[idx]
+				for _, s1 := range secrets {
+					for _, s2 := range secrets {
+						lowered := []string{s1, s2}
+						// Every bound, and one on each side of the text: both ends are
+						// reachable, since visibleLimit returns len(s) for a short text and
+						// can back a cut all the way to 0 on a body that is not UTF-8.
+						for limit := -1; limit <= len(body)+1; limit++ {
+							res.checked++
+							got, gotHit := redactLowered(body, limit, lowered)
+							want, wantHit := referenceBounded(body, limit, lowered)
+							if got == want && gotHit == wantHit {
+								continue
+							}
+							if len(res.errs) < 5 {
+								res.errs = append(res.errs, fmt.Sprintf("redactLowered(%q, %d, %q) = (%q, %v), reference says (%q, %v)",
+									body, limit, lowered, got, gotHit, want, wantHit))
+							}
+							res.mismatches++
+						}
 					}
-					if mismatches < 5 {
-						t.Errorf("redactLowered(%q, %d, %q) = (%q, %v), reference says (%q, %v)",
-							body, limit, lowered, got, gotHit, want, wantHit)
-					}
-					mismatches++
 				}
+			}
+			results[w] = res
+		})
+	}
+	wg.Wait()
+
+	checked, mismatches, reported := 0, 0, 0
+	for _, res := range results {
+		checked += res.checked
+		mismatches += res.mismatches
+		for _, msg := range res.errs {
+			if reported < 5 {
+				t.Errorf("%s", msg)
+				reported++
 			}
 		}
 	}
@@ -205,6 +236,7 @@ func TestRedactLoweredMatchesReferenceAtEveryBound(t *testing.T) {
 // "aa"). TestRedactAcrossSeveralSecrets carries that case for exactly this
 // reason.
 func TestRedactMatchesReferenceExhaustively(t *testing.T) {
+	t.Parallel()
 	alphabet := []byte("abAB")
 	var words []string
 	var gen func(prefix string, n int)
@@ -233,42 +265,80 @@ func TestRedactMatchesReferenceExhaustively(t *testing.T) {
 		}
 	}
 
+	collapse := func(x string) string {
+		for strings.Contains(x, "[redacted][redacted]") {
+			x = strings.ReplaceAll(x, "[redacted][redacted]", "[redacted]")
+		}
+		return x
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	type workerResult struct {
+		checked       int
+		mismatches    int
+		adjacencyOnly int
+		adjErrs       []string
+		misErrs       []string
+	}
+	results := make([]workerResult, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			var res workerResult
+			for idx := w; idx < len(words); idx += workers {
+				body := words[idx]
+				for _, s1 := range secrets {
+					for _, s2 := range secrets {
+						res.checked++
+						got, want := redact(body, s1, s2), reference(body, s1, s2)
+						if got == want {
+							continue
+						}
+						// Adjacency is counted apart from substance, and then required to
+						// be zero. Redact emits one marker per redacted RUN, so it should
+						// match the reference byte for byte — separating the two says which
+						// property broke rather than only that something did.
+						//
+						// Tolerating adjacency was tried and is wrong. Reverting the
+						// run-merge makes redact emit a marker per MATCH, which turns a
+						// megabyte of a one-character user id into ten megabytes. With the
+						// difference merely counted, this test passed with 122,304 of them.
+						if collapse(got) == collapse(want) {
+							if len(res.adjErrs) < 3 {
+								res.adjErrs = append(res.adjErrs, fmt.Sprintf("ADJACENCY redact(%q, %q, %q) = %q, reference says %q — same bytes "+
+									"redacted, different marker count, so the run-merge is gone", body, s1, s2, got, want))
+							}
+							res.adjacencyOnly++
+							continue
+						}
+						if len(res.misErrs) < 5 {
+							res.misErrs = append(res.misErrs, fmt.Sprintf("SUBSTANTIVE redact(%q, %q, %q) = %q, reference says %q", body, s1, s2, got, want))
+						}
+						res.mismatches++
+					}
+				}
+			}
+			results[w] = res
+		})
+	}
+	wg.Wait()
+
 	checked, mismatches, adjacencyOnly := 0, 0, 0
-	for _, body := range words {
-		for _, s1 := range secrets {
-			for _, s2 := range secrets {
-				checked++
-				got, want := redact(body, s1, s2), reference(body, s1, s2)
-				if got == want {
-					continue
-				}
-				// Adjacency is counted apart from substance, and then required to
-				// be zero. Redact emits one marker per redacted RUN, so it should
-				// match the reference byte for byte — separating the two says which
-				// property broke rather than only that something did.
-				//
-				// Tolerating adjacency was tried and is wrong. Reverting the
-				// run-merge makes redact emit a marker per MATCH, which turns a
-				// megabyte of a one-character user id into ten megabytes. With the
-				// difference merely counted, this test passed with 122,304 of them.
-				collapse := func(x string) string {
-					for strings.Contains(x, "[redacted][redacted]") {
-						x = strings.ReplaceAll(x, "[redacted][redacted]", "[redacted]")
-					}
-					return x
-				}
-				if collapse(got) == collapse(want) {
-					if adjacencyOnly < 3 {
-						t.Errorf("ADJACENCY redact(%q, %q, %q) = %q, reference says %q — same bytes "+
-							"redacted, different marker count, so the run-merge is gone", body, s1, s2, got, want)
-					}
-					adjacencyOnly++
-					continue
-				}
-				if mismatches < 5 {
-					t.Errorf("SUBSTANTIVE redact(%q, %q, %q) = %q, reference says %q", body, s1, s2, got, want)
-				}
-				mismatches++
+	adjReported, misReported := 0, 0
+	for _, res := range results {
+		checked += res.checked
+		mismatches += res.mismatches
+		adjacencyOnly += res.adjacencyOnly
+		for _, msg := range res.adjErrs {
+			if adjReported < 3 {
+				t.Errorf("%s", msg)
+				adjReported++
+			}
+		}
+		for _, msg := range res.misErrs {
+			if misReported < 5 {
+				t.Errorf("%s", msg)
+				misReported++
 			}
 		}
 	}
