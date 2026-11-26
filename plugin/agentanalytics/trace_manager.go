@@ -10122,7 +10122,8 @@ func activationKey(ctx context.Context) any {
 	}
 	return orZero(func() any {
 		var key any
-		var cur any = c.WithICDelta(nil)
+		derived := c.WithICDelta(nil)
+		var cur any = derived
 		for steps := 0; cur != nil && steps < maxActivationKeyDepth; steps++ {
 			if v := reflect.ValueOf(cur); v.Kind() != reflect.Pointer || v.IsNil() {
 				break
@@ -10150,6 +10151,14 @@ func activationKey(ctx context.Context) any {
 					}
 				}
 			}
+		}
+		// A nil delta on an external callback can allocate a shallow copy.
+		// When it returns another pointer of the receiver's type and there
+		// is no inner activation, retry to distinguish a copy from a stable
+		// pointer shared by different callbacks.
+		if key == derived && key != ctx && reflect.TypeOf(key) == reflect.TypeOf(ctx) &&
+			derived != c.WithICDelta(nil) {
+			return ctx
 		}
 		return key
 	})

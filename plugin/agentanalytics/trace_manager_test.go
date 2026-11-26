@@ -649,6 +649,78 @@ func TestTraceManager_ModelCallSpans(t *testing.T) {
 	})
 }
 
+type copyingModelCallbackContext struct {
+	mockInvocationContext
+	canonical *copyingModelCallbackContext
+}
+
+func (c *copyingModelCallbackContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	if c.canonical != nil {
+		return c.canonical
+	}
+	clone := *c
+	return &clone
+}
+
+func (*copyingModelCallbackContext) InvocationContext() agent.InvocationContext { return nil }
+
+func TestTraceManager_ModelSpanWithCopyingCallbackContext(t *testing.T) {
+	p := newClockedPlugin(t)
+	first := &copyingModelCallbackContext{mockInvocationContext: mockInvocationContext{
+		ctx: t.Context(), agentName: "worker", invocationID: "inv-copying-context",
+	}}
+	// Overlapping activations can share an invocation, agent, branch and path.
+	secondValue := *first
+	second := &secondValue
+	req := &model.LLMRequest{Model: "gemini-test"}
+	res := &model.LLMResponse{Content: textContent("model", "hi")}
+	var errs callbackErrors
+	errs.add(p.beforeModel(first, req))
+	errs.add(p.beforeModel(second, req))
+	p.now = p.now.Add(10 * time.Millisecond)
+	errs.add(p.onModelError(first, req, errors.New("model unavailable")))
+	errs.add(p.afterModel(second, res, nil))
+	errs.add(p.afterModel(first, res, nil))
+	errs.check(t)
+
+	rows := p.takeRows()
+	want := []string{EventLLMRequest, EventLLMRequest, EventLLMError, EventLLMResponse, EventLLMResponse}
+	if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+	}
+	firstRequest, secondRequest := placeOf(rows[0]), placeOf(rows[1])
+	if firstRequest.span == secondRequest.span {
+		t.Error("overlapping model requests share a span")
+	}
+	if got := placeOf(rows[2]); got != firstRequest {
+		t.Error("LLM_ERROR did not reuse its LLM_REQUEST span")
+	}
+	if got := placeOf(rows[3]); got != secondRequest {
+		t.Error("LLM_RESPONSE did not reuse its LLM_REQUEST span")
+	}
+	if got := placeOf(rows[4]); got != firstRequest {
+		t.Error("recovered LLM_RESPONSE did not reuse its LLM_REQUEST span")
+	}
+}
+
+func TestTraceManager_ModelSpanWithCanonicalCallbackContext(t *testing.T) {
+	p := newClockedPlugin(t)
+	canonical := &copyingModelCallbackContext{mockInvocationContext: mockInvocationContext{
+		ctx: t.Context(), agentName: "worker", invocationID: "inv-canonical-context",
+	}}
+	before := &copyingModelCallbackContext{mockInvocationContext: canonical.mockInvocationContext, canonical: canonical}
+	after := &copyingModelCallbackContext{mockInvocationContext: canonical.mockInvocationContext, canonical: canonical}
+	var errs callbackErrors
+	errs.add(p.beforeModel(before, &model.LLMRequest{Model: "gemini-test"}))
+	errs.add(p.afterModel(after, &model.LLMResponse{Content: textContent("model", "hi")}, nil))
+	errs.check(t)
+
+	rows := p.takeRows()
+	if got, want := placeOf(onlyRowOfType(t, rows, EventLLMResponse)), placeOf(onlyRowOfType(t, rows, EventLLMRequest)); got != want {
+		t.Error("LLM_RESPONSE did not reuse its LLM_REQUEST span across callbacks sharing a canonical context")
+	}
+}
+
 // TestTraceManager_AfterAgentWithoutBeforeAgent ends an agent whose start
 // was not seen. The row gets a span of its own under the invocation, whose
 // span stays open.
