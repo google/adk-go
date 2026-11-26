@@ -719,3 +719,95 @@ func TestSchemaURL(t *testing.T) {
 		})
 	}
 }
+
+func TestTraceGenerateContentResult_ResponseModel(t *testing.T) {
+	tests := []struct {
+		name       string
+		schema     string
+		result     generateContentResult
+		want       string
+		wantAbsent bool
+	}{
+		{
+			name:   "default schema uses response ModelVersion over RequestModel",
+			schema: "otel_semconv_1_44",
+			result: generateContentResult{
+				RequestModel: "requested-model",
+				Response:     &model.LLMResponse{ModelVersion: "served-model-v2", FinishReason: genai.FinishReasonStop},
+			},
+			want: "served-model-v2",
+		},
+		{
+			name:   "legacy schema uses response ModelVersion over RequestModel",
+			schema: "otel_semconv_1_36",
+			result: generateContentResult{
+				RequestModel: "requested-model",
+				Response:     &model.LLMResponse{ModelVersion: "served-legacy"},
+			},
+			want: "served-legacy",
+		},
+		{
+			name:   "falls back to RequestModel when ModelVersion is empty",
+			schema: "otel_semconv_1_44",
+			result: generateContentResult{
+				RequestModel: "requested-model",
+				Response:     &model.LLMResponse{FinishReason: genai.FinishReasonStop},
+			},
+			want: "requested-model",
+		},
+		{
+			name:   "omits attribute when both ModelVersion and RequestModel are empty",
+			schema: "otel_semconv_1_44",
+			result: generateContentResult{
+				Response: &model.LLMResponse{FinishReason: genai.FinishReasonStop},
+			},
+			wantAbsent: true,
+		},
+		{
+			name:   "omits attribute on error with nil response",
+			schema: "otel_semconv_1_44",
+			result: generateContentResult{
+				RequestModel: "requested-model",
+				Error:        errTest,
+			},
+			wantAbsent: true,
+		},
+		{
+			name:   "default schema selects latest non-empty ModelVersion across streamed chunks",
+			schema: "otel_semconv_1_44",
+			result: generateContentResult{
+				RequestModel: "requested-model",
+				Response:     &model.LLMResponse{FinishReason: genai.FinishReasonStop},
+				Responses: []*model.LLMResponse{
+					{ModelVersion: "served-v1", Partial: true},
+					{ModelVersion: "served-v2", Partial: true},
+					{FinishReason: genai.FinishReasonStop},
+				},
+			},
+			want: "served-v2",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			exporter := setupTestTracer(t)
+
+			_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: tc.result.RequestModel})
+			traceGenerateContentResult(span, tc.result)
+			span.End()
+
+			attrs := attributesToMap(exporter.GetSpans()[0].Attributes)
+			got, ok := attrs[semconv.GenAIResponseModelKey]
+			if tc.wantAbsent {
+				if ok {
+					t.Fatalf("gen_ai.response.model = %q, want absent", got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("gen_ai.response.model = %q (present=%v), want %q", got, ok, tc.want)
+			}
+		})
+	}
+}

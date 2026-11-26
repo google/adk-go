@@ -55,6 +55,7 @@
               "gen_ai.response.finish_reasons": [
                 "tool_call"
               ],
+              "gen_ai.response.model": "mock",
               "gen_ai.system_instructions": {
                 "JSON_STRING": [
                   {
@@ -166,6 +167,7 @@
                           "gen_ai.response.finish_reasons": [
                             "stop"
                           ],
+                          "gen_ai.response.model": "mock",
                           "gen_ai.system_instructions": {
                             "JSON_STRING": [
                               {
@@ -273,6 +275,7 @@
               "gen_ai.response.finish_reasons": [
                 "stop"
               ],
+              "gen_ai.response.model": "mock",
               "gen_ai.system_instructions": {
                 "JSON_STRING": [
                   {

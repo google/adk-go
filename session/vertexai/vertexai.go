@@ -89,19 +89,21 @@ func (s *vertexAiService) Get(ctx context.Context, req *session.GetRequest) (*se
 		return nil
 	})
 
-	g.Go(func() error {
-		events, eventsErr = s.client.listSessionEvents(gCtx, req.AppName, req.SessionID, req.After, req.NumRecentEvents)
-		if eventsErr != nil {
-			return fmt.Errorf("failed to list session events: %w", eventsErr)
-		}
-		return nil
-	})
+	if !req.ExcludeEvents {
+		g.Go(func() error {
+			events, eventsErr = s.client.listSessionEvents(gCtx, req.AppName, req.SessionID, req.After, req.NumRecentEvents)
+			if eventsErr != nil {
+				return fmt.Errorf("failed to list session events: %w", eventsErr)
+			}
+			return nil
+		})
+	}
 
 	if err := g.Wait(); err != nil {
-		// Both calls run concurrently against the same session, so a missing
-		// one can surface from either, and whichever loses the race reports the
-		// context cancellation instead. Report the missing session whenever
-		// either call saw it, so callers can rely on
+		// Without ExcludeEvents both calls run concurrently against the same
+		// session, so a missing one can surface from either, and whichever
+		// loses the race reports the context cancellation instead. Report the
+		// missing session whenever a call saw it, so callers can rely on
 		// errors.Is(err, session.ErrNotFound).
 		for _, callErr := range []error{getErr, eventsErr} {
 			if callErr != nil && isNotFoundError(callErr) {
