@@ -29125,6 +29125,106 @@ func onlyAgentRow(t *testing.T, rows []map[string]any, eventType, agent string) 
 	return got[0]
 }
 
+// TestRunner_FirstLookalikeWorkerParentSpanID covers a second worker starting
+// while the first worker and its holder are suspended in yield.
+func TestRunner_FirstLookalikeWorkerParentSpanID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		declared bool
+		nested   bool
+		opaque   bool
+		want     string
+	}{
+		{name: "undeclared sibling", want: "root"},
+		{name: "declared sibling", declared: true, want: "root"},
+		{name: "nested worker", nested: true, want: "holder"},
+		{name: "unknown launcher", opaque: true, want: "holder"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			var holderCtx agent.InvocationContext
+			holder, err := agent.New(agent.Config{
+				Name: "holder",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					holderCtx = ctx
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Content = textContent("model", "holder answer")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(holder): %v", err)
+			}
+			first, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{holder},
+				Run:       holder.Run,
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker): %v", err)
+			}
+			second := newOneEventAgent(t, "worker", nil)
+			rootConfig := agent.Config{
+				Name: "root",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for ev, runErr := range first.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+							from := ctx
+							if tc.nested {
+								from = holderCtx
+							}
+							var parent context.Context = from
+							if tc.opaque {
+								parent = context.WithoutCancel(parent)
+							}
+							childCtx, cancel := context.WithCancel(parent)
+							for ev, runErr := range second.Run(from.WithContext(childCtx)) {
+								if !yield(ev, runErr) || runErr != nil {
+									cancel()
+									return
+								}
+							}
+							cancel()
+						}
+					}
+				},
+			}
+			if tc.declared {
+				rootConfig.SubAgents = []agent.Agent{first}
+			}
+			root, err := agent.New(rootConfig)
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+			}
+			rootStart := onlyAgentRow(t, rows, EventAgentStarting, "root")
+			holderStart := onlyAgentRow(t, rows, EventAgentStarting, "holder")
+			if workerStarts[0]["parent_span_id"] != rootStart["span_id"] || holderStart["parent_span_id"] != workerStarts[0]["span_id"] {
+				t.Fatal("expected root to parent the first worker and the first worker to parent holder")
+			}
+			names := map[any]string{rootStart["span_id"]: "root", holderStart["span_id"]: "holder", workerStarts[0]["span_id"]: "first worker"}
+			if got := names[workerStarts[1]["parent_span_id"]]; got != tc.want {
+				t.Errorf("second worker parent = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation covers a
 // child agent that one activation of worker declares and runs with its own
 // context on a goroutine where another activation named worker is still open
