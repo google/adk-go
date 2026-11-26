@@ -165,7 +165,7 @@ func sanitizeQueryPairs(raw string, requireEquals bool) (string, bool) {
 		key := canonicalizeCredentialMarker(keyText)
 		if isSensitiveKey(key) || normalizeKey(key) == "key" || (!requireEquals && endsInSensitiveTextKey(key)) {
 			safeKey, keyChanged := redactEscapedComponent(rawKey, unescape, escape)
-			if hasEq && isRedactedMarker(rawValue) {
+			if hasEq && (rawValue == "" || isRedactedMarker(rawValue)) {
 				if keyChanged {
 					pairs[i], changed = safeKey+"="+rawValue, true
 				}
@@ -247,6 +247,9 @@ func redactURIComponent(s string) (string, bool) {
 		return s, false
 	}
 	scrubbed := scrubTextPatterns(s)
+	if exposesEncodedPattern(scrubbed, scrubErrorTokens) {
+		return redactedSensitiveTextPlaceholder, true
+	}
 	return scrubbed, scrubbed != s
 }
 

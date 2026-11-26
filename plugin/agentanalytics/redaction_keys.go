@@ -33,8 +33,8 @@ import (
 // (lines 884-905 at d723cb87) defines a 20-key _SENSITIVE_KEYS set normalized
 // via lowercase/"-"->"_", plus "temp:" session keys (lines 1737-1738, 2317-2318).
 // Go keeps the broader v0.1.0 34-key case- and separator-insensitive set plus
-// secret_key, signing_key, compound keys, and stacked user:/app:/temp: prefixes
-// so upgrading from v0.1.0 never weakens redaction.
+// secret_key, signing_key, word-bounded compound keys, and stacked
+// user:/app:/temp: prefixes (see TestIsSensitiveKey and redaction_test.go).
 var sensitiveKeys = map[string]struct{}{
 	"access_token": {}, "api_key": {}, "api_key_secret": {}, "api_key_string": {},
 	"auth_code": {}, "authorization": {}, "aws_secret_access_key": {}, "aws_session_token": {},
@@ -128,24 +128,25 @@ func foldRuneAt(s string, i int) (folded byte, size int, upper, ok bool) {
 }
 
 func foldKeyText(s string, dropSeps bool) string {
-	b := make([]byte, 0, len(s))
-	changed := false
 	for i := 0; i < len(s); {
 		fc, sz, upper, ok := foldRuneAt(s, i)
-		if !ok {
-			b = append(b, s[i:i+sz]...)
-		} else if dropSeps && (fc == '-' || fc == '_' || fc == '.') {
-			changed = true
-		} else {
-			changed = changed || upper || sz > 1
-			b = append(b, fc)
+		if !ok || upper || sz > 1 || (dropSeps && (fc == '-' || fc == '_' || fc == '.')) {
+			b := make([]byte, i, len(s))
+			copy(b, s[:i])
+			for i < len(s) {
+				fc, sz, _, ok := foldRuneAt(s, i)
+				if !ok {
+					b = append(b, s[i:i+sz]...)
+				} else if !(dropSeps && (fc == '-' || fc == '_' || fc == '.')) {
+					b = append(b, fc)
+				}
+				i += sz
+			}
+			return string(b)
 		}
 		i += sz
 	}
-	if !changed {
-		return s
-	}
-	return string(b)
+	return s
 }
 
 func foldKeyASCII(k string) string { return foldKeyText(k, false) }
@@ -248,10 +249,30 @@ func isSensitiveKey(k string) bool {
 	if rest == "" {
 		return false
 	}
-	if _, ok := sensitiveKeyNames[compactKey(rest)]; ok {
+	if isSensitiveKeyName(rest) {
 		return true
 	}
 	return isCompoundSensitiveKey(rest)
+}
+
+func isNonCredentialSegment(seg string) bool {
+	if len(seg) <= 64 {
+		var stack [64]byte
+		b := stack[:0]
+		for i := 0; i < len(seg); {
+			fc, sz, _, ok := foldRuneAt(seg, i)
+			if !ok {
+				b = append(b, seg[i:i+sz]...)
+			} else {
+				b = append(b, fc)
+			}
+			i += sz
+		}
+		_, excluded := nonCredentialSegments[string(b)]
+		return excluded
+	}
+	_, excluded := nonCredentialSegments[foldKeyASCII(seg)]
+	return excluded
 }
 
 func isCompoundSensitiveKey(k string) bool {
@@ -259,7 +280,22 @@ func isCompoundSensitiveKey(k string) bool {
 	if idx := strings.LastIndexAny(k, "_-."); idx >= 0 {
 		lastSeg = k[idx+1:]
 	}
-	if _, excluded := nonCredentialSegments[foldKeyASCII(lastSeg)]; excluded {
+	if isNonCredentialSegment(lastSeg) {
+		return false
+	}
+	if len(k) <= 128 {
+		var cBuf [128]byte
+		var sBuf [128]bool
+		compact, starts, hasBoundary := splitCompoundKeyBuf(k, cBuf[:0], sBuf[:0])
+		if !hasBoundary || len(compact) == 0 {
+			return false
+		}
+		for _, name := range compoundKeySuffixes {
+			i := len(compact) - len(name)
+			if i > 0 && starts[i] && string(compact[i:]) == name && (name != "token" || !isPageTokenKeyBytes(compact[:i], starts)) {
+				return true
+			}
+		}
 		return false
 	}
 	compact, starts, hasBoundary := splitCompoundKey(k)
@@ -275,12 +311,12 @@ func isCompoundSensitiveKey(k string) bool {
 	return false
 }
 
-func splitCompoundKey(k string) (compact string, starts []bool, hasBoundary bool) {
-	b, starts, sep := make([]byte, 0, len(k)), make([]bool, 0, len(k)), true
+func splitCompoundKeyBuf(k string, b []byte, starts []bool) (compact []byte, outStarts []bool, hasBoundary bool) {
+	sep := true
 	for i := 0; i < len(k); {
 		fc, sz, upper, ok := foldRuneAt(k, i)
 		if !ok {
-			return "", nil, false
+			return nil, nil, false
 		}
 		if sz == 1 && (fc == '_' || fc == '-' || fc == '.') {
 			sep, hasBoundary = true, true
@@ -288,23 +324,32 @@ func splitCompoundKey(k string) (compact string, starts []bool, hasBoundary bool
 			continue
 		}
 		if !('a' <= fc && fc <= 'z') && !('0' <= fc && fc <= '9') {
-			return "", nil, false
+			return nil, nil, false
 		}
 		hasBoundary = hasBoundary || upper
 		starts, b, sep = append(starts, sep || upper), append(b, fc), false
 		i += sz
 	}
+	return b, starts, hasBoundary
+}
+
+func splitCompoundKey(k string) (compact string, starts []bool, hasBoundary bool) {
+	b, starts, hasBoundary := splitCompoundKeyBuf(k, make([]byte, 0, len(k)), make([]bool, 0, len(k)))
 	return string(b), starts, hasBoundary
 }
 
 func isPageTokenKey(before string, starts []bool) bool {
-	switch before {
+	return isPageTokenKeyBytes([]byte(before), starts)
+}
+
+func isPageTokenKeyBytes(before []byte, starts []bool) bool {
+	switch string(before) {
 	case "next", "prev", "previous", "pad", "eos", "eot", "bos", "unk", "cls", "sep", "mask":
 		return true
 	}
 	for _, cursor := range []string{"page", "sync", "continuation", "resume"} {
-		if i := len(before) - len(cursor); i >= 0 && starts[i] && before[i:] == cursor {
-			switch before[:i] {
+		if i := len(before) - len(cursor); i >= 0 && starts[i] && string(before[i:]) == cursor {
+			switch string(before[:i]) {
 			case "", "next", "prev", "previous", "start", "newstart":
 				return true
 			}
@@ -315,6 +360,26 @@ func isPageTokenKey(before string, starts []bool) bool {
 
 func isWordByte(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_'
+}
+
+func isSensitiveKeyName(k string) bool {
+	if len(k) <= 128 {
+		var stack [128]byte
+		b := stack[:0]
+		for i := 0; i < len(k); {
+			fc, sz, _, ok := foldRuneAt(k, i)
+			if !ok {
+				b = append(b, k[i:i+sz]...)
+			} else if fc != '-' && fc != '_' && fc != '.' {
+				b = append(b, fc)
+			}
+			i += sz
+		}
+		_, ok := sensitiveKeyNames[string(b)]
+		return ok
+	}
+	_, ok := sensitiveKeyNames[compactKey(k)]
+	return ok
 }
 
 func isBareSensitiveKeyName(name string) bool {
@@ -336,8 +401,7 @@ func isBareSensitiveKeyName(name string) bool {
 	if prevSep {
 		return false
 	}
-	_, ok := sensitiveKeyNames[compactKey(name)]
-	return ok
+	return isSensitiveKeyName(name)
 }
 
 // sensitiveKeyStart returns the starting offset of the sensitive key within

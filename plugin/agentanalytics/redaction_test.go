@@ -16,7 +16,10 @@ package agentanalytics
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
 	"math"
+	"math/rand/v2"
 	"regexp"
 	"slices"
 	"strings"
@@ -314,6 +317,8 @@ func TestSanitizeURIComponents(t *testing.T) {
 		{"bearer token in a query value", "https://h/p?q=Bearer+SECRET123", "https://h/p?q=Bearer+" + r},
 		{"pair in a query value", "https://h/p?note=password%3DSECRET123", "https://h/p?note=password%3D" + r},
 		{"URL in a query value", "https://h/redirect?next=https://inner/p?token=SECRET123", "https://h/redirect?next=https%3A%2F%2Finner%2Fp%3Ftoken%3D" + r},
+		{"double-redirect signed file URI", "https://a.example/redirect?next=https%3A%2F%2Fb.example%2Fr%3Fnext%3Dhttps%253A%252F%252Fc.example%252Ff%253Faccess_token%253DSECRET", "https://a.example/redirect?next=%5BREDACTED_SENSITIVE_TEXT%5D"},
+		{"query key with empty value", "https://h/p?X-Amz-Security-Token=", "https://h/p?X-Amz-Security-Token="},
 		{"cursors and counters", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3"},
 		{"compound name that ends in key", "https://h/p?primary_key=abc", "https://h/p?primary_key=abc"},
 		{"plus in a query value", "https://h/p?q=a+b&sort=asc", "https://h/p?q=a+b&sort=asc"},
@@ -386,6 +391,8 @@ func TestSanitizeURIComponents(t *testing.T) {
 			{"route slug", "err: https://example.com/account/reset-password/confirm failed", "err: https://example.com/account/reset-password/confirm failed"},
 			{"file name in a path", "err: https://example.com/certs/private.key/download failed", "err: https://example.com/certs/private.key/download failed"},
 			{"delimiter without a scheme", "123://456/789 and ://x stay", "123://456/789 and ://x stay"},
+			{"query key with empty value followed by space", "https://h/p?X-Amz-Security-Token= V", "https://h/p?X-Amz-Security-Token=[REDACTED]"},
+			{"fragment key with empty value followed by space", "https://h/cb#token=URISECRET1&x=1&spring.datasource.password= URISECRET2 for user bob", "https://h/cb#token=" + r + "&x=1&spring.datasource.password=[REDACTED] for user bob"},
 		})
 	})
 }
@@ -494,10 +501,31 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"one pair on each line", "client_secret=abc\nrefresh_token=def\nid_token=ghi", "client_secret=[REDACTED]\nrefresh_token=[REDACTED]\nid_token=[REDACTED]"},
 			{"double-quoted value", `password="a=b" token=SECRET123`, `password="[REDACTED]" token=[REDACTED]`},
 			{"single-quoted key and value", "'dbPassword': 'hunter2'", "'dbPassword':'[REDACTED]'"},
+			{"single-quoted padded key", "' DB_PASSWORD ': 'v'", "' DB_PASSWORD ':'[REDACTED]'"},
+			{"double-quoted padded key with equals", `" API_KEY " = "v"`, `" API_KEY "="` + redactedValue + `"`},
+			{"prose inside padded quotes is kept", `he said "use DB_PASSWORD " = "v"`, `he said "use DB_PASSWORD " = "v"`},
 			{"escaped quotes", `msg: \"password\": \"SECRET123\" end`, `msg: \"password\":\"[REDACTED]\" end`},
 			{"escaped quote in an escaped quoted value", `token=\"a\\\"SECRET\"`, `token=\"[REDACTED]\"`},
 			{"state-prefixed key", "user:temp:api_key=sk-123 x=1", "user:temp:api_key=[REDACTED] x=1"},
 			{"temp: key", "temp:session=abc next=1", "temp:session=[REDACTED] next=1"},
+			{"state.temp: key", "state.temp:x=V", "state.temp:x=[REDACTED]"},
+			{"flag --temp: key", "run --temp:scratch=V --verbose", "run --temp:scratch=[REDACTED] --verbose"},
+			{"flag -temp: key", "-temp:x=V", "-temp:x=[REDACTED]"},
+			{"temp: key with colon before equals", "temp:cache:item = V", "temp:cache:item=[REDACTED]"},
+			{"temp: key with colon before colon and space", "temp:cache:item: V", "temp:cache:item:[REDACTED]"},
+			{"single-quoted padded multi-colon temp: key", "' temp:cache:item ': 'v'", "' temp:cache:item ':'[REDACTED]'"},
+			{"double-quoted padded multi-colon temp: key with equals", `log: " temp:cache:item " = V`, `log: " temp:cache:item "=[REDACTED]`},
+			{"single-quoted padded dotted multi-colon temp: key", "' state.temp:cache:item ': 'v'", "' state.temp:cache:item ':'[REDACTED]'"},
+			{"prose inside padded multi-colon temp: quotes keeps value", `' see temp:x ': 'v'`, `' see temp:x ': 'v'`},
+			{"temp: key with colon value", "temp:x:V", "temp:x:[REDACTED]"},
+			{"temp: key with colon before sensitive key", "temp:a:token=2", "temp:a:token=[REDACTED]"},
+			{"punctuation-joined container and pair", "dbPassword={abc}/password: V", "dbPassword=[REDACTED]"},
+			{"punctuation-joined colon container and pair", "dbPassword={a:b}/password: V", "dbPassword=[REDACTED]"},
+			{"punctuation-joined spaced container and pair", "dbPassword={a: b}/password: V", "dbPassword=[REDACTED]"},
+			{"punctuation-joined quoted value and pair", `password='foo 'x/token": V`, "password=[REDACTED]"},
+			{"punctuation-joined backslash before container pair", `password=a\b/token={a: SECRET}`, "password=[REDACTED]"},
+			{"punctuation-joined backslash before quoted pair", `password=a\b/token="V1 V2"`, "password=[REDACTED]"},
+			{"punctuation-joined escaped-quote prefix before quoted pair", `password=\"foo \"x/token="V1 V2"`, "password=[REDACTED]"},
 			{
 				"sensitive and plain keys",
 				"DB_PASSWORD=S1 my_api_key=S2 auth_token=S3 client-secret=S4 dbPassword=S5 temp:k=S6 user:temp:k=S7 app:client_secret=S8 app:region=us",
@@ -539,7 +567,22 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"value that ends in a key name before an error", "password=dev-SECRET123-password: dial tcp", "password=[REDACTED] tcp"},
 			{"value that ends in a header name", "my_api_key=prodSECRET123-api-key: permission denied", "my_api_key=[REDACTED]"},
 			{"value with a path before a key name", "password:\n  s3cr3t/dbPassword: SECRET123", "password:[REDACTED]"},
+			{"JSON pair value ending in compound key name", `log: "my_api_key": prod-api-key: SECRET`, `log: "my_api_key":"[REDACTED]"`},
+			{"JSON pair value ending in key before container", `log: "password": foo_password: {a: b}`, `log: "password":"[REDACTED]"`},
 		})
+	})
+
+	t.Run("JSON string with state.temp: key", func(t *testing.T) {
+		const in = `{"msg":"state.temp:x=V"}`
+		for _, ep := range textEntryPoints {
+			want := `{"msg":"state.temp:x=[REDACTED]}`
+			if ep.name == "redactErrorMessage" {
+				want = `{"msg":"state.temp:x=[REDACTED]"}`
+			}
+			if got := ep.redact(t, in); got != want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
+			}
+		}
 	})
 
 	// Names that only look like credential names, and file names that end
@@ -616,27 +659,83 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 	// an equivalent RE2 expression on hand-picked edge cases and short strings
 	// built from key, prefix, quote, escape, and delimiter tokens.
 	t.Run("textKeyPrefixSpans matches reference regexp", func(t *testing.T) {
-		refRe := regexp.MustCompile(`(?i)(temp:[^=:"'\t\n\f\r ,}]+|[A-Za-z0-9_.\x{0130}\x{017f}\x{212a}-]+)(\\?["'])?[\x00-\x20\x7f]*[=:]`)
+		const (
+			keyWord  = `[A-Za-z0-9_.\x{0130}\x{017f}\x{212a}-]`
+			horizPad = `[\t \x0b\f\x{00a0}\x{feff}]`
+			tempSeg  = `[^=:"'\t\n\f\r ,}]+`
+			tempHead = `(?:` + keyWord + `*[.-])?(temp:` + tempSeg + `)`
+		)
+		refPaddedRe := regexp.MustCompile(`(?i)(\\?["'])` + horizPad + `*((?:(?:user|app):)*` +
+			`(?:` + tempHead + `(?::` + tempSeg + `)*|` + keyWord + `+))` + horizPad + `+` +
+			`(\\?["'])[\x00-\x20\x7f]*[=:]`)
+		refMultiTempRe := regexp.MustCompile(`(?i)` + `(?:` + keyWord + `*[.-])?(temp:` + tempSeg + `(?::` + tempSeg + `)+)` +
+			`(\\?["'])?[\x00-\x20\x7f]*(?:=[^=]|[\x00-\x20\x7f]:|:[\x00-\x20\x7f])`)
+		refBareRe := regexp.MustCompile(`(?i)(?:` + tempHead + `|(` + keyWord + `+))(\\?["'])?[\x00-\x20\x7f]*[=:]`)
 		type span struct{ keyStart, keyEnd, quoteEnd, end int }
 		fromScanner := func(s string) []span {
 			var out []span
 			for _, m := range textKeyPrefixSpans(s) {
-				if ks := sensitiveKeyStart(s, m.start, m.keyEnd); ks >= 0 {
-					out = append(out, span{ks, m.keyEnd, m.quoteEnd, m.end})
-				}
+				out = append(out, span{m.start, m.keyEnd, m.quoteEnd, m.end})
 			}
 			return out
 		}
 		fromRegexp := func(s string) []span {
 			var out []span
-			for _, loc := range refRe.FindAllStringSubmatchIndex(s, -1) {
-				keyStart, keyEnd, quoteEnd := loc[2], loc[3], loc[3]
-				if loc[5] >= 0 {
-					quoteEnd = loc[5]
+			for from := 0; from < len(s); {
+				bestStart := len(s) + 1
+				var keyStart, keyEnd, quoteEnd, end int
+				var checkOpen bool
+				if loc := refPaddedRe.FindStringSubmatchIndex(s[from:]); loc != nil && from+loc[2] < bestStart {
+					openQ, closeQ := s[from+loc[2]:from+loc[3]], s[from+loc[8]:from+loc[9]]
+					if openQ == closeQ {
+						if len(openQ) == 2 || !strings.HasSuffix(s[from:from+loc[2]], `\`) || hasMatchingOpeningQuote(s, from+loc[3], from, openQ) {
+							bestStart = from + loc[2]
+							keyStart, keyEnd = from+loc[4], from+loc[5]
+							if loc[6] >= 0 {
+								keyStart = from + loc[6]
+							}
+							quoteEnd, end = from+loc[9], from+loc[1]
+							checkOpen = true
+						}
+					}
+				}
+				if loc := refMultiTempRe.FindStringSubmatchIndex(s[from:]); loc != nil {
+					candStart := from + loc[0]
+					if candStart < bestStart || (candStart == bestStart && !checkOpen) {
+						dEnd := from + loc[1] - 1
+						if s[dEnd] == ':' && s[dEnd-1] != ':' {
+							dEnd++
+						}
+						if s[dEnd-1] == '=' && !(dEnd < len(s) && s[dEnd] == '=') && valueStartsAt(s, dEnd) ||
+							(s[dEnd-1] == ':' && !(dEnd+1 < len(s) && s[dEnd:dEnd+2] == "//")) {
+							bestStart = candStart
+							keyStart, keyEnd, quoteEnd, end = from+loc[2], from+loc[3], from+loc[3], dEnd
+							if loc[5] >= 0 {
+								quoteEnd = from + loc[5]
+							}
+							checkOpen = false
+						}
+					}
+				}
+				if loc := refBareRe.FindStringSubmatchIndex(s[from:]); loc != nil && from+loc[0] < bestStart {
+					bestStart = from + loc[0]
+					if loc[2] >= 0 {
+						keyStart, keyEnd = from+loc[2], from+loc[3]
+					} else {
+						keyStart, keyEnd = from+loc[4], from+loc[5]
+					}
+					quoteEnd, end = keyEnd, from+loc[1]
+					if loc[7] >= 0 {
+						quoteEnd = from + loc[7]
+					}
+				}
+				if bestStart > len(s) {
+					break
 				}
 				if ks := sensitiveKeyStart(s, keyStart, keyEnd); ks >= 0 {
-					out = append(out, span{ks, keyEnd, quoteEnd, loc[1]})
+					out = append(out, span{ks, keyEnd, quoteEnd, end})
 				}
+				from = end
 			}
 			return out
 		}
@@ -648,7 +747,9 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 		for _, text := range []string{
 			"password=1 token:2 db_password = 3",
 			"user:temp:api_key=sk-1 app:user:password:x temp:foo=bar temp:x",
-			`"password"=1 'dbPassword':2 \"token\"=3 \'secret\':4`,
+			"state.temp:x=V --temp:scratch=V -temp:x=V temp:cache:item = V temp:cache:item: V",
+			`"password"=1 'dbPassword':2 \"token\"=3 \'secret\':4 ' DB_PASSWORD ': 'v' " API_KEY " = "v"`,
+			`' temp:x ': 'v' " temp:cache:item " = 1 " user:api_key " = 1 ' state.temp:cache:item ': 'v' ' user:temp:cache:item ': 'v'`,
 			"AP\u0130_KEY=1 pa\u017f\u017fword=2 api_\u212aey=3 next-page-token=4 x.sig=5",
 			"token\x01=1 token\x7f:2 token\\=3 token\\\\\"=4 temp:a\"=5 temp:a\\\"=6",
 			"a=b c:d === ::: user:next_page_token=1 temp:a:token=2",
@@ -888,11 +989,29 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 			{name: "quoted URL with user information", in: `"see https://u:p@h/x"`},
 			{name: "quoted key with a redacted value", in: `"password":"[REDACTED]" other=ok`},
 			{name: "quoted key before a nested key", in: "\"DB_PASSWORD\":\n  password: SECRET123"},
+			{name: "temp key with comma in malformed JSON", in: `{"temp:a,b": "[REDACTED]"`},
+			{name: "unicode-escaped key with redacted value in malformed JSON", in: `{"\u0070assword": "[REDACTED]"`},
+			{name: "backslash-quote key boundary in malformed JSON", in: `{"a\\": "\"password": "[REDACTED]"`},
+			{name: "double-quoted padded multi-colon temp: key with equals", in: `" temp:cache:item " = V`},
 		}
 		for i := range failed {
 			failed[i].want = unparseableJSONPlaceholder
 		}
 		checkRedaction(t, failed)
+	})
+
+	t.Run("malformed text with unescaped quote escape fails closed outside error messages", func(t *testing.T) {
+		for _, in := range []string{`{"error":"unexpected token \":\"`, `[INFO] "x\"`} {
+			for _, ep := range textEntryPoints {
+				want := unparseableJSONPlaceholder
+				if ep.name == "redactErrorMessage" {
+					want = in
+				}
+				if got := ep.redact(t, in); got != want {
+					t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
+				}
+			}
+		}
 	})
 
 	// Only the first maxInspectableJSONTextBytes bytes of a text are read
@@ -1037,6 +1156,8 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 			return `password="` + strings.Repeat("token={ ", n/10) + strings.Repeat("}", n/10) + `" tail`
 		}},
 		{"pairs with plain keys", 1 << 20, func(n int) string { return strings.Repeat("a=b ", n/4) }},
+		{"sensitive key before dense plain pairs", 256 << 10, func(n int) string { return "password=SECRET " + strings.Repeat("a=1 ", n/4) }},
+		{"backslash-terminated tokens in bare value", 128 << 10, func(n int) string { return "password=" + strings.Repeat(`token=\`, n/7) + " tail" }},
 		{"bare delimiters", 1 << 20, func(n int) string { return strings.Repeat("=", n) }},
 		{"redacted pairs", 256 << 10, func(n int) string { return strings.Repeat("DB_PASSWORD=SECRET1 dbPassword=SECRET2 ", n/39) }},
 		{"header lines", 256 << 10, func(n int) string { return strings.Repeat("Authorization: Bearer SECRET\n", n/29) }},
@@ -1085,4 +1206,123 @@ func fastest(f func()) time.Duration {
 		best = min(best, time.Since(start))
 	}
 	return best
+}
+
+// TestTextKeyPrefixSpansAllocs verifies that delimiter-dense non-sensitive text
+// does not allocate per-delimiter match entries or per-key folding buffers.
+func TestTextKeyPrefixSpansAllocs(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation count is inflated under -race")
+	}
+	for _, tt := range []struct {
+		name string
+		in   string
+	}{
+		{"dense bare equals", "password=" + strings.Repeat("a=", 1<<17)},
+		{"metrics dump", "password=SECRET " + strings.Repeat("metric_one=1 ", 1<<13)},
+		{"uppercase colon metrics", "password=SECRET " + strings.Repeat("METRIC_ONE:1 ", 1<<13)},
+		{"uppercase equals metrics", "password=SECRET " + strings.Repeat("METRIC_ONE=1 ", 1<<13)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(5, func() {
+				_ = textKeyPrefixSpans(tt.in)
+			})
+			if allocs > 2 {
+				t.Errorf("textKeyPrefixSpans allocs = %.0f, want <= 2", allocs)
+			}
+		})
+	}
+}
+
+// TestReferenceRegexDifferential checks that redactErrorMessage and
+// sanitizeRawText catch every secret removed by a standalone reference regexp
+// pass over generated multi-pair, quoted, padded, temp:, and joined inputs.
+func TestReferenceRegexDifferential(t *testing.T) {
+	fixedParts := make([]string, 0, len(sensitiveKeys))
+	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
+		fixedParts = append(fixedParts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[._-]?"))
+	}
+	fixedAlt := strings.Join(fixedParts, "|")
+	refKey := `(?:(?:(?:user|app):)*(?:[A-Za-z0-9_.-]*[.-])?temp:[^=:"'\t\n\f\r ,}]+(?::[^=:"'\t\n\f\r ,}]+)*|(?:(?:user|app):)*(?:` + fixedAlt + `))`
+	refQuote := `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`
+	refBarePart := `(?:^|[^0-9A-Za-z_])` + refKey + `(["'])?[\x00-\x20\x7f]*[=:][\x00-\x20\x7f]*(?:` + refQuote + `|[^\s,;&]+)`
+	refQuotedPart := `["'][\t \x{00a0}\x{feff}]*` + refKey + `[\t \x{00a0}\x{feff}]*["'][\x00-\x20\x7f]*[=:][\x00-\x20\x7f]*(?:` + refQuote + `|[^\s,;&]+)`
+	refPairRe := regexp.MustCompile(`(?i)` + refQuotedPart + `|` + refBarePart)
+	refScrub := func(s string) string {
+		return refPairRe.ReplaceAllString(s, redactedValue)
+	}
+
+	rng := rand.New(rand.NewPCG(20261126, 2515))
+	keys := []string{
+		"password", "api_key", "api-key", "apiKey", "DB_PASSWORD", "dbPassword",
+		"secret_key", "signing_key", "token", "access_token", "client_secret",
+		"temp:x", "state.temp:x", "--temp:scratch", "temp:cache:item",
+		"user:api_key", "private.key", "x.sig",
+	}
+	pads := []string{"", " ", "  ", "\t"}
+	quotes := []string{"", `"`, `'`}
+	delims := []string{":", "=", " : ", " = "}
+	joins := []string{" ", ", ", "; ", "&", "/", "|"}
+	prefixes := []string{"log: ", "err: {", ""}
+
+	inputs := []string{
+		`" temp:cache:item " = "S3CR3T_Q1"`,
+		`' temp:cache:item ': 'S3CR3T_Q2'`,
+		`' state.temp:cache:item ': 'S3CR3T_Q3'`,
+	}
+	secretsList := [][]string{{"S3CR3T_Q1"}, {"S3CR3T_Q2"}, {"S3CR3T_Q3"}}
+
+	for i := range 500 {
+		nParts := 1 + rng.IntN(3)
+		var sb strings.Builder
+		sb.WriteString(prefixes[rng.IntN(len(prefixes))])
+		var secrets []string
+		for p := range nParts {
+			if p > 0 {
+				sb.WriteString(joins[rng.IntN(len(joins))])
+			}
+			k := keys[rng.IntN(len(keys))]
+			q := quotes[rng.IntN(len(quotes))]
+			d := delims[rng.IntN(len(delims))]
+			sec := fmt.Sprintf("S3CR3T_%d_%d_END", i, p)
+			var val string
+			switch rng.IntN(4) {
+			case 0:
+				val = sec
+			case 1:
+				val = `"` + sec + `"`
+			case 2:
+				val = `'` + sec + `'`
+			case 3:
+				val = "{abc}/password: " + sec
+			}
+			if q == "" {
+				sb.WriteString(k + d + val)
+			} else {
+				pad := pads[rng.IntN(len(pads))]
+				sb.WriteString(q + pad + k + pad + q + d + val)
+			}
+			secrets = append(secrets, sec)
+		}
+		inputs = append(inputs, sb.String())
+		secretsList = append(secretsList, secrets)
+	}
+	for i, text := range inputs {
+		refOut := refScrub(text)
+		gotErr := redactErrorMessage(text)
+		gotSan, _ := sanitizeRawText(text)
+		for _, sec := range secretsList[i] {
+			if i < 3 && strings.Contains(refOut, sec) {
+				t.Fatalf("case %d: refScrub(%q) = %q failed to remove %s", i, text, refOut, sec)
+			}
+			if !strings.Contains(refOut, sec) {
+				if strings.Contains(gotErr, sec) {
+					t.Fatalf("case %d: redactErrorMessage(%q) = %q kept %s removed by refScrub", i, text, gotErr, sec)
+				}
+				if strings.Contains(gotSan, sec) {
+					t.Fatalf("case %d: sanitizeRawText(%q) = %q kept %s removed by refScrub", i, text, gotSan, sec)
+				}
+			}
+		}
+	}
 }
