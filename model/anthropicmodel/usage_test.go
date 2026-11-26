@@ -23,9 +23,8 @@ import (
 	"google.golang.org/genai"
 )
 
-// TestExtractUsageMetadata_SaturatesAtMaxInt32 pins that a count too large for
-// the int32 fields of genai usage metadata saturates at math.MaxInt32 instead
-// of wrapping to a negative number. Sums are taken in int64 and clamped once.
+// TestExtractUsageMetadata_SaturatesAtMaxInt32 pins that every count in the
+// usage metadata saturates at math.MaxInt32 and is never negative.
 func TestExtractUsageMetadata_SaturatesAtMaxInt32(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -52,13 +51,55 @@ func TestExtractUsageMetadata_SaturatesAtMaxInt32(t *testing.T) {
 			},
 		},
 		{
-			name:  "input, cache read and cache creation of 2^30 each",
+			name:  "input cache read and cache creation of 2 to the 30 each",
 			usage: anthropic.Usage{InputTokens: 1 << 30, CacheReadInputTokens: 1 << 30, CacheCreationInputTokens: 1 << 30, OutputTokens: 10},
 			want: &genai.GenerateContentResponseUsageMetadata{
 				PromptTokenCount:        math.MaxInt32,
 				CandidatesTokenCount:    10,
 				TotalTokenCount:         math.MaxInt32,
 				CachedContentTokenCount: 1 << 30,
+			},
+		},
+		{
+			name:  "input of 2 to the 32",
+			usage: anthropic.Usage{InputTokens: 1 << 32, OutputTokens: 10},
+			want: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     math.MaxInt32,
+				CandidatesTokenCount: 10,
+				TotalTokenCount:      math.MaxInt32,
+			},
+		},
+		{
+			name:  "output of 2 to the 31",
+			usage: anthropic.Usage{InputTokens: 100, OutputTokens: 1 << 31},
+			want: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     100,
+				CandidatesTokenCount: math.MaxInt32,
+				TotalTokenCount:      math.MaxInt32,
+			},
+		},
+		{
+			name:  "cache read of 2 to the 31",
+			usage: anthropic.Usage{CacheReadInputTokens: 1 << 31, OutputTokens: 10},
+			want: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:        math.MaxInt32,
+				CandidatesTokenCount:    10,
+				TotalTokenCount:         math.MaxInt32,
+				CachedContentTokenCount: math.MaxInt32,
+			},
+		},
+		{
+			name: "output of 2 to the 32 with thinking of 2 to the 31",
+			usage: anthropic.Usage{
+				InputTokens:         100,
+				OutputTokens:        1 << 32,
+				OutputTokensDetails: anthropic.OutputTokensDetails{ThinkingTokens: 1 << 31},
+			},
+			want: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     100,
+				CandidatesTokenCount: math.MaxInt32,
+				TotalTokenCount:      math.MaxInt32,
+				ThoughtsTokenCount:   math.MaxInt32,
 			},
 		},
 		{

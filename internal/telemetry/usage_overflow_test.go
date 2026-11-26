@@ -26,8 +26,8 @@ import (
 )
 
 // The usage fields are int32, so adding two of them in int32 can wrap before
-// the sum is widened to the int an OpenTelemetry attribute takes. The sum must
-// be taken in a wider type.
+// the sum is widened for an OpenTelemetry attribute. The sum must be taken in
+// int64, because an int sum is still 32 bits wide on 32-bit platforms.
 
 func TestGenerateContent_UsageSumsDoNotOverflow(t *testing.T) {
 	tests := []struct {
