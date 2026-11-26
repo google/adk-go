@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -143,13 +144,49 @@ func isMissingCacheError(err error) bool {
 	}
 }
 
+// explicitCachingUnsupportedPhrases are lowercased substrings from provider
+// API errors stating that a model does not support explicit context caching,
+// matching adk-python's _EXPLICIT_CACHING_UNSUPPORTED_SUBSTRINGS.
+var explicitCachingUnsupportedPhrases = []string{
+	"does not support explicit context caching",
+	"explicit caching is not supported for ",
+	"is not supported for context caching",
+}
+
+type explicitCachingRefusalKey struct {
+	scope cacheScope
+	model string
+}
+
+// modelsWithoutExplicitCaching remembers (scope, model) pairs whose provider
+// reported no support for explicit context caching, so later requests and model
+// instances skip create calls rather than failing on every turn.
+var modelsWithoutExplicitCaching sync.Map // map[explicitCachingRefusalKey]struct{}
+
+// isExplicitCachingUnsupported reports whether err is a provider API error
+// stating that the model does not support explicit context caching.
+func isExplicitCachingUnsupported(err error) bool {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	for _, phrase := range explicitCachingUnsupportedPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // prepare decides which cache req uses, creating a cache on the provider when
 // one is due.
 func (c *contextCache) prepare(ctx context.Context, req *model.LLMRequest) cachePlan {
 	if req.Config.CachedContent != "" {
 		return cachePlan{req: req}
 	}
-	fp := newFingerprinter(req, c.model, scopeFor(c.client.ClientConfig()))
+	scope := scopeFor(c.client.ClientConfig())
+	fp := newFingerprinter(req, c.model, scope)
 	old := req.CacheMetadata
 	if old == nil {
 		// No earlier prefix to compare against, so nothing is created yet.
@@ -175,7 +212,7 @@ func (c *contextCache) prepare(ctx context.Context, req *model.LLMRequest) cache
 	}
 
 	count := max(old.ContentsCount, countContentsToCache(req.Contents))
-	created := c.createCache(ctx, req, count, fp.of(count))
+	created := c.createCache(ctx, req, scope, count, fp.of(count))
 	if created == nil {
 		// No cache, for example because the prefix is still below the
 		// model's minimum. Keep the longest stable prefix for the next
@@ -389,11 +426,16 @@ func declarationName(d *genai.FunctionDeclaration) string {
 
 // createCache creates a cache holding the first count contents of req, along
 // with its system instruction, tools and tool config, and returns its metadata
-// with fingerprint as the prefix's. It returns nil, creating nothing, when no
-// earlier prompt size is known, when that prompt was below MinTokens, when the
-// prefix is estimated to fall below the model's minimum cache size, or when
-// the call fails, which its create_cache span records.
-func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, count int, fingerprint string) *model.CacheMetadata {
+// with fingerprint as the prefix's. It returns nil, creating nothing, when the
+// provider has already refused explicit context caching for this backend and
+// model, when no earlier prompt size is known, when that prompt was below
+// MinTokens, when the prefix is estimated to fall below the model's minimum
+// cache size, or when the call fails, which its create_cache span records.
+func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, scope cacheScope, count int, fingerprint string) *model.CacheMetadata {
+	refusalKey := explicitCachingRefusalKey{scope: scope, model: c.model}
+	if _, unsupported := modelsWithoutExplicitCaching.Load(refusalKey); unsupported {
+		return nil
+	}
 	if req.PreviousPromptTokenCount <= 0 || fingerprint == "" {
 		return nil
 	}
@@ -434,6 +476,9 @@ func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, c
 	}
 	if err != nil {
 		telemetry.TraceCreateCacheResult(span, "", err)
+		if isExplicitCachingUnsupported(err) {
+			modelsWithoutExplicitCaching.Store(refusalKey, struct{}{})
+		}
 		return nil
 	}
 	telemetry.TraceCreateCacheResult(span, cached.Name, nil)

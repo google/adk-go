@@ -48,8 +48,10 @@ var cacheTestNow = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 // generateContent endpoints, and records what each received, in order.
 type fakeCacheAPI struct {
 	// createStatus and generateStatus, when non-zero, are the error status
-	// every cache creation or generation gets.
+	// every cache creation or generation gets. createMessage overrides the
+	// default error message for cache creation failures when non-empty.
 	createStatus   int
+	createMessage  string
 	generateStatus int
 	// deleteStatus, when non-zero, is the error status every deletion gets.
 	deleteStatus int
@@ -90,9 +92,12 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	fail := func(status int) {
+	fail := func(status int, message string) {
+		if message == "" {
+			message = "refused"
+		}
 		w.WriteHeader(status)
-		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "INVALID_ARGUMENT"}}`, status)
+		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": %q, "status": "INVALID_ARGUMENT"}}`, status, message)
 	}
 	// failGone answers a generation that names a cache the provider no longer
 	// holds, and reports whether it did.
@@ -119,7 +124,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.creates = append(f.creates, decoded)
 		f.createHeaders = append(f.createHeaders, r.Header.Clone())
 		if f.createStatus != 0 {
-			fail(f.createStatus)
+			fail(f.createStatus, f.createMessage)
 			return
 		}
 		resp := map[string]any{"name": fmt.Sprintf("cachedContents/%d", len(f.creates))}
@@ -139,7 +144,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.deleteStatus != 0 {
-			fail(f.deleteStatus)
+			fail(f.deleteStatus, "")
 			return
 		}
 		_, _ = fmt.Fprint(w, `{}`)
@@ -147,7 +152,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.calls = append(f.calls, "generate")
 		f.generates = append(f.generates, decoded)
 		if f.generateStatus != 0 {
-			fail(f.generateStatus)
+			fail(f.generateStatus, "")
 			return
 		}
 		if name, _ := decoded["cachedContent"].(string); f.goneAfterChunk && f.gone[name] {
@@ -178,7 +183,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.calls = append(f.calls, "generate")
 		f.generates = append(f.generates, decoded)
 		if f.generateStatus != 0 {
-			fail(f.generateStatus)
+			fail(f.generateStatus, "")
 			return
 		}
 		if failGone() {
@@ -195,6 +200,13 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (f *fakeCacheAPI) setCreateError(status int, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createStatus = status
+	f.createMessage = message
+}
+
 // newCacheTestModel returns a model named modelName that talks to api.
 func newCacheTestModel(t *testing.T, api *fakeCacheAPI, modelName string) *geminiModel {
 	t.Helper()
@@ -207,10 +219,16 @@ func newCacheTestModelWithProvider(t *testing.T, api *fakeCacheAPI, modelName st
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(srv.Close)
+	return newCacheTestModelAt(t, srv.URL, modelName, provider)
+}
+
+// newCacheTestModelAt returns a model named modelName wired to baseURL.
+func newCacheTestModelAt(t *testing.T, baseURL, modelName string, provider genai.ExtrasRequestProvider) *geminiModel {
+	t.Helper()
 	m, err := NewModel(t.Context(), modelName, &genai.ClientConfig{
 		APIKey:      "key",
 		Backend:     genai.BackendGeminiAPI,
-		HTTPOptions: genai.HTTPOptions{BaseURL: srv.URL, ExtrasRequestProvider: provider},
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, ExtrasRequestProvider: provider},
 	})
 	if err != nil {
 		t.Fatalf("NewModel: %v", err)
@@ -1634,5 +1652,341 @@ func TestGenerateContent_ContextCacheRuntimeSuffix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func appendCacheTestTurn(req *model.LLMRequest, prevModelText, nextUserText string) *model.LLMRequest {
+	req.Contents = append(req.Contents,
+		genai.NewContentFromText(prevModelText, genai.RoleModel),
+		genai.NewContentFromText(nextUserText, genai.RoleUser),
+	)
+	return req
+}
+
+func TestGenerateContent_ContextCacheExplicitCachingRefusalRemembered(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   string
+		message string
+	}{
+		{
+			name:    "does not support explicit context caching",
+			model:   "gemini-4-hydrogen",
+			message: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		},
+		{
+			name:    "explicit caching is not supported for",
+			model:   "gemini-4-hydrogen",
+			message: "Explicit caching is not supported for models/gemini-4-hydrogen.",
+		},
+		{
+			name:    "is not supported for context caching",
+			model:   "gemma-4",
+			message: "Model `gemma-4` is not supported for context caching. Please use Gemini or OpenMaaS models that are enabled for context caching.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{
+				createStatus:  http.StatusBadRequest,
+				createMessage: tt.message,
+				expireTime:    cacheTestNow.Add(time.Hour),
+			}
+			m := newCacheTestModel(t, api, tt.model)
+			ctx := cacheTestContext(t)
+
+			req1 := cacheTestRequest(&model.ContextCacheConfig{})
+			req1.PreviousPromptTokenCount = 5000
+			resp1 := generateOnce(t, ctx, m, req1)
+
+			req2 := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+			req2.PreviousPromptTokenCount = 10000
+			req2.CacheMetadata = resp1.CacheMetadata
+			resp2 := generateOnce(t, ctx, m, req2)
+
+			req3 := appendCacheTestTurn(
+				appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question"),
+				"third answer", "fourth question",
+			)
+			req3.PreviousPromptTokenCount = 15000
+			req3.CacheMetadata = resp2.CacheMetadata
+			resp3 := generateOnce(t, ctx, m, req3)
+
+			wantCalls := []string{"generate", "create", "generate", "generate"}
+			if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+				t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+			}
+
+			for i, wantContents := range []int{3, 5, 7} {
+				if _, ok := api.generates[i]["cachedContent"]; ok {
+					t.Errorf("generate[%d] unexpectedly set cachedContent", i)
+				}
+				if api.generates[i]["systemInstruction"] == nil {
+					t.Errorf("generate[%d] dropped systemInstruction", i)
+				}
+				gotContents, _ := api.generates[i]["contents"].([]any)
+				if len(gotContents) != wantContents {
+					t.Errorf("generate[%d] contents len = %d, want %d", i, len(gotContents), wantContents)
+				}
+			}
+
+			wantMeta2 := &model.CacheMetadata{Fingerprint: fingerprintOf(m, req2, 4), ContentsCount: 4}
+			if diff := cmp.Diff(wantMeta2, resp2.CacheMetadata); diff != "" {
+				t.Errorf("turn 2 CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+			wantMeta3 := &model.CacheMetadata{Fingerprint: fingerprintOf(m, req3, 6), ContentsCount: 6}
+			if diff := cmp.Diff(wantMeta3, resp3.CacheMetadata); diff != "" {
+				t.Errorf("turn 3 CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGenerateContent_ContextCacheSubMinimumErrorRetried(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "minimum token count error",
+			message: "The cached content is of 507 tokens. The minimum token count to start explicit caching is 4096.",
+		},
+		{
+			name:    "total token count error",
+			message: "Cached content is too small. total_token_count=509, min_total_token_count=1024",
+		},
+		{
+			name:    "generic bad request",
+			message: "refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{
+				createStatus:  http.StatusBadRequest,
+				createMessage: tt.message,
+				expireTime:    cacheTestNow.Add(time.Hour),
+			}
+			m := newCacheTestModel(t, api, "projects/test/locations/us-central1/endpoints/tuned-model")
+			ctx := cacheTestContext(t)
+
+			req1 := cacheTestRequest(&model.ContextCacheConfig{})
+			req1.PreviousPromptTokenCount = 600
+			resp1 := generateOnce(t, ctx, m, req1)
+
+			req2 := cacheTestRequest(&model.ContextCacheConfig{})
+			req2.PreviousPromptTokenCount = 600
+			req2.CacheMetadata = resp1.CacheMetadata
+			resp2 := generateOnce(t, ctx, m, req2)
+			if resp2.CacheMetadata.CacheName != "" {
+				t.Fatalf("turn 2 CacheName = %q, want empty after failed create", resp2.CacheMetadata.CacheName)
+			}
+
+			api.setCreateError(0, "")
+
+			req3 := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+			req3.PreviousPromptTokenCount = 8000
+			req3.CacheMetadata = resp2.CacheMetadata
+			resp3 := generateOnce(t, ctx, m, req3)
+
+			wantCalls := []string{"generate", "create", "generate", "create", "generate"}
+			if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+				t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+			}
+			if got := resp3.CacheMetadata.CacheName; got != "cachedContents/2" {
+				t.Errorf("turn 3 CacheName = %q, want %q", got, "cachedContents/2")
+			}
+		})
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalDoesNotAffectOtherModels(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	g4 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	ctx := cacheTestContext(t)
+
+	g4Req1 := cacheTestRequest(&model.ContextCacheConfig{})
+	g4Resp1 := generateOnce(t, ctx, g4, g4Req1)
+
+	g4Req2 := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+	g4Req2.PreviousPromptTokenCount = 10000
+	g4Req2.CacheMetadata = g4Resp1.CacheMetadata
+	g4Resp2 := generateOnce(t, ctx, g4, g4Req2)
+
+	g4Req3 := appendCacheTestTurn(
+		appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question"),
+		"third answer", "fourth question",
+	)
+	g4Req3.PreviousPromptTokenCount = 12000
+	g4Req3.CacheMetadata = g4Resp2.CacheMetadata
+	_ = generateOnce(t, ctx, g4, g4Req3)
+
+	api.setCreateError(0, "")
+
+	flash := newCacheTestModelAt(t, srv.URL, "gemini-2.5-flash", nil)
+	flashReq1 := cacheTestRequest(&model.ContextCacheConfig{})
+	flashResp1 := generateOnce(t, ctx, flash, flashReq1)
+
+	flashReq2 := cacheTestRequest(&model.ContextCacheConfig{})
+	flashReq2.PreviousPromptTokenCount = 10000
+	flashReq2.CacheMetadata = flashResp1.CacheMetadata
+	flashResp2 := generateOnce(t, ctx, flash, flashReq2)
+
+	wantCalls := []string{"generate", "create", "generate", "generate", "generate", "create", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	if got := flashResp2.CacheMetadata.CacheName; got != "cachedContents/2" {
+		t.Errorf("flash turn 2 CacheName = %q, want %q", got, "cachedContents/2")
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalSharedAcrossModelInstances(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	m1 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	ctx := cacheTestContext(t)
+
+	req1 := cacheTestRequest(&model.ContextCacheConfig{})
+	resp1 := generateOnce(t, ctx, m1, req1)
+
+	req2 := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+	req2.PreviousPromptTokenCount = 10000
+	req2.CacheMetadata = resp1.CacheMetadata
+	resp2 := generateOnce(t, ctx, m1, req2)
+
+	m2 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	req3 := appendCacheTestTurn(
+		appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question"),
+		"third answer", "fourth question",
+	)
+	req3.PreviousPromptTokenCount = 15000
+	req3.CacheMetadata = resp2.CacheMetadata
+	resp3 := generateOnce(t, ctx, m2, req3)
+
+	wantCalls := []string{"generate", "create", "generate", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := api.generates[2]["cachedContent"]; ok {
+		t.Error("turn 3 on new model instance unexpectedly set cachedContent")
+	}
+	if got := resp3.CacheMetadata.CacheName; got != "" {
+		t.Errorf("turn 3 CacheName = %q, want empty", got)
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalScopedToBackend(t *testing.T) {
+	ctx := cacheTestContext(t)
+
+	api1 := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Explicit caching is not supported for models/gemini-4-hydrogen.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	m1 := newCacheTestModel(t, api1, "gemini-4-hydrogen")
+
+	api2 := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m2 := newCacheTestModel(t, api2, "gemini-4-hydrogen")
+
+	r1 := generateOnce(t, ctx, m1, cacheTestRequest(&model.ContextCacheConfig{}))
+	r2Req := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+	r2Req.PreviousPromptTokenCount = 10000
+	r2Req.CacheMetadata = r1.CacheMetadata
+	r2 := generateOnce(t, ctx, m1, r2Req)
+	r3Req := appendCacheTestTurn(
+		appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question"),
+		"third answer", "fourth question",
+	)
+	r3Req.PreviousPromptTokenCount = 15000
+	r3Req.CacheMetadata = r2.CacheMetadata
+	_ = generateOnce(t, ctx, m1, r3Req)
+
+	m2R1 := generateOnce(t, ctx, m2, cacheTestRequest(&model.ContextCacheConfig{}))
+	m2R2Req := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+	m2R2Req.PreviousPromptTokenCount = 10000
+	m2R2Req.CacheMetadata = m2R1.CacheMetadata
+	m2R2 := generateOnce(t, ctx, m2, m2R2Req)
+
+	if diff := cmp.Diff([]string{"generate", "create", "generate", "generate"}, api1.calls); diff != "" {
+		t.Errorf("backend 1 calls mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"generate", "create", "generate"}, api2.calls); diff != "" {
+		t.Errorf("backend 2 calls mismatch (-want +got):\n%s", diff)
+	}
+	if got := m2R2.CacheMetadata.CacheName; got != "cachedContents/1" {
+		t.Errorf("backend 2 CacheName = %q, want %q", got, "cachedContents/1")
+	}
+}
+
+func TestGenerateContent_ContextCacheSwitchFromActiveCacheToRefusingModel(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	flash := newCacheTestModelAt(t, srv.URL, "gemini-2.5-flash", nil)
+	activeFlashCache := &model.CacheMetadata{
+		CacheName:       "cachedContents/flash-cache",
+		ExpireTime:      cacheTestNow.Add(30 * time.Minute),
+		InvocationsUsed: 1,
+		CreatedAt:       cacheTestNow,
+		Fingerprint:     fingerprintOf(flash, cacheTestRequest(nil), 2),
+		ContentsCount:   2,
+	}
+
+	g4 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	ctx := cacheTestContext(t)
+
+	g4Turn1 := cacheTestRequest(&model.ContextCacheConfig{})
+	g4Turn1.PreviousPromptTokenCount = 10000
+	g4Turn1.CacheMetadata = activeFlashCache
+	g4Resp1 := generateOnce(t, ctx, g4, g4Turn1)
+	if g4Resp1.CacheMetadata.CacheName != "" {
+		t.Fatalf("turn 1 CacheName = %q, want empty", g4Resp1.CacheMetadata.CacheName)
+	}
+
+	g4Turn2 := appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question")
+	g4Turn2.PreviousPromptTokenCount = 12000
+	g4Turn2.CacheMetadata = g4Resp1.CacheMetadata
+	g4Resp2 := generateOnce(t, ctx, g4, g4Turn2)
+
+	g4Turn3 := appendCacheTestTurn(
+		appendCacheTestTurn(cacheTestRequest(&model.ContextCacheConfig{}), "second answer", "third question"),
+		"third answer", "fourth question",
+	)
+	g4Turn3.PreviousPromptTokenCount = 14000
+	g4Turn3.CacheMetadata = g4Resp2.CacheMetadata
+	g4Resp3 := generateOnce(t, ctx, g4, g4Turn3)
+
+	wantCalls := []string{"generate", "delete cachedContents/flash-cache", "create", "generate", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	for i := range api.generates {
+		if _, ok := api.generates[i]["cachedContent"]; ok {
+			t.Errorf("generate[%d] unexpectedly set cachedContent", i)
+		}
+	}
+	if got := g4Resp3.CacheMetadata.CacheName; got != "" {
+		t.Errorf("turn 3 CacheName = %q, want empty", got)
 	}
 }
