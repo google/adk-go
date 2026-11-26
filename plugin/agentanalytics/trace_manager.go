@@ -4735,11 +4735,13 @@ func (inv *invocationTrace) launcherLocked(act any, launchLineage []visitedConte
 //     the returned witnesses are [worker-a, worker-b] and tree.enclosing stops
 //     at mid rather than demoting above worker-outer to root.
 //   - When selected has a non-empty node path containing id.path, only spans
-//     at or below selected's branch and path qualify, except that when
-//     selected inherited selected.path rather than opening a branch-scoped
-//     node there (either not a workflow agent, or its parent agent shares
-//     selected.path), branch-compatible peers on the exact same selected.path
-//     remain eligible. Otherwise (for example, a detached leaf on a non-empty
+//     at or below selected's branch and path qualify, except that when id.path
+//     equals selected.path and selected inherited selected.path rather than
+//     opening a branch-scoped node there (either not a workflow agent, or its
+//     parent agent shares selected.path), branch-compatible peers on the exact
+//     same selected.path remain eligible. Once id enters a deeper node path
+//     below selected.path, peers left at selected.path on another branch no
+//     longer qualify. Otherwise (for example, a detached leaf on a non-empty
 //     branch whose node path is empty), any open member whose own branch and
 //     path can hold id counts as a possible launcher so a detached child
 //     cannot falsely attach to another peer's branch subtree.
@@ -4869,11 +4871,12 @@ func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity
 		!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) {
 		return false
 	}
-	// When selected inherited selected.path rather than opening a branch-scoped
-	// node there (not a workflow agent, or its parent agent shares
-	// selected.path, such as a workflowagent pushed at its caller's path), peers
-	// sharing exact selected.path on an ancestor branch stay eligible.
-	inheritedPath := selected != nil && (!selected.isWorkflow ||
+	// When id.path equals selected.path and selected inherited selected.path
+	// rather than opening a branch-scoped node there (not a workflow agent, or
+	// its parent agent shares selected.path, such as a workflowagent pushed at
+	// its caller's path), peers sharing exact selected.path on an ancestor
+	// branch stay eligible.
+	inheritedPath := selected != nil && id.path == selected.path && (!selected.isWorkflow ||
 		(selected.parent != nil && selected.parent.kind == spanKindAgent && selected.parent.path == selected.path))
 	if requireSelected && (!atOrBelowPath(rec.path, selected.path) ||
 		(!withinBranch(rec.branch, selected.branch) && !(inheritedPath && rec.path == selected.path))) {
@@ -5129,13 +5132,13 @@ func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecor
 // (agentName, branch, path), in which case all non-excluded members of recs are
 // appended as peers). When selected has a non-empty path containing id.path,
 // only spans fitting both id and selected's branch and node path qualify (except
-// when selected inherited selected.path rather than opening a node there, in
-// which case peers on exact selected.path with a compatible ancestor branch
-// remain eligible); otherwise any span fitting id qualifies. For each matched
-// member k, when another member follows inside k's subtree
-// (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k appends first[k] and last[k]
-// (omitting last[k] if equal) (even when first[k] == inv.agentStack[mIdx] or
-// when no inner member matched) so tree.enclosing stops at the nearest common
+// when id.path equals selected.path and selected inherited selected.path rather
+// than opening a node there, in which case peers on exact selected.path with
+// a compatible ancestor branch remain eligible); otherwise any span fitting id
+// qualifies. For each matched member k, when another member follows inside k's
+// subtree (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k appends first[k] and
+// last[k] (omitting last[k] if equal) (even when first[k] == inv.agentStack[mIdx]
+// or when no inner member matched) so tree.enclosing stops at the nearest common
 // ancestor inside k (or at k itself when matched spans straddle inner members)
 // when possible, or above k when k matched itself; otherwise it appends
 // inv.agentStack[mIdx]. Outside -race builds, up to 16 members use stack
@@ -5220,10 +5223,20 @@ func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *
 	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps
 }
 
+// hasSegmentPrefix reports whether s starts with prefix followed immediately by
+// sep, matching strings.HasPrefix(s, prefix+string(sep)) without allocating.
+func hasSegmentPrefix(s, prefix string, sep byte) bool {
+	return len(s) > len(prefix) && s[len(prefix)] == sep && strings.HasPrefix(s, prefix)
+}
+
+func hasPathSegmentPrefix(path, prefix string) bool {
+	return hasSegmentPrefix(path, prefix, '/')
+}
+
 // atOrBelowPath reports whether node path path is ancestor or one of its
 // descendant node paths. An empty ancestor holds every path.
 func atOrBelowPath(path, ancestor string) bool {
-	return ancestor == "" || path == ancestor || strings.HasPrefix(path, ancestor+"/")
+	return ancestor == "" || path == ancestor || hasPathSegmentPrefix(path, ancestor)
 }
 
 // propagateExcludedLocked marks every open agent span in inv.agentStack[1:]
@@ -6212,7 +6225,7 @@ func (inv *invocationTrace) ownerOf(ctx context.Context, id identity) *spanRecor
 // branches. ADK names the branch of a sub-agent of a parallel agent after
 // its parent branch: "parent.parallel.sub".
 func withinBranch(branch, ancestor string) bool {
-	return ancestor == "" || branch == ancestor || strings.HasPrefix(branch, ancestor+".")
+	return ancestor == "" || branch == ancestor || hasSegmentPrefix(branch, ancestor, '.')
 }
 
 // withinPath reports whether path runs inside the node activation ancestor.
@@ -6229,7 +6242,7 @@ func withinPath(path, ancestor string, sameAgent bool) bool {
 	if path == "" || ancestor == "" {
 		return true
 	}
-	return strings.HasPrefix(path, ancestor+"/")
+	return hasPathSegmentPrefix(path, ancestor)
 }
 
 // traceManager assigns trace, span and parent span IDs to rows and measures
@@ -9368,7 +9381,7 @@ func isSubNodePath(path, owner string) bool {
 	if owner == "" {
 		return path != ""
 	}
-	return strings.HasPrefix(path, owner+"/")
+	return hasPathSegmentPrefix(path, owner)
 }
 
 // clearLastPartialLocked records that the caller read past the last partial

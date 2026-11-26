@@ -29615,6 +29615,95 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 				t.Errorf("appendPossibleOwnersWithIndexLocked(unsorted) allocated %v times per call, want 0", allocs)
 			}
 		}
+
+		// Verify >=64-byte node paths still avoid per-span prefix string
+		// allocations across both unindexed and indexed paths.
+		longPrefix := strings.Repeat("segment_", 9) + "wf@1"
+		longLeaf := identity{agentName: "leaf", branch: "selected", path: longPrefix + "/leaf@1"}
+		invLong := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-long-path-allocs", time.Unix(1_700_000_000, 0))
+		rootL := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invLong.agentStack[0], goroutineID: 100}
+		w1L := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootL, goroutineID: 101}
+		w2L := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootL, goroutineID: 102}
+		selOuterL := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: longPrefix, parent: w2L, goroutineID: 103}
+		midL := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2L, goroutineID: 104}
+		w3L := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: midL, goroutineID: 104}
+		selAL := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: longPrefix, parent: w3L, goroutineID: 105}
+		invLong.agentStack = append(invLong.agentStack, rootL, w1L, w2L, selOuterL, midL, w3L, selAL)
+
+		treeLong := invLong.buildOpenSpanTreeLocked(nil)
+		recsLong := []*spanRecord{w1L, w2L, w3L}
+		if out, _ := invLong.appendPossibleOwnersLocked(dst[:0], treeLong, nil, recsLong, longLeaf, selAL); len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
+			t.Fatalf("appendPossibleOwnersLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
+		}
+		qualLong := invLong.buildQualifyingIndexLocked(treeLong, nil, longLeaf, selAL)
+		if out, _ := invLong.appendPossibleOwnersWithIndexLocked(dst[:0], treeLong, nil, &qualLong, recsLong, longLeaf); len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
+			t.Fatalf("appendPossibleOwnersWithIndexLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
+		}
+		if !raceEnabled {
+			if allocs := testing.AllocsPerRun(100, func() {
+				out, _ := invLong.appendPossibleOwnersLocked(dst[:0], treeLong, nil, recsLong, longLeaf, selAL)
+				if len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
+					t.Fatalf("appendPossibleOwnersLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked(long path) allocated %v times per call, want 0", allocs)
+			}
+			if allocs := testing.AllocsPerRun(100, func() {
+				out, _ := invLong.appendPossibleOwnersWithIndexLocked(dst[:0], treeLong, nil, &qualLong, recsLong, longLeaf)
+				if len(out) != 2 || out[0] != selOuterL || out[1] != w3L {
+					t.Fatalf("appendPossibleOwnersWithIndexLocked(long path) = %v, want [sel-outer worker-3]", spanIDs(out))
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersWithIndexLocked(long path) allocated %v times per call, want 0", allocs)
+			}
+
+			// Verify building a 128-span qualifying index allocates no extra per-span strings on long paths.
+			buildIndexTrace := func(prefix string) (*invocationTrace, *openSpanTree, *spanRecord, identity) {
+				invIdx := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-128-idx", time.Unix(1_700_000_000, 0))
+				rootIdx := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invIdx.agentStack[0], goroutineID: 1}
+				invIdx.agentStack = append(invIdx.agentStack, rootIdx)
+				for i := range 125 {
+					invIdx.agentStack = append(invIdx.agentStack, &spanRecord{
+						spanID:      fmt.Sprintf("node-%d", i),
+						kind:        spanKindAgent,
+						name:        "worker",
+						branch:      "selected",
+						path:        prefix + "/child@1",
+						parent:      rootIdx,
+						goroutineID: uint64(10 + i),
+					})
+				}
+				selIdx := &spanRecord{
+					spanID:      "sel-idx",
+					kind:        spanKindAgent,
+					name:        "wf",
+					isWorkflow:  true,
+					branch:      "selected",
+					path:        prefix,
+					parent:      rootIdx,
+					goroutineID: 200,
+				}
+				invIdx.agentStack = append(invIdx.agentStack, selIdx)
+				return invIdx, invIdx.buildOpenSpanTreeLocked(nil), selIdx, identity{agentName: "leaf", branch: "selected", path: prefix + "/child@1/leaf@1"}
+			}
+			invShortIdx, treeShortIdx, selShortIdx, idShortIdx := buildIndexTrace("selected/wf@1")
+			invLongIdx, treeLongIdx, selLongIdx, idLongIdx := buildIndexTrace(longPrefix)
+			shortAllocs := testing.AllocsPerRun(20, func() {
+				q := invShortIdx.buildQualifyingIndexLocked(treeShortIdx, nil, idShortIdx, selShortIdx)
+				if q.inspections == 0 {
+					t.Fatal("unexpected zero inspections")
+				}
+			})
+			longAllocs := testing.AllocsPerRun(20, func() {
+				q := invLongIdx.buildQualifyingIndexLocked(treeLongIdx, nil, idLongIdx, selLongIdx)
+				if q.inspections == 0 {
+					t.Fatal("unexpected zero inspections")
+				}
+			})
+			if longAllocs > shortAllocs || longAllocs > 4 {
+				t.Errorf("128-span buildQualifyingIndexLocked long-path allocs = %v, short-path = %v (want parity <= 4)", longAllocs, shortAllocs)
+			}
+		}
 	})
 
 	t.Run("outer worker above mid with two inner workers on selected branch demotes to mid", func(t *testing.T) {
@@ -29923,6 +30012,28 @@ func TestParentForRunLocked_DistinctOpenSpansAllocateNothing(t *testing.T) {
 		inv.parentForRunLocked(id, nil, 99999, goroutineOrigin{parent: 1}, nil)
 	}); allocs != 0 {
 		t.Errorf("parentForRunLocked allocated %v times per call, want 0", allocs)
+	}
+
+	// Verify >=64-byte distinct paths also allocate nothing.
+	longAnc := strings.Repeat("segment_", 9) + "pw@1"
+	invLong := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-distinct-long-allocs", time.Unix(1_700_000_000, 0))
+	rootLong := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invLong.agentStack[0], goroutineID: 1}
+	invLong.agentStack = append(invLong.agentStack, rootLong)
+	for i := range 128 {
+		invLong.agentStack = append(invLong.agentStack, &spanRecord{
+			spanID:      fmt.Sprintf("item-%d", i),
+			kind:        spanKindAgent,
+			name:        "item",
+			path:        fmt.Sprintf("%s/n_%d", longAnc, i),
+			parent:      rootLong,
+			goroutineID: uint64(i + 2),
+		})
+	}
+	longID := identity{agentName: "leaf", path: fmt.Sprintf("%s/n_127/leaf@1", longAnc)}
+	if allocs := testing.AllocsPerRun(100, func() {
+		invLong.parentForRunLocked(longID, nil, 99999, goroutineOrigin{parent: 1}, nil)
+	}); allocs != 0 {
+		t.Errorf("parentForRunLocked(long path) allocated %v times per call, want 0", allocs)
 	}
 }
 
@@ -37176,6 +37287,25 @@ func TestParentForRunLocked_DetachedLeafSameInheritedPath(t *testing.T) {
 			t.Fatal("spanQualifiesForOwner(worker-1) = true, want false when workflow selected opened child path fn@1/wf@1")
 		}
 	})
+
+	t.Run("descendant node inside direct workflow excludes peer at caller path", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-inherited-path-descendant-wf", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", path: "fn@1", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", path: "fn@1", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", path: "fn@1", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", path: "fn@1", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", path: "fn@1", parent: mid, goroutineID: 103}
+		subWF := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "fn@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, w3, subWF)
+
+		descLeaf := identity{agentName: "leaf_from_inner", branch: "selected", path: "fn@1/sub_wf@1/inner_node@1"}
+		if got := inv.parentForRunLocked(descLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != subWF {
+			t.Fatalf("parentForRunLocked(descendant leaf inside sub_wf) = %s, want %s (not %s)", got.spanID, subWF.spanID, root.spanID)
+		}
+		if spanQualifiesForOwner(w1, nil, descLeaf, subWF, true) {
+			t.Fatal("spanQualifiesForOwner(worker-1 at fn@1) = true for descendant leaf at fn@1/sub_wf@1/inner_node@1, want false")
+		}
+	})
 }
 
 func TestRunner_ConcurrentNestedLookalike_InsideEmittingFunctionNode_DetachedLeafDemotes(t *testing.T) {
@@ -37406,6 +37536,190 @@ func TestRunner_ConcurrentNestedLookalike_InsideEmittingFunctionNode_DetachedLea
 				t.Errorf("leaf_opaque_with_delta parent_span_id = %q, want %q (shared root, not selected_agent %q)", got, rootSpan, selectedSpan)
 			}
 		})
+	}
+}
+
+func TestRunner_ConcurrentNestedLookalike_DirectWorkflowDescendantLeafKeepsSubWF(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafFromInner := newOneEventAgent(t, "leaf_from_inner", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	releaseW1 := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseW1) }) }
+	t.Cleanup(release)
+
+	innerNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		const wantPath = "wf_root@1/fn@1/sub_wf@1/inner_node@1"
+		if gotPath := ctx.Path(); gotPath != wantPath {
+			return nil, fmt.Errorf("inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
+		}
+		var opaquePlain context.Context = noValueContext{parent: ctx}
+		opaqueDelta := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{
+				Context: &opaquePlain,
+			},
+		})
+		out := make(chan item, 4)
+		go func() {
+			go func() {
+				defer close(out)
+				for ev, runErr := range leafFromInner.Run(opaqueDelta) {
+					out <- item{ev: ev, err: runErr}
+				}
+			}()
+		}()
+		for it := range out {
+			if it.err != nil {
+				return nil, it.err
+			}
+			if emitErr := emit(it.ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	subWF, err := workflowagent.New(workflowagent.Config{
+		Name:  "sub_wf",
+		Edges: workflow.Chain(workflow.Start, innerNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(sub_wf): %v", err)
+	}
+
+	var worker agent.Agent
+	mid, err := agent.New(agent.Config{
+		Name: "mid",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(mid): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err = agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 open")
+					if !yield(ev, nil) {
+						return
+					}
+					select {
+					case <-releaseW1:
+					case <-ctx.Done():
+						return
+					}
+				case 2:
+					for ev, runErr := range mid.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				default:
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					for ev, runErr := range subWF.Run(branchedCtx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var w1Done sync.WaitGroup
+				w1Events := make(chan item, 4)
+				w1Done.Go(func() {
+					defer close(w1Events)
+					for ev, runErr := range worker.Run(ctx) {
+						w1Events <- item{ev: ev, err: runErr}
+					}
+				})
+				first, ok := <-w1Events
+				if ok && !yield(first.ev, first.err) {
+					release()
+					return
+				}
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						release()
+						return
+					}
+				}
+				release()
+				for it := range w1Events {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+				w1Done.Wait()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	emitNode := workflow.NewEmittingFunctionNode[any, any]("fn", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if ctx.Path() == "" {
+			return nil, errors.New("expected non-empty ctx.Path() inside NewEmittingFunctionNode")
+		}
+		for ev, runErr := range root.Run(ctx) {
+			if runErr != nil {
+				return nil, runErr
+			}
+			if emitErr := emit(ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+	wfRoot, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_root",
+		Edges: workflow.Chain(workflow.Start, emitNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, wfRoot, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	subWFSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "sub_wf")["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_from_inner")["parent_span_id"].(string); got != subWFSpan {
+		t.Errorf("leaf_from_inner parent_span_id = %q, want %q (sub_wf, not root %q)", got, subWFSpan, rootSpan)
 	}
 }
 
