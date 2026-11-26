@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
@@ -66,7 +67,10 @@ const (
 )
 
 var (
-	captureMode = captureNone
+	// captureMode holds a contentCaptureMode. It is atomic because tests call
+	// ApplyEnv while goroutines an earlier test left behind are still reading
+	// it.
+	captureMode atomic.Int32
 	once        sync.Once
 )
 
@@ -97,7 +101,7 @@ func contentCapture() contentCaptureMode {
 	once.Do(func() {
 		ApplyEnv()
 	})
-	return captureMode
+	return contentCaptureMode(captureMode.Load())
 }
 
 // getGenAICaptureMessageContent reports whether message content should be
@@ -115,10 +119,21 @@ func captureContentOnSpans() bool {
 	return mode == captureSpanOnly || mode == captureSpanAndEvent
 }
 
-var loggerProvider = global.GetLoggerProvider()
+var defaultLoggerProvider = global.GetLoggerProvider()
+
+// loggerOverride is atomic because goroutines a test leaves behind can still
+// be logging when the next test swaps the provider.
+var loggerOverride atomic.Pointer[log.LoggerProvider]
+
+func loggerProvider() log.LoggerProvider {
+	if lp := loggerOverride.Load(); lp != nil {
+		return *lp
+	}
+	return defaultLoggerProvider
+}
 
 func otelLogger() log.Logger {
-	return loggerProvider.Logger(
+	return loggerProvider().Logger(
 		systemName,
 		log.WithSchemaURL(schemaURL()),
 		log.WithInstrumentationVersion(version.Version),
@@ -127,9 +142,8 @@ func otelLogger() log.Logger {
 
 // OverrideLoggerForTesting makes logging use lp until the test ends.
 func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
-	original := loggerProvider
-	loggerProvider = lp
-	t.Cleanup(func() { loggerProvider = original })
+	original := loggerOverride.Swap(&lp)
+	t.Cleanup(func() { loggerOverride.Store(original) })
 }
 
 // logRequest logs the request to the model - the system message and user messages.
@@ -299,7 +313,7 @@ func contentToJSONLikeValue(c *genai.Content) any {
 // EVENT_ONLY, SPAN_ONLY and SPAN_AND_EVENT, and treats "1" or "true" as
 // EVENT_ONLY for back-compatibility. Anything else records no content.
 func ApplyEnv() {
-	captureMode = parseContentCaptureMode(os.Getenv(captureMessageContentEnvVar))
+	captureMode.Store(int32(parseContentCaptureMode(os.Getenv(captureMessageContentEnvVar))))
 }
 
 func evalsToTrue(s string) bool {
