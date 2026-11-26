@@ -38,6 +38,11 @@
 // once without it, and the next request creates a new cache.
 //
 // A request that already names a cache in its own config is sent as it is.
+// When the provider reports that a model does not support explicit context
+// caching, that refusal is remembered for the model and backend for the life
+// of the process (shared across model instances and never cleared), so later
+// requests are sent without trying to create a cache again until the process
+// restarts.
 //
 // Each request with a CacheConfig gets one handle_context_caching span, a
 // child of the generate_content span when an agent makes the call. Its
