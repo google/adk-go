@@ -29474,6 +29474,292 @@ func TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch(t *testing.T) {
 	})
 }
 
+// TestParentForRunLocked_NestedLookalikeNearestOwner pins that
+// appendPossibleOwnersLocked assigns each qualifying open span to its nearest
+// enclosing lookalike member, demoting only when distinct members match on
+// their own and emitting first/last witnesses for outer matching members so
+// enclosing stops at the nearest common ancestor instead of over-demoting.
+func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
+	leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
+
+	t.Run("nested lookalike repro keeps selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-repro", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, w3, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, selected.spanID, root.spanID)
+		}
+	})
+
+	t.Run("three-level nested chain with idle sibling keeps selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-3level", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid1 := &spanRecord{spanID: "mid-1", kind: spanKindAgent, name: "mid_1", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid1, goroutineID: 103}
+		mid2 := &spanRecord{spanID: "mid-2", kind: spanKindAgent, name: "mid_2", parent: w3, goroutineID: 103}
+		w4 := &spanRecord{spanID: "worker-4", kind: spanKindAgent, name: "worker", parent: mid2, goroutineID: 104}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w4, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid1, w3, mid2, w4, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, selected.spanID)
+		}
+	})
+
+	t.Run("peer sibling also hosting matching span demotes to root", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-sibling-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		sel1 := &spanRecord{spanID: "sel-1", kind: spanKindAgent, name: "wf_alt", branch: "selected", path: "selected/wf@1", parent: w1, goroutineID: 106}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		sel3 := &spanRecord{spanID: "sel-3", kind: spanKindAgent, name: "wf", branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, sel1, w2, mid, w3, sel3)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("both nested members match via distinct children demotes to worker2 with zero allocs", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-distinct-children", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 104}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 104}
+		selA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, selOuter, mid, w3, selA)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, w2.spanID, selA.spanID, root.spanID)
+		}
+
+		if !raceEnabled {
+			tree := inv.buildOpenSpanTreeLocked(nil)
+			recs := []*spanRecord{w1, w2, w3}
+			dst := make([]*spanRecord, 0, 4)
+			if allocs := testing.AllocsPerRun(100, func() {
+				out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA)
+				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+					t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", out)
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
+			}
+		}
+	})
+
+	t.Run("both nested members share intermediate mid demotes to mid", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-shared-mid", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: mid, goroutineID: 103}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 104}
+		selA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, selOuter, w3, selA)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, mid.spanID, w2.spanID, root.spanID)
+		}
+	})
+
+	t.Run("outer member matches before and after worker3 across sibling subtrees demotes to worker2", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-first-last-witness", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: w2, goroutineID: 102}
+		selOuter1 := &spanRecord{spanID: "sel-outer-1", kind: spanKindAgent, name: "wf_outer_1", branch: "selected", path: "selected/wf@1", parent: midA, goroutineID: 103}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: midA, goroutineID: 104}
+		selA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: w2, goroutineID: 106}
+		selOuter2 := &spanRecord{spanID: "sel-outer-2", kind: spanKindAgent, name: "wf_outer_2", branch: "selected", path: "selected/wf@1", parent: midB, goroutineID: 107}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, midA, selOuter1, w3, selA, midB, selOuter2)
+
+		if got := inv.parentFor(leaf); got != selA {
+			t.Fatalf("parentFor = %s, want %s", got.spanID, selA.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, w2.spanID, midA.spanID, root.spanID)
+		}
+
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		out := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w1, w2, w3}, leaf, selA)
+		if len(out) != 3 || out[0] != selOuter1 || out[1] != selOuter2 || out[2] != w3 {
+			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer-1 sel-outer-2 worker-3]", out)
+		}
+	})
+
+	t.Run("outer member itself matches alongside worker3 demotes to root", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-outer-self-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", branch: "selected", path: "selected/wf@1", parent: root, goroutineID: 102}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 101}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", branch: "selected", path: "selected/wf@1", parent: mid, goroutineID: 103}
+		selA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		selOuter := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w2, w1, mid, w3, selA, selOuter)
+
+		if got := inv.parentFor(leaf); got != selA {
+			t.Fatalf("parentFor = %s, want %s", got.spanID, selA.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s (must demote above matching outer worker-2, not %s)", got.spanID, root.spanID, w2.spanID)
+		}
+
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		out := inv.appendPossibleOwnersLocked(nil, tree, nil, []*spanRecord{w2, w3}, leaf, selA)
+		if len(out) != 2 || out[0] != w2 || out[1] != w3 {
+			t.Fatalf("appendPossibleOwnersLocked = %v, want [worker-2 worker-3]", out)
+		}
+	})
+
+	t.Run("interleaved unsorted and duplicate recs", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-unsorted-dup", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w1, goroutineID: 101}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, w3, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, selected.spanID)
+		}
+
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		for _, recs := range [][]*spanRecord{
+			{w1, w2, w3},
+			{w3, w1, w2},
+			{w3, w3},
+			{w3, w1, w2, w3, w1},
+		} {
+			if out := inv.appendPossibleOwnersLocked(nil, tree, nil, recs, leaf, selected); len(out) != 0 {
+				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want empty", recs, out)
+			}
+		}
+
+		// Also verify interleaved multi-owner demotion with unsorted and duplicate recs.
+		invMulti := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-unsorted-dup-multi", time.Unix(1_700_000_000, 0))
+		rootM := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invMulti.agentStack[0], goroutineID: 100}
+		w1M := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootM, goroutineID: 101}
+		w2M := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootM, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w1M, goroutineID: 103}
+		midM := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w1M, goroutineID: 104}
+		w3M := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: midM, goroutineID: 104}
+		selA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "wf_a", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: w3M, goroutineID: 105}
+		invMulti.agentStack = append(invMulti.agentStack, rootM, w1M, w2M, selOuter, midM, w3M, selA)
+
+		if got := invMulti.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w1M {
+			t.Fatalf("parentForRunLocked(interleaved multi) = %s, want %s", got.spanID, w1M.spanID)
+		}
+		treeM := invMulti.buildOpenSpanTreeLocked(nil)
+		for _, recs := range [][]*spanRecord{
+			{w1M, w2M, w3M},
+			{w3M, w1M, w2M},
+			{w3M, w1M, w2M, w1M, w3M},
+		} {
+			out := invMulti.appendPossibleOwnersLocked(nil, treeM, nil, recs, leaf, selA)
+			if len(out) != 2 || out[0] != selOuter || out[1] != w3M {
+				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want [sel-outer worker-3]", recs, out)
+			}
+		}
+	})
+
+	t.Run("more than 16 lookalike members unique and multi-owner", func(t *testing.T) {
+		const idleSiblings = 19
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-21-workers-unique", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+		inv.agentStack = append(inv.agentStack, root)
+		recs := make([]*spanRecord, 0, idleSiblings+2)
+		for i := range idleSiblings {
+			w := &spanRecord{
+				spanID:      fmt.Sprintf("worker-%d", i),
+				kind:        spanKindAgent,
+				name:        "worker",
+				parent:      root,
+				goroutineID: uint64(100 + i),
+			}
+			recs = append(recs, w)
+			inv.agentStack = append(inv.agentStack, w)
+		}
+		wOuter := &spanRecord{spanID: "worker-outer", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 200}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: wOuter, goroutineID: 200}
+		wInner := &spanRecord{spanID: "worker-inner", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 201}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: wInner, goroutineID: 202}
+		recs = append(recs, wOuter, wInner)
+		inv.agentStack = append(inv.agentStack, wOuter, mid, wInner, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 99999, goroutineOrigin{parent: 88888}, nil); got != selected {
+			t.Fatalf("parentForRunLocked(21 workers unique) = %s, want %s", got.spanID, selected.spanID)
+		}
+		reversed := slices.Clone(recs)
+		slices.Reverse(reversed)
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		if out := inv.appendPossibleOwnersLocked(nil, tree, nil, reversed, leaf, selected); len(out) != 0 {
+			t.Fatalf("appendPossibleOwnersLocked(21 workers reversed) = %v, want empty", out)
+		}
+
+		// Multi-owner with >16 members: wOuter also owns a matching child -> demotes to wOuter.
+		invNestedMulti := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-21-workers-nested-multi", time.Unix(1_700_000_000, 0))
+		rootNM := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invNestedMulti.agentStack[0], goroutineID: 1}
+		invNestedMulti.agentStack = append(invNestedMulti.agentStack, rootNM)
+		for i := range idleSiblings {
+			invNestedMulti.agentStack = append(invNestedMulti.agentStack, &spanRecord{
+				spanID:      fmt.Sprintf("worker-%d", i),
+				kind:        spanKindAgent,
+				name:        "worker",
+				parent:      rootNM,
+				goroutineID: uint64(100 + i),
+			})
+		}
+		wOuterNM := &spanRecord{spanID: "worker-outer", kind: spanKindAgent, name: "worker", parent: rootNM, goroutineID: 200}
+		selOuterNM := &spanRecord{spanID: "sel-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: wOuterNM, goroutineID: 203}
+		midNM := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: wOuterNM, goroutineID: 200}
+		wInnerNM := &spanRecord{spanID: "worker-inner", kind: spanKindAgent, name: "worker", parent: midNM, goroutineID: 201}
+		selInnerNM := &spanRecord{spanID: "sel-inner", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: wInnerNM, goroutineID: 202}
+		invNestedMulti.agentStack = append(invNestedMulti.agentStack, wOuterNM, selOuterNM, midNM, wInnerNM, selInnerNM)
+
+		if got := invNestedMulti.parentForRunLocked(leaf, nil, 99999, goroutineOrigin{parent: 88888}, nil); got != wOuterNM {
+			t.Fatalf("parentForRunLocked(21 workers nested multi) = %s, want %s", got.spanID, wOuterNM.spanID)
+		}
+
+		// Multi-owner with 20 direct matching workers -> demotes to root without panic.
+		invDirect := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-20-workers-direct-multi", time.Unix(1_700_000_000, 0))
+		rootD := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invDirect.agentStack[0], goroutineID: 1}
+		invDirect.agentStack = append(invDirect.agentStack, rootD)
+		for i := range 20 {
+			invDirect.agentStack = append(invDirect.agentStack, &spanRecord{
+				spanID:      fmt.Sprintf("dw-%d", i),
+				kind:        spanKindAgent,
+				name:        "worker",
+				nonLLM:      true,
+				children:    []string{"leaf"},
+				parent:      rootD,
+				goroutineID: uint64(300 + i),
+			})
+		}
+		if got := invDirect.parentForRunLocked(identity{agentName: "leaf"}, nil, 99999, goroutineOrigin{parent: 88888}, nil); got != rootD {
+			t.Fatalf("parentForRunLocked(20 direct workers) = %s, want %s", got.spanID, rootD.spanID)
+		}
+	})
+}
+
 // TestParentForRunLocked_DistinctOpenSpansAllocateNothing pins that while no
 // two open activations share an agent name, branch and node path,
 // parentForRunLocked skips lookalike resolution without allocating.
@@ -35972,4 +36258,167 @@ func TestProvenAfterAllRetiredLockedAndExclusionEdges(t *testing.T) {
 		checkWildcard("p0", "p1", false, false)
 		checkWildcard("p0", "p1", true, false)
 	})
+}
+
+type noValueContext struct {
+	parent context.Context
+}
+
+func (c noValueContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
+func (c noValueContext) Done() <-chan struct{}       { return c.parent.Done() }
+func (c noValueContext) Err() error                  { return c.parent.Err() }
+func (c noValueContext) Value(key any) any {
+	if pmKey := discoverPluginManagerCtxKey(c.parent); pmKey != nil && key == pmKey {
+		return c.parent.Value(key)
+	}
+	return nil
+}
+
+// TestRunner_ConcurrentNestedLookalike_HelperGoroutineKeepsSelectedParent
+// covers root running an open sibling worker alongside worker -> mid -> worker
+// -> selected (on branch "selected"), where selected starts leaf agents across
+// two intermediate helper goroutines both via two-hop context.WithoutCancel
+// and via an opaque non-forwarding context. Both leaves run under selected
+// rather than demoting to root.
+func TestRunner_ConcurrentNestedLookalike_HelperGoroutineKeepsSelectedParent(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafDetached := newOneEventAgent(t, "leaf_detached", nil)
+	leafOpaque := newOneEventAgent(t, "leaf_opaque", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	selectedAgent, err := agent.New(agent.Config{
+		Name:      "selected_agent",
+		SubAgents: []agent.Agent{leafDetached, leafOpaque},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				out := make(chan item, 8)
+				go func() {
+					// Hop through a second helper goroutine so neither goid nor
+					// origin.parent matches any open agent span.
+					go func() {
+						defer close(out)
+						detachedCtx := ctx.WithContext(context.WithoutCancel(context.WithoutCancel(ctx)))
+						for ev, runErr := range leafDetached.Run(detachedCtx) {
+							out <- item{ev: ev, err: runErr}
+						}
+						opaqueCtx := ctx.WithContext(noValueContext{parent: ctx})
+						for ev, runErr := range leafOpaque.Run(opaqueCtx) {
+							out <- item{ev: ev, err: runErr}
+						}
+					}()
+				}()
+				for it := range out {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(selected_agent): %v", err)
+	}
+
+	var worker agent.Agent
+	mid, err := agent.New(agent.Config{
+		Name: "mid",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(mid): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err = agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 open")
+					yield(ev, nil)
+				case 2:
+					for ev, runErr := range mid.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				default:
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					for ev, runErr := range selectedAgent.Run(branchedCtx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					// Keep worker 1 open in yield while worker 2 -> mid -> worker 3 -> selected_agent runs.
+					worker2Events := make(chan item, 16)
+					go func() {
+						defer close(worker2Events)
+						for ev2, runErr2 := range worker.Run(ctx) {
+							worker2Events <- item{ev: ev2, err: runErr2}
+						}
+					}()
+					for it := range worker2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 3 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 3", got)
+	}
+	selectedSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "selected_agent")["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_detached")["parent_span_id"].(string); got != selectedSpan {
+		t.Errorf("leaf_detached parent_span_id = %q, want %q (selected_agent, not root %q)", got, selectedSpan, rootSpan)
+	}
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_opaque")["parent_span_id"].(string); got != selectedSpan {
+		t.Errorf("leaf_opaque parent_span_id = %q, want %q (selected_agent, not root %q)", got, selectedSpan, rootSpan)
+	}
 }

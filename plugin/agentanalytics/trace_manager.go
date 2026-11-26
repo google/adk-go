@@ -4688,35 +4688,98 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	return parent
 }
 
-// appendPossibleOwnersLocked appends to dst the members of the unmatched
-// lookalike group recs that could hold a child agent starting with id whose
-// parent would otherwise be selected: the members with an open span, not
-// excluded, in their subtree (themselves included) that id's branch and node
-// path fit as they fit a parent (see parentFor) at or below selected's branch
-// and node path. A child cannot run under a member without such a span, so
-// when fewer than two members have one, their branch and node path already
-// tell which member holds the child, and nothing is appended. inv.mu must be
-// held.
+// appendPossibleOwnersLocked assigns each non-excluded open span that fits id
+// at or below selected to its nearest enclosing member of recs, and appends
+// enclosing witnesses to dst only when at least two members match on their
+// own. When an ancestor member matches via strict descendants alongside a
+// descendant owner, its first and last witnesses are appended so
+// tree.enclosing stops at their nearest common ancestor instead of over-demoting
+// above the ancestor member. inv.mu must be held.
 func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
-	start := len(dst)
+	var mIdxBuf [16]int
+	mIdxs := mIdxBuf[:0]
 	for _, m := range recs {
-		mIdx, ok := tree.stackIdx[m]
-		if !ok {
-			continue
+		if mIdx, ok := tree.stackIdx[m]; ok {
+			mIdxs = append(mIdxs, mIdx)
 		}
-		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
-			rec := inv.agentStack[u]
-			if exclude[rec.spanID] ||
-				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
-				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
-				continue
-			}
-			dst = append(dst, m)
+	}
+	if len(mIdxs) < 2 {
+		return dst
+	}
+	sorted := true
+	for i := 1; i < len(mIdxs); i++ {
+		if tree.tin[mIdxs[i-1]] > tree.tin[mIdxs[i]] {
+			sorted = false
 			break
 		}
 	}
-	if len(dst)-start < 2 {
-		return dst[:start]
+	if !sorted {
+		slices.SortFunc(mIdxs, func(a, b int) int { return cmp.Compare(tree.tin[a], tree.tin[b]) })
+	}
+	mIdxs = slices.Compact(mIdxs)
+	if len(mIdxs) < 2 {
+		return dst
+	}
+	var firstBuf, lastBuf [16]*spanRecord
+	var first, last []*spanRecord
+	if len(mIdxs) <= len(firstBuf) {
+		first, last = firstBuf[:len(mIdxs)], lastBuf[:len(mIdxs)]
+	} else {
+		first, last = make([]*spanRecord, len(mIdxs)), make([]*spanRecord, len(mIdxs))
+	}
+	var activeBuf [16]int
+	active := activeBuf[:0]
+	owners := 0
+	for next := 0; next < len(mIdxs); {
+		topEnd := tree.tout[mIdxs[next]]
+		active = active[:0]
+		for pos := tree.tin[mIdxs[next]] - 1; pos < topEnd; pos++ {
+			for len(active) > 0 && tree.tout[mIdxs[active[len(active)-1]]] <= pos {
+				active = active[:len(active)-1]
+			}
+			if next < len(mIdxs) && tree.tin[mIdxs[next]]-1 == pos {
+				active = append(active, next)
+				next++
+			}
+			owner := active[len(active)-1]
+			ownerIdx := mIdxs[owner]
+			hasDesc := owner+1 < len(mIdxs) && tree.tin[mIdxs[owner+1]] <= tree.tout[ownerIdx]
+			if first[owner] != inv.agentStack[ownerIdx] {
+				rec := inv.agentStack[tree.dfsSeq[pos]]
+				if !exclude[rec.spanID] &&
+					withinBranch(id.branch, rec.branch) && withinPath(id.path, rec.path, rec.name == id.agentName) &&
+					withinBranch(rec.branch, selected.branch) && atOrBelowPath(rec.path, selected.path) {
+					if first[owner] == nil {
+						first[owner] = rec
+						owners++
+					}
+					last[owner] = rec
+				}
+			}
+			if first[owner] != nil && (!hasDesc || first[owner] == inv.agentStack[ownerIdx]) {
+				if next < len(mIdxs) && tree.tin[mIdxs[next]] <= tree.tout[ownerIdx] {
+					pos = tree.tin[mIdxs[next]] - 2
+				} else {
+					pos = tree.tout[ownerIdx] - 1
+				}
+			}
+		}
+	}
+	if owners < 2 {
+		return dst
+	}
+	for k, mIdx := range mIdxs {
+		if first[k] == nil {
+			continue
+		}
+		if k+1 < len(mIdxs) && tree.tin[mIdxs[k+1]] <= tree.tout[mIdx] {
+			dst = append(dst, first[k])
+			if last[k] != first[k] {
+				dst = append(dst, last[k])
+			}
+		} else {
+			dst = append(dst, inv.agentStack[mIdx])
+		}
 	}
 	return dst
 }
