@@ -87,8 +87,9 @@ func appendUserTurn(t *testing.T, svc session.Service, sess session.Session, tex
 }
 
 // runCompactionProcessorWithRequest runs the processor in the state the
-// default chain leaves it in: the instructions processor has already put the
-// system instruction on req, and the tools processor has already collected the
+// default chain leaves it in, for an agent configured with the same
+// instruction and tools: the instructions processor has already put the system
+// instruction on req, and the tools processor has already collected the
 // agent's tools into the flow. Their declarations are copied onto req only
 // after every request processor has run, so the processor sees them on the
 // flow, not on req.
@@ -96,7 +97,18 @@ func runCompactionProcessorWithRequest(t *testing.T, svc session.Service, sess s
 	t.Helper()
 
 	ctx := compactionctx.ToContext(t.Context(), compactionctx.New(cfg, svc))
-	testAgent := utils.Must(llmagent.New(llmagent.Config{Name: "assistant", Model: &testModel{}}))
+	var instruction string
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		for _, p := range req.Config.SystemInstruction.Parts {
+			instruction += p.Text
+		}
+	}
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:        "assistant",
+		Model:       &testModel{},
+		Instruction: instruction,
+		Tools:       tools,
+	}))
 	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Agent:   testAgent,
 		Session: sess,
@@ -241,6 +253,7 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 		reported       int32
 		textChars      int
 		instruction    string
+		tools          int
 		trailingChars  int
 		wantCompaction bool
 	}{
@@ -257,6 +270,15 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			wantCompaction: false,
 		},
 		{
+			// The count is plausible on its own, but the whole prompt,
+			// instruction included, is well above the threshold.
+			name:           "reported 1 with a large instruction above the threshold",
+			reported:       1,
+			textChars:      200,
+			instruction:    strings.Repeat("Follow the house style guide. ", 800),
+			wantCompaction: true,
+		},
+		{
 			name:           "accurate report above the threshold",
 			reported:       6000,
 			textChars:      100,
@@ -270,6 +292,16 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			reported:       3500,
 			textChars:      100,
 			instruction:    strings.Repeat("Follow the house style guide. ", 400),
+			trailingChars:  100,
+			wantCompaction: false,
+		},
+		{
+			// Same for the tool declarations: the reported count already
+			// includes them, so adding them again would cross the threshold.
+			name:           "accurate report with tools on the flow and a later turn stays under the threshold",
+			reported:       3500,
+			textChars:      100,
+			tools:          10,
 			trailingChars:  100,
 			wantCompaction: false,
 		},
@@ -296,7 +328,7 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			t.Logf("threshold=%d tokens; reported=%d; contents estimate=%d tokens",
 				threshold, tc.reported, compactioninternal.EstimateTokensFromContents(contents))
 
-			runCompactionProcessorWithRequest(t, svc, sess, req, nil, &compaction.Config{
+			runCompactionProcessorWithRequest(t, svc, sess, req, lookupTools(t, tc.tools), &compaction.Config{
 				TokenThreshold:     threshold,
 				EventRetentionSize: 2,
 				Summarizer:         summarizer,
