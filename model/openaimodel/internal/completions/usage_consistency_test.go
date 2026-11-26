@@ -33,11 +33,16 @@ func usageFields(prompt, completion, total, reasoning int64) string {
 
 // TestModel_ImpossibleUsageIsUnknown pins that usage which cannot be true is
 // reported as unknown rather than stored as is, in blocking and streaming mode.
-// total_tokens is prompt plus completion tokens, so a total below that sum
-// contradicts its own parts. reasoning_tokens is a subset of
+// total_tokens counts at least the prompt and completion tokens, so a total
+// below their sum contradicts its own parts. reasoning_tokens is a subset of
 // completion_tokens, so reasoning above completion is a contradiction in the
 // same way. Unknown (nil) says that the provider's numbers cannot be trusted.
 // The turn itself still succeeds.
+//
+// Some OpenAI-compatible providers may instead count reasoning outside
+// completion_tokens and add it to total_tokens. Whether to accept that shape
+// is left open, and no row pins it. The reasoning row below has a total of
+// prompt plus completion, so it does not fit that shape either.
 //
 // A total above the sum, reasoning equal to completion, and an omitted total
 // are not contradictions. An omitted total decodes to 0 and means not
@@ -63,7 +68,7 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 		},
 		{
 			name:   "total above prompt plus completion is kept",
-			prompt: 100, completion: 50, total: 170, reasoning: 20,
+			prompt: 100, completion: 50, total: 180, reasoning: 20,
 			wantUsage: true,
 		},
 		{
@@ -85,6 +90,11 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 			name:   "reasoning above completion",
 			prompt: 100, completion: 10, total: 110, reasoning: 50,
 			why: "reasoning_tokens 50 is above completion_tokens 10",
+		},
+		{
+			name:   "reasoning above completion with total omitted",
+			prompt: 100, completion: 10, total: -1, reasoning: 50,
+			why: "reasoning_tokens 50 is above completion_tokens 10, with total_tokens omitted",
 		},
 	}
 	for _, tt := range tests {

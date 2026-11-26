@@ -38,8 +38,8 @@ func usageBody(input, output, total, reasoning int64) string {
 
 // TestModel_ImpossibleUsageIsUnknown pins that usage which cannot be true is
 // reported as unknown rather than stored as is, in blocking and streaming mode.
-// total_tokens is input plus output tokens, so a total below that sum
-// contradicts its own parts. reasoning_tokens is a subset of output_tokens, so
+// total_tokens counts at least the input and output tokens, so a total below
+// their sum contradicts its own parts. reasoning_tokens is a subset of output_tokens, so
 // reasoning above output is a contradiction in the same way. Unknown (nil) says
 // that the provider's numbers cannot be trusted. The turn itself still
 // succeeds.
@@ -68,7 +68,7 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 		},
 		{
 			name:  "total above input plus output is kept",
-			input: 100, output: 50, total: 170, reasoning: 20,
+			input: 100, output: 50, total: 180, reasoning: 20,
 			wantUsage: true,
 		},
 		{
@@ -90,6 +90,11 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 			name:  "reasoning above output",
 			input: 100, output: 10, total: 110, reasoning: 50,
 			why: "reasoning_tokens 50 is above output_tokens 10",
+		},
+		{
+			name:  "reasoning above output with total omitted",
+			input: 100, output: 10, total: -1, reasoning: 50,
+			why: "reasoning_tokens 50 is above output_tokens 10, with total_tokens omitted",
 		},
 	}
 	for _, tt := range tests {
