@@ -2402,7 +2402,6 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 }
 
 func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
-	runInParallel(t)
 	ctx := context.Background()
 
 	var nilPlugin *BigQueryAgentAnalyticsPlugin

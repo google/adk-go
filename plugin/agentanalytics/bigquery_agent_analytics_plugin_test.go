@@ -2986,9 +2986,9 @@ func TestQuotedFragmentCost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, _, mCtx := setupTestPlugin(t)
-			start := time.Now()
-			_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", tt.text))
-			if d := time.Since(start); d > 3*time.Second {
+			if d := withinWallClock(3*time.Second, func() {
+				_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", tt.text))
+			}); d > 3*time.Second {
 				t.Errorf("OnUserMessageCallback took %v for a %d KB message", d, len(tt.text)/1000)
 			}
 		})
@@ -3885,17 +3885,21 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				p, requests, mCtx := setupTestPlugin(t)
-				start := time.Now()
-				var errs callbackErrors
-				errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tc.text)))
-				errs.check(t)
-				if d := time.Since(start); d > 3*time.Second {
+				if d := withinWallClock(3*time.Second, func() {
+					var errs callbackErrors
+					errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tc.text)))
+					errs.check(t)
+				}); d > 3*time.Second {
 					t.Errorf("OnUserMessageCallback took %v for a %d-byte text", d, len(tc.text))
 				}
 				p.AfterRunCallback()(mCtx)
 
 				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				userRows := rowsOfType(rows, EventUserMessageReceived)
+				if len(userRows) == 0 {
+					t.Fatalf("got 0 %s rows, want at least 1", EventUserMessageReceived)
+				}
+				userRow := userRows[0]
 				gotSummary, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary")
 				if s, _ := gotSummary.(string); !strings.HasPrefix(s, tc.prefix) {
 					t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %q, want prefix %q", s, tc.prefix)

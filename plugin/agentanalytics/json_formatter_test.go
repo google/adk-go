@@ -2955,9 +2955,9 @@ func TestSanitizeRawText(t *testing.T) {
 			"unterminated fragment with escaped quotes": `"a" "` + strings.Repeat(`x\"`, 62) + filler,
 		}
 		for name, text := range samples {
-			start := time.Now()
-			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			var got string
+			var lost bool
+			if d := withinWallClock(3*time.Second, func() { got, lost = sanitizeRawText(text) }); d > 3*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a 100 KB text", name, d)
 			}
 			if got != text || lost {
@@ -2978,9 +2978,9 @@ func TestSanitizeRawText(t *testing.T) {
 			"keys without spaces": "password=SECRET123-" + strings.Repeat("token:", 10_000) + " x",
 		}
 		for name, text := range samples {
-			start := time.Now()
-			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			var got string
+			var lost bool
+			if d := withinWallClock(3*time.Second, func() { got, lost = sanitizeRawText(text) }); d > 3*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
 			}
 			if strings.Contains(got, "SECRET123") {
@@ -3004,16 +3004,16 @@ func TestSanitizeRawText(t *testing.T) {
 			"105KB quoted colons with Windows path":                     strings.Repeat(`see "design": user notes; `, 4_100) + `C:\\users\\alice`,
 		}
 		for name, text := range unchanged {
-			start := time.Now()
-			if got := redactErrorMessage(text); got != text {
-				t.Errorf("%s: redactErrorMessage redacted clean text (len=%d)", name, len(got))
-			}
-			if d := time.Since(start); d > 3*time.Second {
+			var red string
+			if d := withinWallClock(3*time.Second, func() { red = redactErrorMessage(text) }); d > 3*time.Second {
 				t.Errorf("%s: redactErrorMessage took %v for a %d-byte text", name, d, len(text))
 			}
-			start = time.Now()
-			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			if red != text {
+				t.Errorf("%s: redactErrorMessage redacted clean text (len=%d)", name, len(red))
+			}
+			var got string
+			var lost bool
+			if d := withinWallClock(3*time.Second, func() { got, lost = sanitizeRawText(text) }); d > 3*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
 			}
 			if got != text || lost {
@@ -3022,9 +3022,9 @@ func TestSanitizeRawText(t *testing.T) {
 		}
 
 		withCred := strings.Repeat("design review notes; ", 2_500) + `retry\npassword=SECRET123`
-		start := time.Now()
-		got, lost := sanitizeRawText(withCred)
-		if d := time.Since(start); d > 3*time.Second {
+		var got string
+		var lost bool
+		if d := withinWallClock(3*time.Second, func() { got, lost = sanitizeRawText(withCred) }); d > 3*time.Second {
 			t.Errorf("escaped credential after 50KB prose: sanitizeRawText took %v", d)
 		}
 		if got != redactedSensitiveTextPlaceholder || !lost {
@@ -3164,9 +3164,8 @@ func TestSanitizeRawText(t *testing.T) {
 				{"redactErrorMessage", redactErrorMessage},
 				{"scrubErrorText", scrubErrorText},
 			} {
-				start := time.Now()
-				got := redact.fn(text)
-				if d := time.Since(start); d > 3*time.Second {
+				var got string
+				if d := withinWallClock(3*time.Second, func() { got = redact.fn(text) }); d > 3*time.Second {
 					t.Errorf("%s: %s took %v for a %d-byte text", tc.name, redact.name, d, len(text))
 				}
 				for _, k := range tc.kept {
@@ -5303,6 +5302,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	key := APIKey(&s)
 
 	t.Run("values", func(t *testing.T) {
+		runInParallel(t)
 		var marshalerCalled atomic.Bool
 		ptrTextCred := credentialTextKey{&marshalerCalled, secret}
 		valTextCred := credentialTextValueKey{&marshalerCalled, secret}
@@ -5446,6 +5446,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("values with redaction off", func(t *testing.T) {
+		runInParallel(t)
 		var offCalled atomic.Bool
 		for _, in := range []any{
 			Token(secret),
@@ -5757,6 +5758,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("map keys", func(t *testing.T) {
+		runInParallel(t)
 		type (
 			SessionToken struct{ credentialTextKey }
 			IDToken      struct{ credentialTextValueKey }
@@ -5841,6 +5843,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("plain credential struct without marshaler", func(t *testing.T) {
+		runInParallel(t)
 		// A credential-named struct without a MarshalJSON or MarshalText method is
 		// walked field by field rather than redacted whole: an exported field with
 		// a neutral name and type is emitted unless its own field name, static
@@ -5903,6 +5906,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("url.Userinfo", func(t *testing.T) {
+		runInParallel(t)
 		type definedUserinfo url.Userinfo
 		checkCredentialNamed(t, false, reflect.TypeFor[url.Userinfo](), reflect.TypeFor[definedUserinfo]())
 		u := url.UserPassword("alice", secret)
@@ -5975,6 +5979,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("opaque errors stay empty objects", func(t *testing.T) {
+		runInParallel(t)
 		for _, redact := range []bool{true, false} {
 			got, truncated, err := smartTruncate(errors.New(secret), 1000, redact)
 			if err != nil || string(got) != `{}` || truncated {
@@ -5984,6 +5989,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("implementer boxes the address of an addressable value", func(t *testing.T) {
+		runInParallel(t)
 		// Boxing the value itself would copy it, which reads its count
 		// while another goroutine may update it.
 		h := &struct{ M countingMarshaler }{}

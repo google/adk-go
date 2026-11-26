@@ -33866,7 +33866,6 @@ func TestPushAgentSpan_PlatformClockOutsideLockAndTaskModeOnly(t *testing.T) {
 }
 
 func TestResolveFinishedTaskLocked_512OverlappingActivationsEquivalence(t *testing.T) {
-	runInParallel(t)
 	const numActivations = 512
 	base := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-512", agentName: "worker", path: "work"}
@@ -36582,6 +36581,7 @@ func TestUUIDProviderLedger_BoundedAcrossDistinctPathsAndCompletedRuns(t *testin
 	})
 
 	t.Run("evicted invocations compact uuidProviders to <= maxCompletedUUIDProviderEntries", func(t *testing.T) {
+		runInParallel(t)
 		tm := newTraceManager()
 		tm.maxTracked = 1
 		evID := identity{invocationID: "inv-evict-compact", agentName: "wf"}
@@ -36622,6 +36622,7 @@ func TestUUIDProviderLedger_BoundedAcrossDistinctPathsAndCompletedRuns(t *testin
 	})
 
 	t.Run("late activations after default-provider completion stay bounded at maxCompletedUUIDProviderEntries", func(t *testing.T) {
+		runInParallel(t)
 		tm := newTraceManager()
 		root := identity{invocationID: "inv-late-bound", agentName: "root"}
 		tm.invocationSpan(plain, root, nil)

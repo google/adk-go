@@ -5746,7 +5746,6 @@ func TestResolveUploads_CanceledCallerContextDefersUploads(t *testing.T) {
 // flush, the flush requeues the upload, logs it once as pending a retry, and
 // keeps the batch, and Close retries the upload when it writes the batch.
 func TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush(t *testing.T) {
-	runInParallel(t)
 	requests := make(chan *storagepb.AppendRowsRequest, 16)
 	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
 		requests: requests,

@@ -1435,14 +1435,13 @@ func TestPlugin_SchemaCallbacks_NoPass(t *testing.T) {
 // once that share one OnSchemaReady, as a host that builds a plugin per
 // request does, and checks under -race that each calls it exactly once.
 func TestPlugin_SchemaCallbacks_ConcurrentPlugins(t *testing.T) {
-	t.Parallel()
 	const plugins = 6
 	var ready atomic.Int32
 	t.Run("construct", func(t *testing.T) {
 		for i := range plugins {
 			withViews := i%2 != 0
 			t.Run(fmt.Sprintf("plugin-%d", i), func(t *testing.T) {
-				runInParallel(t)
+				t.Parallel()
 				transport := &tableTransport{t: t}
 				rec := newSchemaCallbackRecorder()
 				p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
@@ -1928,7 +1927,6 @@ func shortenConflictVerifyForTest(t *testing.T, initialBackoff, maxDuration time
 }
 
 func TestResolveDDLConflict_EdgeCases(t *testing.T) {
-	runInParallel(t)
 	cfg := DefaultConfig()
 	cfg.ProjectID = "test-project"
 	cfg.DatasetID = "test_dataset"

@@ -4359,9 +4359,10 @@ func TestURITokenSpansMatchExpression(t *testing.T) {
 	}
 	alphabet := []string{"a", "Z", "9", "+", ":", "/", " ", `"`, "é"}
 	var checked atomic.Int64
-	if check("") {
-		checked.Add(1)
+	if !check("") {
+		t.FailNow()
 	}
+	checked.Add(1)
 	var wg sync.WaitGroup
 	for _, c := range alphabet {
 		wg.Go(func() {
@@ -4387,6 +4388,9 @@ func TestURITokenSpansMatchExpression(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
+	}
 	if want := int64(597_871); checked.Load() != want {
 		t.Fatalf("checked %d texts, want %d", checked.Load(), want)
 	}

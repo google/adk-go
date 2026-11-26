@@ -134,7 +134,6 @@ func (s *scriptedClientStream) RecvMsg(m any) error {
 }
 
 func TestBatchProcessor_AppendAndFlush(t *testing.T) {
-	runInParallel(t)
 	ctx := t.Context()
 
 	config := DefaultConfig()
@@ -4635,7 +4634,6 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 // pauses them keeps neither upload, so that the next flush does not upload
 // them even once the pause is over.
 func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testing.T) {
-	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// firstBatchUploads reports whether the first batch has an upload,
@@ -4695,7 +4693,6 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runInParallel(t)
 			lis, err := net.Listen("tcp", "localhost:0")
 			if err != nil {
 				t.Fatalf("listen: %v", err)
@@ -4966,7 +4963,6 @@ func TestBatchProcessor_FlushRunEndSucceededWriteReleasesCutShortUploadBytes(t *
 // back without calling the offloader. The pause lasts GCSUploadTimeout, so a
 // background flush after the run-end budget is over falls back too.
 func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T) {
-	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// rows returns the queued rows, one per batch. The first upload that
@@ -5103,7 +5099,6 @@ func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T)
 // take 400ms each and share a single slot, so neither flush reaches the end of
 // them before its upload time is up.
 func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *testing.T) {
-	runInParallel(t)
 	const (
 		rowCount = 12
 		retryLog = "pending retry on next flush"
@@ -5228,7 +5223,6 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 // long-text inline fallbacks on rows 1 and 2), and allows a subsequent
 // background flush to upload a new part as GCS_REFERENCE.
 func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *testing.T) {
-	runInParallel(t)
 	const (
 		longPrefix = "LONG-TEXT-PREFIX-"
 		retryLog   = "pending retry on next flush"
@@ -5602,7 +5596,6 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 // after six of them have failed, none of them having run for three quarters of
 // that time.
 func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T) {
-	runInParallel(t)
 	const (
 		batches = 3
 		uploads = 12
@@ -8141,7 +8134,6 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 // the error, or else the first flush keeps all five rows and the retry
 // writes ev-0 twice.
 func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
-	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		rows  int
@@ -8170,7 +8162,6 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runInParallel(t)
 			ids := make([]string, tc.rows)
 			for i := range ids {
 				ids[i] = fmt.Sprintf("ev-%d", i)
@@ -8337,7 +8328,6 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 }
 
 func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
-	runInParallel(t)
 	newProcessor := func(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool, logger Logger) *batchProcessor {
 		t.Helper()
 		ctx := context.Background()
