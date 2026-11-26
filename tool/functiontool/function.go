@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/schemacache"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
@@ -43,9 +44,12 @@ type Config struct {
 	Description string
 	// An optional JSON schema object defining the expected parameters for the tool.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
+	// The schema must not be modified once the tool is created: the Gemini model
+	// sends the encoding taken at that point.
 	InputSchema *jsonschema.Schema
 	// An optional JSON schema object defining the structure of the tool's output.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
+	// Like InputSchema, it must not be modified once the tool is created.
 	OutputSchema *jsonschema.Schema
 	// IsLongRunning makes a FunctionTool a long-running operation.
 	IsLongRunning bool
@@ -273,14 +277,22 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 //  [1] MCP SDK https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v0.0.0-20250625213837-ff0d746521c4/mcp#ToolHandler
 //  [2] ADK Python https://github.com/google/adk-python/blob/04de3e197d7a57935488eb7bfa647c7ab62cd9d9/src/google/adk/tools/function_tool.py#L110-L112
 
+// resolvedSchema also records the encoding of the schema it resolves, which
+// must not change once resolved, so the Gemini model does not encode it on
+// every call.
 func resolvedSchema[T any](override *jsonschema.Schema) (*jsonschema.Resolved, error) {
 	// TODO: check if override schema is compatible with T.
-	if override != nil {
-		return override.Resolve(nil)
+	schema := override
+	if schema == nil {
+		var err error
+		if schema, err = jsonschema.For[T](nil); err != nil {
+			return nil, err
+		}
 	}
-	schema, err := jsonschema.For[T](nil)
+	resolved, err := schema.Resolve(nil)
 	if err != nil {
 		return nil, err
 	}
-	return schema.Resolve(nil)
+	schemacache.Remember(resolved.Schema())
+	return resolved, nil
 }
