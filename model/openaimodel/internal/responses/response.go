@@ -305,29 +305,26 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 }
 
 // convertUsage converts Responses API token accounting into genai usage
-// metadata. It returns nil when any count is invalid (see [shared.TokenCount]):
-// usage the server could not have measured is reported as unknown rather than
-// as numbers every reader would trust.
+// metadata. It returns nil when any count is invalid (see
+// [shared.InvalidUsage]): usage the server could not have measured is reported
+// as unknown rather than as numbers every reader would trust.
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
 	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
 		return nil
 	}
-	count := func(v int64) int32 {
-		n, _ := shared.TokenCount(v)
-		return n
-	}
+	// InvalidUsage has bounded every count to [0, math.MaxInt32].
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        count(usage.InputTokens),
-		CandidatesTokenCount:    count(usage.OutputTokens),
-		TotalTokenCount:         count(usage.TotalTokens),
-		CachedContentTokenCount: count(usage.InputTokensDetails.CachedTokens),
+		PromptTokenCount:        int32(usage.InputTokens),
+		CandidatesTokenCount:    int32(usage.OutputTokens),
+		TotalTokenCount:         int32(usage.TotalTokens),
+		CachedContentTokenCount: int32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: count(usage.InputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: int32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: count(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: int32(usage.OutputTokens)},
 		},
-		ThoughtsTokenCount: count(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: int32(usage.OutputTokensDetails.ReasoningTokens),
 	}
 }
 

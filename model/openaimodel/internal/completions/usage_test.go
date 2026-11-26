@@ -28,21 +28,28 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
+// TestConvertUsage_InvalidCountDropsUsage sets each count, keyed by the name
+// Chat Completions gives it, to a value no request can have. Usage must be
+// dropped, and InvalidUsage must name that field, since the name is what the
+// span event reports.
 func TestConvertUsage_InvalidCountDropsUsage(t *testing.T) {
 	setters := map[string]func(*openai.CompletionUsage, int64){
 		"prompt_tokens":     func(u *openai.CompletionUsage, v int64) { u.PromptTokens = v },
 		"completion_tokens": func(u *openai.CompletionUsage, v int64) { u.CompletionTokens = v },
 		"total_tokens":      func(u *openai.CompletionUsage, v int64) { u.TotalTokens = v },
-		"cached_tokens":     func(u *openai.CompletionUsage, v int64) { u.PromptTokensDetails.CachedTokens = v },
-		"reasoning_tokens": func(u *openai.CompletionUsage, v int64) {
+		"prompt_tokens_details.cached_tokens": func(u *openai.CompletionUsage, v int64) {
+			u.PromptTokensDetails.CachedTokens = v
+		},
+		"completion_tokens_details.reasoning_tokens": func(u *openai.CompletionUsage, v int64) {
 			u.CompletionTokensDetails.ReasoningTokens = v
 		},
 	}
 	// Each wraps or saturates to a plausible int32 if narrowed blindly:
-	// MinInt32-1 to MaxInt32, -2^32+1 to 1, MaxInt32+1 to MaxInt32.
-	invalid := []int64{-1, math.MinInt32, math.MinInt32 - 1, -(1 << 32) + 1, math.MaxInt32 + 1, math.MaxInt64}
+	// MinInt32-1 to MaxInt32, -2^32+1 to 1, MaxInt32+1 to MaxInt32, 2^32 to 0.
+	invalid := []int64{-1, math.MinInt32, math.MinInt32 - 1, -(1 << 32) + 1, math.MaxInt32 + 1, 1 << 32, math.MaxInt64}
 	for field, set := range setters {
 		for _, v := range invalid {
 			t.Run(fmt.Sprintf("%s=%d", field, v), func(t *testing.T) {
@@ -50,6 +57,9 @@ func TestConvertUsage_InvalidCountDropsUsage(t *testing.T) {
 				set(&u, v)
 				if got := convertUsage(u); got != nil {
 					t.Errorf("convertUsage() = %+v, want nil for an impossible count", got)
+				}
+				if name, _ := shared.InvalidUsage(usageCounts(u)...); name != field {
+					t.Errorf("InvalidUsage(usageCounts()) name = %q, want %q", name, field)
 				}
 			})
 		}
@@ -76,6 +86,24 @@ func TestConvertUsage_ValidBounds(t *testing.T) {
 				t.Errorf("convertUsage() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestConvertUsage_MapsEachCount(t *testing.T) {
+	u := openai.CompletionUsage{PromptTokens: 11, CompletionTokens: 22, TotalTokens: 33}
+	u.PromptTokensDetails.CachedTokens = 4
+	u.CompletionTokensDetails.ReasoningTokens = 5
+	want := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        11,
+		CandidatesTokenCount:    22,
+		TotalTokenCount:         33,
+		CachedContentTokenCount: 4,
+		ThoughtsTokenCount:      5,
+		PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 11}},
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 22}},
+	}
+	if diff := cmp.Diff(want, convertUsage(u)); diff != "" {
+		t.Errorf("convertUsage() mismatch (-want +got):\n%s", diff)
 	}
 }
 

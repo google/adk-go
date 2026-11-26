@@ -17,7 +17,6 @@ package openaimodel
 import (
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -39,7 +38,7 @@ import (
 func TestInvalidUsageDoesNotDriveCompaction(t *testing.T) {
 	for _, api := range []API{APIResponses, APIChatCompletions} {
 		t.Run(string(api), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := newLoopbackServer(t, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if strings.HasSuffix(r.URL.Path, "/chat/completions") {
 					_, _ = fmt.Fprint(w, `{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop",`+
@@ -50,8 +49,7 @@ func TestInvalidUsageDoesNotDriveCompaction(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"id":"r","model":"m","status":"completed",`+
 					`"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ack"}]}],`+
 					`"usage":{"input_tokens":-2147483649,"output_tokens":1,"total_tokens":1}}`)
-			}))
-			t.Cleanup(server.Close)
+			})
 
 			llm, err := NewModel(t.Context(), "test-model", &ClientConfig{
 				APIKey: "test", BaseURL: server.URL + "/v1", HTTPClient: server.Client(), API: api,

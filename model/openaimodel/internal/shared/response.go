@@ -29,18 +29,6 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-// TokenCount narrows a token count to the int32 genai carries, reporting false
-// for a count no request can have: a negative one, or one beyond int32, about a
-// thousand times the largest context window. Such a count comes from a broken
-// server or proxy. Wrapping or saturating it would hand compaction, telemetry
-// and analytics a number they trust, so callers drop the usage instead.
-func TokenCount(v int64) (int32, bool) {
-	if v < 0 || v > math.MaxInt32 {
-		return 0, false
-	}
-	return int32(v), true
-}
-
 // UsageCount is one count from a provider's usage report, under the name the
 // provider gives it.
 type UsageCount struct {
@@ -54,9 +42,13 @@ const (
 	usageExceedsInt32 = "exceeds_int32"
 )
 
-// InvalidUsage returns the name of the first count that is not a valid
-// [TokenCount], and why: "negative" or "exceeds_int32". name is empty when
-// every count is valid.
+// InvalidUsage returns the name of the first count no request can have, and
+// why: "negative", or "exceeds_int32" for one beyond the int32 genai carries,
+// about a thousand times the largest context window. Such a count comes from a
+// broken server or proxy. Wrapping or saturating it would hand compaction,
+// telemetry and analytics a number they trust, so callers drop the usage
+// instead. name is empty when every count is valid, and each then converts to
+// int32 exactly.
 func InvalidUsage(counts ...UsageCount) (name, reason string) {
 	for _, c := range counts {
 		switch {

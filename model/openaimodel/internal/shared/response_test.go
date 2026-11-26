@@ -15,40 +15,11 @@
 package shared
 
 import (
-	"fmt"
 	"math"
 	"testing"
 
 	"google.golang.org/genai"
 )
-
-func TestTokenCount(t *testing.T) {
-	tests := []struct {
-		in     int64
-		want   int32
-		wantOK bool
-	}{
-		{in: 0, want: 0, wantOK: true},
-		{in: 1_000_000, want: 1_000_000, wantOK: true},
-		{in: math.MaxInt32, want: math.MaxInt32, wantOK: true},
-		// Out of range either way: no request can have such a count, and a
-		// blind int32 conversion would turn these into plausible ones.
-		{in: -1},
-		{in: math.MinInt32},
-		{in: math.MinInt32 - 1}, // int32() wraps to MaxInt32
-		{in: -(1 << 32) + 1},    // int32() wraps to 1
-		{in: math.MaxInt32 + 1}, // int32() wraps to MinInt32
-		{in: math.MaxInt64},
-	}
-	for _, tc := range tests {
-		t.Run(fmt.Sprint(tc.in), func(t *testing.T) {
-			got, ok := TokenCount(tc.in)
-			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("TokenCount(%d) = (%d, %t), want (%d, %t)", tc.in, got, ok, tc.want, tc.wantOK)
-			}
-		})
-	}
-}
 
 func TestInvalidUsage(t *testing.T) {
 	tests := []struct {
@@ -58,10 +29,17 @@ func TestInvalidUsage(t *testing.T) {
 		wantReason string
 	}{
 		{name: "none"},
-		{name: "all valid", counts: []UsageCount{{"a", 0}, {"b", math.MaxInt32}}},
+		{name: "all valid", counts: []UsageCount{{"a", 0}, {"b", 1_000_000}, {"c", math.MaxInt32}}},
 		{name: "negative", counts: []UsageCount{{"a", 1}, {"b", -1}}, wantName: "b", wantReason: "negative"},
 		{name: "too large", counts: []UsageCount{{"a", math.MaxInt32 + 1}}, wantName: "a", wantReason: "exceeds_int32"},
 		{name: "first wins", counts: []UsageCount{{"a", -5}, {"b", math.MaxInt64}}, wantName: "a", wantReason: "negative"},
+		{name: "MinInt32", counts: []UsageCount{{"a", math.MinInt32}}, wantName: "a", wantReason: "negative"},
+		{name: "MaxInt64", counts: []UsageCount{{"a", math.MaxInt64}}, wantName: "a", wantReason: "exceeds_int32"},
+		// A blind int32 conversion would turn each of these into a plausible
+		// count.
+		{name: "wraps to MaxInt32", counts: []UsageCount{{"a", math.MinInt32 - 1}}, wantName: "a", wantReason: "negative"},
+		{name: "wraps to 1", counts: []UsageCount{{"a", -(1 << 32) + 1}}, wantName: "a", wantReason: "negative"},
+		{name: "wraps to 0", counts: []UsageCount{{"a", 1 << 32}}, wantName: "a", wantReason: "exceeds_int32"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
