@@ -4736,13 +4736,13 @@ func (inv *invocationTrace) launcherLocked(act any, launchLineage []visitedConte
 //     at mid rather than demoting above worker-outer to root.
 //   - When selected has a non-empty node path containing id.path, only spans
 //     at or below selected's branch and path qualify, except that when
-//     selected is not a workflow agent (so it inherited selected.path rather
-//     than opening a branch-scoped node there), branch-compatible peers on the
-//     exact same selected.path remain eligible. Otherwise (for example, a
-//     detached leaf on a non-empty branch whose node path is empty), any open
-//     member whose own branch and path can hold id counts as a possible
-//     launcher so a detached child cannot falsely attach to another peer's
-//     branch subtree.
+//     selected inherited selected.path rather than opening a branch-scoped
+//     node there (either not a workflow agent, or its parent agent shares
+//     selected.path), branch-compatible peers on the exact same selected.path
+//     remain eligible. Otherwise (for example, a detached leaf on a non-empty
+//     branch whose node path is empty), any open member whose own branch and
+//     path can hold id counts as a possible launcher so a detached child
+//     cannot falsely attach to another peer's branch subtree.
 //   - When an unmatched lookalike group shares id's own (agentName, branch,
 //     path), its live members are treated as peers of id even if nested across
 //     intermediate spans, and parent is further walked up past any agent span
@@ -4869,11 +4869,14 @@ func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity
 		!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) {
 		return false
 	}
-	// When selected is not a workflow agent, it inherited selected.path rather
-	// than opening a branch-scoped node there, so peers sharing exact
-	// selected.path on an ancestor branch stay eligible.
+	// When selected inherited selected.path rather than opening a branch-scoped
+	// node there (not a workflow agent, or its parent agent shares
+	// selected.path, such as a workflowagent pushed at its caller's path), peers
+	// sharing exact selected.path on an ancestor branch stay eligible.
+	inheritedPath := selected != nil && (!selected.isWorkflow ||
+		(selected.parent != nil && selected.parent.kind == spanKindAgent && selected.parent.path == selected.path))
 	if requireSelected && (!atOrBelowPath(rec.path, selected.path) ||
-		(!withinBranch(rec.branch, selected.branch) && (selected.isWorkflow || rec.path != selected.path))) {
+		(!withinBranch(rec.branch, selected.branch) && !(inheritedPath && rec.path == selected.path))) {
 		return false
 	}
 	return true
@@ -4899,7 +4902,9 @@ func appendMatchedOwnerWitnesses(dst []*spanRecord, tree *openSpanTree, stack []
 // qualifyingIndex precomputes in O(N) time which open spans in tree qualify
 // under (exclude, id, selected) together with next/prev qualifying Euler-tour
 // positions, allowing appendPossibleOwnersWithIndexLocked to evaluate each
-// lookalike group in O(len(recs)) time without re-scanning overlapping subtrees.
+// lookalike group in O(k) time (for k = len(recs) DFS-ordered members, or
+// O(k log k) when unsorted via in-place heapsort) without re-scanning
+// overlapping subtrees.
 type qualifyingIndex struct {
 	qualifies   []bool
 	nextQual    []int
@@ -5003,6 +5008,8 @@ func collectSortedGroupMemberIdxs(dst []int, tree *openSpanTree, recs []*spanRec
 		}
 	}
 	if !sorted {
+		// In-place heapsort keeps the O(k log k) unsorted path closure-free and
+		// non-allocating while preserving O(k) for already DFS-ordered inputs.
 		n := len(dst)
 		for i := n/2 - 1; i >= 0; i-- {
 			steps += siftDownIdxsByTin(dst, tree.tin, i, n)
@@ -5117,39 +5124,41 @@ func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecor
 
 // appendPossibleOwnersLocked assigns each non-excluded qualifying open span to
 // its nearest enclosing member of recs, and appends enclosing witnesses to dst
-// only when at least two members match on their own (or when recs shares id's
-// own (agentName, branch, path), in which case all non-excluded members of recs
-// are appended as peers). When selected has a non-empty path containing
-// id.path, only spans fitting both id and selected's branch and node path
-// qualify (except when selected is not a workflow agent, in which case peers on
-// exact selected.path with a compatible ancestor branch remain eligible);
-// otherwise any span fitting id qualifies. For each matched member k, when
-// another member follows inside k's subtree (tree.tin[mIdxs[k+1]] <=
-// tree.tout[mIdx]), k appends first[k] and last[k] (omitting last[k] if equal)
-// (even when first[k] == inv.agentStack[mIdx] or when no inner member matched)
-// so tree.enclosing stops at the nearest common ancestor inside k (or at k
-// itself when matched spans straddle inner members) when possible, or above k
-// when k matched itself; otherwise it appends inv.agentStack[mIdx]. Outside
-// -race builds, up to 16 members use stack buffers without allocating when
-// given a prebuilt openSpanTree/qualifyingIndex and sufficient dst capacity.
-// inv.mu must be held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
+// together with the exact number of visited positions/member steps only when
+// at least two members match on their own (or when recs shares id's own
+// (agentName, branch, path), in which case all non-excluded members of recs are
+// appended as peers). When selected has a non-empty path containing id.path,
+// only spans fitting both id and selected's branch and node path qualify (except
+// when selected inherited selected.path rather than opening a node there, in
+// which case peers on exact selected.path with a compatible ancestor branch
+// remain eligible); otherwise any span fitting id qualifies. For each matched
+// member k, when another member follows inside k's subtree
+// (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k appends first[k] and last[k]
+// (omitting last[k] if equal) (even when first[k] == inv.agentStack[mIdx] or
+// when no inner member matched) so tree.enclosing stops at the nearest common
+// ancestor inside k (or at k itself when matched spans straddle inner members)
+// when possible, or above k when k matched itself; otherwise it appends
+// inv.agentStack[mIdx]. Outside -race builds, up to 16 members use stack
+// buffers without allocating when given a prebuilt openSpanTree and sufficient
+// dst capacity. inv.mu must be held.
+func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) ([]*spanRecord, int) {
 	var mIdxBuf [16]int
-	mIdxs, _ := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
+	mIdxs, steps := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
 	if len(mIdxs) < 2 {
-		return dst
+		return dst, steps
 	}
 	if isPeerLookalikeGroup(recs, id) {
 		start := len(dst)
 		for _, mIdx := range mIdxs {
+			steps++
 			if !exclude[inv.agentStack[mIdx].spanID] {
 				dst = append(dst, inv.agentStack[mIdx])
 			}
 		}
 		if len(dst)-start < 2 {
-			return dst[:start]
+			return dst[:start], steps
 		}
-		return dst
+		return dst, steps
 	}
 	requireSelected := selected != nil && selected.path != "" && atOrBelowPath(id.path, selected.path)
 	var firstBuf, lastBuf [16]*spanRecord
@@ -5166,7 +5175,9 @@ func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *
 		topEnd := tree.tout[mIdxs[next]]
 		active = active[:0]
 		for pos := tree.tin[mIdxs[next]] - 1; pos < topEnd; pos++ {
+			steps++
 			for len(active) > 0 && tree.tout[mIdxs[active[len(active)-1]]] <= pos {
+				steps++
 				active = active[:len(active)-1]
 			}
 			if next < len(mIdxs) && tree.tin[mIdxs[next]]-1 == pos {
@@ -5203,9 +5214,10 @@ func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *
 		}
 	}
 	if owners < 2 {
-		return dst
+		return dst, steps
 	}
-	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last)
+	steps += len(mIdxs)
+	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps
 }
 
 // atOrBelowPath reports whether node path path is ancestor or one of its
