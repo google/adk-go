@@ -71,12 +71,17 @@ func createSessionFromStorageSession(storage *storageSession) (*localSession, er
 
 // storageEvent corresponds to the 'events' table.
 type storageEvent struct {
-	// The primary key leads with the event id, so it cannot serve Get's
-	// per-session read. idx_events_app_user_session_ts_id matches that read's
-	// filter and its ORDER BY timestamp DESC, id DESC, so the rows come back in
-	// index order with no sort step. adk-python defines the same index under
-	// the same name. The priorities are explicit because GORM otherwise orders
-	// index columns by field position, which would put id first.
+	// On SQLite and PostgreSQL the primary key leads with id, so Get's
+	// per-session read cannot use it and scans the whole table. On MySQL,
+	// InnoDB already indexes (app_name, user_id, session_id) for the foreign
+	// key, so this index removes the filesort. idx_events_app_user_session_ts_id
+	// matches Get's filter and ORDER BY timestamp DESC, id DESC, and uses the
+	// same name and columns as adk-python. The priorities are explicit because
+	// GORM otherwise orders index columns by field position, which would put
+	// id first. On MySQL, InnoDB adopts this index for fk_sessions_events and
+	// drops its own FK index, so rolling back with DROP INDEX fails with
+	// Error 1553 unless another index on (app_name, user_id, session_id) is
+	// created first.
 	ID        string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:5,sort:desc"`
 	AppName   string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:1"`
 	UserID    string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:2"`
