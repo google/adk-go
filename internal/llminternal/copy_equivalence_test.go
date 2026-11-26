@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -745,5 +746,61 @@ func TestCloneGenerateContentConfigPanicsLikeReference(t *testing.T) {
 	got := recovered(func() { CloneGenerateContentConfig(cfg) })
 	if want == nil || got != want {
 		t.Errorf("CloneGenerateContentConfig panicked with %v, want %v", got, want)
+	}
+}
+
+// TestCloneMatchesReferenceOnOtherKinds covers kinds no genai type uses
+// today, so a later genai release that adds one is already covered: slices
+// whose elements are structs, slices or maps, and maps with pointer keys,
+// including a nil key, which map iteration may visit after a non-nil one.
+func TestCloneMatchesReferenceOnOtherKinds(t *testing.T) {
+	type inner struct {
+		P *int
+		B []byte
+	}
+	type kinds struct {
+		Structs []inner
+		Slices  [][]byte
+		Maps    []map[string]*int
+		Keys    map[*int]string
+		Array   [2]*int
+	}
+	src := &kinds{
+		Structs: []inner{{P: new(1), B: []byte("a")}, {}},
+		Slices:  [][]byte{[]byte("b"), nil},
+		Maps:    []map[string]*int{{"k": new(2)}, nil},
+		Keys:    map[*int]string{nil: "nil"},
+		Array:   [2]*int{new(3), nil},
+	}
+	for i := range 10 {
+		src.Keys[new(i)] = fmt.Sprint(i)
+	}
+	// Both copies give pointer keys fresh targets, so diffCopies cannot look
+	// them up by the source key; keyed compares them by what they point to.
+	keyed := func(m map[*int]string) map[string]string {
+		out := map[string]string{}
+		for k, v := range m {
+			if _, ok := src.Keys[k]; ok && k != nil {
+				t.Errorf("copy shares key %p with the source", k)
+			}
+			name := "nil"
+			if k != nil {
+				name = fmt.Sprint(*k)
+			}
+			out[name] = v
+		}
+		return out
+	}
+	for range 20 {
+		ref, got := referenceClone(src), clone(src)
+		if diff := cmp.Diff(keyed(ref.Keys), keyed(got.Keys)); diff != "" {
+			t.Fatalf("copy of Keys differs from the reference copy (-want +got):\n%s", diff)
+		}
+		srcKeys := src.Keys
+		src.Keys, ref.Keys, got.Keys = nil, nil, nil
+		for _, d := range diffCopies(src, ref, got) {
+			t.Fatalf("copy differs from the reference copy at %s", d)
+		}
+		src.Keys = srcKeys
 	}
 }
