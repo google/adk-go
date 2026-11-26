@@ -20,6 +20,16 @@
 // columns, and writes to that table fail until they exist. Applications that
 // manage the schema themselves instead of calling AutoMigrate must add those
 // columns before deploying the release that introduces them.
+//
+// A release may also add indexes. AutoMigrate creates a missing index with a
+// plain CREATE INDEX, which on PostgreSQL blocks writes to the table until the
+// index is built. Operators of a large existing events table should create the
+// index beforehand without blocking writes:
+//
+//	CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_app_user_session_ts_id
+//	    ON events (app_name, user_id, session_id, timestamp DESC, id DESC);
+//
+// AutoMigrate then finds an index of that name and skips it.
 package database
 
 import (
