@@ -69,6 +69,18 @@ func TestPersistenceAndScope(t *testing.T) {
 	checkIDs(t, search(t, reopened, "app", "user", "coffee"))
 }
 
+func TestReimportChangesTieOrder(t *testing.T) {
+	svc := openService(t, sqlitememory.Config{Path: filepath.Join(t.TempDir(), "memory.db")})
+	first := newSession(t, "app", "user", "first", textEvent("first", "oolong tea"))
+	second := newSession(t, "app", "user", "second", textEvent("second", "green tea"))
+	importSession(t, svc, first)
+	importSession(t, svc, second)
+	checkIDs(t, search(t, svc, "app", "user", "tea"), "first", "second")
+
+	importSession(t, svc, first)
+	checkIDs(t, search(t, svc, "app", "user", "tea"), "second", "first")
+}
+
 func TestImportRollback(t *testing.T) {
 	svc := openService(t, sqlitememory.Config{Path: filepath.Join(t.TempDir(), "memory.db")})
 	importSession(t, svc, newSession(t, "app", "user", "session", textEvent("original", "original memory")))
