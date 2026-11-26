@@ -15,12 +15,8 @@
 package auth_test
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -107,19 +103,11 @@ func TestServiceAccountKeepsTheIDTokenExchangeOutOfDebugLogs(t *testing.T) {
 // requests go to tokenURI.
 func idTokenServiceAccountKey(t *testing.T, tokenURI string) []byte {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
 	b, err := json.Marshal(map[string]string{
 		"type":           "service_account",
 		"project_id":     "p",
 		"private_key_id": "key-id",
-		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"private_key":    auth.ServiceAccountTestKeyPEM(t),
 		"client_email":   "sa@p.iam.gserviceaccount.com",
 		"client_id":      "1",
 		"token_uri":      tokenURI,

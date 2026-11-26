@@ -141,6 +141,7 @@ func waitForReconnectBackoff(t *testing.T) {
 // endpoint that completes the websocket handshake and then hangs up must not
 // redial without limit, and the caller must be told the session is over.
 func TestRunLiveBoundsADeadEndpoint(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		// Hard close straight after setupComplete.
 	})
@@ -173,6 +174,7 @@ func TestRunLiveBoundsADeadEndpoint(t *testing.T) {
 // frame and then hangs up resets that budget on every connection, so only the
 // invocation-wide ceiling ends the session.
 func TestRunLiveBoundsAOneFramePerConnectionBackend(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong))
 		// Give the flow time to consume the frame and reset the consecutive
@@ -210,6 +212,7 @@ func TestRunLiveBoundsAOneFramePerConnectionBackend(t *testing.T) {
 // TestRunLiveReconnectSurvivesATransientDrop guards the other direction: the
 // bounds must not kill a session that recovers.
 func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		if connNum == 1 {
 			return // one abrupt drop
@@ -271,6 +274,7 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 // not resumable just before the drop, as it does while the model is answering,
 // so the reconnect also has to keep the handle it was offered before that.
 func TestRunLiveResumedConnectionDoesNotReplayHistory(t *testing.T) {
+	t.Parallel()
 	const handle = "handle-1"
 	firstConnFrame := make(chan string, 1)
 	resumedConnFrames := make(chan []string, 1)
@@ -358,6 +362,7 @@ func TestRunLiveResumedConnectionDoesNotReplayHistory(t *testing.T) {
 // LiveRunConfig.SessionResumption. That first connection resumes the session
 // too, so it must not replay the history either.
 func TestRunLiveCallerHandleDoesNotReplayHistory(t *testing.T) {
+	t.Parallel()
 	frames := make(chan []string, 1)
 	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
@@ -499,6 +504,7 @@ func TestRunLiveReconnectStopsOnTeardown(t *testing.T) {
 // backoff is unreachable in the outage it exists for, because the first failed
 // dial would end the session outright.
 func TestRunLiveChargesAFailedRedialToTheBudget(t *testing.T) {
+	t.Parallel()
 	client, connCount, closeServer := startClosableLiveServer(t, func(connNum int, conn *websocket.Conn) {})
 	f := newReconnectFlow(client, testLiveReconnectPolicy(3, 20))
 	ctx, cancel := newLiveInvocationContext(t)
@@ -523,6 +529,7 @@ func TestRunLiveChargesAFailedRedialToTheBudget(t *testing.T) {
 // connected, so this is bad credentials or an unknown model, and retrying only
 // delays a permanent error.
 func TestRunLiveFirstConnectFailureIsFatal(t *testing.T) {
+	t.Parallel()
 	client, connCount, closeServer := startClosableLiveServer(t, func(connNum int, conn *websocket.Conn) {})
 	closeServer()
 
@@ -549,6 +556,7 @@ func TestRunLiveFirstConnectFailureIsFatal(t *testing.T) {
 }
 
 func TestLiveReconnectPolicyNextBackoff(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		p    *liveReconnectPolicy
@@ -592,6 +600,7 @@ func TestLiveReconnectPolicyNextBackoff(t *testing.T) {
 }
 
 func TestLiveReconnectPolicyJittered(t *testing.T) {
+	t.Parallel()
 	t.Run("stays within the band and varies", func(t *testing.T) {
 		p := &liveReconnectPolicy{jitter: 0.2}
 		const base = time.Second
@@ -631,6 +640,7 @@ func TestLiveReconnectPolicyJittered(t *testing.T) {
 }
 
 func TestDefaultLiveReconnectPolicy(t *testing.T) {
+	t.Parallel()
 	p := defaultLiveReconnectPolicy()
 	if p.maxAttempts <= 0 || p.maxTotal <= 0 {
 		t.Fatalf("policy has no bound: maxAttempts=%d maxTotal=%d", p.maxAttempts, p.maxTotal)
@@ -681,6 +691,7 @@ func TestDefaultLiveReconnectPolicy(t *testing.T) {
 }
 
 func TestTornDown(t *testing.T) {
+	t.Parallel()
 	t.Run("open session", func(t *testing.T) {
 		if tornDown(t.Context(), newLiveSessionImpl()) {
 			t.Error("tornDown = true for a live session and an uncancelled context")
@@ -703,6 +714,7 @@ func TestTornDown(t *testing.T) {
 }
 
 func TestWaitBeforeReconnect(t *testing.T) {
+	t.Parallel()
 	t.Run("proceeds when nothing tore down", func(t *testing.T) {
 		if !waitBeforeReconnect(t.Context(), newLiveSessionImpl(), time.Millisecond) {
 			t.Error("waitBeforeReconnect = false with a live session and an uncancelled context")
@@ -742,6 +754,7 @@ func TestWaitBeforeReconnect(t *testing.T) {
 // lifecycle, so counting every reconnect would end a long healthy call once it
 // had been cycled maxTotal times.
 func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
+	t.Parallel()
 	const connLifetime = 120 * time.Millisecond
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong))
@@ -793,6 +806,7 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 // absolute size. At full scale the session dies eight minutes in, which is no
 // use as a test.
 func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
+	t.Parallel()
 	const (
 		scale        = 100
 		connLifetime = intermediaryWebsocketTimeout / scale
@@ -843,6 +857,7 @@ func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
 // no content to reset that budget, how long each connection lasts is the only
 // thing separating this session from a backend that hangs up on every dial.
 func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
+	t.Parallel()
 	const connLifetime = 120 * time.Millisecond
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		// No content on any connection, only the setup exchange and a drop.
@@ -896,6 +911,7 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 // before it meets the error, which is what puts the caller's delay after the
 // error is stamped rather than before.
 func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"turnComplete":true}}`))
 	})
