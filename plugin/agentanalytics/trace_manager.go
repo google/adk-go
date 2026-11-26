@@ -59,7 +59,10 @@ const (
 	sweepInterval = 128
 )
 
-var agentInterfaceType = reflect.TypeFor[agent.Agent]()
+var (
+	agentInterfaceType   = reflect.TypeFor[agent.Agent]()
+	contextInterfaceType = reflect.TypeFor[context.Context]()
+)
 
 // agentPkgPath and workflowPkgPath are the import paths of ADK's agent and
 // workflow packages, and adkPkgPrefix is the import path prefix that all of
@@ -4531,20 +4534,65 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
-// maxLaunchLineage bounds the chain of contexts that launcherLocked follows.
-const maxLaunchLineage = 64
+func isThinContextWrapper(t reflect.Type) bool {
+	if t.NumField() != 1 {
+		return false
+	}
+	f := t.Field(0)
+	return f.Anonymous && f.Name == "Context" && f.Type == contextInterfaceType
+}
+
+func extractContextField(v reflect.Value, name string) (any, bool) {
+	f := directStructField(v, name)
+	if !f.IsValid() || f.Kind() != reflect.Interface || f.IsNil() || !f.CanInterface() {
+		return nil, false
+	}
+	return f.Interface(), true
+}
+
+func launchLineageNext(v reflect.Value) (any, bool) {
+	vt := v.Type()
+	switch {
+	case vt.PkgPath() == "context":
+		if next, ok := extractContextField(v, "Context"); ok {
+			return next, true
+		}
+		if cc := directStructField(v, "cancelCtx"); cc.IsValid() {
+			if cc.Kind() == reflect.Pointer {
+				if cc.IsNil() {
+					return nil, false
+				}
+				cc = cc.Elem()
+			}
+			if cc.Kind() == reflect.Struct {
+				return extractContextField(cc, "Context")
+			}
+		}
+		return nil, false
+	case isADKType(vt):
+		return extractContextField(v, "Context")
+	case isThinContextWrapper(vt):
+		f := v.Field(0)
+		if f.IsNil() || !f.CanInterface() {
+			return nil, false
+		}
+		return f.Interface(), true
+	default:
+		return nil, false
+	}
+}
 
 // launcherLocked returns the index in agentStack of the open agent activation,
 // not excluded, whose context the agent run with activation key act (see
 // activationKey) was started with, or 0 if no such activation is known. ADK
 // derives the context of each agent run from the context passed to its Run,
-// and each of its contexts, like the context package's own, embeds the
-// context that it derives from, so the chain of embedded Context fields from
-// act passes through the activation key of every run that the new run's
-// context derives from, nearest first. The first one of an open activation
-// tells which activation started the run, whichever goroutine runs it. The
-// chain is read through exported fields alone, so no user code runs while
-// inv.mu is held.
+// and standard context wrappers (except context.WithoutCancel), ADK contexts,
+// and pointer wrappers embedding only context.Context with no other fields
+// expose the parent they derive from, so the chain from act passes through the
+// activation key of every run that the new run's context derives from, nearest
+// first. The first one of an open activation tells which activation started the
+// run, whichever goroutine runs it. Only those allowlisted types and direct
+// fields are read, so no user fields or methods run while inv.mu is held.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if act == nil {
 		return 0
@@ -4558,8 +4606,12 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 			byActivation[rec.activation] = i
 		}
 	}
+	if len(byActivation) == 0 {
+		return 0
+	}
 	cur := act
-	for step := range maxLaunchLineage {
+	var seen map[any]struct{}
+	for step := 0; ; step++ {
 		v := reflect.ValueOf(cur)
 		if v.Kind() != reflect.Pointer || v.IsNil() {
 			return 0
@@ -4569,16 +4621,24 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 				return i
 			}
 		}
+		if step >= 32 {
+			if seen == nil {
+				seen = make(map[any]struct{})
+			}
+			if _, dup := seen[cur]; dup {
+				return 0
+			}
+			seen[cur] = struct{}{}
+		}
 		if v = v.Elem(); v.Kind() != reflect.Struct {
 			return 0
 		}
-		next := v.FieldByName("Context")
-		if !next.IsValid() || next.Kind() != reflect.Interface || next.IsNil() || !next.CanInterface() {
+		next, ok := launchLineageNext(v)
+		if !ok {
 			return 0
 		}
-		cur = next.Interface()
+		cur = next
 	}
-	return 0
 }
 
 // parentForRunLocked returns the span that an agent starting with id on
@@ -10142,10 +10202,13 @@ func activationKey(ctx context.Context) any {
 		}
 		if key != nil {
 			if v := reflect.ValueOf(key); v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct {
-				if f := v.Elem().FieldByName("Context"); f.IsValid() && f.CanInterface() {
-					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
-						if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
-							return inner
+				elem := v.Elem()
+				if isADKType(elem.Type()) {
+					if f := directStructField(elem, "Context"); f.IsValid() && f.CanInterface() {
+						if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
+							if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
+								return inner
+							}
 						}
 					}
 				}

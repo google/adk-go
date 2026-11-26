@@ -29420,6 +29420,614 @@ func TestParentForRunLocked_LaunchLineage(t *testing.T) {
 	})
 }
 
+type lineageContextMethods interface{ context.Context }
+
+type lineageEmbeddedMetadata struct{ Context context.Context }
+
+type lineageOptionalMetadata struct {
+	lineageContextMethods
+	*lineageEmbeddedMetadata
+}
+
+type lineageSideContext struct {
+	lineageContextMethods
+	Context context.Context
+}
+
+type lineageMultiFieldContext struct {
+	context.Context
+	extra int
+}
+
+type lineageCustomIfaceContext struct {
+	lineageContextMethods
+}
+
+type lineageContextAlias = context.Context
+
+type lineageAliasContext struct {
+	lineageContextAlias
+}
+
+type syncContextWrapper struct {
+	mu      sync.RWMutex
+	Context context.Context
+}
+
+func (w *syncContextWrapper) Deadline() (time.Time, bool) {
+	w.mu.RLock()
+	c := w.Context
+	w.mu.RUnlock()
+	return c.Deadline()
+}
+
+func (w *syncContextWrapper) Done() <-chan struct{} {
+	w.mu.RLock()
+	c := w.Context
+	w.mu.RUnlock()
+	return c.Done()
+}
+
+func (w *syncContextWrapper) Err() error {
+	w.mu.RLock()
+	c := w.Context
+	w.mu.RUnlock()
+	return c.Err()
+}
+
+func (w *syncContextWrapper) Value(key any) any {
+	w.mu.RLock()
+	c := w.Context
+	w.mu.RUnlock()
+	return c.Value(key)
+}
+
+type nonADKEmbeddedIC struct {
+	Context agent.InvocationContext
+}
+
+type nonADKNilEmbeddedIC struct {
+	agent.InvocationContext
+	*nonADKEmbeddedIC
+}
+
+func (w *nonADKNilEmbeddedIC) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return w
+}
+
+type nonADKSideFieldIC struct {
+	agent.InvocationContext
+	Context agent.InvocationContext
+}
+
+func (w *nonADKSideFieldIC) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return w
+}
+
+type nonADKSyncIC struct {
+	agent.InvocationContext
+	mu      sync.RWMutex
+	Context agent.InvocationContext
+}
+
+func (w *nonADKSyncIC) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return w
+}
+
+func TestDispatcherLaunchLineage(t *testing.T) {
+	for _, tc := range []struct {
+		kind       string
+		wantWorker int
+	}{
+		{kind: "direct", wantWorker: 2},
+		{kind: "pointer", wantWorker: 2},
+		{kind: "value", wantWorker: 1},
+		{kind: "nil_optional", wantWorker: 2},
+		{kind: "side_field", wantWorker: 2},
+		{kind: "deep", wantWorker: 2},
+		{kind: "timeout", wantWorker: 2},
+		{kind: "after_func", wantWorker: 2},
+		{kind: "without_cancel", wantWorker: 1},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+			type item struct {
+				ev  *session.Event
+				err error
+			}
+			var dispatch chan<- func()
+			var workerCalls atomic.Int32
+			var rootCtx context.Context
+			wrap := func(ctx, outer context.Context, kind string) (context.Context, func()) {
+				switch kind {
+				case "pointer":
+					return &lineageContext{Context: ctx}, func() {}
+				case "value":
+					return lineageContext{Context: ctx}, func() {}
+				case "nil_optional":
+					return &lineageOptionalMetadata{lineageContextMethods: ctx}, func() {}
+				case "side_field":
+					return &lineageSideContext{lineageContextMethods: ctx, Context: outer}, func() {}
+				case "deep":
+					for i := range 70 {
+						ctx = context.WithValue(ctx, lineageKey{}, i)
+					}
+					return ctx, func() {}
+				case "timeout":
+					c, cancel := context.WithTimeout(ctx, time.Minute)
+					return c, cancel
+				case "after_func":
+					stop := context.AfterFunc(ctx, func() {})
+					return ctx, func() { stop() }
+				case "without_cancel":
+					return context.WithoutCancel(ctx), func() {}
+				default:
+					return ctx, func() {}
+				}
+			}
+			var worker agent.Agent
+			var err error
+			worker, err = agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{leaf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if workerCalls.Add(1) == 1 {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "worker"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "worker 1 ok")
+							yield(ev, nil)
+							return
+						}
+						leafEvents := make(chan item, 4)
+						job := func() {
+							defer close(leafEvents)
+							var wrapped context.Context
+							var cleanup func()
+							if tc.kind == "after_func" {
+								c, cancel := context.WithCancel(ctx)
+								stop := context.AfterFunc(c, func() {})
+								wrapped = c
+								cleanup = func() {
+									stop()
+									cancel()
+								}
+							} else {
+								wrapped, cleanup = wrap(ctx, rootCtx, tc.kind)
+							}
+							defer cleanup()
+							for ev, runErr := range leaf.Run(ctx.WithContext(wrapped)) {
+								leafEvents <- item{ev: ev, err: runErr}
+							}
+						}
+						if tc.kind == "nil_optional" || tc.kind == "side_field" {
+							job()
+						} else {
+							select {
+							case dispatch <- job:
+							case <-ctx.Done():
+								yield(nil, ctx.Err())
+								return
+							}
+						}
+						for it := range leafEvents {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name: "root",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						jobs := make(chan func())
+						dispatcherDone := make(chan struct{})
+						go func() {
+							defer close(dispatcherDone)
+							for job := range jobs {
+								job()
+							}
+						}()
+						defer func() {
+							close(jobs)
+							<-dispatcherDone
+						}()
+						rootCtx = ctx
+						dispatch = jobs
+						for ev, runErr := range worker.Run(ctx) {
+							worker2Events := make(chan item, 8)
+							go func() {
+								defer close(worker2Events)
+								for ev, runErr := range worker.Run(ctx) {
+									worker2Events <- item{ev: ev, err: runErr}
+								}
+							}()
+							for it := range worker2Events {
+								if !yield(it.ev, it.err) {
+									return
+								}
+							}
+							if !yield(ev, runErr) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+			}
+			w1Span, _ := workerStarts[0]["span_id"].(string)
+			w2Span, _ := workerStarts[1]["span_id"].(string)
+			roots := agentRowsOfType(rows, EventAgentStarting, "root")
+			leaves := agentRowsOfType(rows, EventAgentStarting, "leaf")
+			ends := agentRowsOfType(rows, EventAgentCompleted, "leaf")
+			if len(roots) != 1 || len(leaves) != 1 || len(ends) != 1 {
+				t.Fatalf("root starts %d, leaf starts %d, leaf completions %d; want one of each", len(roots), len(leaves), len(ends))
+			}
+			wantSpan := w2Span
+			if tc.wantWorker == 1 {
+				wantSpan = w1Span
+			}
+			if got, _ := leaves[0]["parent_span_id"].(string); got != wantSpan {
+				t.Fatalf("leaf parent_span_id = %q (worker1=%t, worker2=%t, root=%t), want worker %d (%q)",
+					got, got == w1Span, got == w2Span, got == roots[0]["span_id"], tc.wantWorker, wantSpan)
+			}
+		})
+	}
+}
+
+func TestSynchronizedContextNoRace(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				syncCtx := &syncContextWrapper{Context: ctx}
+				altCtx := context.WithValue(ctx, lineageKey{}, "alt")
+				stopMutate := make(chan struct{})
+				var mutateWG sync.WaitGroup
+				mutateWG.Go(func() {
+					for i := 0; ; i++ {
+						select {
+						case <-stopMutate:
+							return
+						default:
+						}
+						syncCtx.mu.Lock()
+						if i%2 == 0 {
+							syncCtx.Context = altCtx
+						} else {
+							syncCtx.Context = ctx
+						}
+						syncCtx.mu.Unlock()
+					}
+				})
+				defer func() {
+					close(stopMutate)
+					mutateWG.Wait()
+				}()
+				for ev, runErr := range leaf.Run(ctx.WithContext(syncCtx)) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					worker2Events := make(chan item, 8)
+					go func() {
+						defer close(worker2Events)
+						for ev, runErr := range worker.Run(ctx) {
+							worker2Events <- item{ev: ev, err: runErr}
+						}
+					}()
+					for it := range worker2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	w2Span, _ := workerStarts[1]["span_id"].(string)
+	leaves := agentRowsOfType(rows, EventAgentStarting, "leaf")
+	if len(leaves) != 1 {
+		t.Fatalf("leaf AGENT_STARTING count = %d, want 1", len(leaves))
+	}
+	if got, _ := leaves[0]["parent_span_id"].(string); got != w2Span {
+		t.Fatalf("leaf parent_span_id = %q, want worker 2 (%q)", got, w2Span)
+	}
+}
+
+func TestLauncherLocked_CycleAndFallback(t *testing.T) {
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launcher-cycle", time.Unix(1_700_000_000, 0))
+	w1Act := &lineageContext{Context: context.Background()}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: inv.agentStack[0], goroutineID: 101, activation: w1Act}
+	inv.agentStack = append(inv.agentStack, w1)
+	excluded := make([]bool, len(inv.agentStack))
+
+	t.Run("self-referential pointer cycle terminates", func(t *testing.T) {
+		cyc := &lineageContext{}
+		cyc.Context = cyc
+		if got := inv.launcherLocked(cyc, excluded); got != 0 {
+			t.Fatalf("launcherLocked(self-cycle) = %d, want 0", got)
+		}
+	})
+
+	t.Run("two-node pointer cycle terminates", func(t *testing.T) {
+		a := &lineageContext{}
+		b := &lineageContext{Context: a}
+		a.Context = b
+		if got := inv.launcherLocked(a, excluded); got != 0 {
+			t.Fatalf("launcherLocked(2-cycle) = %d, want 0", got)
+		}
+	})
+
+	t.Run("deep WithValue over cycle terminates", func(t *testing.T) {
+		cyc := &lineageContext{}
+		cyc.Context = cyc
+		var cur context.Context = cyc
+		for i := range 80 {
+			cur = context.WithValue(cur, lineageKey{}, i)
+		}
+		if got := inv.launcherLocked(&lineageContext{Context: cur}, excluded); got != 0 {
+			t.Fatalf("launcherLocked(deep-cycle) = %d, want 0", got)
+		}
+	})
+
+	t.Run("deep WithValue chain over 64 steps resolves", func(t *testing.T) {
+		var cur context.Context = w1Act
+		for i := range 80 {
+			cur = context.WithValue(cur, lineageKey{}, i)
+		}
+		if got := inv.launcherLocked(&lineageContext{Context: cur}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(80 WithValue) = %d, want 1", got)
+		}
+	})
+
+	t.Run("stdlib timerCtx and afterFuncCtx resolve", func(t *testing.T) {
+		tCtx, cancel := context.WithTimeout(w1Act, time.Minute)
+		defer cancel()
+		if got := inv.launcherLocked(&lineageContext{Context: tCtx}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(timerCtx) = %d, want 1", got)
+		}
+
+		cCtx, cCancel := context.WithCancel(w1Act)
+		defer cCancel()
+		stop := context.AfterFunc(cCtx, func() {})
+		defer stop()
+		if got := inv.launcherLocked(&lineageContext{Context: cCtx}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(afterFuncCtx) = %d, want 1", got)
+		}
+	})
+
+	t.Run("withoutCancel, value wrapper, multi-field, custom-iface, and alias stop walk", func(t *testing.T) {
+		cases := []struct {
+			name string
+			act  any
+		}{
+			{name: "withoutCancelCtx", act: &lineageContext{Context: context.WithoutCancel(w1Act)}},
+			{name: "valueWrapper", act: &lineageContext{Context: lineageContext{Context: w1Act}}},
+			{name: "multiField", act: &lineageContext{Context: &lineageMultiFieldContext{Context: w1Act, extra: 1}}},
+			{name: "customIface", act: &lineageContext{Context: &lineageCustomIfaceContext{lineageContextMethods: w1Act}}},
+			{name: "aliasField", act: &lineageContext{Context: &lineageAliasContext{lineageContextAlias: w1Act}}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := inv.launcherLocked(tc.act, excluded); got != 0 {
+					t.Fatalf("launcherLocked(%s) = %d, want 0", tc.name, got)
+				}
+			})
+		}
+	})
+}
+
+func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
+	var capturedIC agent.InvocationContext
+	leaf, err := agent.New(agent.Config{
+		Name: "leaf",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				capturedIC = ic
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(leaf): %v", err)
+	}
+	leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(leaf): %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_deep",
+		Edges: workflow.Chain(workflow.Start, leafNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_deep): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, wf).Run(t.Context(), "u1", "s-deep-path", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+	}
+	if capturedIC == nil {
+		t.Fatal("leaf did not capture InvocationContext")
+	}
+
+	var cur context.Context = agent.NewCallbackContext(capturedIC, nil)
+	for i := range 520 {
+		cur = context.WithValue(cur, lineageKey{}, i)
+	}
+	if got := contextPath(cur); got != "wf_deep@1/leaf@1" {
+		t.Fatalf("contextPath(520 WithValue) = %q, want wf_deep@1/leaf@1", got)
+	}
+
+	if got := contextPath(&lineageContext{Context: cur}); got != "wf_deep@1/leaf@1" {
+		t.Fatalf("contextPath(pointer thin wrapper) = %q, want wf_deep@1/leaf@1", got)
+	}
+	if got := contextPath(lineageContext{Context: cur}); got != "" {
+		t.Fatalf("contextPath(value thin wrapper) = %q, want empty", got)
+	}
+	if got := contextPath(&lineageAliasContext{lineageContextAlias: cur}); got != "" {
+		t.Fatalf("contextPath(alias wrapper) = %q, want empty", got)
+	}
+
+	cyc := &lineageContext{}
+	cyc.Context = cyc
+	if got := contextPath(cyc); got != "" {
+		t.Fatalf("contextPath(self-cycle) = %q, want empty", got)
+	}
+	cycA := &lineageContext{}
+	cycB := &lineageContext{Context: cycA}
+	cycA.Context = cycB
+	if got := contextPath(cycA); got != "" {
+		t.Fatalf("contextPath(2-cycle) = %q, want empty", got)
+	}
+
+	nilOpt := &lineageOptionalMetadata{lineageContextMethods: capturedIC}
+	if got := contextPath(nilOpt); got != "" {
+		t.Fatalf("contextPath(nilOpt) = %q, want empty", got)
+	}
+
+	syncCtx := &syncContextWrapper{Context: cur}
+	stopMutate := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stopMutate:
+				return
+			default:
+			}
+			syncCtx.mu.Lock()
+			if i%2 == 0 {
+				syncCtx.Context = cur
+			} else {
+				syncCtx.Context = capturedIC
+			}
+			syncCtx.mu.Unlock()
+		}
+	})
+	for range 200 {
+		if got := contextPath(syncCtx); got != "" {
+			t.Fatalf("contextPath(syncCtx) = %q, want empty", got)
+		}
+	}
+	close(stopMutate)
+	wg.Wait()
+}
+
+func TestActivationKey_NonADKWrapper(t *testing.T) {
+	base := &mockInvocationContext{ctx: context.Background(), agentName: "base", invocationID: "inv-base"}
+	other := &mockInvocationContext{ctx: context.Background(), agentName: "other", invocationID: "inv-other"}
+
+	t.Run("nil embedded pointer does not panic", func(t *testing.T) {
+		w := &nonADKNilEmbeddedIC{InvocationContext: base}
+		if got := activationKey(w); got != w {
+			t.Fatalf("activationKey(nilEmbedded) = %v, want %p", got, w)
+		}
+	})
+
+	t.Run("side Context field is ignored", func(t *testing.T) {
+		w := &nonADKSideFieldIC{InvocationContext: base, Context: other}
+		if got := activationKey(w); got != w {
+			t.Fatalf("activationKey(sideField) = %v, want %p", got, w)
+		}
+	})
+
+	t.Run("synchronized Context field has no data race", func(t *testing.T) {
+		w := &nonADKSyncIC{InvocationContext: base, Context: other}
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				w.mu.Lock()
+				if i%2 == 0 {
+					w.Context = other
+				} else {
+					w.Context = base
+				}
+				w.mu.Unlock()
+			}
+		})
+		for range 200 {
+			if got := activationKey(w); got != w {
+				t.Fatalf("activationKey(syncIC) = %v, want %p", got, w)
+			}
+		}
+		close(stop)
+		wg.Wait()
+	})
+}
+
 // TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch pins that an
 // unmatched lookalike group above the selected parent moves the parent up
 // only when another member of the group also has an open span that the

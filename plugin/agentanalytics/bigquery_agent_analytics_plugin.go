@@ -2498,8 +2498,9 @@ type visitedContextStruct struct {
 // contextPath returns the execution node path carried by ctx, or "".
 // ADK's callbackContextWrapper.Path logs an error and returns "", and
 // NewCallbackContext wraps the inner InvocationContext without copying its
-// path onto the outer commonContext, so contextPath inspects the wrapped
-// context chain directly before falling back to Path() on non-wrapper types.
+// path onto the outer commonContext, so contextPath inspects allowlisted
+// standard context, ADK, and single-field context.Context pointer wrappers
+// directly before falling back to Path() on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2512,7 +2513,7 @@ func contextPath(ctx context.Context) (path string) {
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := range 512 {
+	for steps := 0; ; steps++ {
 		item, ok := q.pop()
 		if !ok {
 			break
@@ -2545,6 +2546,9 @@ func contextPath(ctx context.Context) (path string) {
 			}
 		}
 		c1, c2 := adkContextChildren(v)
+		if !c1.IsValid() && !c2.IsValid() && v.CanAddr() && isThinContextWrapper(vt) {
+			c1 = v.Field(0)
+		}
 		q.push(c1)
 		q.push(c2)
 	}
