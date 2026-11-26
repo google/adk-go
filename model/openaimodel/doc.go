@@ -66,6 +66,12 @@
 // for unsupported output items, unsupported message content, or invalid
 // function-call arguments. The event contains only an "error.type" category.
 //
+// A token count outside [0, math.MaxInt32] cannot describe a real request, so
+// a response carrying one reports no UsageMetadata at all,
+// and "openai.usage_invalid" is recorded on the active span with the
+// provider's field name ("openai.usage.field") and "negative" or
+// "exceeds_int32" ("openai.usage.reason"). The count itself is not recorded.
+//
 // On the Responses API, model reasoning is reported to the caller as thought
 // parts; Chat Completions responses are read for text, refusals and tool calls
 // only. Reasoning is not sent back on a later turn to either API: the

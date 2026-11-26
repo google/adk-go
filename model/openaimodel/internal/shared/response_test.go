@@ -15,10 +15,63 @@
 package shared
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"google.golang.org/genai"
 )
+
+func TestTokenCount(t *testing.T) {
+	tests := []struct {
+		in     int64
+		want   int32
+		wantOK bool
+	}{
+		{in: 0, want: 0, wantOK: true},
+		{in: 1_000_000, want: 1_000_000, wantOK: true},
+		{in: math.MaxInt32, want: math.MaxInt32, wantOK: true},
+		// Out of range either way: no request can have such a count, and a
+		// blind int32 conversion would turn these into plausible ones.
+		{in: -1},
+		{in: math.MinInt32},
+		{in: math.MinInt32 - 1}, // int32() wraps to MaxInt32
+		{in: -(1 << 32) + 1},    // int32() wraps to 1
+		{in: math.MaxInt32 + 1}, // int32() wraps to MinInt32
+		{in: math.MaxInt64},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprint(tc.in), func(t *testing.T) {
+			got, ok := TokenCount(tc.in)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("TokenCount(%d) = (%d, %t), want (%d, %t)", tc.in, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		counts     []UsageCount
+		wantName   string
+		wantReason string
+	}{
+		{name: "none"},
+		{name: "all valid", counts: []UsageCount{{"a", 0}, {"b", math.MaxInt32}}},
+		{name: "negative", counts: []UsageCount{{"a", 1}, {"b", -1}}, wantName: "b", wantReason: "negative"},
+		{name: "too large", counts: []UsageCount{{"a", math.MaxInt32 + 1}}, wantName: "a", wantReason: "exceeds_int32"},
+		{name: "first wins", counts: []UsageCount{{"a", -5}, {"b", math.MaxInt64}}, wantName: "a", wantReason: "negative"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			name, reason := InvalidUsage(tc.counts...)
+			if name != tc.wantName || reason != tc.wantReason {
+				t.Errorf("InvalidUsage() = (%q, %q), want (%q, %q)", name, reason, tc.wantName, tc.wantReason)
+			}
+		})
+	}
+}
 
 func TestCompletedContentSupersedes(t *testing.T) {
 	call := func(id, city string) *genai.Part {

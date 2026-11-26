@@ -15,6 +15,7 @@
 package completions
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -140,20 +141,50 @@ func finishReason(reason string) genai.FinishReason {
 }
 
 // convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count.
+// metadata, whose field names differ from this endpoint's on every count. It
+// returns nil when any count is invalid (see [shared.TokenCount]): usage the
+// server could not have measured is reported as unknown rather than as numbers
+// every reader would trust.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		return nil
+	}
+	count := func(v int64) int32 {
+		n, _ := shared.TokenCount(v)
+		return n
+	}
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
-		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
+		PromptTokenCount:        count(usage.PromptTokens),
+		CandidatesTokenCount:    count(usage.CompletionTokens),
+		TotalTokenCount:         count(usage.TotalTokens),
+		CachedContentTokenCount: count(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: count(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: count(usage.CompletionTokens)},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: count(usage.CompletionTokensDetails.ReasoningTokens),
+	}
+}
+
+// usageCounts lists the counts convertUsage reports, under their Chat
+// Completions names.
+func usageCounts(usage openai.CompletionUsage) []shared.UsageCount {
+	return []shared.UsageCount{
+		{Name: "prompt_tokens", Value: usage.PromptTokens},
+		{Name: "completion_tokens", Value: usage.CompletionTokens},
+		{Name: "total_tokens", Value: usage.TotalTokens},
+		{Name: "prompt_tokens_details.cached_tokens", Value: usage.PromptTokensDetails.CachedTokens},
+		{Name: "completion_tokens_details.reasoning_tokens", Value: usage.CompletionTokensDetails.ReasoningTokens},
+	}
+}
+
+// traceInvalidUsage records on the span in ctx why convertUsage dropped usage,
+// when it did.
+func traceInvalidUsage(ctx context.Context, usage openai.CompletionUsage) {
+	if name, reason := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		shared.TraceInvalidUsage(ctx, name, reason)
 	}
 }
 
