@@ -102,7 +102,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 		details.noteLLMRequest(params.Request)
 		metrics := newClientInference(params, start)
 
-		var result generateContentResult
+		result := generateContentResult{RequestModel: params.ModelName}
 		var duration time.Duration
 		ended := false
 		end := func() {

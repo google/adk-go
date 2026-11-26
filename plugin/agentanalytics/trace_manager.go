@@ -59,7 +59,10 @@ const (
 	sweepInterval = 128
 )
 
-var agentInterfaceType = reflect.TypeFor[agent.Agent]()
+var (
+	agentInterfaceType   = reflect.TypeFor[agent.Agent]()
+	contextInterfaceType = reflect.TypeFor[context.Context]()
+)
 
 // agentPkgPath and workflowPkgPath are the import paths of ADK's agent and
 // workflow packages, and adkPkgPrefix is the import path prefix that all of
@@ -72,6 +75,7 @@ var (
 	internalLLMPkgPath     = adkPkgPrefix + "internal/llminternal"
 	remoteAgentPkgPath     = adkPkgPrefix + "agent/remoteagent/v2"
 	a2aServerPkgPath       = adkPkgPrefix + "server/adka2a/v2"
+	parentMapPkgPath       = adkPkgPrefix + "internal/agent/parentmap"
 )
 
 // schedulerCreator and errgroupCreator are the functions that runtime.Stack
@@ -4531,23 +4535,103 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
-// maxLaunchLineage bounds the chain of contexts that launcherLocked follows.
-const maxLaunchLineage = 64
+const maxContextWalkDepth = 1 << 16
+
+// isThinContextWrapper reports whether t is a struct with a single anonymous
+// field of type context.Context. Requiring NumField() == 1 and an anonymous
+// field excludes user structs that may guard Context with a sibling mutex or
+// named-field synchronization; callers still enforce pointer-backing.
+func isThinContextWrapper(t reflect.Type) bool {
+	if t.NumField() != 1 {
+		return false
+	}
+	f := t.Field(0)
+	return f.Anonymous && f.Name == "Context" && f.Type == contextInterfaceType
+}
+
+// isAllowedValueContext reports whether a non-pointer struct context type is
+// an allowlisted immutable wrapper whose parent may be followed during
+// launch-lineage inspection. It deliberately returns false for
+// context.withoutCancelCtx and all user value structs.
+func isAllowedValueContext(t reflect.Type) bool {
+	switch t.PkgPath() {
+	case "context":
+		return t.Name() == "stopCtx"
+	case remoteAgentPkgPath:
+		return t.Name() == "authContext"
+	default:
+		return false
+	}
+}
+
+func extractContextField(v reflect.Value, name string) (any, bool) {
+	f := directStructField(v, name)
+	if !f.IsValid() || f.Kind() != reflect.Interface || f.IsNil() || !f.CanInterface() {
+		return nil, false
+	}
+	return f.Interface(), true
+}
+
+func launchLineageNext(v reflect.Value, allowThinPtr bool) (any, bool) {
+	vt := v.Type()
+	switch {
+	case vt.PkgPath() == "context":
+		if vt.Name() == "withoutCancelCtx" {
+			return nil, false
+		}
+		if next, ok := extractContextField(v, "Context"); ok {
+			return next, true
+		}
+		if cc := directStructField(v, "cancelCtx"); cc.IsValid() && cc.Kind() == reflect.Struct {
+			return extractContextField(cc, "Context")
+		}
+		return nil, false
+	case vt.PkgPath() == "os/signal" && vt.Name() == "signalCtx":
+		return extractContextField(v, "Context")
+	case isADKType(vt):
+		if next, ok := extractContextField(v, "Context"); ok {
+			return next, true
+		}
+		if vt.PkgPath() == remoteAgentPkgPath && vt.Name() == "authContext" {
+			return extractContextField(v, "InvocationContext")
+		}
+		return nil, false
+	case allowThinPtr && isThinContextWrapper(vt):
+		f := v.Field(0)
+		if f.IsNil() || !f.CanInterface() {
+			return nil, false
+		}
+		return f.Interface(), true
+	default:
+		return nil, false
+	}
+}
 
 // launcherLocked returns the index in agentStack of the open agent activation,
 // not excluded, whose context the agent run with activation key act (see
 // activationKey) was started with, or 0 if no such activation is known. ADK
 // derives the context of each agent run from the context passed to its Run,
-// and each of its contexts, like the context package's own, embeds the
-// context that it derives from, so the chain of embedded Context fields from
-// act passes through the activation key of every run that the new run's
-// context derives from, nearest first. The first one of an open activation
-// tells which activation started the run, whichever goroutine runs it. The
-// chain is read through exported fields alone, so no user code runs while
-// inv.mu is held.
+// and Go standard library context wrappers (context and os/signal.NotifyContext,
+// except context.WithoutCancel), allowlisted immutable value wrappers such as
+// context.stopCtx, ADK contexts that expose an exported Context or
+// InvocationContext field (callbackContextWrapper and toolContextWrapper hold
+// their inner Context in an unexported context field and stop the walk if
+// encountered unwrapped), and pointer wrappers embedding only context.Context
+// with no other fields (assumed immutable after handoff) expose the parent they
+// derive from, up to maxContextWalkDepth (65536) steps, so the chain from act
+// passes through the activation key of every run that the new run's context
+// derives from, nearest first. The first one of an open activation tells which
+// activation started the run, whichever goroutine runs it. Multi-field and
+// named-field user structs are never read, and no user methods run while inv.mu
+// is held.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
+	idx, _ := inv.launcherLockedCounted(act, excluded)
+	return idx
+}
+
+func (inv *invocationTrace) launcherLockedCounted(act any, excluded []bool) (int, int) {
 	if act == nil {
-		return 0
+		return 0, 0
 	}
 	byActivation := make(map[any]int)
 	for i, rec := range inv.agentStack {
@@ -4558,27 +4642,65 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 			byActivation[rec.activation] = i
 		}
 	}
-	cur := act
-	for step := range maxLaunchLineage {
-		v := reflect.ValueOf(cur)
-		if v.Kind() != reflect.Pointer || v.IsNil() {
-			return 0
-		}
-		if step > 0 {
-			if i, ok := byActivation[cur]; ok {
-				return i
-			}
-		}
-		if v = v.Elem(); v.Kind() != reflect.Struct {
-			return 0
-		}
-		next := v.FieldByName("Context")
-		if !next.IsValid() || next.Kind() != reflect.Interface || next.IsNil() || !next.CanInterface() {
-			return 0
-		}
-		cur = next.Interface()
+	if len(byActivation) == 0 {
+		return 0, 0
 	}
-	return 0
+	cur := act
+	var tortoise any
+	power := 1
+	lam := 0
+	steps := 0
+	for step := range maxContextWalkDepth {
+		steps = step + 1
+		v := reflect.ValueOf(cur)
+		if !v.IsValid() {
+			return 0, steps
+		}
+		var allowThinPtr bool
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() {
+				return 0, steps
+			}
+			if step > 0 {
+				if i, ok := byActivation[cur]; ok {
+					return i, steps
+				}
+			}
+			if tortoise != nil {
+				if samePointer(cur, tortoise) {
+					return 0, steps
+				}
+				if lam == power {
+					tortoise = cur
+					power *= 2
+					lam = 0
+				}
+				lam++
+			} else {
+				tortoise = cur
+				lam = 1
+			}
+			v = v.Elem()
+			if v.Kind() != reflect.Struct {
+				return 0, steps
+			}
+			allowThinPtr = true
+		case reflect.Struct:
+			if !isAllowedValueContext(v.Type()) {
+				return 0, steps
+			}
+			allowThinPtr = false
+		default:
+			return 0, steps
+		}
+		next, ok := launchLineageNext(v, allowThinPtr)
+		if !ok {
+			return 0, steps
+		}
+		cur = next
+	}
+	return 0, steps
 }
 
 // parentForRunLocked returns the span that an agent starting with id on
@@ -5678,13 +5800,13 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 	return exclude, unmatched, unmatchedByRec, tree
 }
 
-// ownerOf returns the span that the model and tool calls of id run under:
-// the agent's own span, if it is known, preferring the one that the agent run
-// of ctx started (see findAgentForContext), or else the span that it would run
-// under (see parentFor). It never returns nil: parentFor falls back to
-// agentStack[0], the invocation span.
-func (inv *invocationTrace) ownerOf(ctx context.Context, id identity) *spanRecord {
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+// ownerForActivationLocked returns the span that the model and tool calls of
+// id run under: the agent's own span, if it is known, preferring the one with
+// activation key act (see findAgentForActivationLocked), or else the span that
+// it would run under (see parentFor). It never returns nil: parentFor falls
+// back to agentStack[0], the invocation span.
+func (inv *invocationTrace) ownerForActivationLocked(act any, id identity) *spanRecord {
+	if i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); i > 0 {
 		return inv.agentStack[i]
 	}
 	return inv.parentFor(id)
@@ -7178,11 +7300,12 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch)
 	if i < 0 {
 		span := inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
 		span.timestamp = now
@@ -7226,9 +7349,10 @@ func (tm *traceManager) endRestartedNodeRuns(ctx context.Context, id identity) [
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
+	act := activationKey(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch)
 	if i < 0 {
 		return nil
 	}
@@ -7559,6 +7683,7 @@ func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identit
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
@@ -7574,7 +7699,7 @@ func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identit
 				break
 			}
 		}
-		i = inv.unobservedTaskLocked(ctx, id, fallbackCallID, eventTime)
+		i = inv.unobservedTaskForActivationLocked(act, id, fallbackCallID, eventTime)
 	}
 	if i < 0 {
 		return rowSpan{}, false
@@ -8053,16 +8178,17 @@ func (inv *invocationTrace) resolveFinishedTaskLocked(id identity, endingCallIDs
 	return consumeWinner(best.idx, candidates)
 }
 
-// unobservedTaskLocked resolves the open task-mode activation of id for a
-// finish_task completion event whose callID was not observed by any open
-// activation's tool callbacks (for example, when an earlier plugin answered
-// BeforeToolCallback and AfterToolCallback, or in synthetic event-only tests
-// without call IDs). Activations that already hold an unconsumed observed
-// ending attempt for another call are skipped when another candidate exists,
-// eventTime excludes activations started after the event was created, and ties
-// fall back to ctx's activation (when in pool) or the newest plausible
-// matching activation as on main. inv.mu must be held.
-func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, _ string, eventTime time.Time) int {
+// unobservedTaskForActivationLocked resolves the open task-mode activation of
+// id for a finish_task completion event whose callID was not observed by any
+// open activation's tool callbacks (for example, when an earlier plugin
+// answered BeforeToolCallback and AfterToolCallback, or in synthetic
+// event-only tests without call IDs). Activations that already hold an
+// unconsumed observed ending attempt for another call are skipped when another
+// candidate exists, eventTime excludes activations started after the event was
+// created, and ties fall back to act's activation (when in pool) or the newest
+// plausible matching activation as on main. act must be resolved before inv.mu
+// is taken; inv.mu must be held.
+func (inv *invocationTrace) unobservedTaskForActivationLocked(act any, id identity, _ string, eventTime time.Time) int {
 	var withoutEnding, allMatching []int
 	for i := 1; i < len(inv.agentStack); i++ {
 		rec := inv.agentStack[i]
@@ -8099,7 +8225,7 @@ func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identit
 	if len(pool) == 1 {
 		return pool[0]
 	}
-	if ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
+	if ctxIdx := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
 		return ctxIdx
 	}
 	return pool[len(pool)-1]
@@ -8115,12 +8241,13 @@ func (tm *traceManager) noteTaskStart(ctx context.Context, id identity, callID s
 	}
 	recordedAt := platform.Now(ctx)
 	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	act := activationKey(ctx)
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+	if i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
 		for j := range rec.taskAttempts {
 			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
@@ -8161,12 +8288,13 @@ func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID
 			kind = taskAttemptCompleted
 		}
 	}
+	act := activationKey(ctx)
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+	if i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
 		for j := range rec.taskAttempts {
 			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
@@ -8230,14 +8358,11 @@ func (tm *traceManager) retireFailedTaskAttemptsForEvent(ctx context.Context, id
 	if total == 0 && overruledTotal == 0 {
 		return
 	}
+	act := activationKey(ctx)
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
-}
-
-func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
-	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
+	inv.retireFailedTaskAttemptsAtLocked(act, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
 }
 
 // retireFailedTaskAttemptsAtLocked compacts pending finish_task attempts
@@ -8247,7 +8372,7 @@ func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, 
 // cannot erase a newer activation's pending attempt, and retiring
 // overruledEndingCalls on the activation where remaining matched or on a
 // plausible matching activation when remaining was empty. inv.mu must be held.
-func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(act any, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
 	matchesAgent := func(rec *spanRecord) bool {
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
 			(id.path != "" && rec.path != "" && rec.path != id.path) || len(rec.taskAttempts) == 0 {
@@ -8356,15 +8481,15 @@ func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context
 		clear(rec.taskAttempts[write:])
 		rec.taskAttempts = rec.taskAttempts[:write]
 	}
-	ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
-	if ctxIdx > 0 && activationKey(ctx) != nil && matchesAgent(inv.agentStack[ctxIdx]) {
+	ctxIdx := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch)
+	if ctxIdx > 0 && act != nil && matchesAgent(inv.agentStack[ctxIdx]) {
 		retireOverruledOn(inv.agentStack[ctxIdx])
 	}
 	// When no concrete activation context matched, prefer the earliest-recorded
 	// plausible overruled attempt so a failed merged batch on an older open run
 	// retires its own overruled ending call before a concurrent newer run's.
 	for i := 1; i < len(inv.agentStack) && overruledTotal > 0; i++ {
-		if i == ctxIdx && activationKey(ctx) != nil {
+		if i == ctxIdx && act != nil {
 			continue
 		}
 		if rec := inv.agentStack[i]; matchesAgent(rec) {
@@ -8761,13 +8886,13 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 // tool call that the current callback ends, or noFrame if it is not known:
 // the activations that started on the current goroutine after the call did
 // returned before it (see canSettleInSubtreeLocked).
-func (inv *invocationTrace) endToolRunsLocked(ctx context.Context, id identity, stopped bool, now time.Time, ambient string, since uint64) []unclosedAgentSpan {
+func (inv *invocationTrace) endToolRunsForActivationLocked(act any, id identity, stopped bool, now time.Time, ambient string, since uint64) []unclosedAgentSpan {
 	// In RunLive the root agent has no span on agentStack, so
-	// findAgentForContext returns -1 and Live-tool child activations parent
-	// under agentStack[0] (spanKindInvocation). Using max(0, ...) lets
-	// endToolRunsLocked end the activations that a Live tool ran once the
-	// tool finishes.
-	i := max(0, inv.findAgentForContext(ctx, id.path, id.agentName, id.branch))
+	// findAgentForActivationLocked returns -1 and Live-tool child activations
+	// parent under agentStack[0] (spanKindInvocation). Using max(0, ...) lets
+	// endToolRunsForActivationLocked end the activations that a Live tool ran
+	// once the tool finishes.
+	i := max(0, inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch))
 	owner := inv.agentStack[i]
 	for _, rec := range inv.toolSpans {
 		if rec.parentSpanID == owner.spanID {
@@ -9216,7 +9341,8 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 		return
 	}
 	bareKey := key
-	key = callKey(ctx, key)
+	act := activationKey(ctx)
+	key = callKeyForActivation(act, key)
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -9224,7 +9350,7 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 		inv.unrecoveredErrors = make(map[string]recordedError)
 	}
 	var spanID string
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+	if i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); i > 0 {
 		spanID = inv.agentStack[i].spanID
 	}
 	seq := inv.nextSeqLocked()
@@ -9237,7 +9363,7 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 	// The error is checked like a call that ctx starts under the agent. A
 	// context cancels its children before cancel returns, so the contexts
 	// that a workflow or a parallel agent canceled are canceled by now.
-	owner := inv.ownerOf(ctx, id)
+	owner := inv.ownerForActivationLocked(act, id)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, tm.now())
 		// A recorded error clears stale model- and tool-event credits so a
@@ -9271,7 +9397,7 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 // (completedModels[key] != nil). A later call on a new activation, such as a
 // retry in a loop agent, does not erase an earlier unrecovered error.
 func (tm *traceManager) clearError(ctx context.Context, id identity, key string) {
-	key = callKey(ctx, key)
+	key = callKeyForActivation(activationKey(ctx), key)
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -10101,6 +10227,88 @@ func endedFunc(ctx context.Context) func() bool {
 // follows.
 const maxActivationKeyDepth = 8
 
+type icDeltaStripper interface {
+	WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
+}
+
+func samePointer(a, b any) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	return va.Kind() == reflect.Pointer && vb.Kind() == reflect.Pointer &&
+		!va.IsNil() && !vb.IsNil() &&
+		va.Type() == vb.Type() && va.Pointer() == vb.Pointer()
+}
+
+func isNonNilPointer(a any) bool {
+	if a == nil {
+		return false
+	}
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && !v.IsNil()
+}
+
+func isADKPointer(a any) bool {
+	if a == nil {
+		return false
+	}
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct && isADKType(v.Elem().Type())
+}
+
+// stableStripICDelta calls WithICDelta(nil) to unwrap ADK forwarding wrappers
+// (such as callbackContextWrapper and toolContextWrapper) without losing
+// identity on external decorators whose WithICDelta(nil) allocates a fresh
+// shallow copy on every call.
+func stableStripICDelta(c icDeltaStripper) any {
+	s1 := c.WithICDelta(nil)
+	if !isNonNilPointer(s1) || samePointer(s1, c) {
+		return c
+	}
+	s2 := c.WithICDelta(nil)
+	if samePointer(s2, s1) {
+		return s1
+	}
+	return c
+}
+
+// resolveInvocationActivationKey unwraps start's wrapper chain to the innermost
+// per-run InvocationContext pointer. Step 0 runs stableStripICDelta directly so
+// ADK callback/tool wrappers, value-typed WithICDelta-only wrappers, and
+// nil-embedded mocks keep their expected entry behavior; nested hops via
+// InvocationContext() gate stableStripICDelta to ADK-owned pointers so opaque
+// application views reached inside ADK callbacks stay distinct.
+func resolveInvocationActivationKey(start any, maxSteps int) any {
+	cur := start
+	if stripper, ok := cur.(icDeltaStripper); ok {
+		cur = stableStripICDelta(stripper)
+	}
+	var key any
+	for steps := 0; steps < maxSteps && isNonNilPointer(cur); steps++ {
+		key = cur
+		next, ok := cur.(interface {
+			InvocationContext() agent.InvocationContext
+		})
+		if !ok {
+			break
+		}
+		inner := next.InvocationContext()
+		if !isNonNilPointer(inner) {
+			break
+		}
+		var stripped any = inner
+		if isADKPointer(inner) {
+			stripped = stableStripICDelta(inner)
+		}
+		if !isNonNilPointer(stripped) || samePointer(stripped, cur) {
+			break
+		}
+		cur = stripped
+	}
+	return key
+}
+
 // activationKey returns the per-activation context pointer that ADK created for
 // the agent run that ctx belongs to, or nil if ctx does not show it. Each
 // agent.Run allocates a fresh run context via ctx.WithContext(spanCtx) and
@@ -10112,41 +10320,24 @@ const maxActivationKeyDepth = 8
 // AfterAgentCallback of one run while keeping concurrent runs of the same agent
 // on one branch and node path distinct. An agent callback receives a
 // callbackContextWrapper whose InvocationContext method logs a warning and
-// returns nil, so the chain starts at WithICDelta(nil).
+// returns nil, so the chain starts with stableStripICDelta.
 func activationKey(ctx context.Context) any {
-	c, ok := ctx.(interface {
-		WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
-	})
+	c, ok := ctx.(icDeltaStripper)
 	if !ok {
 		return nil
 	}
 	return orZero(func() any {
-		var key any
-		var cur any = c.WithICDelta(nil)
-		for steps := 0; cur != nil && steps < maxActivationKeyDepth; steps++ {
-			if v := reflect.ValueOf(cur); v.Kind() != reflect.Pointer || v.IsNil() {
-				break
-			}
-			key = cur
-			next, ok := cur.(interface {
-				InvocationContext() agent.InvocationContext
-			})
-			if !ok {
-				break
-			}
-			inner := next.InvocationContext()
-			if inner == nil || any(inner) == cur {
-				break
-			}
-			cur = inner
+		key := resolveInvocationActivationKey(c, maxActivationKeyDepth)
+		if !isNonNilPointer(key) {
+			return nil
 		}
-		if key != nil {
-			if v := reflect.ValueOf(key); v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct {
-				if f := v.Elem().FieldByName("Context"); f.IsValid() && f.CanInterface() {
-					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
-						if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
-							return inner
-						}
+		v := reflect.ValueOf(key)
+		if v.Elem().Kind() == reflect.Struct {
+			elem := v.Elem()
+			if isADKType(elem.Type()) {
+				if f := directStructField(elem, "Context"); f.IsValid() && f.CanInterface() {
+					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && isNonNilPointer(inner) {
+						return inner
 					}
 				}
 			}
@@ -10155,19 +10346,20 @@ func activationKey(ctx context.Context) any {
 	})
 }
 
-// isActivationOf reports whether rec is the span of the agent activation
-// whose run ctx belongs to (see activationKey).
-func (rec *spanRecord) isActivationOf(ctx context.Context) bool {
-	return rec.kind == spanKindAgent && rec.activation != nil && rec.activation == activationKey(ctx)
+// isActivationKey reports whether rec is the span of the agent activation
+// whose activation key matches act (see activationKey).
+func (rec *spanRecord) isActivationKey(act any) bool {
+	return rec.kind == spanKindAgent && rec.activation != nil && rec.activation == act
 }
 
-// findAgentForContext returns the index in agentStack of the open span of the
-// agent name on branch that the agent run of ctx started (see activationKey),
-// or else, if no open span of it carries the key, as findAgent does. Concurrent
-// runs of the same agent on one branch and node path are then told apart by
-// the run that each callback belongs to rather than by which started last.
-func (inv *invocationTrace) findAgentForContext(ctx context.Context, path, name, branch string) int {
-	if act := activationKey(ctx); act != nil {
+// findAgentForActivationLocked returns the index in agentStack of the open span
+// of the agent name on branch that the agent run identified by act started
+// (see activationKey), or else, if no open span of it carries the key, as
+// findAgent does. Concurrent runs of the same agent on one branch and node
+// path are then told apart by the run that each callback belongs to rather than
+// by which started last. inv.mu must be held.
+func (inv *invocationTrace) findAgentForActivationLocked(act any, path, name, branch string) int {
+	if act != nil {
 		for i := len(inv.agentStack) - 1; i > 0; i-- {
 			rec := inv.agentStack[i]
 			if rec.kind == spanKindAgent && rec.activation == act && rec.name == name && rec.branch == branch {
@@ -10663,14 +10855,15 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	if !inv.lockLive() {
 		return tm.pushLLMSpan(ctx, id)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key := callKey(ctx, llmKey(id))
-	owner := inv.ownerOf(ctx, id)
+	key := callKeyForActivation(act, llmKey(id))
+	owner := inv.ownerForActivationLocked(act, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
@@ -10684,7 +10877,7 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	rec := inv.newChild(owner, spanKindLLM, now)
 	rec.canceled = canceledFunc(ctx)
 	rec.callStarted = true
-	rec.ownActivation = owner.isActivationOf(ctx)
+	rec.ownActivation = owner.isActivationKey(act)
 	inv.llmSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedModels, key)
@@ -10699,15 +10892,16 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 // chunk, so only the partial session event that ADK emits once the chunk is
 // accepted does (see recordStreamed).
 func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
+	act := activationKey(ctx)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if rec := inv.llmSpans[callKey(ctx, llmKey(id))]; rec != nil && rec.firstToken.IsZero() {
+	if rec := inv.llmSpans[callKeyForActivation(act, llmKey(id))]; rec != nil && rec.firstToken.IsZero() {
 		rec.firstToken = now
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		if owner := inv.ownerForActivationLocked(act, id); owner.kind == spanKindAgent {
 			inv.touchAgentActivityLocked(owner, now)
 		}
 	}
@@ -10776,6 +10970,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	if !inv.lockLive() {
 		return tm.popLLMSpan(ctx, id, responded)
 	}
@@ -10785,13 +10980,13 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	// late state (see retireLateSettledLocked).
 	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key := callKey(ctx, llmKey(id))
+	key := callKeyForActivation(act, llmKey(id))
 	rec := inv.llmSpans[key]
 	if rec == nil {
 		if responded {
 			if prev := inv.completedModels[key]; prev != nil {
 				delete(inv.completedModels, key)
-				if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+				if owner := inv.ownerForActivationLocked(act, id); owner.kind == spanKindAgent {
 					owner.hasResponse = true
 					owner.modelResponded = true
 					owner.awaitingModelEvent++
@@ -10801,14 +10996,14 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 				return span
 			}
 		}
-		span := inv.rowSpan(inv.newChild(inv.ownerOf(ctx, id), spanKindLLM, now), nil, ambient)
+		span := inv.rowSpan(inv.newChild(inv.ownerForActivationLocked(act, id), spanKindLLM, now), nil, ambient)
 		span.timestamp = now
 		return span
 	}
 	delete(inv.llmSpans, key)
 	inv.syncOpenCallsLocked()
 	rec.dropContexts()
-	if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+	if owner := inv.ownerForActivationLocked(act, id); owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
 	}
 	if !responded {
@@ -10816,11 +11011,11 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 		// credit: clear stale credits so a peer's response cannot claim
 		// this activation's events (see selectResponseOwnerLocked).
 		inv.completedModels[key] = rec
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		if owner := inv.ownerForActivationLocked(act, id); owner.kind == spanKindAgent {
 			owner.awaitingModelEvent = 0
 		}
 	} else {
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		if owner := inv.ownerForActivationLocked(act, id); owner.kind == spanKindAgent {
 			owner.hasResponse = true
 			owner.modelResponded = true
 			owner.awaitingModelEvent++
@@ -10842,14 +11037,15 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	if !inv.lockLive() {
 		return tm.pushToolSpan(ctx, id, key)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
-	owner := inv.ownerOf(ctx, id)
+	key = callKeyForActivation(act, key)
+	owner := inv.ownerForActivationLocked(act, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
@@ -10866,7 +11062,7 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	rec.canceled = canceledFunc(ctx)
 	rec.seq = inv.nextSeqLocked()
 	rec.callStarted = true
-	rec.ownActivation = owner.isActivationOf(ctx)
+	rec.ownActivation = owner.isActivationKey(act)
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedTools, key)
@@ -10886,19 +11082,20 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // latency; the agent and invocation spans are left alone. Once the agent
 // has no tool call left open, the activations that its tool calls ran and
 // that never ended are ended—purged if they failed, or retired quietly
-// otherwise (see endToolRunsLocked).
+// otherwise (see endToolRunsForActivationLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	actions := toolActionsOf(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := activationKey(ctx)
 	if !inv.lockLive() {
 		return tm.popToolSpan(ctx, id, key, fromError)
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
+	key = callKeyForActivation(act, key)
 	open := inv.toolSpans[key]
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
@@ -10906,7 +11103,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 		inv.markToolRunsDoneLocked(open)
 	}
 	if !fromError {
-		if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		if i := inv.findAgentForActivationLocked(act, id.path, id.agentName, id.branch); i > 0 {
 			inv.agentStack[i].awaitingToolEvent++
 		}
 	}
@@ -10917,7 +11114,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	if open != nil {
 		since = open.seq
 	}
-	purged = inv.endToolRunsLocked(ctx, id, inv.lastSessionEventPartial, now, ambient, since)
+	purged = inv.endToolRunsForActivationLocked(act, id, inv.lastSessionEventPartial, now, ambient, since)
 	// The ended tool call may have run open activations under other spans.
 	inv.settleFinishedLocked()
 	inv.retireLateSettledLocked()
@@ -10939,7 +11136,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 			return span, purged, true
 		}
 	}
-	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
+	rec := inv.newChild(inv.ownerForActivationLocked(act, id), spanKindTool, now)
 	if fromError {
 		rec.dropContexts()
 		rec.errorAttempt = attemptOf(actions)
@@ -11210,13 +11407,13 @@ func attemptOf(actions *session.EventActions) toolAttempt {
 	return weak.Make(actions)
 }
 
-// callKey prefixes key with the pointer identity of ctx's agent-run
-// InvocationContext when present (see activationKey), isolating concurrent
-// activations of the same agent on one branch and node path without retaining
-// ctx. Because toolKeyCall reads after the final NUL byte, prefixing before
-// toolKey preserves toolKeyCall unchanged.
-func callKey(ctx context.Context, key string) string {
-	if act := activationKey(ctx); act != nil {
+// callKeyForActivation prefixes key with the pointer identity of act when
+// non-nil (see activationKey), isolating concurrent activations of the same
+// agent on one branch and node path without retaining ctx or calling user
+// methods under inv.mu. Because toolKeyCall reads after the final NUL byte,
+// prefixing before toolKey preserves toolKeyCall unchanged.
+func callKeyForActivation(act any, key string) string {
+	if act != nil {
 		return fmt.Sprintf("%p\x00%s", act, key)
 	}
 	return key
@@ -11387,6 +11584,52 @@ func (q *contextStructQueue) pop() (reflect.Value, bool) {
 	return v, true
 }
 
+type contextStructStack struct {
+	inline   [16]reflect.Value
+	count    int
+	overflow []reflect.Value
+}
+
+func (s *contextStructStack) push(v reflect.Value) {
+	if !v.IsValid() || ((v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) && v.IsNil()) {
+		return
+	}
+	if s.overflow != nil {
+		s.overflow = append(s.overflow, v)
+		return
+	}
+	if s.count == len(s.inline) {
+		s.overflow = make([]reflect.Value, len(s.inline)+1, len(s.inline)*2)
+		copy(s.overflow, s.inline[:])
+		clear(s.inline[:])
+		s.overflow[s.count] = v
+		s.count = 0
+		return
+	}
+	s.inline[s.count] = v
+	s.count++
+}
+
+func (s *contextStructStack) pop() (reflect.Value, bool) {
+	if s.overflow != nil {
+		if len(s.overflow) == 0 {
+			return reflect.Value{}, false
+		}
+		i := len(s.overflow) - 1
+		v := s.overflow[i]
+		s.overflow[i] = reflect.Value{}
+		s.overflow = s.overflow[:i]
+		return v, true
+	}
+	if s.count == 0 {
+		return reflect.Value{}, false
+	}
+	s.count--
+	v := s.inline[s.count]
+	s.inline[s.count] = reflect.Value{}
+	return v, true
+}
+
 func sameContextChild(a, b reflect.Value) bool {
 	if !a.IsValid() || !b.IsValid() {
 		return false
@@ -11402,6 +11645,12 @@ func sameContextChild(a, b reflect.Value) bool {
 
 // adkContextChildren returns up to two inner context fields from allowlisted
 // Go stdlib and ADK context wrapper structs, ignoring application-owned types.
+// For dual-parent ADK contexts that separate value/cancellation delegation
+// from invocation identity (commonContext and internal/context.ReadonlyContext),
+// c1 is the replacement Context (visited first by Value-lookup walkers) and c2
+// is the underlying invocationContext / InvocationContext (visited first by
+// contextPath). For cancelledToolContext and authContext, c1 is the wrapped
+// ADK context and c2 is the secondary cancel/value context.
 func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 	vt := v.Type()
 	switch vt.PkgPath() {
@@ -11413,6 +11662,10 @@ func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 			return f, reflect.Value{}
 		}
 		return directStructField(v, "c"), reflect.Value{}
+	case "os/signal":
+		if vt.Name() == "signalCtx" {
+			return directStructField(v, "Context"), reflect.Value{}
+		}
 	case agentPkgPath:
 		switch vt.Name() {
 		case "commonContext":
@@ -11469,7 +11722,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := range 512 {
+	for steps := range maxContextWalkDepth {
 		item, ok := q.pop()
 		if !ok {
 			break
@@ -11480,11 +11733,16 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 		}
 		if v.Type().PkgPath() == "context" {
 			if key, val := directStructField(v, "key"), directStructField(v, "val"); key.IsValid() && val.IsValid() {
+				if key.Kind() == reflect.Interface && !key.IsNil() {
+					key = key.Elem()
+				}
 				if val.Kind() == reflect.Interface && !val.IsNil() {
 					val = val.Elem()
 				}
-				if val.IsValid() && val.Kind() == reflect.Map &&
-					val.Type().Key().Kind() == reflect.String &&
+				if key.IsValid() && key.Type().PkgPath() == parentMapPkgPath && key.Type().Name() == "ctxKey" &&
+					key.Kind() == reflect.Int && key.Int() == 0 &&
+					val.IsValid() && val.Type().PkgPath() == parentMapPkgPath && val.Type().Name() == "Map" &&
+					val.Kind() == reflect.Map && val.Type().Key().Kind() == reflect.String &&
 					val.Type().Elem() == agentInterfaceType {
 					if keyVal, ok := exportContextKey(key); ok {
 						lookupCtx := ctx
@@ -11494,7 +11752,8 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 							}
 						}
 						if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
-							if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
+							if m := reflect.ValueOf(raw); m.IsValid() && m.Type().PkgPath() == parentMapPkgPath &&
+								m.Type().Name() == "Map" && m.Kind() == reflect.Map && m.CanInterface() {
 								out := make(map[string]agent.Agent, m.Len())
 								iter := m.MapRange()
 								for iter.Next() {
@@ -11809,7 +12068,7 @@ func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pi
 		}
 	}()
 	var seen map[visitedContextStruct]bool
-	for steps := 0; cur.IsValid() && steps < 512; steps++ {
+	for steps := 0; cur.IsValid() && steps < maxContextWalkDepth; steps++ {
 		var ok bool
 		cur, ok = derefContextStructValueLazy(cur, &seen, steps >= 32)
 		if !ok {
@@ -11839,6 +12098,10 @@ func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pi
 				next = f
 			} else if f := directStructField(cur, "c"); f.IsValid() {
 				next = f
+			}
+		case "os/signal":
+			if vt.Name() == "signalCtx" {
+				next = directStructField(cur, "Context")
 			}
 		case agentPkgPath:
 			if f := directStructField(cur, "context"); f.IsValid() {

@@ -30,6 +30,7 @@
               "gen_ai.response.finish_reasons": [
                 "stop"
               ],
+              "gen_ai.response.model": "mock",
               "gen_ai.usage.cache_read.input_tokens": 60,
               "gen_ai.usage.input_tokens": 150,
               "gen_ai.usage.output_tokens": 50,
@@ -50,6 +51,7 @@
                   "gen_ai.response.finish_reasons": [
                     "stop"
                   ],
+                  "gen_ai.response.model": "mock",
                   "gen_ai.usage.cache_read.input_tokens": 60,
                   "gen_ai.usage.input_tokens": 150,
                   "gen_ai.usage.output_tokens": 50,

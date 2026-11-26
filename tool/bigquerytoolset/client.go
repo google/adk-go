@@ -85,7 +85,9 @@ func newClient(ctx context.Context, cfg Config) (*client, error) {
 		return nil, fmt.Errorf("bigquerytoolset: invalid BigQuery endpoint: %w", withoutURL(err))
 	}
 
-	userAgent := userAgentPrefix + " " + version.TrackingHeader()
+	// No destination, so no hosting runtime suffix: adk-python's BigQuery
+	// user agent has none either.
+	userAgent := userAgentPrefix + " " + version.TrackingHeader(nil)
 	if cfg.ApplicationName != "" {
 		userAgent += " " + cfg.ApplicationName
 	}

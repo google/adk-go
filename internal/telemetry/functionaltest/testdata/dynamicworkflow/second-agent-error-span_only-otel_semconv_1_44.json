@@ -75,6 +75,7 @@
                   "gen_ai.response.finish_reasons": [
                     "stop"
                   ],
+                  "gen_ai.response.model": "mock",
                   "gen_ai.system_instructions": [
                     {
                       "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n",
@@ -101,6 +102,7 @@
                       "gen_ai.response.finish_reasons": [
                         "stop"
                       ],
+                      "gen_ai.response.model": "mock",
                       "gen_ai.usage.cache_read.input_tokens": 40,
                       "gen_ai.usage.input_tokens": 100,
                       "gen_ai.usage.output_tokens": 25,

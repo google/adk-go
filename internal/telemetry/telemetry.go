@@ -162,6 +162,9 @@ type generateContentResult struct {
 	// Responses are every response of the call, in order, ending with
 	// Response. Nil means Response alone. The legacy schema reads only Response.
 	Responses []*model.LLMResponse
+	// RequestModel is the model name requested for the call, used as a
+	// fallback for gen_ai.response.model when no response reports ModelVersion.
+	RequestModel string
 }
 
 func (r generateContentResult) responses() []*model.LLMResponse {
@@ -169,6 +172,24 @@ func (r generateContentResult) responses() []*model.LLMResponse {
 		return []*model.LLMResponse{r.Response}
 	}
 	return r.Responses
+}
+
+// responseModel returns the latest non-empty ModelVersion reported by the
+// response(s), falling back to RequestModel when none is reported, matching
+// adk-python's _response_model.
+func (r generateContentResult) responseModel() string {
+	if useLegacySchema() {
+		if r.Response != nil && r.Response.ModelVersion != "" {
+			return r.Response.ModelVersion
+		}
+		return r.RequestModel
+	}
+	for _, response := range slices.Backward(r.responses()) {
+		if response.ModelVersion != "" {
+			return response.ModelVersion
+		}
+	}
+	return r.RequestModel
 }
 
 // usageResponse is the latest response that reports token usage, as a stream
@@ -218,6 +239,9 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 		return attrs
 	}
 	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
+	if model := params.responseModel(); model != "" {
+		attrs = append(attrs, semconv.GenAIResponseModel(model))
+	}
 	if resp := params.usageResponse(); resp != nil {
 		u := resp.UsageMetadata
 		attrs = append(attrs,
