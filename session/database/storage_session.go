@@ -47,7 +47,8 @@ func (storageSession) TableName() string {
 
 // Helper to map from internal struct to GORM struct
 func createStorageSession(ctx context.Context, s *localSession) (*storageSession, error) {
-	now := platform.Now(ctx)
+	// Avoid database rounding that would make the returned session appear stale.
+	now := platform.Now(ctx).Truncate(time.Microsecond)
 	return &storageSession{
 		UserID:     s.userID,
 		AppName:    s.appName,
