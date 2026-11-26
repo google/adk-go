@@ -15,6 +15,8 @@
 package telemetry
 
 import (
+	"sync/atomic"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 
@@ -27,13 +29,22 @@ var (
 	inferenceTokenBuckets    = []float64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864}
 )
 
-// The global provider at package initialization. Instruments it creates
-// forward to whichever provider the application installs later, so this works
-// before telemetry setup runs.
-var meterProvider = otel.GetMeterProvider()
+// defaultInstruments are created on the global provider at package
+// initialization. They forward to whichever provider the application installs
+// later, so this works before telemetry setup runs.
+var defaultInstruments = newInstruments(otel.GetMeterProvider())
 
-// inst holds every instrument ADK records into.
-var inst = newInstruments(meterProvider)
+// instrumentsOverride is atomic because goroutines a test leaves behind can
+// still be recording when the next test swaps the provider.
+var instrumentsOverride atomic.Pointer[instruments]
+
+// inst returns every instrument ADK records into.
+func inst() *instruments {
+	if i := instrumentsOverride.Load(); i != nil {
+		return i
+	}
+	return &defaultInstruments
+}
 
 type instruments struct {
 	inferenceDuration          metric.Float64Histogram
@@ -104,7 +115,7 @@ func created[T any](instrument T, err error) T {
 // OverrideMeterForTesting makes metrics record into the given provider until
 // the test ends.
 func OverrideMeterForTesting(t interface{ Cleanup(func()) }, mp metric.MeterProvider) {
-	originalProvider, originalInstruments := meterProvider, inst
-	meterProvider, inst = mp, newInstruments(mp)
-	t.Cleanup(func() { meterProvider, inst = originalProvider, originalInstruments })
+	i := newInstruments(mp)
+	original := instrumentsOverride.Swap(&i)
+	t.Cleanup(func() { instrumentsOverride.Store(original) })
 }

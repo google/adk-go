@@ -81,9 +81,9 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 	// describes that chunk.
 	attrs := metric.WithAttributes(c.attributes(resp.ModelVersion)...)
 	if c.lastChunk.IsZero() {
-		inst.timeToFirstChunk.Record(ctx, now.Sub(c.start).Seconds(), attrs)
+		inst().timeToFirstChunk.Record(ctx, now.Sub(c.start).Seconds(), attrs)
 	} else {
-		inst.timePerOutputChunk.Record(ctx, now.Sub(c.lastChunk).Seconds(), attrs)
+		inst().timePerOutputChunk.Record(ctx, now.Sub(c.lastChunk).Seconds(), attrs)
 	}
 	c.lastChunk = now
 }
@@ -124,6 +124,7 @@ func (c *clientInference) record(ctx context.Context, elapsed time.Duration) {
 		histogramAttrs = append(slices.Clip(attrs), errorType(c.err))
 	}
 	histogram := metric.WithAttributes(histogramAttrs...)
+	inst := inst()
 	inst.inferenceDuration.Record(ctx, elapsed.Seconds(), histogram)
 
 	usage := tokenusage.FromResponses(c.responses)

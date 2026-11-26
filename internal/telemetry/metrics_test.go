@@ -29,16 +29,16 @@ import (
 func TestInstruments(t *testing.T) {
 	reader := setupTestMeter(t)
 	ctx := t.Context()
-	inst.inferenceDuration.Record(ctx, 1)
-	inst.inferenceInputTokens.Record(ctx, 1)
-	inst.inferenceOutputTokens.Record(ctx, 1)
-	inst.usageInputTokens.Add(ctx, 1)
-	inst.usageOutputTokens.Add(ctx, 1)
-	inst.usageCacheReadInputTokens.Add(ctx, 1)
-	inst.usageCacheWriteInputTokens.Add(ctx, 1)
-	inst.usageReasoningOutputTokens.Add(ctx, 1)
-	inst.timeToFirstChunk.Record(ctx, 1)
-	inst.timePerOutputChunk.Record(ctx, 1)
+	inst().inferenceDuration.Record(ctx, 1)
+	inst().inferenceInputTokens.Record(ctx, 1)
+	inst().inferenceOutputTokens.Record(ctx, 1)
+	inst().usageInputTokens.Add(ctx, 1)
+	inst().usageOutputTokens.Add(ctx, 1)
+	inst().usageCacheReadInputTokens.Add(ctx, 1)
+	inst().usageCacheWriteInputTokens.Add(ctx, 1)
+	inst().usageReasoningOutputTokens.Add(ctx, 1)
+	inst().timeToFirstChunk.Record(ctx, 1)
+	inst().timePerOutputChunk.Record(ctx, 1)
 
 	type instrument struct {
 		Kind, Unit, Description string
