@@ -55,6 +55,7 @@
               "gen_ai.response.finish_reasons": [
                 "tool_call"
               ],
+              "gen_ai.response.model": "mock",
               "gen_ai.system_instructions": [
                 {
                   "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_root_agent\". The description about you is \"A sample root agent.\".",
@@ -75,7 +76,8 @@
                   "gen_ai.request.model": "mock",
                   "gen_ai.response.finish_reasons": [
                     "tool_call"
-                  ]
+                  ],
+                  "gen_ai.response.model": "mock"
                 }
               }
             ]
@@ -154,6 +156,7 @@
               "gen_ai.response.finish_reasons": [
                 "stop"
               ],
+              "gen_ai.response.model": "mock",
               "gen_ai.system_instructions": [
                 {
                   "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_root_agent\". The description about you is \"A sample root agent.\".",
@@ -174,7 +177,8 @@
                   "gen_ai.request.model": "mock",
                   "gen_ai.response.finish_reasons": [
                     "stop"
-                  ]
+                  ],
+                  "gen_ai.response.model": "mock"
                 }
               }
             ]
