@@ -32,9 +32,10 @@ import (
 
 // TestInvalidUsageDoesNotDriveCompaction runs whole turns against a server
 // whose input_tokens wraps to math.MaxInt32 when narrowed to int32. Narrowed,
-// every few-token prompt would look over any threshold and tail-retention
-// compaction would summarize the conversation on every turn. Reported as
-// unknown, compaction falls back to its own estimate and leaves it alone.
+// every few-token prompt would look over any threshold, and tail-retention
+// compaction would summarize older turns as soon as there were enough of them
+// (twice in these four turns). Reported as unknown, compaction falls back to
+// its own estimate and leaves the conversation alone.
 func TestInvalidUsageDoesNotDriveCompaction(t *testing.T) {
 	for _, api := range []API{APIResponses, APIChatCompletions} {
 		t.Run(string(api), func(t *testing.T) {
