@@ -381,6 +381,79 @@ func TestRunHandlersReadEventsOncePerTurn(t *testing.T) {
 	}
 }
 
+// eventsFailingSessionService answers a Get that skips the events and fails
+// one that reads them, as a store whose session row reads but whose events
+// query fails does.
+type eventsFailingSessionService struct {
+	session.Service
+}
+
+func (s *eventsFailingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	if !req.ExcludeEvents {
+		return nil, errors.New("events query failed")
+	}
+	return s.Service.Get(ctx, req)
+}
+
+// The existence check no longer reads the events, so a failure that only the
+// events read hits is reported by the run itself: /run still answers 500, and
+// /run_sse, which has already sent its 200 headers by then, streams it as an
+// error event. adk-python's /run_sse also reports a failure after its
+// existence check inside the stream, as a data line with an error field.
+func TestRunHandlersEventsReadFailure(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{
+				Name: "testApp",
+				Run:  testAgent([]testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello")}}),
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			svc := &eventsFailingSessionService{Service: session.InMemoryService()}
+			if _, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "s1"}); err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: svc,
+				AgentLoader:    agent.NewSingleLoader(fakeAgent),
+				SSETimeout:     10 * time.Second,
+			})
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				UserId:     "testUser",
+				SessionId:  "s1",
+				Streaming:  streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+			if streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+
+			wantStatus := http.StatusInternalServerError
+			if streaming {
+				wantStatus = http.StatusOK
+			}
+			if rr.Code != wantStatus {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, wantStatus, rr.Body.String())
+			}
+			if body := rr.Body.String(); !strings.Contains(body, "events query failed") {
+				t.Errorf("body = %q, want it to report the events read failure", body)
+			}
+			if streaming && !strings.Contains(rr.Body.String(), "event: error") {
+				t.Errorf("body = %q, want an SSE error event", rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",
