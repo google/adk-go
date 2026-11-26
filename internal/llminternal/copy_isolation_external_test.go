@@ -23,16 +23,22 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin/functioncallmodifier"
+	"google.golang.org/adk/v2/tool/geminitool"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // Mutators of req.Config outside this package, run on the copy
 // basicRequestProcessor makes (CloneGenerateContentConfig).
 
+// toolConfig returns an agent config whose Tools and FunctionDeclarations
+// have spare capacity, so an append through a shared backing array would
+// write into the agent's.
 func toolConfig() *genai.GenerateContentConfig {
 	decls := make([]*genai.FunctionDeclaration, 1, 4)
 	decls[0] = &genai.FunctionDeclaration{Name: "existing", Description: "d", Parameters: &genai.Schema{Type: genai.TypeObject}}
-	return &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: decls}}}
+	tools := make([]*genai.Tool, 1, 4)
+	tools[0] = &genai.Tool{FunctionDeclarations: decls}
+	return &genai.GenerateContentConfig{Tools: tools}
 }
 
 func checkToolConfigUnchanged(t *testing.T, cfg *genai.GenerateContentConfig) {
@@ -44,6 +50,23 @@ func checkToolConfigUnchanged(t *testing.T, cfg *genai.GenerateContentConfig) {
 	if spare := decls[:cap(decls)][len(decls)]; spare != nil {
 		t.Errorf("the agent's FunctionDeclarations got %v written past its length", spare)
 	}
+	if spare := cfg.Tools[:cap(cfg.Tools)][len(cfg.Tools)]; spare != nil {
+		t.Errorf("the agent's Tools got %v written past its length", spare)
+	}
+}
+
+// TestGeminiToolLeavesAgentConfigAlone covers the geminitool tools, which
+// append to req.Config.Tools.
+func TestGeminiToolLeavesAgentConfigAlone(t *testing.T) {
+	cfg := toolConfig()
+	req := &model.LLMRequest{Model: "gemini-2.5-flash", Config: llminternal.CloneGenerateContentConfig(cfg)}
+	if err := (geminitool.GoogleSearch{}).ProcessRequest(nil, req); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(req.Config.Tools); got != 2 {
+		t.Fatalf("request has %d tools, want 2", got)
+	}
+	checkToolConfigUnchanged(t, cfg)
 }
 
 type packedTool struct{}

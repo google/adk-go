@@ -28,11 +28,13 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// The tests below run each in-tree step that edits the request copy in place
-// and check that the stored event or the agent's config is left as it was.
+// The tests below run the in-tree steps that edit the request copy in place,
+// found by searching for writes through req.Contents and req.Config, and check
+// that the stored event or the agent's config is left as it was. Steps outside
+// this package are in copy_isolation_external_test.go.
 
-// isolationHistory returns a history whose parts each in-tree mutator of
-// req.Contents edits.
+// isolationHistory returns a history holding the parts the req.Contents
+// mutators below edit.
 func isolationHistory() []*session.Event {
 	return []*session.Event{
 		{ID: "u", Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
@@ -130,8 +132,8 @@ func TestRequestCopyBytesAreOwn(t *testing.T) {
 	}
 }
 
-// isolationConfig returns an agent config whose fields each in-tree mutator
-// of req.Config edits. FunctionDeclarations has spare capacity, so an append
+// isolationConfig returns an agent config holding the fields the req.Config
+// mutators below edit. FunctionDeclarations has spare capacity, so an append
 // through a shared backing array would write into the agent's.
 func isolationConfig() *genai.GenerateContentConfig {
 	decls := make([]*genai.FunctionDeclaration, 1, 4)

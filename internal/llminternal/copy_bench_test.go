@@ -31,8 +31,9 @@ import (
 
 var benchText = strings.Repeat("The quick brown fox jumps over the lazy dog. ", 8)
 
-// benchEvents returns n alternating user and agent events: text turns, with
-// a function call and its response in every eighth pair.
+// benchEvents returns n alternating user and agent events: text turns,
+// except that every fourth agent turn is a function call and the agent turn
+// after it the call's response.
 func benchEvents(n int, agentName string) []*session.Event {
 	start := time.Unix(1_700_000_000, 0)
 	events := make([]*session.Event, 0, n)

@@ -101,8 +101,8 @@ func referenceDeepCopy(src, dst reflect.Value) {
 // pointers point to filled values, slices get two filled elements and spare
 // capacity, maps get two entries, interfaces hold a map (so sharing is
 // observable) and funcs are non-nil. Each recursive type is entered at most
-// twice on a path. Pointers, slices and maps to values the copy panics on are
-// left nil and recorded in skipped.
+// twice on a path. Struct fields holding pointers, slices or maps to values
+// the copy panics on are left nil and recorded in skipped.
 type filler struct {
 	n       int
 	stack   map[reflect.Type]int
@@ -224,8 +224,9 @@ func structFields(t reflect.Type, seen map[reflect.Type]bool, out map[string]boo
 }
 
 // fillAll returns a value of type T with every reachable field set, including
-// fields a later genai release adds, and fails the test if any field other
-// than those in wantSkipped is left unset.
+// fields a later genai release adds, and fails the test if any field is left
+// unset other than those in wantSkipped and the fields of genai.Interval and
+// time types, which only a skipped field reaches.
 func fillAll[T any](t *testing.T, wantSkipped map[string]bool) *T {
 	t.Helper()
 	f := newFiller()
@@ -515,8 +516,8 @@ func (c *copyChecker) check(path string, src, ref, got reflect.Value) {
 	}
 }
 
-// mutate changes every value reachable from v without going through
-// interfaces, which both copies share with the source by design.
+// mutate changes every value reachable from v, other than map keys, without
+// going through interfaces, which both copies share with the source by design.
 func mutate(v reflect.Value) {
 	switch v.Kind() {
 	case reflect.Bool:
@@ -689,7 +690,8 @@ func TestIsZeroPartCoversEveryField(t *testing.T) {
 
 // TestBasicRequestProcessorIsolatesConfig checks through the request
 // processor that editing req.Config leaves the agent's GenerateContentConfig
-// as it was, and the other way round, for a config with every field set.
+// as it was, and the other way round, for a config with every field set that
+// the copy accepts (see configSkipped).
 func TestBasicRequestProcessorIsolatesConfig(t *testing.T) {
 	agentCfg := fillAll[genai.GenerateContentConfig](t, configSkipped)
 	requestConfig := newConfigRequester(t, agentCfg)
