@@ -1611,6 +1611,8 @@ type recordingStaticModel struct {
 
 func (m *recordingStaticModel) Name() string { return "recording-static" }
 
+func (m *recordingStaticModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *recordingStaticModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		cloned := *req
@@ -1961,6 +1963,8 @@ type liveTestModel struct {
 
 func (m *liveTestModel) Name() string { return "live-test-model" }
 
+func (m *liveTestModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *liveTestModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(func(*model.LLMResponse, error) bool) {}
 }
@@ -2106,13 +2110,13 @@ func (s namedToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) { return
 type namedVariantLLM struct {
 	*scriptedLLM
 	name                string
-	backend             genai.Backend
+	caps                model.Capabilities
 	sawSetModelResponse bool
 }
 
 func (m *namedVariantLLM) Name() string { return m.name }
 
-func (m *namedVariantLLM) GetGoogleLLMVariant() genai.Backend { return m.backend }
+func (m *namedVariantLLM) Capabilities() model.Capabilities { return m.caps }
 
 func (m *namedVariantLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if _, ok := req.Tools["set_model_response"]; ok {
@@ -2145,7 +2149,6 @@ func TestLlmAgent_OutputArtifact_SetModelResponseWorkaroundRejected(t *testing.T
 		Model: &namedVariantLLM{
 			scriptedLLM: &scriptedLLM{},
 			name:        "gemini-1.5-flash",
-			backend:     genai.BackendGeminiAPI,
 		},
 		Tools:          []tool.Tool{noopTool},
 		OutputSchema:   schema,
@@ -2172,7 +2175,6 @@ func TestLlmAgent_OutputArtifact_SetModelResponseWorkaroundRejected(t *testing.T
 		Model: &namedVariantLLM{
 			scriptedLLM: &scriptedLLM{},
 			name:        "gemini-1.5-flash",
-			backend:     genai.BackendGeminiAPI,
 		},
 		SubAgents:      []agent.Agent{helper},
 		Toolsets:       []tool.Toolset{namedToolset{name: "search"}},
@@ -2193,8 +2195,8 @@ func TestLlmAgent_OutputArtifact_SetModelResponseWorkaroundRejected(t *testing.T
 					{Content: genai.NewContentFromText(`{"title":"NATIVE_BODY"}`, genai.RoleModel)},
 				},
 			},
-			name:    "gemini-2.5-flash",
-			backend: genai.BackendVertexAI,
+			name: "gemini-2.5-flash",
+			caps: model.Capabilities{AcceptsOutputSchemaAndTools: true},
 		},
 		Tools:          []tool.Tool{noopTool},
 		OutputSchema:   schema,
@@ -2237,7 +2239,6 @@ func runSequentialWithOptionalLive(t *testing.T, doLive bool, turn *model.LLMRes
 	m := &namedVariantLLM{
 		scriptedLLM: &scriptedLLM{turns: []*model.LLMResponse{turn}},
 		name:        "gemini-2.5-flash",
-		backend:     genai.BackendGeminiAPI,
 	}
 	writer, err := llmagent.New(llmagent.Config{
 		Name:  "writer",
