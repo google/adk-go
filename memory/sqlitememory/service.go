@@ -90,9 +90,10 @@ func (s *Service) Close() error {
 	return s.db.Close()
 }
 
-// AddSessionToMemory atomically replaces the stored events of sess. Events
-// without visible text are skipped. Event content and custom metadata must be
-// JSON-serializable.
+// AddSessionToMemory replaces the stored events of sess in a single transaction.
+// Pass the complete session. Previously stored events omitted from sess are
+// removed from memory. Events without visible text are skipped. Event content
+// and custom metadata must be JSON-serializable.
 func (s *Service) AddSessionToMemory(ctx context.Context, sess session.Session) error {
 	if sess == nil {
 		return errors.New("sqlitememory: session must not be nil")
@@ -140,7 +141,8 @@ func (s *Service) AddSessionToMemory(ctx context.Context, sess session.Session) 
 // SearchMemory searches imported events for req.AppName and req.UserID using
 // [memory.InMemoryService]'s keyword matching rules. It returns at most ten
 // entries ranked by the number of distinct query words matched. Ties follow
-// import order, then event order.
+// the order of each session's most recent import, earliest first, then event
+// order within the session.
 func (s *Service) SearchMemory(ctx context.Context, req *memory.SearchRequest) (*memory.SearchResponse, error) {
 	if req == nil {
 		return nil, errors.New("sqlitememory: search request must not be nil")

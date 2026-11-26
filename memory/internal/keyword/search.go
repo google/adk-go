@@ -27,7 +27,7 @@ import (
 	"google.golang.org/genai"
 )
 
-// MaxResults bounds the number of entries added to the model context.
+// MaxResults is the maximum number of entries returned by a search.
 const MaxResults = 10
 
 // VisibleContent copies the content without nil parts or model reasoning and
