@@ -94,6 +94,12 @@ func retrieveStructuredModelResponse(ev *session.Event) (string, error) {
 	return "", nil
 }
 
+// NeedsOutputSchemaProcessor reports whether state requires the
+// set_model_response tool workaround to combine OutputSchema with tools.
+func NeedsOutputSchemaProcessor(state *State) bool {
+	return state != nil && state.OutputSchema != nil && needOutputSchemaProcessor(state)
+}
+
 func needOutputSchemaProcessor(state *State) bool {
 	if state == nil || state.Model == nil {
 		return false

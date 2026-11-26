@@ -241,7 +241,12 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	var outputSchema *genai.Schema
 	if llmAgent, ok := t.agent.(llminternal.Agent); ok && llmAgent != nil {
-		outputSchema = llminternal.Reveal(llmAgent).OutputSchema
+		subState := llminternal.Reveal(llmAgent)
+		// A sub-agent that saved its reply as OutputArtifact returns the
+		// artifact reference as text, which is not the schema's JSON.
+		if !subState.SavedOutputArtifact(lastEvent) {
+			outputSchema = subState.OutputSchema
+		}
 	}
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
