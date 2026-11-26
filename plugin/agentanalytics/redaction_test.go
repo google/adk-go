@@ -329,6 +329,8 @@ func TestSanitizeURIComponents(t *testing.T) {
 		{"URL in a query value", "https://h/redirect?next=https://inner/p?token=SECRET123", "https://h/redirect?next=https%3A%2F%2Finner%2Fp%3Ftoken%3D" + r},
 		{"percent-encoded redirect URL with userinfo", "https://app.example/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40evil.example%2Fp", "https://app.example/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
 		{"benign percent-encoded redirect URL stays untouched", "https://app.example/cb?next=https%3A%2F%2Fapp.example%2Fdashboard", "https://app.example/cb?next=https%3A%2F%2Fapp.example%2Fdashboard"},
+		{"percent-encoded IPv6 redirect URL stays untouched", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D"},
+		{"percent-encoded IPv6 redirect URL with userinfo leaves no dangling bracket", "https://example.com/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
 		{"double-redirect signed file URI", "https://a.example/redirect?next=https%3A%2F%2Fb.example%2Fr%3Fnext%3Dhttps%253A%252F%252Fc.example%252Ff%253Faccess_token%253DSECRET", "https://a.example/redirect?next=%5BREDACTED_SENSITIVE_TEXT%5D"},
 		{"query key with empty value", "https://h/p?X-Amz-Security-Token=", "https://h/p?X-Amz-Security-Token="},
 		{"cursors and counters", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3", "https://h/p?next_page_token=p2&sync_token=s1&token_count=3"},
@@ -397,6 +399,11 @@ func TestSanitizeURIComponents(t *testing.T) {
 			{"pair in a path redacts the rest of the path", "fetch https://example.com/v1/password=SECRET123/token=SECRET123/key=SECRET123 done", "fetch https://example.com/v1/password=[REDACTED] done"},
 			{"URL in a query value", "https://a/b?u=http://c/d?token=SECRET123 e://f", "https://a/b?u=http%3A%2F%2Fc%2Fd%3Ftoken%3D" + r + " e://f"},
 			{"percent-encoded redirect URL with userinfo", "err: https://app.example/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40evil.example%2Fp done", "err: https://app.example/cb?next=%5BREDACTED_SENSITIVE_URI%5D done"},
+			{"percent-encoded IPv6 redirect URL stays untouched across entry points", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D"},
+			{"percent-encoded IPv6 redirect URL with userinfo across entry points", "https://example.com/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
+			{"bare IPv6 URL in prose stays untouched", "see https://[2001:db8::1].", "see https://[2001:db8::1]."},
+			{"bracketed non-IPv6 URL trims outer closing bracket", "see [https://example.com]", "see [https://example.com]"},
+			{"non-IPv6 host bracket trims closing bracket", "see https://host[a:b] ok", "see [REDACTED_SENSITIVE_URI]] ok"},
 			{"mixed parameters", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=SECRET1", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=" + r},
 			{"vertical tab does not end a URI", "see https://u:p@h/x\vSECRET123 ok", "see [REDACTED_SENSITIVE_URI] ok"},
 			{"vertical tab in a path value", "https://h/token/SEC\vRET123", redactedURIPlaceholder},
@@ -558,7 +565,7 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"single-quoted Windows-path-prefixed padded temp: key", `'C:\ssl\temp:x ': 'SECRET'`, redactedSensitiveTextPlaceholder},
 			{"single-quoted slash-prefixed temp: key with vertical tab", "' config/temp:a\vb ': 'SECRET'", "' config/temp:a\vb ':'[REDACTED]'"},
 			{"single-quoted slash-prefixed temp: key with NBSP", "' config/temp:a\u00a0b ': 'SECRET'", "' config/temp:a\u00a0b ':'[REDACTED]'"},
-			{"prose before slash-prefixed temp: inside quotes stays", `' see config/temp:x ': 'v'`, `' see config/temp:x ': 'v'`},
+			{"spaced path before slash-prefixed temp: inside quotes redacts", `' see config/temp:x ': 'v'`, `' see config/temp:x ':'[REDACTED]'`},
 			{"single-quoted slash-prefixed padded multi-colon temp: key", "' config/temp:a:b ': 'SECRET'", "' config/temp:a:b ':'[REDACTED]'"},
 			{"single-quoted slash-prefixed multi-colon temp: key with NBSP", "' config/temp:a:b \u00a0': 'SECRET'", "' config/temp:a:b \u00a0':'[REDACTED]'"},
 			{"single-quoted slash-prefixed multi-colon temp: key with BOM", "'config/temp:a:b \ufeff': 'SECRET'", "'config/temp:a:b \ufeff':'[REDACTED]'"},
@@ -803,6 +810,20 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"mixed adjacent closing quotes before assignment", `log: "password": 'token=a/token '" = S3CR3T`, `log: "password":"[REDACTED]"`},
 			{"long inner token with doubled single closing quote", `log: "password": a&token= 'token=` + strings.Repeat("a/", 300) + `token '' = S3CR3T`, `log: "password":"[REDACTED]"`},
 			{"triple closing quote stays unextended", `log: "password": 'token=a/token ''' = S3CR3T`, `log: "password":"[REDACTED]" = S3CR3T`},
+			{"glued third single quote before equals", `log: "password": 'x'' token '''=S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"glued third double quote before equals", `log: "password": "x"" token """=S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"glued fourth single quote before equals", `log: "password": 'x'' token ''''=S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"glued mixed double quotes before equals", `log: "password": 'x'' token '""=S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"glued escaped single quotes before equals", `log: "password": 'x'' token '\'\'=S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"glued third quote with space before equals stays unextended", `log: "password": 'x'' token ''' = S3CR3T`, `log: "password":"[REDACTED]" = S3CR3T`},
+			{"standalone triple quote before equals stays intact", `log: ' token '''=S3CR3T`, `log: ' token '''=S3CR3T`},
+			{"quoted path with spaces in directory double-quoted", `log: "Application Support/DB_PASSWORD "=S3CR3T`, `log: "Application Support/DB_PASSWORD "=[REDACTED]`},
+			{"quoted path with spaces in directory single-quoted", `log: 'Application Support/DB_PASSWORD '=S3CR3T`, `log: 'Application Support/DB_PASSWORD '=[REDACTED]`},
+			{"quoted nested path with spaces in directories", `log: "a b/c d/DB_PASSWORD "=S3CR3T`, `log: "a b/c d/DB_PASSWORD "=[REDACTED]`},
+			{"quoted path with spaces and base key", `log: "Application Support/token "=S3CR3T`, `log: "Application Support/token "=[REDACTED]`},
+			{"quoted path with spaces and temp key", `log: "Application Support/temp:foo "=S3CR3T`, `log: "Application Support/temp:foo "=[REDACTED]`},
+			{"quoted path with spaces inside final component stays intact", `log: "Application Support/my password "=S3CR3T`, `log: "Application Support/my password "=S3CR3T`},
+			{"quoted embedded temp with double colon stays intact", `log: " a.temp::x "=S3CR3T`, `log: " a.temp::x "=S3CR3T`},
 			{"prose with spaced quoted sensitive key stays intact", `he said "use DB_PASSWORD " = "v"`, `he said "use DB_PASSWORD " = "v"`},
 			{"quoted value ending in non-sensitive word after inner token stays intact", `log: "password": 'x token=y foo ' = S3CR3T`, `log: "password":"[REDACTED]" = S3CR3T`},
 		})
@@ -923,11 +944,11 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			tempHead = `(?:` + keyWord + `*[.-])?(temp:` + tempSeg + `)`
 			tempCore = `temp:` + tempSeg + `(?::` + tempSeg + `)*`
 		)
-		quotedKeyAlt := `(?:(?:user|app):)*(?:` + tempCore + `|` + keyWord + `+)|` + keyWord + `*[.-]` + tempCore + `|[^\s"']*[/\\\x0b](?:` + tempCore + `|` + keyWord + `+)`
+		quotedKeyAlt := `(?:(?:user|app):)*(?:` + tempCore + `|` + keyWord + `+)|` + keyWord + `*[.-]` + tempCore + `|[^\s"']*[/\\\x0b](?:` + tempCore + `|` + keyWord + `+)|[^"',{}]*[/\\](?:temp:` + tempSeg + `|` + keyWord + `+)`
 		refPaddedRe := regexp.MustCompile(`(?i)(\\?["'])(?:` +
 			anyPad + `+(` + quotedKeyAlt + `)` + anyPad + `*|` +
 			anyPad + `*(` + quotedKeyAlt + `)` + anyPad + `+|` +
-			`([^\s"']*[/\\\x0b]` + keyWord + `+)` +
+			`([^"',{}]*[/\\]` + keyWord + `+|[^\s"']*\x0b` + keyWord + `+)` +
 			`)(\\?["'])[\x00-\x20\x7f]*[=:]`)
 		refBareRe := regexp.MustCompile(`(?i)(?:` + tempHead + `|(` + keyWord + `+))(\\?["'])?[\x00-\x20\x7f]*[=:]`)
 		type span struct{ keyStart, keyEnd, quoteEnd, end int }
@@ -957,6 +978,10 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 							if sub := s[keyStart:keyEnd]; !strings.HasPrefix(strings.ToLower(sub), "temp:") {
 								if idx := strings.Index(strings.ToLower(sub), "temp:"); idx > 0 && (sub[idx-1] == ':' || sub[idx-1] == '.' || sub[idx-1] == '-' || sub[idx-1] == '/' || sub[idx-1] == '\\') {
 									keyStart += idx
+								} else if sensitiveKeyStart(s, keyStart, keyEnd) < 0 {
+									if slash := strings.LastIndexAny(sub, `/\`); slash >= 0 && slash+1 < len(sub) {
+										keyStart += slash + 1
+									}
 								}
 							}
 							quoteEnd, end = from+loc[11], from+loc[1]
@@ -1115,6 +1140,10 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 			{"URI with userinfo followed by text in a JSON string", `{"ok":1,"u":"https://u:p@example.com/p ok"}`, `{"ok":1,"u":"[REDACTED_SENSITIVE_URI] ok"}`},
 			{"cursor and counter", `{"next_page_token":"p2","token_count":42,"monkey":"a"}`, `{"next_page_token":"p2","token_count":42,"monkey":"a"}`},
 			{"error that names a credential", `{"error":{"code":401,"message":"Request had invalid authentication credentials."}}`, `{"error":{"code":401,"message":"Request had invalid authentication credentials."}}`},
+			{"compound key mentioning single-quoted Bearer keeps siblings", `{"db_password": "use 'Bearer' auth", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key mentioning double-quoted Bearer keeps siblings", `{"db_password": "use \"Bearer\" auth", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with apostrophe and Bearer keeps siblings", `{"db_password": "don't mention Bearer", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with closed Bearer quote keeps siblings", `{"db_password": "Bearer 'tok'", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 		})
 	})
 
@@ -1153,6 +1182,12 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 				name:      "compound sensitive key and an escaped colon",
 				in:        `{"zz_secret":"Authorization\u003a\n","note":"kept"}`,
 				wantError: `{"note":"kept","zz_secret":"[REDACTED]"}`,
+				wantText:  redactedSensitiveTextPlaceholder,
+			},
+			{
+				name:      "compound sensitive key with percent-encoded space and unclosed Bearer quote",
+				in:        `{"db_password": "Bearer%20\"unclosed", "request_id": "req-1"}`,
+				wantError: `{"db_password":"[REDACTED]","request_id":"req-1"}`,
 				wantText:  redactedSensitiveTextPlaceholder,
 			},
 			{
@@ -1445,6 +1480,15 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 		{"repeated quoted values with inner token in extendOverlappingTextPair", 64 << 10, func(n int) string {
 			return `log: "password": a&` + strings.Repeat("token= 'token=a/b ' ", n/20) + "token=SECRET"
 		}},
+		{"repeated temp: segments inside quoted key ending in double colon", 64 << 10, func(n int) string {
+			return `"` + strings.Repeat("temp:", n/5) + `:: "=x password=SECRET`
+		}},
+		{"repeated glued quoted tokens in extendOverlappingTextPair", 64 << 10, func(n int) string {
+			return `log: "password": ` + strings.Repeat("'token='a '", n/11) + " password=SECRET"
+		}},
+		{"repeated glued quoted token pairs in extendOverlappingTextPair", 64 << 10, func(n int) string {
+			return `log: "password": ` + strings.Repeat(`'x''token='a''`, n/14) + " password=SECRET"
+		}},
 		{"bare delimiters", 1 << 20, func(n int) string { return strings.Repeat("=", n) }},
 		{"redacted pairs", 256 << 10, func(n int) string { return strings.Repeat("DB_PASSWORD=SECRET1 dbPassword=SECRET2 ", n/39) }},
 		{"header lines", 256 << 10, func(n int) string { return strings.Repeat("Authorization: Bearer SECRET\n", n/29) }},
@@ -1526,11 +1570,26 @@ func TestTextKeyPrefixSpansAllocs(t *testing.T) {
 // pass over generated multi-pair, quoted, padded, temp:, and joined inputs.
 func TestReferenceRegexDifferential(t *testing.T) {
 	fixedParts := make([]string, 0, len(sensitiveKeys))
+	compoundParts := make([]string, 0, len(sensitiveKeys))
+	camelCompoundParts := make([]string, 0, len(sensitiveKeys))
 	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
-		fixedParts = append(fixedParts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[._-]?"))
+		pat := strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[._-]?")
+		fixedParts = append(fixedParts, pat)
+		if _, low := lowPrecisionKeySuffixes[compactKey(k)]; !low {
+			compoundParts = append(compoundParts, pat)
+			camelCompoundParts = append(camelCompoundParts, "(?-i:"+strings.ToUpper(pat[:1])+")"+pat[1:])
+		}
 	}
 	fixedAlt := strings.Join(fixedParts, "|")
-	refKey := `(?:(?:(?:user|app):)*(?:[A-Za-z0-9_.-]*[.-])?temp:[^=:"'\t\n\f\r ,}]+(?::[^=:"'\t\n\f\r ,}]+)*|(?:(?:user|app):)*(?:` + fixedAlt + `))`
+	compoundAlt := strings.Join(compoundParts, "|")
+	camelCompoundAlt := strings.Join(camelCompoundParts, "|")
+	statePrefix := `(?:(?:user|app):)*`
+	refKey := `(?:` +
+		statePrefix + `(?:[A-Za-z0-9_.-]*[.-])?temp:[^=:"'\t\n\f\r ,}]+(?::[^=:"'\t\n\f\r ,}]+)*|` +
+		statePrefix + `[A-Za-z0-9_.-]+[._-](?:` + compoundAlt + `)|` +
+		statePrefix + `(?-i:[a-z0-9]+)(?:` + camelCompoundAlt + `)|` +
+		statePrefix + `(?:[A-Za-z0-9_.-]*[.-])?(?:` + fixedAlt + `)` +
+		`)`
 	refQuote := `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`
 	refBarePart := `(?:^|[^0-9A-Za-z_])` + refKey + `(["'])?[\x00-\x20\x7f]*[=:][\x00-\x20\x7f]*(?:` + refQuote + `|[^\s,;&]+)`
 	refQuotedPart := `["'][\t \x{00a0}\x{feff}]*` + refKey + `[\t \x{00a0}\x{feff}]*["'][\x00-\x20\x7f]*[=:][\x00-\x20\x7f]*(?:` + refQuote + `|[^\s,;&]+)`
@@ -1552,18 +1611,35 @@ func TestReferenceRegexDifferential(t *testing.T) {
 	joins := []string{" ", ", ", "; ", "&", "/", "|"}
 	prefixes := []string{"log: ", "err: {", ""}
 
+	for _, k := range keys {
+		const sec = "S3CR3T_SINGLE"
+		for _, text := range []string{k + "=" + sec, `"` + k + `" = "` + sec + `"`} {
+			if refOut := refScrub(text); strings.Contains(refOut, sec) {
+				t.Fatalf("single-pair key %q: refScrub(%q) = %q failed to remove %s", k, text, refOut, sec)
+			}
+			if gotErr := redactErrorMessage(text); strings.Contains(gotErr, sec) {
+				t.Fatalf("single-pair key %q: redactErrorMessage(%q) = %q kept %s", k, text, gotErr, sec)
+			}
+			if gotSan, _ := sanitizeRawText(text); strings.Contains(gotSan, sec) {
+				t.Fatalf("single-pair key %q: sanitizeRawText(%q) = %q kept %s", k, text, gotSan, sec)
+			}
+		}
+	}
+
 	inputs := []string{
 		`" temp:cache:item " = "S3CR3T_Q1"`,
 		`' temp:cache:item ': 'S3CR3T_Q2'`,
 		`' state.temp:cache:item ': 'S3CR3T_Q3'`,
 	}
 	secretsList := [][]string{{"S3CR3T_Q1"}, {"S3CR3T_Q2"}, {"S3CR3T_Q3"}}
+	keysList := [][]string{{"temp:cache:item"}, {"temp:cache:item"}, {"state.temp:cache:item"}}
 
 	for i := range 500 {
 		nParts := 1 + rng.IntN(3)
 		var sb strings.Builder
 		sb.WriteString(prefixes[rng.IntN(len(prefixes))])
 		var secrets []string
+		var caseKeys []string
 		for p := range nParts {
 			if p > 0 {
 				sb.WriteString(joins[rng.IntN(len(joins))])
@@ -1590,19 +1666,23 @@ func TestReferenceRegexDifferential(t *testing.T) {
 				sb.WriteString(q + pad + k + pad + q + d + val)
 			}
 			secrets = append(secrets, sec)
+			caseKeys = append(caseKeys, k)
 		}
 		inputs = append(inputs, sb.String())
 		secretsList = append(secretsList, secrets)
+		keysList = append(keysList, caseKeys)
 	}
+	checkedByKey := make(map[string]int, len(keys))
 	for i, text := range inputs {
 		refOut := refScrub(text)
 		gotErr := redactErrorMessage(text)
 		gotSan, _ := sanitizeRawText(text)
-		for _, sec := range secretsList[i] {
+		for j, sec := range secretsList[i] {
 			if i < 3 && strings.Contains(refOut, sec) {
 				t.Fatalf("case %d: refScrub(%q) = %q failed to remove %s", i, text, refOut, sec)
 			}
 			if !strings.Contains(refOut, sec) {
+				checkedByKey[keysList[i][j]]++
 				if strings.Contains(gotErr, sec) {
 					t.Fatalf("case %d: redactErrorMessage(%q) = %q kept %s removed by refScrub", i, text, gotErr, sec)
 				}
@@ -1610,6 +1690,11 @@ func TestReferenceRegexDifferential(t *testing.T) {
 					t.Fatalf("case %d: sanitizeRawText(%q) = %q kept %s removed by refScrub", i, text, gotSan, sec)
 				}
 			}
+		}
+	}
+	for _, k := range keys {
+		if checkedByKey[k] == 0 {
+			t.Errorf("key %q was never exercised by refScrub in randomized inputs", k)
 		}
 	}
 }

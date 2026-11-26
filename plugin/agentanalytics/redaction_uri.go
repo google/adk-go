@@ -358,13 +358,24 @@ func scrubURITokens(msg string) string {
 
 // trimTrailingPunctuation strips sentence punctuation that follows a URI in
 // prose while preserving a closing "]" that completes a known placeholder
-// sentinel (such as "[REDACTED]").
+// sentinel (such as "[REDACTED]") or an IPv6 host literal (such as
+// "https://[2001:db8::1]").
 func trimTrailingPunctuation(s string) string {
 	trimmed := strings.TrimRight(s, ".,;:)]}")
 	if withBracket := s[:min(len(trimmed)+1, len(s))]; strings.HasSuffix(withBracket, "]") {
-		if open := strings.LastIndexByte(trimmed, '['); open >= 0 && isKnownSentinel(withBracket[open:]) {
-			return withBracket
+		if open := strings.LastIndexByte(trimmed, '['); open >= 0 {
+			if isKnownSentinel(withBracket[open:]) || isIPv6HostBracket(withBracket, open) {
+				return withBracket
+			}
 		}
 	}
 	return trimmed
+}
+
+func isIPv6HostBracket(s string, open int) bool {
+	schemeEnd := strings.LastIndex(s[:open], "://")
+	if schemeEnd < 0 || !strings.Contains(s[open:], ":") {
+		return false
+	}
+	return open == schemeEnd+3 || (open > schemeEnd+3 && s[open-1] == '@' && !strings.ContainsAny(s[schemeEnd+3:open], "/?#"))
 }
