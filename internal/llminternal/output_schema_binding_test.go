@@ -15,6 +15,8 @@
 package llminternal
 
 import (
+	"errors"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,6 +26,9 @@ import (
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 func TestOutputSchemaFor(t *testing.T) {
@@ -132,7 +137,10 @@ func TestOutputSchemaFor(t *testing.T) {
 				icontext.InvocationContextParams{Agent: a},
 			)
 
-			got := outputSchemaFor(ctx, tc.state)
+			got, err := outputSchemaFor(ctx, tc.state)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("outputSchemaFor mismatch (-want +got):\n%s", diff)
@@ -152,10 +160,16 @@ func TestOutputSchemaForCopiesBoundSchema(t *testing.T) {
 		icontext.InvocationContextParams{Agent: a},
 	)
 
-	first := outputSchemaFor(ctx, state)
+	first, err := outputSchemaFor(ctx, state)
+	if err != nil {
+		t.Fatal(err)
+	}
 	first.Properties["a"].Description = "edited"
 	first.Properties["b"] = &genai.Schema{Type: genai.TypeString}
-	second := outputSchemaFor(ctx, state)
+	second, err := outputSchemaFor(ctx, state)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	want := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"a": {Type: genai.TypeString}}}
 	if diff := cmp.Diff(want, second); diff != "" {
@@ -175,7 +189,68 @@ func TestWithBoundOutputSchemaNilShadowsOuter(t *testing.T) {
 		icontext.InvocationContextParams{Agent: a},
 	)
 
-	if got := outputSchemaFor(ctx, state); got != nil {
-		t.Errorf("outputSchemaFor = %v under a nil inner binding, want nil", got)
+	if got, err := outputSchemaFor(ctx, state); err != nil || got != nil {
+		t.Fatal("outputSchemaFor did not return a nil schema under a nil inner binding")
+	}
+}
+
+func TestOutputSchemaForCloneError(t *testing.T) {
+	wantErr := errors.New("schema value cannot be marshaled")
+	for _, tc := range []struct {
+		name   string
+		schema *genai.Schema
+	}{
+		{name: "default", schema: &genai.Schema{Default: &cloneTestJSON{err: wantErr}}},
+		{name: "example", schema: &genai.Schema{Example: &cloneTestJSON{err: wantErr}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &State{}
+			a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "self"})), s: state}
+			ctx := icontext.NewInvocationContext(
+				WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, tc.schema),
+				icontext.InvocationContextParams{Agent: a},
+			)
+
+			got, err := outputSchemaFor(ctx, state)
+			if got != nil || !errors.Is(err, wantErr) {
+				t.Fatal("outputSchemaFor did not preserve the clone error")
+			}
+		})
+	}
+}
+
+func TestRequestProcessors_BoundSchemaCloneError(t *testing.T) {
+	wantErr := errors.New("schema value cannot be marshaled")
+	for _, tc := range []struct {
+		name      string
+		processor func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]
+		tools     []tool.Tool
+	}{
+		{name: "basic", processor: basicRequestProcessor},
+		{name: "output schema", processor: outputSchemaRequestProcessor, tools: []tool.Tool{&mockTool{name: "other_tool"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &State{Model: &mockLLM{name: "gemini-2.5-flash"}, Tools: tc.tools}
+			schema := &genai.Schema{Default: &cloneTestJSON{err: wantErr}}
+			a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "self"})), s: state}
+			ctx := icontext.NewInvocationContext(
+				WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, schema),
+				icontext.InvocationContextParams{Agent: a},
+			)
+			req := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
+			errorsSeen := 0
+			for ev, err := range tc.processor(ctx, req, &Flow{}) {
+				if ev != nil || !errors.Is(err, wantErr) {
+					t.Fatal("processor did not preserve the clone error")
+				}
+				errorsSeen++
+			}
+			if errorsSeen != 1 {
+				t.Fatalf("processor returned %d errors, want one", errorsSeen)
+			}
+			if !cmp.Equal(req, &model.LLMRequest{Config: &genai.GenerateContentConfig{}}) {
+				t.Fatal("processor changed the request after the clone failed")
+			}
+		})
 	}
 }
