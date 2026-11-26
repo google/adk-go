@@ -121,9 +121,6 @@ type GetRequest struct {
 	// caller that only needs to know the session exists. NumRecentEvents and
 	// After are ignored when it is set. Matches adk-python's
 	// GetSessionConfig(num_recent_events=0).
-	//
-	// A Service that does not support it returns the events anyway, so a
-	// caller must not rely on Events being empty.
 	ExcludeEvents bool
 }
 

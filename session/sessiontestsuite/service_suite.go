@@ -309,6 +309,8 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		// ExcludeEvents is part of the Get contract, as num_recent_events=0
+		// is in adk-python, so every Service runs this case.
 		t.Run("exclude_events", func(t *testing.T) {
 			s := setup(t)
 			ctx := t.Context()
