@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -56,11 +57,23 @@ var (
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
-var tracerProvider = otel.GetTracerProvider()
+var defaultTracerProvider = otel.GetTracerProvider()
+
+// tracerOverride is atomic because goroutines a test leaves behind, such as a
+// live session's tool calls, can still be starting spans when the next test
+// swaps the provider.
+var tracerOverride atomic.Pointer[trace.TracerProvider]
+
+func tracerProvider() trace.TracerProvider {
+	if tp := tracerOverride.Load(); tp != nil {
+		return *tp
+	}
+	return defaultTracerProvider
+}
 
 // tracer is looked up per use, since the schema URL follows the env.
 func tracer() trace.Tracer {
-	return tracerProvider.Tracer(
+	return tracerProvider().Tracer(
 		systemName,
 		trace.WithInstrumentationVersion(version.Version),
 		trace.WithSchemaURL(schemaURL()),
@@ -77,9 +90,8 @@ func schemaURL() string {
 
 // OverrideTracerForTesting makes tracing use tp until the test ends.
 func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
-	original := tracerProvider
-	tracerProvider = tp
-	t.Cleanup(func() { tracerProvider = original })
+	original := tracerOverride.Swap(&tp)
+	t.Cleanup(func() { tracerOverride.Store(original) })
 }
 
 type TraceAgentResultParams struct {

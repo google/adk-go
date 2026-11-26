@@ -487,25 +487,46 @@ func assertionScope(r *http.Request) (string, error) {
 	return claims.Scope, nil
 }
 
+var (
+	saKeyOnce sync.Once
+	saKeyPEM  string
+	saKeyErr  error
+)
+
+// ServiceAccountTestKeyPEM returns a cached 2048-bit RSA private key in PKCS8
+// PEM format, generated once per test binary.
+func ServiceAccountTestKeyPEM(t *testing.T) string {
+	t.Helper()
+	saKeyOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			saKeyErr = err
+			return
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			saKeyErr = err
+			return
+		}
+		saKeyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	})
+	if saKeyErr != nil {
+		t.Fatal(saKeyErr)
+	}
+	return saKeyPEM
+}
+
 // serviceAccountKey is a service-account key file whose token requests go to
 // tokenURI. A service-account key rather than an authorized_user credential,
 // because credential discovery honors a service-account key's token_uri but
 // sends a user credential's token requests to Google's endpoint regardless.
 func serviceAccountKey(t *testing.T, tokenURI string) []byte {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
 	b, err := json.Marshal(map[string]string{
 		"type":           "service_account",
 		"project_id":     "p",
 		"private_key_id": "key-id",
-		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"private_key":    ServiceAccountTestKeyPEM(t),
 		"client_email":   "sa@p.iam.gserviceaccount.com",
 		"client_id":      "1",
 		"token_uri":      tokenURI,

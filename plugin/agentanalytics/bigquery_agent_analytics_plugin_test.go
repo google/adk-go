@@ -5163,8 +5163,9 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 }
 
 type callbackTestLLM struct {
-	name string
-	gen  func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error]
+	model.LLM // embedded so standalone GOWORK=off tests compile against v2.8.0
+	name      string
+	gen       func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error]
 }
 
 func (m *callbackTestLLM) Name() string { return m.name }
