@@ -322,9 +322,10 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	}
 }
 
-// requestConfig returns the copy of req.Config sent to the backend. The Gemini
-// Developer API does not support labels, so the copy sent there has none, while
-// req.Config keeps them for callbacks and plugins that read the request.
+// requestConfig returns the copy of req.Config sent to the backend. The copy
+// sent to the Gemini Developer API has no labels, because that API's v1
+// refuses the field, while req.Config keeps them for callbacks and plugins
+// that read the request.
 func (m *geminiModel) requestConfig(req *model.LLMRequest) *genai.GenerateContentConfig {
 	clientConfig := m.client.ClientConfig()
 	config := configPreservingEmptyTextThoughtSignatures(req.Config, clientConfig.HTTPOptions.ExtrasRequestProvider)

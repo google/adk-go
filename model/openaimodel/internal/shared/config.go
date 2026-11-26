@@ -62,16 +62,24 @@ var IgnoredHTTPOptionFields = []string{"Headers"}
 var SupportedHTTPOptionFields = []string{"Timeout"}
 
 // RunHTTPOptions returns the fields of a run's HTTP options both endpoints
-// accept, Timeout and Headers (SupportedHTTPOptionFields and
-// IgnoredHTTPOptionFields), or nil when opts sets neither. The agent flow
-// merges only these into a request (see agent.RunConfig.HTTPOptions), so an
-// option set for every agent of a run, such as RetryOptions, does not make
-// these endpoints refuse the request.
+// accept, a positive Timeout and Headers (SupportedHTTPOptionFields and
+// IgnoredHTTPOptionFields), or nil when opts sets neither. A zero Timeout,
+// which genai reads as no timeout, is left out because both endpoints refuse
+// a non-positive one. The agent flow merges only these into a request (see
+// agent.RunConfig.HTTPOptions), so an option set for every agent of a run,
+// such as RetryOptions, does not make these endpoints refuse the request.
 func RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
-	if opts == nil || (opts.Timeout == nil && opts.Headers == nil) {
+	if opts == nil {
 		return nil
 	}
-	return &genai.HTTPOptions{Timeout: opts.Timeout, Headers: opts.Headers}
+	timeout := opts.Timeout
+	if timeout != nil && *timeout <= 0 {
+		timeout = nil
+	}
+	if timeout == nil && opts.Headers == nil {
+		return nil
+	}
+	return &genai.HTTPOptions{Timeout: timeout, Headers: opts.Headers}
 }
 
 // ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning

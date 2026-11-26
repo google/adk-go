@@ -101,12 +101,17 @@ type RunConfig struct {
 	// The model connectors in model/anthropicmodel and model/openaimodel
 	// accept only the Timeout and Headers fields of a request's HTTPOptions:
 	// they apply a positive Timeout as the request timeout and send none of
-	// the Headers. For an agent whose model uses one of these connectors, ADK
-	// drops the other fields of HTTPOptions before the merge, as adk-python's
-	// connectors ignore HTTP options, so an invocation that sets RetryOptions
-	// or ExtraBody for its Gemini agents does not fail on that agent. HTTP
-	// options set on that agent's own GenerateContentConfig are not dropped:
-	// the connector returns an error for a field it cannot send.
+	// the Headers, so that a header meant for another backend, such as a
+	// credential, is never sent to Anthropic or OpenAI. For an agent whose
+	// model uses one of these connectors, ADK drops the other fields of
+	// HTTPOptions before the merge, so an invocation that sets RetryOptions or
+	// ExtraBody for its Gemini agents does not fail on that agent. For
+	// model/openaimodel it also drops a Timeout that is not positive, which
+	// that connector refuses, so such an agent keeps its own timeout. A model
+	// that wraps one of these connectors gets the same treatment only if it
+	// implements model.RunHTTPOptionsFilter by forwarding to the connector.
+	// HTTP options set on that agent's own GenerateContentConfig reach the
+	// connector whole, and it returns an error for a field it cannot send.
 	HTTPOptions *genai.HTTPOptions
 
 	// Labels holds per-invocation key-value labels (for example, for billing
@@ -131,11 +136,17 @@ type RunConfig struct {
 	// calling Run, and leave the map unchanged until the iteration ends. An
 	// agent run through tool/agenttool gets the same Labels.
 	//
+	// Requests that model/gemini sends to the Gemini Developer API carry no
+	// labels, because that API's v1 refuses the field. Callbacks still see
+	// Labels in the request.
+	//
 	// The model connectors in model/anthropicmodel and model/openaimodel have
 	// no request labels to send. For an agent whose model uses one of these
 	// connectors, ADK drops Labels, as adk-python's connectors ignore labels,
 	// so an invocation that sets Labels for its Gemini agents does not fail on
-	// that agent. Labels other than "adk_agent_name" set on that agent's own
-	// GenerateContentConfig still make the connector return an error.
+	// that agent. A model that wraps one of these connectors gets the same
+	// treatment only if it implements model.RunLabelsFilter by forwarding to
+	// the connector. Labels other than "adk_agent_name" set on that agent's
+	// own GenerateContentConfig still make the connector return an error.
 	Labels *map[string]string
 }

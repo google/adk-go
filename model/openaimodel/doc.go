@@ -62,8 +62,8 @@
 //
 // The rejection of HTTPOptions fields and labels applies to values set on the
 // agent's GenerateContentConfig. From agent.RunConfig.HTTPOptions, which
-// applies to every agent of a run, the agent flow passes only Timeout and
-// Headers to these models and drops the other fields; it drops
+// applies to every agent of a run, the agent flow passes only a positive
+// Timeout and Headers to these models and drops the other fields; it drops
 // agent.RunConfig.Labels whole.
 //
 // Function tools are sent with strict parameter validation disabled, and that

@@ -1255,8 +1255,8 @@ func TestGeminiModel_Capabilities(t *testing.T) {
 
 // TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex checks that request
 // labels, which the flow fills with the calling agent's name, reach the wire
-// only on Vertex AI. The Gemini Developer API does not support labels, so the
-// body sent there carries none while the caller's config keeps them.
+// only on Vertex AI. The body sent to the Gemini Developer API carries none,
+// since that API's v1 refuses the field, while the caller's config keeps them.
 func TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex(t *testing.T) {
 	tests := []struct {
 		name       string

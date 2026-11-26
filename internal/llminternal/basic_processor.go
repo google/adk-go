@@ -77,54 +77,27 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 	}
 }
 
-// RunHTTPOptionsFilter is implemented by a model connector that cannot send
-// every field of genai.HTTPOptions. Before merging RunConfig.HTTPOptions into
-// a request for such a model, basicRequestProcessor replaces them with what
-// RunHTTPOptions returns, so that options set for every agent of a run do not
-// make this connector refuse the request; adk-python's connectors ignore
-// options they do not use. HTTP options from the agent's own
-// GenerateContentConfig are not filtered, and the connector still validates
-// them.
-//
-// RunHTTPOptions must not modify opts, and returns nil when nothing of opts
-// is left. It may return values that share maps and pointers with opts.
-type RunHTTPOptionsFilter interface {
-	RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions
-}
-
 // runHTTPOptionsFor returns the part of the run's HTTP options opts to merge
-// into a request for llm: all of opts, or what llm's RunHTTPOptions keeps.
+// into a request for llm: all of opts, or what llm keeps of them as a
+// model.RunHTTPOptionsFilter.
 func runHTTPOptionsFor(llm model.LLM, opts *genai.HTTPOptions) *genai.HTTPOptions {
 	if opts == nil {
 		return nil
 	}
-	if f, ok := llm.(RunHTTPOptionsFilter); ok {
+	if f, ok := llm.(model.RunHTTPOptionsFilter); ok {
 		return f.RunHTTPOptions(opts)
 	}
 	return opts
 }
 
-// RunLabelsFilter is implemented by a model connector that cannot send every
-// request label. Before merging RunConfig.Labels into a request for such a
-// model, basicRequestProcessor replaces them with what RunLabels returns, so
-// that labels set for every agent of a run do not make this connector refuse
-// the request; adk-python's connectors ignore labels they do not send. Labels
-// from the agent's own GenerateContentConfig are not filtered, and the
-// connector still validates them.
-//
-// RunLabels must not modify labels. It may return labels itself, or nil when
-// none is left.
-type RunLabelsFilter interface {
-	RunLabels(labels map[string]string) map[string]string
-}
-
 // runLabelsFor returns the run's labels to merge into a request for llm: all
-// of *labels, or what llm's RunLabels keeps. It returns nil for nil labels.
+// of *labels, or what llm keeps of them as a model.RunLabelsFilter. It returns
+// nil for nil labels.
 func runLabelsFor(llm model.LLM, labels *map[string]string) map[string]string {
 	if labels == nil {
 		return nil
 	}
-	if f, ok := llm.(RunLabelsFilter); ok {
+	if f, ok := llm.(model.RunLabelsFilter); ok {
 		return f.RunLabels(*labels)
 	}
 	return *labels

@@ -46,7 +46,6 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/httprr"
-	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
@@ -4307,9 +4306,9 @@ func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
-	filter, ok := m.(llminternal.RunHTTPOptionsFilter)
+	filter, ok := m.(model.RunHTTPOptionsFilter)
 	if !ok {
-		t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunHTTPOptionsFilter", m)
+		t.Fatalf("NewModel() returned %T, which does not implement model.RunHTTPOptionsFilter", m)
 	}
 	tests := []struct {
 		name string
@@ -4356,9 +4355,9 @@ func TestRunLabels_DropsAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModel() error = %v", err)
 	}
-	filter, ok := m.(llminternal.RunLabelsFilter)
+	filter, ok := m.(model.RunLabelsFilter)
 	if !ok {
-		t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunLabelsFilter", m)
+		t.Fatalf("NewModel() returned %T, which does not implement model.RunLabelsFilter", m)
 	}
 	if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
 		t.Errorf("RunLabels() = %v, want nil", got)

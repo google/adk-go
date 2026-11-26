@@ -455,7 +455,7 @@ func TestBasicProcessor_RunConfigHTTPOptions_AgentTimeoutOnlyKeepsRunHeaders(t *
 }
 
 // timeoutOnlyLLM is a model whose connector accepts only the Timeout of a
-// run's HTTP options, as a RunHTTPOptionsFilter.
+// run's HTTP options, as a model.RunHTTPOptionsFilter.
 type timeoutOnlyLLM struct {
 	model.LLM
 }
@@ -468,8 +468,8 @@ func (*timeoutOnlyLLM) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOption
 }
 
 // TestBasicProcessor_RunConfigHTTPOptions_FilteredForModel pins that a model
-// implementing RunHTTPOptionsFilter receives only the run HTTP options it
-// keeps, while HTTP options set on the agent reach the request whole.
+// implementing model.RunHTTPOptionsFilter receives only the run HTTP options
+// it keeps, while HTTP options set on the agent reach the request whole.
 func TestBasicProcessor_RunConfigHTTPOptions_FilteredForModel(t *testing.T) {
 	t.Parallel()
 
@@ -535,7 +535,7 @@ func TestBasicProcessor_RunConfigLabels_AgentWithoutLabels(t *testing.T) {
 }
 
 // labelDroppingLLM is a model whose connector sends no labels, as a
-// RunLabelsFilter.
+// model.RunLabelsFilter.
 type labelDroppingLLM struct {
 	model.LLM
 }
@@ -543,9 +543,9 @@ type labelDroppingLLM struct {
 func (*labelDroppingLLM) RunLabels(map[string]string) map[string]string { return nil }
 
 // TestBasicProcessor_RunConfigLabels_FilteredForModel pins that a model
-// implementing RunLabelsFilter receives none of the run's labels, while labels
-// set on the agent reach the request, and that neither the caller's map nor
-// the agent's map is written.
+// implementing model.RunLabelsFilter receives none of the run's labels,
+// while labels set on the agent reach the request, and that neither the
+// caller's map nor the agent's map is written.
 func TestBasicProcessor_RunConfigLabels_FilteredForModel(t *testing.T) {
 	t.Parallel()
 

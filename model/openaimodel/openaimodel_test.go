@@ -33,7 +33,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
@@ -514,9 +513,8 @@ func redact(v string) string {
 
 // TestRunHTTPOptions_KeepsTimeoutAndHeaders checks, on both APIs, that the
 // agent flow is given only the fields of a run's HTTP options these models
-// accept, so that RetryOptions or ExtraBody set for every agent of a run do
-// not make an OpenAI request fail, as adk-python's OpenAI models ignore HTTP
-// options.
+// accept, so that RetryOptions, ExtraBody or a zero Timeout set for every
+// agent of a run do not make an OpenAI request fail.
 func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
 	opts := &genai.HTTPOptions{
 		Timeout:      genai.Ptr(2 * time.Second),
@@ -531,9 +529,9 @@ func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel() err = %v", err)
 			}
-			filter, ok := llm.(llminternal.RunHTTPOptionsFilter)
+			filter, ok := llm.(model.RunHTTPOptionsFilter)
 			if !ok {
-				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunHTTPOptionsFilter", llm)
+				t.Fatalf("NewModel() returned %T, which does not implement model.RunHTTPOptionsFilter", llm)
 			}
 			want := &genai.HTTPOptions{Timeout: genai.Ptr(2 * time.Second), Headers: http.Header{"X-Run": {"run"}}}
 			if diff := cmp.Diff(want, filter.RunHTTPOptions(opts)); diff != "" {
@@ -541,6 +539,13 @@ func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
 			}
 			if got := filter.RunHTTPOptions(&genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}); got != nil {
 				t.Errorf("RunHTTPOptions(ExtraBody only) = %+v, want nil", got)
+			}
+			zeroTimeout := &genai.HTTPOptions{Timeout: genai.Ptr(time.Duration(0)), Headers: http.Header{"X-Run": {"run"}}}
+			if diff := cmp.Diff(&genai.HTTPOptions{Headers: http.Header{"X-Run": {"run"}}}, filter.RunHTTPOptions(zeroTimeout)); diff != "" {
+				t.Errorf("RunHTTPOptions(zero Timeout) mismatch (-want +got):\n%s", diff)
+			}
+			if got := filter.RunHTTPOptions(&genai.HTTPOptions{Timeout: genai.Ptr(time.Duration(0))}); got != nil {
+				t.Errorf("RunHTTPOptions(zero Timeout only) = %+v, want nil", got)
 			}
 		})
 	}
@@ -557,9 +562,9 @@ func TestRunLabels_DropsAll(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel() err = %v", err)
 			}
-			filter, ok := llm.(llminternal.RunLabelsFilter)
+			filter, ok := llm.(model.RunLabelsFilter)
 			if !ok {
-				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunLabelsFilter", llm)
+				t.Fatalf("NewModel() returned %T, which does not implement model.RunLabelsFilter", llm)
 			}
 			if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
 				t.Errorf("RunLabels() = %v, want nil", got)
