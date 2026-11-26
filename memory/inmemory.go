@@ -18,23 +18,15 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"iter"
 	"slices"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
-	"golang.org/x/text/unicode/norm"
-	"golang.org/x/text/unicode/runenames"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/memory/internal/keyword"
 	"google.golang.org/adk/v2/session"
 )
-
-const maxSearchResults = 10
 
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
 // Searches return at most ten entries, ranked by the number of distinct query
@@ -94,12 +86,7 @@ type value struct {
 	timestamp      time.Time
 	customMetadata map[string]any
 
-	// precomputed set of words in the content for simple keyword matching.
-	words map[string]struct{}
-
-	// Cache an additional lowercase copy of the event text to avoid joining and
-	// lowercasing content parts on each substring search.
-	textLower string
+	document keyword.Document
 }
 
 type userMemories struct {
@@ -205,33 +192,15 @@ func buildValue(event *session.Event) (value, bool) {
 		return value{}, false
 	}
 
-	// Thought parts are the model's reasoning, not conversation, so they are
-	// neither searched nor returned. adk-python v2.12.0 does both; this keeps
-	// internal reasoning out of memory results.
-	var texts []string
-	var visibleParts []*genai.Part
-	for _, part := range event.Content.Parts {
-		if part == nil || part.Thought {
-			continue
-		}
-		visibleParts = append(visibleParts, part)
-		if part.Text != "" {
-			texts = append(texts, part.Text)
-		}
-	}
-
-	content := *event.Content
-	content.Parts = visibleParts
-	text := strings.Join(texts, " ")
+	content, text := keyword.VisibleContent(event.Content)
 
 	return value{
 		id:             event.ID,
-		content:        &content,
+		content:        content,
 		author:         event.Author,
 		timestamp:      event.Timestamp,
 		customMetadata: event.CustomMetadata,
-		words:          extractSearchableWords(text),
-		textLower:      cases.Lower(language.Und).String(norm.NFC.String(text)),
+		document:       keyword.NewDocument(text),
 	}, true
 }
 
@@ -240,18 +209,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 		return nil, errors.New("memory: SearchRequest must not be nil")
 	}
 
-	// The query is split into words like the stored text, so a Latin word
-	// inside Japanese or Chinese query text matches on its own. A true value
-	// allows substring matching, which only a whole non-ASCII query word gets:
-	// a run split out of one, such as と from Pythonと, would match nearly any
-	// Japanese text.
-	queryWords := make(map[string]bool)
-	for word := range extractSearchableWords(req.Query) {
-		queryWords[word] = false
-	}
-	for word := range extractWordsLower(req.Query) {
-		queryWords[word] = hasNonASCII(word)
-	}
+	query := keyword.NewQuery(req.Query)
 
 	k := key{
 		appName: req.AppName,
@@ -259,7 +217,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 	}
 
 	res := &SearchResponse{}
-	if len(queryWords) == 0 {
+	if len(query) == 0 {
 		return res, nil
 	}
 
@@ -283,16 +241,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 
 	for _, sk := range values.sessionOrder {
 		for _, e := range values.sessions[sk] {
-			if len(e.words) == 0 {
-				continue
-			}
-			score := 0
-			for word, allowSubstring := range queryWords {
-				if _, ok := e.words[word]; ok || (allowSubstring && strings.Contains(e.textLower, word)) {
-					score++
-				}
-			}
-			if score > 0 {
+			if score := query.Score(e.document); score > 0 {
 				scored = append(scored, scoredMemory{
 					score: score,
 					entry: Entry{
@@ -312,80 +261,13 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 	slices.SortStableFunc(scored, func(a, b scoredMemory) int {
 		return cmp.Compare(b.score, a.score)
 	})
-	for _, match := range scored[:min(len(scored), maxSearchResults)] {
+	for _, match := range scored[:min(len(scored), keyword.MaxResults)] {
 		res.Memories = append(res.Memories, match.entry)
 	}
 
 	return res, nil
 }
 
-// extractWordsLower returns the lowercased \w+ tokens of the NFC form of text,
-// as adk-python's _extract_words_lower does. Combining marks are not word
-// characters, so after NFC a mark that composes nowhere separates words.
-func extractWordsLower(text string) map[string]struct{} {
-	// A Caser may be stateful, so each call builds its own.
-	lower := cases.Lower(language.Und)
-	res := make(map[string]struct{})
-	for word := range tokens(text) {
-		res[lower.String(word)] = struct{}{}
-	}
-	return res
-}
-
-// tokens returns the \w+ tokens of the NFC form of text, in their original
-// case.
-func tokens(text string) iter.Seq[string] {
-	return strings.FieldsFuncSeq(norm.NFC.String(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
-	})
-}
-
-// extractSearchableWords returns the words a query or an event is matched on,
-// as adk-python's _extract_searchable_words does: the tokens of
-// extractWordsLower plus, for each token with non-ASCII characters, its runs
-// of Latin and of non-Latin characters. Japanese and Chinese are written
-// without spaces, so in 私はPythonを使う the run python becomes a word of its
-// own.
-//
-// A token is split before it is lowercased. Lowercasing turns İ into i and
-// U+0307, which is not Latin, so splitting afterwards would make words of
-// that i and of the rest of the run, such as stanbul.
-func extractSearchableWords(text string) map[string]struct{} {
-	lower := cases.Lower(language.Und)
-	words := make(map[string]struct{})
-	for word := range tokens(text) {
-		words[lower.String(word)] = struct{}{}
-		if !hasNonASCII(word) {
-			continue
-		}
-		start, runLatin := 0, false
-		for i, r := range word {
-			latin := isLatin(r)
-			if i > 0 && latin != runLatin {
-				words[lower.String(word[start:i])] = struct{}{}
-				start = i
-			}
-			runLatin = latin
-		}
-		words[lower.String(word[start:])] = struct{}{}
-	}
-	return words
-}
-
-// isLatin reports whether r belongs to a Latin run, as adk-python's _is_latin
-// does: an ASCII word character, or a character whose Unicode name starts
-// with LATIN. The name rule leaves out ª and º, which unicode.Latin includes.
-func isLatin(r rune) bool {
-	if r <= unicode.MaxASCII {
-		return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
-	}
-	return strings.HasPrefix(runenames.Name(r), "LATIN")
-}
-
 func hasNonNilPart(parts []*genai.Part) bool {
 	return slices.ContainsFunc(parts, func(p *genai.Part) bool { return p != nil })
-}
-
-func hasNonASCII(s string) bool {
-	return strings.IndexFunc(s, func(r rune) bool { return r > unicode.MaxASCII }) >= 0
 }
