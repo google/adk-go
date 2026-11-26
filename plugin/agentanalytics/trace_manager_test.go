@@ -29675,6 +29675,7 @@ func (d *viewWithOwnCtxAndICDelta) WithICDelta(delta *agent.InvocationContextDel
 }
 
 type gatedViewLLM struct {
+	model.LLM
 	onCall func(ctx context.Context, call int32) *model.LLMResponse
 	calls  atomic.Int32
 }
