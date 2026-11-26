@@ -321,6 +321,33 @@ func TestErrors(t *testing.T) {
 	rr.Close()
 }
 
+func TestCorruptNegativeLengths(t *testing.T) {
+	// A corrupt trace with negative record lengths must return the documented
+	// "corrupt httprr trace" error instead of panicking on a slice bound.
+	*record = ""
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"negative request length", "-1 0\n"},
+		{"negative response length", "0 -1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := t.TempDir() + "/rr"
+			if err := os.WriteFile(file, []byte("httprr trace v1\n"+tc.body), 0o666); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Open(file, nil)
+			if err == nil {
+				t.Fatal("Open succeeded on trace with negative record length")
+			}
+			if !strings.Contains(err.Error(), "corrupt httprr trace") {
+				t.Fatalf("got error %q, want corrupt httprr trace", err)
+			}
+		})
+	}
+}
+
 type errTransport struct{ err error }
 
 func (e errTransport) RoundTrip(req *http.Request) (*http.Response, error) {

@@ -179,7 +179,7 @@ func open(file string, rt http.RoundTripper) (*RecordReplay, error) {
 		f1, f2, _ := strings.Cut(line, " ")
 		n1, err1 := strconv.Atoi(f1)
 		n2, err2 := strconv.Atoi(f2)
-		if !ok || err1 != nil || err2 != nil || n1 > len(data) || n2 > len(data[n1:]) {
+		if !ok || err1 != nil || err2 != nil || n1 < 0 || n2 < 0 || n1 > len(data) || n2 > len(data[n1:]) {
 			return nil, fmt.Errorf("read %s: corrupt httprr trace", file)
 		}
 		var req, resp string
