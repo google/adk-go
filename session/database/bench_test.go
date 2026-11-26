@@ -37,6 +37,16 @@ func BenchmarkGetSessionInCrowdedTable(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+			b.Cleanup(func() {
+				sqlDB, err := db.DB()
+				if err != nil {
+					b.Errorf("db.DB() error = %v", err)
+					return
+				}
+				if err := sqlDB.Close(); err != nil {
+					b.Errorf("sqlDB.Close() error = %v", err)
+				}
+			})
 			svc, err := NewSessionServiceFromDB(db)
 			if err != nil {
 				b.Fatal(err)

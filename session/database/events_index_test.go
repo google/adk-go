@@ -67,6 +67,16 @@ func privateService(t *testing.T, rec *sqlRecorder) *databaseService {
 	if err != nil {
 		t.Fatalf("gorm.Open() error = %v", err)
 	}
+	t.Cleanup(func() {
+		sqlDB, err := db.DB()
+		if err != nil {
+			t.Errorf("db.DB() error = %v", err)
+			return
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("sqlDB.Close() error = %v", err)
+		}
+	})
 	svc, err := NewSessionServiceFromDB(db)
 	if err != nil {
 		t.Fatalf("NewSessionServiceFromDB() error = %v", err)
@@ -181,6 +191,7 @@ func TestGetEventsQueryUsesEventsIndex(t *testing.T) {
 		{name: "all events"},
 		{name: "recent events", req: session.GetRequest{NumRecentEvents: 2}},
 		{name: "events after", req: session.GetRequest{After: ts.Add(-2 * time.Second)}},
+		{name: "recent events after", req: session.GetRequest{After: ts.Add(-2 * time.Second), NumRecentEvents: 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := tc.req
