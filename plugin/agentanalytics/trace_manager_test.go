@@ -31,6 +31,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/signal"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -29449,6 +29451,97 @@ type lineageAliasContext struct {
 	lineageContextAlias
 }
 
+type namedContextWrapper struct {
+	Context context.Context
+}
+
+func (w *namedContextWrapper) Deadline() (time.Time, bool) { return w.Context.Deadline() }
+func (w *namedContextWrapper) Done() <-chan struct{}       { return w.Context.Done() }
+func (w *namedContextWrapper) Err() error                  { return w.Context.Err() }
+func (w *namedContextWrapper) Value(key any) any           { return w.Context.Value(key) }
+
+type customNamedContextIface interface{ context.Context }
+
+type embeddedCustomNamedContext struct {
+	Context customNamedContextIface
+}
+
+func (w *embeddedCustomNamedContext) Deadline() (time.Time, bool) { return w.Context.Deadline() }
+func (w *embeddedCustomNamedContext) Done() <-chan struct{}       { return w.Context.Done() }
+func (w *embeddedCustomNamedContext) Err() error                  { return w.Context.Err() }
+func (w *embeddedCustomNamedContext) Value(key any) any           { return w.Context.Value(key) }
+
+func newEmbeddedAnonNamedContext(base context.Context) context.Context {
+	type Context interface{ context.Context }
+	type embeddedAnonNamedContext struct{ Context }
+	return &embeddedAnonNamedContext{Context: base}
+}
+
+var neverClosedDoneChan = make(chan struct{})
+
+type afterFuncerThin struct {
+	context.Context
+}
+
+func (c *afterFuncerThin) Done() <-chan struct{} {
+	return neverClosedDoneChan
+}
+
+func (c *afterFuncerThin) AfterFunc(f func()) func() bool {
+	return context.AfterFunc(c.Context, f)
+}
+
+type shallowCopyICDecorator struct {
+	agent.InvocationContext
+	tag string
+}
+
+func (d *shallowCopyICDecorator) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	cp := *d
+	if delta != nil {
+		cp.InvocationContext = d.InvocationContext.WithICDelta(delta)
+	}
+	return &cp
+}
+
+type embeddedInvocationContext = agent.InvocationContext
+
+type forwardingShallowCopyICDecorator struct {
+	embeddedInvocationContext
+	tag string
+}
+
+func (d *forwardingShallowCopyICDecorator) InvocationContext() agent.InvocationContext {
+	return d.embeddedInvocationContext
+}
+
+func (d *forwardingShallowCopyICDecorator) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	cp := *d
+	if delta != nil {
+		cp.embeddedInvocationContext = d.embeddedInvocationContext.WithICDelta(delta)
+	}
+	return &cp
+}
+
+type deterministicICDecorator struct {
+	agent.InvocationContext
+}
+
+func (d *deterministicICDecorator) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	if delta == nil {
+		return d.InvocationContext
+	}
+	return d.InvocationContext.WithICDelta(delta)
+}
+
+type stableBaseIC struct {
+	*mockInvocationContext
+}
+
+func (b *stableBaseIC) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return b
+}
+
 type syncContextWrapper struct {
 	mu      sync.RWMutex
 	Context context.Context
@@ -29521,13 +29614,19 @@ func TestDispatcherLaunchLineage(t *testing.T) {
 	}{
 		{kind: "direct", wantWorker: 2},
 		{kind: "pointer", wantWorker: 2},
+		// Intentional lineage stops: value wrappers, WithoutCancel, multi-field
+		// structs, and named-field structs do not expose launch lineage, so
+		// goroutine origin decides (dispatcher starts from root on worker 1).
 		{kind: "value", wantWorker: 1},
+		{kind: "without_cancel", wantWorker: 1},
+		{kind: "multi_field", wantWorker: 1},
+		{kind: "named_field", wantWorker: 1},
 		{kind: "nil_optional", wantWorker: 2},
 		{kind: "side_field", wantWorker: 2},
 		{kind: "deep", wantWorker: 2},
 		{kind: "timeout", wantWorker: 2},
-		{kind: "after_func", wantWorker: 2},
-		{kind: "without_cancel", wantWorker: 1},
+		{kind: "stop_ctx", wantWorker: 2},
+		{kind: "signal_notify", wantWorker: 2},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			p, requests, _ := setupTestPlugin(t)
@@ -29545,6 +29644,10 @@ func TestDispatcherLaunchLineage(t *testing.T) {
 					return &lineageContext{Context: ctx}, func() {}
 				case "value":
 					return lineageContext{Context: ctx}, func() {}
+				case "multi_field":
+					return &lineageMultiFieldContext{Context: ctx, extra: 1}, func() {}
+				case "named_field":
+					return &namedContextWrapper{Context: ctx}, func() {}
 				case "nil_optional":
 					return &lineageOptionalMetadata{lineageContextMethods: ctx}, func() {}
 				case "side_field":
@@ -29557,9 +29660,12 @@ func TestDispatcherLaunchLineage(t *testing.T) {
 				case "timeout":
 					c, cancel := context.WithTimeout(ctx, time.Minute)
 					return c, cancel
-				case "after_func":
-					stop := context.AfterFunc(ctx, func() {})
-					return ctx, func() { stop() }
+				case "stop_ctx":
+					c, cancel := context.WithCancel(&afterFuncerThin{Context: ctx})
+					return c, cancel
+				case "signal_notify":
+					c, stop := signal.NotifyContext(ctx, os.Interrupt)
+					return c, stop
 				case "without_cancel":
 					return context.WithoutCancel(ctx), func() {}
 				default:
@@ -29584,19 +29690,7 @@ func TestDispatcherLaunchLineage(t *testing.T) {
 						leafEvents := make(chan item, 4)
 						job := func() {
 							defer close(leafEvents)
-							var wrapped context.Context
-							var cleanup func()
-							if tc.kind == "after_func" {
-								c, cancel := context.WithCancel(ctx)
-								stop := context.AfterFunc(c, func() {})
-								wrapped = c
-								cleanup = func() {
-									stop()
-									cancel()
-								}
-							} else {
-								wrapped, cleanup = wrap(ctx, rootCtx, tc.kind)
-							}
+							wrapped, cleanup := wrap(ctx, rootCtx, tc.kind)
 							defer cleanup()
 							for ev, runErr := range leaf.Run(ctx.WithContext(wrapped)) {
 								leafEvents <- item{ev: ev, err: runErr}
@@ -29720,7 +29814,14 @@ func TestSynchronizedContextNoRace(t *testing.T) {
 				syncCtx := &syncContextWrapper{Context: ctx}
 				altCtx := context.WithValue(ctx, lineageKey{}, "alt")
 				stopMutate := make(chan struct{})
+				var stopOnce sync.Once
 				var mutateWG sync.WaitGroup
+				stopWriter := func() {
+					stopOnce.Do(func() {
+						close(stopMutate)
+						mutateWG.Wait()
+					})
+				}
 				mutateWG.Go(func() {
 					for i := 0; ; i++ {
 						select {
@@ -29737,10 +29838,8 @@ func TestSynchronizedContextNoRace(t *testing.T) {
 						syncCtx.mu.Unlock()
 					}
 				})
-				defer func() {
-					close(stopMutate)
-					mutateWG.Wait()
-				}()
+				t.Cleanup(stopWriter)
+				defer stopWriter()
 				for ev, runErr := range leaf.Run(ctx.WithContext(syncCtx)) {
 					if !yield(ev, runErr) || runErr != nil {
 						return
@@ -29847,23 +29946,113 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("stdlib timerCtx and afterFuncCtx resolve", func(t *testing.T) {
+	t.Run("stdlib timerCtx and stopCtx resolve", func(t *testing.T) {
 		tCtx, cancel := context.WithTimeout(w1Act, time.Minute)
 		defer cancel()
 		if got := inv.launcherLocked(&lineageContext{Context: tCtx}, excluded); got != 1 {
 			t.Fatalf("launcherLocked(timerCtx) = %d, want 1", got)
 		}
 
-		cCtx, cCancel := context.WithCancel(w1Act)
+		cCtx, cCancel := context.WithCancel(&afterFuncerThin{Context: w1Act})
 		defer cCancel()
-		stop := context.AfterFunc(cCtx, func() {})
-		defer stop()
+		cVal := reflect.ValueOf(cCtx).Elem()
+		inner := directStructField(cVal, "Context")
+		if !inner.IsValid() || inner.IsNil() {
+			t.Fatal("cancelCtx.Context is nil")
+		}
+		innerTyp := inner.Elem().Type()
+		if innerTyp.PkgPath() != "context" || innerTyp.Name() != "stopCtx" {
+			t.Fatalf("cancelCtx.Context concrete type = %s.%s, want context.stopCtx", innerTyp.PkgPath(), innerTyp.Name())
+		}
 		if got := inv.launcherLocked(&lineageContext{Context: cCtx}, excluded); got != 1 {
-			t.Fatalf("launcherLocked(afterFuncCtx) = %d, want 1", got)
+			t.Fatalf("launcherLocked(stopCtx) = %d, want 1", got)
 		}
 	})
 
-	t.Run("withoutCancel, value wrapper, multi-field, custom-iface, and alias stop walk", func(t *testing.T) {
+	t.Run("cycle passing through stopCtx terminates", func(t *testing.T) {
+		af := &afterFuncerThin{Context: context.Background()}
+		cCtx, cCancel := context.WithCancel(af)
+		defer cCancel()
+		af.Context = cCtx
+		if got := inv.launcherLocked(&lineageContext{Context: cCtx}, excluded); got != 0 {
+			t.Fatalf("launcherLocked(stopCtx-cycle) = %d, want 0", got)
+		}
+	})
+
+	t.Run("deep cycle over 32 steps terminates", func(t *testing.T) {
+		head := &lineageContext{}
+		cur := head
+		var cycleEntry *lineageContext
+		for i := range 45 {
+			next := &lineageContext{}
+			cur.Context = next
+			cur = next
+			if i == 10 {
+				cycleEntry = next
+			}
+		}
+		cur.Context = cycleEntry
+		if got := inv.launcherLocked(head, excluded); got != 0 {
+			t.Fatalf("launcherLocked(deep-cycle>32) = %d, want 0", got)
+		}
+	})
+
+	t.Run("very deep acyclic WithValue chain resolves", func(t *testing.T) {
+		var cur context.Context = w1Act
+		for i := range 1000 {
+			cur = context.WithValue(cur, lineageKey{}, i)
+		}
+		if got := inv.launcherLocked(&lineageContext{Context: cur}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(1000 WithValue) = %d, want 1", got)
+		}
+	})
+
+	t.Run("signal.NotifyContext resolves launcherLocked and contextPath", func(t *testing.T) {
+		sigCtx, stop := signal.NotifyContext(w1Act, os.Interrupt)
+		defer stop()
+		if got := inv.launcherLocked(&lineageContext{Context: sigCtx}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(signal.NotifyContext) = %d, want 1", got)
+		}
+
+		var capturedIC agent.InvocationContext
+		leaf, err := agent.New(agent.Config{
+			Name: "leaf",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					capturedIC = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(leaf): %v", err)
+		}
+		leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(leaf): %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf_sig",
+			Edges: workflow.Chain(workflow.Start, leafNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(wf_sig): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, wf).Run(t.Context(), "u1", "s-sig-path", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if capturedIC == nil {
+			t.Fatal("leaf did not capture InvocationContext")
+		}
+		sigPathCtx, stopPath := signal.NotifyContext(agent.NewCallbackContext(capturedIC, nil), os.Interrupt)
+		defer stopPath()
+		if got := contextPath(sigPathCtx); got != "wf_sig@1/leaf@1" {
+			t.Fatalf("contextPath(signal.NotifyContext) = %q, want wf_sig@1/leaf@1", got)
+		}
+	})
+
+	t.Run("withoutCancel, value wrapper, multi-field, named-field, custom-iface, and alias stop walk", func(t *testing.T) {
 		cases := []struct {
 			name string
 			act  any
@@ -29871,7 +30060,9 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 			{name: "withoutCancelCtx", act: &lineageContext{Context: context.WithoutCancel(w1Act)}},
 			{name: "valueWrapper", act: &lineageContext{Context: lineageContext{Context: w1Act}}},
 			{name: "multiField", act: &lineageContext{Context: &lineageMultiFieldContext{Context: w1Act, extra: 1}}},
+			{name: "namedField", act: &lineageContext{Context: &namedContextWrapper{Context: w1Act}}},
 			{name: "customIface", act: &lineageContext{Context: &lineageCustomIfaceContext{lineageContextMethods: w1Act}}},
+			{name: "customNamedIface", act: &lineageContext{Context: newEmbeddedAnonNamedContext(w1Act)}},
 			{name: "aliasField", act: &lineageContext{Context: &lineageAliasContext{lineageContextAlias: w1Act}}},
 		}
 		for _, tc := range cases {
@@ -29882,6 +30073,31 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestIsThinContextWrapper(t *testing.T) {
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+		want bool
+	}{
+		{name: "single anonymous context.Context", typ: reflect.TypeFor[lineageContext](), want: true},
+		{name: "named Context field", typ: reflect.TypeFor[namedContextWrapper](), want: false},
+		{name: "embedded non-stdlib Context interface", typ: reflect.TypeOf(newEmbeddedAnonNamedContext(context.Background())).Elem(), want: false},
+		{name: "named non-stdlib Context interface", typ: reflect.TypeFor[embeddedCustomNamedContext](), want: false},
+		{name: "multi-field wrapper", typ: reflect.TypeFor[lineageMultiFieldContext](), want: false},
+		{name: "alias field wrapper", typ: reflect.TypeFor[lineageAliasContext](), want: false},
+		{name: "signal.signalCtx", typ: reflect.TypeOf(sigCtx).Elem(), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isThinContextWrapper(tc.typ); got != tc.want {
+				t.Fatalf("isThinContextWrapper(%v) = %v, want %v", tc.typ, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
@@ -29925,8 +30141,8 @@ func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
 		t.Fatalf("contextPath(520 WithValue) = %q, want wf_deep@1/leaf@1", got)
 	}
 
-	if got := contextPath(&lineageContext{Context: cur}); got != "wf_deep@1/leaf@1" {
-		t.Fatalf("contextPath(pointer thin wrapper) = %q, want wf_deep@1/leaf@1", got)
+	if got := contextPath(&lineageContext{Context: cur}); got != "" {
+		t.Fatalf("contextPath(pointer thin wrapper) = %q, want empty", got)
 	}
 	if got := contextPath(lineageContext{Context: cur}); got != "" {
 		t.Fatalf("contextPath(value thin wrapper) = %q, want empty", got)
@@ -29954,7 +30170,14 @@ func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
 
 	syncCtx := &syncContextWrapper{Context: cur}
 	stopMutate := make(chan struct{})
+	var stopOnce sync.Once
 	var wg sync.WaitGroup
+	stopWriter := func() {
+		stopOnce.Do(func() {
+			close(stopMutate)
+			wg.Wait()
+		})
+	}
 	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
@@ -29971,13 +30194,13 @@ func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
 			syncCtx.mu.Unlock()
 		}
 	})
+	t.Cleanup(stopWriter)
 	for range 200 {
 		if got := contextPath(syncCtx); got != "" {
 			t.Fatalf("contextPath(syncCtx) = %q, want empty", got)
 		}
 	}
-	close(stopMutate)
-	wg.Wait()
+	stopWriter()
 }
 
 func TestActivationKey_NonADKWrapper(t *testing.T) {
@@ -30001,7 +30224,14 @@ func TestActivationKey_NonADKWrapper(t *testing.T) {
 	t.Run("synchronized Context field has no data race", func(t *testing.T) {
 		w := &nonADKSyncIC{InvocationContext: base, Context: other}
 		stop := make(chan struct{})
+		var stopOnce sync.Once
 		var wg sync.WaitGroup
+		stopWriter := func() {
+			stopOnce.Do(func() {
+				close(stop)
+				wg.Wait()
+			})
+		}
 		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
@@ -30018,13 +30248,381 @@ func TestActivationKey_NonADKWrapper(t *testing.T) {
 				w.mu.Unlock()
 			}
 		})
+		t.Cleanup(stopWriter)
 		for range 200 {
 			if got := activationKey(w); got != w {
 				t.Fatalf("activationKey(syncIC) = %v, want %p", got, w)
 			}
 		}
-		close(stop)
-		wg.Wait()
+		stopWriter()
+	})
+}
+
+func TestContextWalkers_SynchronizedWrappersDeterministicNoRace(t *testing.T) {
+	var capturedIC agent.InvocationContext
+	leaf, err := agent.New(agent.Config{
+		Name: "leaf",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				capturedIC = ic
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(leaf): %v", err)
+	}
+	leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(leaf): %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_sync_det",
+		Edges: workflow.Chain(workflow.Start, leafNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_sync_det): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, wf).Run(t.Context(), "u1", "s-sync-det", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+	}
+	if capturedIC == nil {
+		t.Fatal("leaf did not capture InvocationContext")
+	}
+	plainIC := &mockInvocationContext{ctx: context.Background(), agentName: "plain", invocationID: "inv-plain"}
+
+	t.Run("launcherLocked_multiFieldSyncWrapper", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-sync-launcher", time.Unix(1_700_000_000, 0))
+		w1Act := &lineageContext{Context: context.Background()}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: inv.agentStack[0], goroutineID: 101, activation: w1Act}
+		inv.agentStack = append(inv.agentStack, w1)
+		excluded := make([]bool, len(inv.agentStack))
+
+		syncCtx := &syncContextWrapper{Context: w1Act}
+		altCtx := context.WithValue(w1Act, lineageKey{}, "alt")
+		act := &lineageContext{Context: syncCtx}
+
+		stop := make(chan struct{})
+		ready := make(chan struct{})
+		var stopOnce sync.Once
+		var wg sync.WaitGroup
+		stopWriter := func() {
+			stopOnce.Do(func() {
+				close(stop)
+				wg.Wait()
+			})
+		}
+		wg.Go(func() {
+			signaled := false
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				syncCtx.mu.Lock()
+				if i%2 == 0 {
+					syncCtx.Context = altCtx
+				} else {
+					syncCtx.Context = w1Act
+				}
+				syncCtx.mu.Unlock()
+				if !signaled {
+					close(ready)
+					signaled = true
+				}
+			}
+		})
+		t.Cleanup(stopWriter)
+		<-ready
+
+		for range 5000 {
+			if got := inv.launcherLocked(act, excluded); got != 0 {
+				t.Fatalf("launcherLocked(syncCtx) = %d, want 0", got)
+			}
+		}
+	})
+
+	t.Run("contextPath_thinWrapperExternallyLocked", func(t *testing.T) {
+		var extMu sync.Mutex
+		thin := &lineageContext{Context: capturedIC}
+		adkCtx := agent.NewContext(plainIC).WithContext(thin)
+
+		stop := make(chan struct{})
+		ready := make(chan struct{})
+		var stopOnce sync.Once
+		var wg sync.WaitGroup
+		stopWriter := func() {
+			stopOnce.Do(func() {
+				close(stop)
+				wg.Wait()
+			})
+		}
+		wg.Go(func() {
+			signaled := false
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				extMu.Lock()
+				if i%2 == 0 {
+					thin.Context = context.Background()
+				} else {
+					thin.Context = capturedIC
+				}
+				extMu.Unlock()
+				if !signaled {
+					close(ready)
+					signaled = true
+				}
+			}
+		})
+		t.Cleanup(stopWriter)
+		<-ready
+
+		for range 5000 {
+			if got := contextPath(adkCtx); got != "" {
+				t.Fatalf("contextPath(adkCtx wrapping thin) = %q, want empty", got)
+			}
+		}
+	})
+
+	t.Run("contextPath_multiFieldSyncWrapper", func(t *testing.T) {
+		syncCtx := &syncContextWrapper{Context: capturedIC}
+		adkCtx := agent.NewContext(plainIC).WithContext(syncCtx)
+
+		stop := make(chan struct{})
+		ready := make(chan struct{})
+		var stopOnce sync.Once
+		var wg sync.WaitGroup
+		stopWriter := func() {
+			stopOnce.Do(func() {
+				close(stop)
+				wg.Wait()
+			})
+		}
+		wg.Go(func() {
+			signaled := false
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				syncCtx.mu.Lock()
+				if i%2 == 0 {
+					syncCtx.Context = context.Background()
+				} else {
+					syncCtx.Context = capturedIC
+				}
+				syncCtx.mu.Unlock()
+				if !signaled {
+					close(ready)
+					signaled = true
+				}
+			}
+		})
+		t.Cleanup(stopWriter)
+		<-ready
+
+		for range 5000 {
+			if got := contextPath(adkCtx); got != "" {
+				t.Fatalf("contextPath(adkCtx wrapping syncCtx) = %q, want empty", got)
+			}
+		}
+	})
+}
+
+func TestContextPath_PrefersInvocationContextOverReplacementContext(t *testing.T) {
+	captureWorkflowIC := func(wfName string) agent.InvocationContext {
+		var captured agent.InvocationContext
+		leaf, err := agent.New(agent.Config{
+			Name: "leaf",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					captured = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(leaf): %v", err)
+		}
+		leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(leaf): %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  wfName,
+			Edges: workflow.Chain(workflow.Start, leafNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(%s): %v", wfName, err)
+		}
+		for _, runErr := range newTestRunner(t, wf).Run(t.Context(), "u1", "s-"+wfName, textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if captured == nil {
+			t.Fatalf("%s leaf did not capture InvocationContext", wfName)
+		}
+		return captured
+	}
+
+	icInner := captureWorkflowIC("wf_inner")
+	icOuter := captureWorkflowIC("wf_outer")
+
+	t.Run("depth-1 prefers invocationContext over replacement Context", func(t *testing.T) {
+		d1 := agent.NewCallbackContext(icInner, nil).WithICDelta(nil).(agent.Context)
+		ctx := d1.WithAgentContext(context.WithValue(icOuter, lineageKey{}, "outer"))
+		if got := contextPath(ctx); got != "wf_inner@1/leaf@1" {
+			t.Fatalf("contextPath(depth-1) = %q, want wf_inner@1/leaf@1", got)
+		}
+	})
+
+	t.Run("depth-3 prefers invocationContext over shallower replacement Context", func(t *testing.T) {
+		d1 := agent.NewCallbackContext(icInner, nil).WithICDelta(nil)
+		d2 := agent.NewCallbackContext(d1, nil).WithICDelta(nil)
+		d3 := agent.NewCallbackContext(d2, nil).WithICDelta(nil).(agent.Context)
+		ctx := d3.WithAgentContext(context.WithValue(icOuter, lineageKey{}, "outer"))
+		if got := contextPath(ctx); got != "wf_inner@1/leaf@1" {
+			t.Fatalf("contextPath(depth-3) = %q, want wf_inner@1/leaf@1", got)
+		}
+	})
+
+	t.Run("fallback to replacement Context when invocationContext has no path", func(t *testing.T) {
+		plainIC := &mockInvocationContext{ctx: context.Background(), agentName: "plain", invocationID: "inv-plain"}
+		d1 := agent.NewCallbackContext(plainIC, nil).WithICDelta(nil).(agent.Context)
+		ctx := d1.WithAgentContext(context.WithValue(icOuter, lineageKey{}, "outer"))
+		if got := contextPath(ctx); got != "wf_outer@1/leaf@1" {
+			t.Fatalf("contextPath(fallback) = %q, want wf_outer@1/leaf@1", got)
+		}
+	})
+
+	t.Run("Value and contextParentMap still follow replacement Context", func(t *testing.T) {
+		type valKey struct{}
+		replacement := context.WithValue(icOuter, valKey{}, "from-replacement")
+		d1 := agent.NewCallbackContext(icInner, nil).WithICDelta(nil).(agent.Context)
+		ctx := d1.WithAgentContext(replacement)
+		if got := ctx.Value(valKey{}); got != "from-replacement" {
+			t.Fatalf("ctx.Value(valKey) = %v, want from-replacement", got)
+		}
+		var nestedOuterIC agent.InvocationContext
+		nestedLeaf, err := agent.New(agent.Config{
+			Name: "nested_leaf",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					nestedOuterIC = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(nested_leaf): %v", err)
+		}
+		nNode, err := workflow.NewAgentNode(nestedLeaf, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		nWF, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf_nested_outer",
+			Edges: workflow.Chain(workflow.Start, nNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		wrapperParent, err := agent.New(agent.Config{
+			Name:      "wrapper_parent",
+			SubAgents: []agent.Agent{nWF},
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return nWF.Run(ic)
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(wrapper_parent): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, wrapperParent).Run(t.Context(), "u1", "s-nested-outer", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		combined := agent.NewCallbackContext(icInner, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.WithValue(nestedOuterIC, lineageKey{}, 1))
+		if got := contextPath(combined); got != "wf_inner@1/leaf@1" {
+			t.Fatalf("contextPath(combined) = %q, want wf_inner@1/leaf@1", got)
+		}
+		if got := contextParentMap(combined); got["wf_nested_outer"] != wrapperParent {
+			t.Fatalf("contextParentMap(combined)[wf_nested_outer] = %v, want %v", got["wf_nested_outer"], wrapperParent)
+		}
+	})
+}
+
+func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
+	baseIC := &stableBaseIC{mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "base", invocationID: "inv-base"}}
+
+	t.Run("shallow copy WithICDelta(nil) keeps identical activationKey", func(t *testing.T) {
+		dec := &shallowCopyICDecorator{InvocationContext: baseIC, tag: "run-1"}
+		s1 := dec.WithICDelta(nil)
+		s2 := dec.WithICDelta(nil)
+		if any(s1) == any(dec) || any(s2) == any(dec) || any(s1) == any(s2) {
+			t.Fatalf("precondition failed: shallowCopyICDecorator must allocate distinct pointers")
+		}
+
+		k1 := activationKey(dec)
+		k2 := activationKey(dec)
+		if k1 != any(dec) || k2 != any(dec) {
+			t.Fatalf("activationKey(dec) = %p / %p, want %p", k1, k2, dec)
+		}
+		cb := agent.NewCallbackContext(dec, nil)
+		if kc := activationKey(cb); kc != any(dec) {
+			t.Fatalf("activationKey(NewCallbackContext(dec)) = %p, want %p", kc, dec)
+		}
+	})
+
+	t.Run("forwarding shallow copy decorator unwraps InvocationContext()", func(t *testing.T) {
+		dec := &forwardingShallowCopyICDecorator{embeddedInvocationContext: baseIC, tag: "fwd"}
+		if got := activationKey(dec); got != any(baseIC) {
+			t.Fatalf("activationKey(forwardingDec) = %p, want %p", got, baseIC)
+		}
+		if got := activationKey(agent.NewCallbackContext(dec, nil)); got != any(baseIC) {
+			t.Fatalf("activationKey(NewCallbackContext(forwardingDec)) = %p, want %p", got, baseIC)
+		}
+	})
+
+	t.Run("deterministic WithICDelta(nil) unwraps to baseIC", func(t *testing.T) {
+		dec := &deterministicICDecorator{InvocationContext: baseIC}
+		if got := activationKey(dec); got != any(baseIC) {
+			t.Fatalf("activationKey(deterministicDec) = %p, want %p", got, baseIC)
+		}
+	})
+
+	t.Run("pushLLMSpan and popLLMSpan match across shallow-copy decorator", func(t *testing.T) {
+		tm := newTraceManager()
+		now := time.Unix(1_700_000_000, 0)
+		tm.now = func() time.Time {
+			now = now.Add(5 * time.Millisecond)
+			return now
+		}
+		dec := &shallowCopyICDecorator{InvocationContext: baseIC, tag: "llm"}
+		id := identity{invocationID: "inv-base", agentName: "base"}
+		tm.invocationSpan(dec, id, nil)
+		tm.pushAgentSpan(dec, id)
+		pushSpan := tm.pushLLMSpan(dec, id)
+		popSpan := tm.popLLMSpan(dec, id, true)
+		if pushSpan.spanID == "" || popSpan.spanID != pushSpan.spanID {
+			t.Fatalf("LLM span split across shallowCopyICDecorator: push=%q pop=%q", pushSpan.spanID, popSpan.spanID)
+		}
+		if popSpan.latency == nil {
+			t.Fatal("popLLMSpan returned nil latency (span was not matched)")
+		}
+		inv := tm.invocation(dec, id)
+		inv.mu.Lock()
+		remaining := len(inv.llmSpans)
+		inv.mu.Unlock()
+		if remaining != 0 {
+			t.Fatalf("inv.llmSpans has %d leaked entries, want 0", remaining)
+		}
 	})
 }
 

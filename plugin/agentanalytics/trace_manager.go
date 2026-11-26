@@ -4534,12 +4534,33 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
+const maxLaunchLineageSteps = 1 << 16
+
+// isThinContextWrapper reports whether t is a struct with a single anonymous
+// field of type context.Context. Requiring NumField() == 1 and an anonymous
+// field excludes user structs that may guard Context with a sibling mutex or
+// named-field synchronization; callers still enforce pointer-backing.
 func isThinContextWrapper(t reflect.Type) bool {
 	if t.NumField() != 1 {
 		return false
 	}
 	f := t.Field(0)
 	return f.Anonymous && f.Name == "Context" && f.Type == contextInterfaceType
+}
+
+// isAllowedValueContext reports whether a non-pointer struct context type is
+// an allowlisted immutable wrapper whose parent may be followed during
+// launch-lineage inspection. It deliberately returns false for
+// context.withoutCancelCtx and all user value structs.
+func isAllowedValueContext(t reflect.Type) bool {
+	switch t.PkgPath() {
+	case "context":
+		return t.Name() == "stopCtx"
+	case remoteAgentPkgPath:
+		return t.Name() == "authContext"
+	default:
+		return false
+	}
 }
 
 func extractContextField(v reflect.Value, name string) (any, bool) {
@@ -4550,28 +4571,31 @@ func extractContextField(v reflect.Value, name string) (any, bool) {
 	return f.Interface(), true
 }
 
-func launchLineageNext(v reflect.Value) (any, bool) {
+func launchLineageNext(v reflect.Value, allowThinPtr bool) (any, bool) {
 	vt := v.Type()
 	switch {
 	case vt.PkgPath() == "context":
+		if vt.Name() == "withoutCancelCtx" {
+			return nil, false
+		}
 		if next, ok := extractContextField(v, "Context"); ok {
 			return next, true
 		}
-		if cc := directStructField(v, "cancelCtx"); cc.IsValid() {
-			if cc.Kind() == reflect.Pointer {
-				if cc.IsNil() {
-					return nil, false
-				}
-				cc = cc.Elem()
-			}
-			if cc.Kind() == reflect.Struct {
-				return extractContextField(cc, "Context")
-			}
+		if cc := directStructField(v, "cancelCtx"); cc.IsValid() && cc.Kind() == reflect.Struct {
+			return extractContextField(cc, "Context")
 		}
 		return nil, false
-	case isADKType(vt):
+	case vt.PkgPath() == "os/signal" && vt.Name() == "signalCtx":
 		return extractContextField(v, "Context")
-	case isThinContextWrapper(vt):
+	case isADKType(vt):
+		if next, ok := extractContextField(v, "Context"); ok {
+			return next, true
+		}
+		if vt.PkgPath() == remoteAgentPkgPath && vt.Name() == "authContext" {
+			return extractContextField(v, "InvocationContext")
+		}
+		return nil, false
+	case allowThinPtr && isThinContextWrapper(vt):
 		f := v.Field(0)
 		if f.IsNil() || !f.CanInterface() {
 			return nil, false
@@ -4586,13 +4610,15 @@ func launchLineageNext(v reflect.Value) (any, bool) {
 // not excluded, whose context the agent run with activation key act (see
 // activationKey) was started with, or 0 if no such activation is known. ADK
 // derives the context of each agent run from the context passed to its Run,
-// and standard context wrappers (except context.WithoutCancel), ADK contexts,
-// and pointer wrappers embedding only context.Context with no other fields
-// expose the parent they derive from, so the chain from act passes through the
+// and Go standard library context wrappers (context and os/signal.NotifyContext,
+// except context.WithoutCancel), allowlisted immutable value wrappers such as
+// context.stopCtx, ADK contexts, and pointer wrappers embedding only
+// context.Context with no other fields (assumed immutable after handoff) expose
+// the parent they derive from, so the chain from act passes through the
 // activation key of every run that the new run's context derives from, nearest
 // first. The first one of an open activation tells which activation started the
-// run, whichever goroutine runs it. Only those allowlisted types and direct
-// fields are read, so no user fields or methods run while inv.mu is held.
+// run, whichever goroutine runs it. Multi-field and named-field user structs
+// are never read, and no user methods run while inv.mu is held.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if act == nil {
 		return 0
@@ -4610,35 +4636,59 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 		return 0
 	}
 	cur := act
-	var seen map[any]struct{}
-	for step := 0; ; step++ {
+	var tortoise any
+	power := 1
+	lam := 0
+	for step := range maxLaunchLineageSteps {
 		v := reflect.ValueOf(cur)
-		if v.Kind() != reflect.Pointer || v.IsNil() {
+		if !v.IsValid() {
 			return 0
 		}
-		if step > 0 {
-			if i, ok := byActivation[cur]; ok {
-				return i
-			}
-		}
-		if step >= 32 {
-			if seen == nil {
-				seen = make(map[any]struct{})
-			}
-			if _, dup := seen[cur]; dup {
+		var allowThinPtr bool
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() {
 				return 0
 			}
-			seen[cur] = struct{}{}
-		}
-		if v = v.Elem(); v.Kind() != reflect.Struct {
+			if step > 0 {
+				if i, ok := byActivation[cur]; ok {
+					return i
+				}
+			}
+			if tortoise != nil {
+				if samePointer(cur, tortoise) {
+					return 0
+				}
+				if lam == power {
+					tortoise = cur
+					power *= 2
+					lam = 0
+				}
+				lam++
+			} else {
+				tortoise = cur
+				lam = 1
+			}
+			v = v.Elem()
+			if v.Kind() != reflect.Struct {
+				return 0
+			}
+			allowThinPtr = true
+		case reflect.Struct:
+			if !isAllowedValueContext(v.Type()) {
+				return 0
+			}
+			allowThinPtr = false
+		default:
 			return 0
 		}
-		next, ok := launchLineageNext(v)
+		next, ok := launchLineageNext(v, allowThinPtr)
 		if !ok {
 			return 0
 		}
 		cur = next
 	}
+	return 0
 }
 
 // parentForRunLocked returns the span that an agent starting with id on
@@ -10161,6 +10211,71 @@ func endedFunc(ctx context.Context) func() bool {
 // follows.
 const maxActivationKeyDepth = 8
 
+type icDeltaStripper interface {
+	WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
+}
+
+func samePointer(a, b any) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	return va.Kind() == reflect.Pointer && vb.Kind() == reflect.Pointer &&
+		!va.IsNil() && !vb.IsNil() &&
+		va.Type() == vb.Type() && va.Pointer() == vb.Pointer()
+}
+
+func isNonNilPointer(a any) bool {
+	if a == nil {
+		return false
+	}
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && !v.IsNil()
+}
+
+// stableStripICDelta calls WithICDelta(nil) to unwrap ADK forwarding wrappers
+// (such as callbackContextWrapper and toolContextWrapper) without losing
+// identity on external decorators whose WithICDelta(nil) allocates a fresh
+// shallow copy on every call.
+func stableStripICDelta(c icDeltaStripper) any {
+	s1 := c.WithICDelta(nil)
+	if !isNonNilPointer(s1) || samePointer(s1, c) {
+		return c
+	}
+	s2 := c.WithICDelta(nil)
+	if samePointer(s2, s1) {
+		return s1
+	}
+	return c
+}
+
+func resolveInvocationActivationKey(start any, maxSteps int) any {
+	cur := start
+	if stripper, ok := cur.(icDeltaStripper); ok {
+		cur = stableStripICDelta(stripper)
+	}
+	var key any
+	for steps := 0; steps < maxSteps && isNonNilPointer(cur); steps++ {
+		key = cur
+		next, ok := cur.(interface {
+			InvocationContext() agent.InvocationContext
+		})
+		if !ok {
+			break
+		}
+		inner := next.InvocationContext()
+		if !isNonNilPointer(inner) {
+			break
+		}
+		stripped := stableStripICDelta(inner)
+		if !isNonNilPointer(stripped) || samePointer(stripped, cur) {
+			break
+		}
+		cur = stripped
+	}
+	return key
+}
+
 // activationKey returns the per-activation context pointer that ADK created for
 // the agent run that ctx belongs to, or nil if ctx does not show it. Each
 // agent.Run allocates a fresh run context via ctx.WithContext(spanCtx) and
@@ -10172,44 +10287,29 @@ const maxActivationKeyDepth = 8
 // AfterAgentCallback of one run while keeping concurrent runs of the same agent
 // on one branch and node path distinct. An agent callback receives a
 // callbackContextWrapper whose InvocationContext method logs a warning and
-// returns nil, so the chain starts at WithICDelta(nil).
+// returns nil, so the chain starts with stableStripICDelta.
 func activationKey(ctx context.Context) any {
-	c, ok := ctx.(interface {
-		WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
-	})
+	c, ok := ctx.(icDeltaStripper)
 	if !ok {
 		return nil
 	}
 	return orZero(func() any {
-		var key any
-		var cur any = c.WithICDelta(nil)
-		for steps := 0; cur != nil && steps < maxActivationKeyDepth; steps++ {
-			if v := reflect.ValueOf(cur); v.Kind() != reflect.Pointer || v.IsNil() {
-				break
-			}
-			key = cur
-			next, ok := cur.(interface {
-				InvocationContext() agent.InvocationContext
-			})
-			if !ok {
-				break
-			}
-			inner := next.InvocationContext()
-			if inner == nil || any(inner) == cur {
-				break
-			}
-			cur = inner
+		key := resolveInvocationActivationKey(c, maxActivationKeyDepth)
+		if !isNonNilPointer(key) {
+			return nil
 		}
-		if key != nil {
-			if v := reflect.ValueOf(key); v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct {
-				elem := v.Elem()
-				if isADKType(elem.Type()) {
-					if f := directStructField(elem, "Context"); f.IsValid() && f.CanInterface() {
-						if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
-							if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
-								return inner
+		v := reflect.ValueOf(key)
+		if v.Elem().Kind() == reflect.Struct {
+			elem := v.Elem()
+			if isADKType(elem.Type()) {
+				if f := directStructField(elem, "Context"); f.IsValid() && f.CanInterface() {
+					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && isNonNilPointer(inner) {
+						if iv := reflect.ValueOf(inner).Elem(); iv.Kind() != reflect.Struct || !isADKType(iv.Type()) {
+							if resolved := resolveInvocationActivationKey(inner, maxActivationKeyDepth); isNonNilPointer(resolved) {
+								return resolved
 							}
 						}
+						return stableStripICDelta(inner)
 					}
 				}
 			}
@@ -11465,6 +11565,12 @@ func sameContextChild(a, b reflect.Value) bool {
 
 // adkContextChildren returns up to two inner context fields from allowlisted
 // Go stdlib and ADK context wrapper structs, ignoring application-owned types.
+// For dual-parent ADK contexts that separate value/cancellation delegation
+// from invocation identity (commonContext and internal/context.ReadonlyContext),
+// c1 is the replacement Context (visited first by Value-lookup walkers) and c2
+// is the underlying invocationContext / InvocationContext (visited first by
+// contextPath). For cancelledToolContext and authContext, c1 is the wrapped
+// ADK context and c2 is the secondary cancel/value context.
 func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 	vt := v.Type()
 	switch vt.PkgPath() {
@@ -11476,6 +11582,10 @@ func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 			return f, reflect.Value{}
 		}
 		return directStructField(v, "c"), reflect.Value{}
+	case "os/signal":
+		if vt.Name() == "signalCtx" {
+			return directStructField(v, "Context"), reflect.Value{}
+		}
 	case agentPkgPath:
 		switch vt.Name() {
 		case "commonContext":
@@ -11902,6 +12012,10 @@ func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pi
 				next = f
 			} else if f := directStructField(cur, "c"); f.IsValid() {
 				next = f
+			}
+		case "os/signal":
+			if vt.Name() == "signalCtx" {
+				next = directStructField(cur, "Context")
 			}
 		case agentPkgPath:
 			if f := directStructField(cur, "context"); f.IsValid() {

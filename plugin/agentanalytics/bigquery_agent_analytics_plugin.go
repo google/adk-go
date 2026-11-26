@@ -2495,12 +2495,15 @@ type visitedContextStruct struct {
 	typ reflect.Type
 }
 
+const maxContextPathSteps = 1 << 16
+
 // contextPath returns the execution node path carried by ctx, or "".
 // ADK's callbackContextWrapper.Path logs an error and returns "", and
 // NewCallbackContext wraps the inner InvocationContext without copying its
 // path onto the outer commonContext, so contextPath inspects allowlisted
-// standard context, ADK, and single-field context.Context pointer wrappers
-// directly before falling back to Path() on non-wrapper types.
+// standard library and ADK context wrappers directly (visiting
+// invocationContext before a replacement Context) before falling back to Path()
+// on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2510,13 +2513,18 @@ func contextPath(ctx context.Context) (path string) {
 	if ctx == nil {
 		return ""
 	}
-	var q contextStructQueue
-	q.push(reflect.ValueOf(ctx))
+	var primary, fallback contextStructQueue
+	primary.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := 0; ; steps++ {
-		item, ok := q.pop()
+	for steps := range maxContextPathSteps {
+		fromPrimary := true
+		item, ok := primary.pop()
 		if !ok {
-			break
+			fromPrimary = false
+			item, ok = fallback.pop()
+			if !ok {
+				break
+			}
 		}
 		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
 		if !ok {
@@ -2546,11 +2554,31 @@ func contextPath(ctx context.Context) (path string) {
 			}
 		}
 		c1, c2 := adkContextChildren(v)
-		if !c1.IsValid() && !c2.IsValid() && v.CanAddr() && isThinContextWrapper(vt) {
-			c1 = v.Field(0)
+		if c2.IsValid() {
+			// On commonContext and internal/context.ReadonlyContext, c2 is the
+			// authoritative invocationContext/InvocationContext and c1 is the
+			// replacement Context. On cancelledToolContext and authContext, c1
+			// is the wrapped ADK context and c2 is the secondary cancel/value
+			// context.
+			if (vt.PkgPath() == agentPkgPath && vt.Name() == "commonContext") ||
+				(vt.PkgPath() == internalContextPkgPath && vt.Name() == "ReadonlyContext") {
+				primary.push(c2)
+				fallback.push(c1)
+			} else {
+				if fromPrimary {
+					primary.push(c1)
+				} else {
+					fallback.push(c1)
+				}
+				fallback.push(c2)
+			}
+			continue
 		}
-		q.push(c1)
-		q.push(c2)
+		if fromPrimary {
+			primary.push(c1)
+		} else {
+			fallback.push(c1)
+		}
 	}
 	type pathCarrier interface {
 		Path() string

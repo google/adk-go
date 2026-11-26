@@ -371,15 +371,20 @@ type GCSContentOffloader interface {
 // path are open, an agent that one of them runs is placed under that
 // activation's span (parent_span_id): the activation whose context, or a
 // context derived from it, was passed to the agent's Run, whichever goroutine
-// runs the agent. Launch lineage follows standard context wrappers (except
-// context.WithoutCancel), ADK contexts, and pointer wrappers that embed only
-// context.Context with no other fields. When a context derives through any
-// other wrapper, goroutines decide instead: a child agent that runs on an
-// activation's goroutine, or on a goroutine that the activation starts
-// directly, is placed under that activation, and one launched across an
-// intermediate goroutine that runs no ADK callback is placed under the nearest
-// open span enclosing the concurrent activations that hold an open span its
-// branch and node path fit (or the invocation span if none encloses them).
+// runs the agent. Launch lineage follows Go standard library context wrappers
+// (context and os/signal.NotifyContext, except context.WithoutCancel), ADK
+// contexts, and pointer wrappers whose sole field is an anonymously embedded
+// context.Context that must not be reassigned after handoff. Multi-field
+// wrappers (such as struct{ context.Context; id string }) and wrappers with a
+// named Context field (such as struct{ Context context.Context }) are
+// intentionally not inspected because user-owned structs may guard fields with
+// a sibling or external lock. When a context derives through any other wrapper,
+// goroutines decide instead: a child agent that runs on an activation's
+// goroutine, or on a goroutine that the activation starts directly, is placed
+// under that activation, and one launched across an intermediate goroutine that
+// runs no ADK callback is placed under the nearest open span enclosing the
+// concurrent activations that hold an open span its branch and node path fit
+// (or the invocation span if none encloses them).
 type Config struct {
 	// _ prevents unkeyed literals, which adding a field would break.
 	_ struct{} `json:"-"`
