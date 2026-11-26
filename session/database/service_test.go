@@ -65,6 +65,45 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 	}
 }
 
+// A database that keeps microseconds rounds a sub-microsecond creation time,
+// as MySQL does, and rounding up made the stored row newer than the session
+// Create returned. The first AppendEvent on that session then failed the stale
+// check. A runner with AutoCreateSession takes this path whenever it creates a
+// session for a message: it appends the message to the session Create returned.
+func Test_databaseService_CreateThenAppend_survivesMicrosecondRounding(t *testing.T) {
+	// 700 ns past the microsecond, so rounding goes up.
+	created := time.Date(2026, time.January, 2, 3, 4, 5, 123456700, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return created })
+
+	s := emptyService(t)
+	// Round the stored row only, leaving the Go struct alone, since MySQL
+	// rounds on the server.
+	roundOnWrite := func(tx *gorm.DB) {
+		ss, ok := tx.Statement.Dest.(*storageSession)
+		if !ok || tx.Error != nil {
+			return
+		}
+		err := tx.Session(&gorm.Session{NewDB: true}).Model(&storageSession{}).
+			Where("app_name = ? AND user_id = ? AND id = ?", ss.AppName, ss.UserID, ss.ID).
+			Update("update_time", ss.UpdateTime.Round(time.Microsecond)).Error
+		if err != nil {
+			_ = tx.AddError(err)
+		}
+	}
+	if err := s.db.Callback().Create().After("gorm:create").Register("test:round_to_microsecond", roundOnWrite); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	resp, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ev := &session.Event{ID: "e1", Author: "user", InvocationID: "inv1", Timestamp: created.Add(time.Second)}
+	if err := s.AppendEvent(ctx, resp.Session, ev); err != nil {
+		t.Fatalf("AppendEvent() on the session Create returned: %v", err)
+	}
+}
+
 // TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip guards that
 // the storage layer serializes/deserializes the workflow event fields
 // (NodeInfo, RequestedInput, Routes, IsolationScope); dropping them
