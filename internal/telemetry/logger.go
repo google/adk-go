@@ -46,6 +46,13 @@ const otelSemconv136 = "otel_semconv_1_36"
 // https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-events.md
 const inferenceOperationDetailsEventName = "gen_ai.client.inference.operation.details"
 
+// Events of the legacy schema.
+const (
+	systemMessageEventName = "gen_ai.system.message"
+	userMessageEventName   = "gen_ai.user.message"
+	choiceEventName        = "gen_ai.choice"
+)
+
 const elidedContent = "<elided>"
 
 // contentCaptureMode says which signals may carry message content.
@@ -152,10 +159,19 @@ func logRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backen
 	if !useLegacySchema() {
 		return
 	}
+	// Records are built only for a logger that takes them, asked without a
+	// severity since they carry none: with no LoggerProvider installed the
+	// logger is a no-op, and converting a conversation for it buys nothing.
+	logger := otelLogger()
 	genAISystem := variantToGenAISystem(backend)
-	logSystemMessage(ctx, req, genAISystem)
+	if logger.Enabled(ctx, log.EnabledParameters{EventName: systemMessageEventName}) {
+		logSystemMessage(ctx, logger, req, genAISystem)
+	}
+	if !logger.Enabled(ctx, log.EnabledParameters{EventName: userMessageEventName}) {
+		return
+	}
 	for _, content := range req.Contents {
-		logUserMessage(ctx, content, genAISystem)
+		logUserMessage(ctx, logger, content, genAISystem)
 	}
 }
 
@@ -170,8 +186,12 @@ func logResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Bac
 	if !useLegacySchema() {
 		return
 	}
+	logger := otelLogger()
+	if !logger.Enabled(ctx, log.EnabledParameters{EventName: choiceEventName}) {
+		return
+	}
 	record := log.Record{}
-	record.SetEventName("gen_ai.choice")
+	record.SetEventName(choiceEventName)
 
 	var finishReason string
 	var content *genai.Content
@@ -198,32 +218,32 @@ func logResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Bac
 		record.AddAttributes(*genAISystem)
 	}
 
-	otelLogger().Emit(ctx, record)
+	logger.Emit(ctx, record)
 }
 
 // logSystemMessage logs the system message from the request.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aisystemmessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec requires a "role" body field, but it's omitted.
-func logSystemMessage(ctx context.Context, req *model.LLMRequest, genAISystem *attribute.KeyValue) {
+func logSystemMessage(ctx context.Context, logger log.Logger, req *model.LLMRequest, genAISystem *attribute.KeyValue) {
 	record := log.Record{}
-	record.SetEventName("gen_ai.system.message")
+	record.SetEventName(systemMessageEventName)
 	record.SetBody(attribute.MapValue(
 		attribute.KeyValue{Key: "content", Value: extractSystemMessage(req)},
 	))
 	if genAISystem != nil {
 		record.AddAttributes(*genAISystem)
 	}
-	otelLogger().Emit(ctx, record)
+	logger.Emit(ctx, record)
 }
 
 // logUserMessage logs the user message from the request.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aiusermessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec requires a "role" body field, but it's omitted. If the role is set in [genai.Content], then it will be available in body.content.role.
-func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *attribute.KeyValue) {
+func logUserMessage(ctx context.Context, logger log.Logger, content *genai.Content, genAISystem *attribute.KeyValue) {
 	record := log.Record{}
-	record.SetEventName("gen_ai.user.message")
+	record.SetEventName(userMessageEventName)
 	record.SetBody(attribute.MapValue(
 		attribute.KeyValue{Key: "content", Value: toLogValue(contentToJSONLikeValue(content))},
 	))
@@ -231,7 +251,7 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *at
 		record.AddAttributes(*genAISystem)
 	}
 
-	otelLogger().Emit(ctx, record)
+	logger.Emit(ctx, record)
 }
 
 // GenAISystemAttr returns the gen_ai.system attribute for a backend, and
