@@ -23,15 +23,19 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // estimateFixture stores a session of n exchanges whose text is textChars
@@ -69,10 +73,26 @@ func estimateFixture(t *testing.T, n, textChars int, usage *genai.GenerateConten
 	return svc, sess
 }
 
-// runCompactionProcessorWithRequest runs the processor on a request that
-// already carries what the tools and instructions processors add before it in
-// the default chain, through cfg.
-func runCompactionProcessorWithRequest(t *testing.T, svc session.Service, sess session.Session, req *model.LLMRequest, cfg *compaction.Config) {
+// appendUserTurn appends a user event with textChars characters and no usage.
+func appendUserTurn(t *testing.T, svc session.Service, sess session.Session, textChars int) {
+	t.Helper()
+
+	ev := session.NewEvent(t.Context(), "inv")
+	ev.Author = "user"
+	ev.Timestamp = time.Unix(1000, 0)
+	ev.LLMResponse.Content = genai.NewContentFromText(strings.Repeat("y", textChars), "user")
+	if err := svc.AppendEvent(t.Context(), sess, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+}
+
+// runCompactionProcessorWithRequest runs the processor in the state the
+// default chain leaves it in: the instructions processor has already put the
+// system instruction on req, and the tools processor has already collected the
+// agent's tools into the flow. Their declarations are copied onto req only
+// after every request processor has run, so the processor sees them on the
+// flow, not on req.
+func runCompactionProcessorWithRequest(t *testing.T, svc session.Service, sess session.Session, req *model.LLMRequest, tools []tool.Tool, cfg *compaction.Config) {
 	t.Helper()
 
 	ctx := compactionctx.ToContext(t.Context(), compactionctx.New(cfg, svc))
@@ -81,38 +101,47 @@ func runCompactionProcessorWithRequest(t *testing.T, svc session.Service, sess s
 		Agent:   testAgent,
 		Session: sess,
 	})
-	for _, err := range llminternal.CompactionRequestProcessor(ictx, req, &llminternal.Flow{}) {
+	for _, err := range llminternal.CompactionRequestProcessor(ictx, req, &llminternal.Flow{Tools: tools}) {
 		if err != nil {
 			t.Fatalf("CompactionRequestProcessor() error = %v", err)
 		}
 	}
 }
 
-// toolDeclarations returns n function declarations with a description and a
-// parameter schema, the way a toolset with many tools fills the request.
-func toolDeclarations(n int) []*genai.Tool {
-	decls := make([]*genai.FunctionDeclaration, 0, n)
-	for i := range n {
-		decls = append(decls, &genai.FunctionDeclaration{
-			Name:        fmt.Sprintf("tool_%02d", i),
-			Description: strings.Repeat("Looks up records and returns them. ", 12),
-			Parameters: &genai.Schema{
-				Type: genai.TypeObject,
-				Properties: map[string]*genai.Schema{
-					"query": {Type: genai.TypeString, Description: strings.Repeat("The search query. ", 10)},
-					"limit": {Type: genai.TypeInteger, Description: strings.Repeat("Maximum number of results. ", 10)},
-				},
-			},
-		})
-	}
-	return []*genai.Tool{{FunctionDeclarations: decls}}
+type lookupArgs struct {
+	Query string `json:"query" jsonschema:"The search query. The search query. The search query. The search query."`
+	Limit int    `json:"limit" jsonschema:"Maximum number of results. Maximum number of results. Maximum number of results."`
 }
 
-// requestChars returns the size in characters of the request parts outside
-// contents, for a test log.
-func requestChars(t *testing.T, cfg *genai.GenerateContentConfig) int {
+// lookupTools returns n function tools with a long description and a
+// parameter schema, the way an agent with many tools fills the request.
+func lookupTools(t *testing.T, n int) []tool.Tool {
 	t.Helper()
-	b, err := json.Marshal(cfg)
+	tools := make([]tool.Tool, 0, n)
+	for i := range n {
+		lookup, err := functiontool.New(functiontool.Config{
+			Name:        fmt.Sprintf("tool_%02d", i),
+			Description: strings.Repeat("Looks up records and returns them. ", 12),
+		}, func(agent.Context, lookupArgs) (struct{}, error) { return struct{}{}, nil })
+		if err != nil {
+			t.Fatalf("functiontool.New() error = %v", err)
+		}
+		tools = append(tools, lookup)
+	}
+	return tools
+}
+
+// preambleChars returns the size in characters of the system instruction and
+// the tool declarations, for a test log.
+func preambleChars(t *testing.T, req *model.LLMRequest, tools []tool.Tool) int {
+	t.Helper()
+	parts := []any{req.Config.SystemInstruction}
+	for _, tl := range tools {
+		if d, ok := tl.(toolinternal.FunctionTool); ok {
+			parts = append(parts, d.Declaration())
+		}
+	}
+	b, err := json.Marshal(parts)
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
@@ -123,11 +152,11 @@ func requestChars(t *testing.T, cfg *genai.GenerateContentConfig) int {
 // prompt dominated by the system instruction or tool declarations triggers
 // compaction when the model has never reported usage.
 //
-// With no reported count, the decision rests on an estimate. The system
-// instruction and the tool declarations are already on the request when the
-// compaction processor runs, so they belong in that estimate. Today it counts
-// only the conversation text, and a short history under a huge preamble reads
-// as far below the threshold.
+// With no reported count, the decision rests on an estimate. When the
+// compaction processor runs, the system instruction is already on the request
+// and the agent's tools are already on the flow, so both belong in that
+// estimate. Today it counts only the contents (text and tool traffic), and a
+// short history under a huge preamble reads as far below the threshold.
 func TestCompactionProcessorEstimateCountsSystemInstructionAndTools(t *testing.T) {
 	t.Parallel()
 
@@ -139,22 +168,24 @@ func TestCompactionProcessorEstimateCountsSystemInstructionAndTools(t *testing.T
 
 	tests := []struct {
 		name           string
-		config         *genai.GenerateContentConfig
+		instruction    string
+		tools          int
 		wantCompaction bool
 	}{
 		{
 			name:           "large system instruction",
-			config:         &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(strings.Repeat("Follow the house style guide. ", 400), "user")},
+			instruction:    strings.Repeat("Follow the house style guide. ", 400),
 			wantCompaction: true,
 		},
 		{
 			name:           "many tool declarations",
-			config:         &genai.GenerateContentConfig{Tools: toolDeclarations(40)},
+			tools:          40,
 			wantCompaction: true,
 		},
 		{
-			name:           "small system instruction and few tools stay under the threshold",
-			config:         &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText("Be brief.", "user"), Tools: toolDeclarations(1)},
+			name:           "small system instruction and one tool stay under the threshold",
+			instruction:    "Be brief.",
+			tools:          1,
 			wantCompaction: false,
 		},
 	}
@@ -164,23 +195,28 @@ func TestCompactionProcessorEstimateCountsSystemInstructionAndTools(t *testing.T
 
 			svc, sess := estimateFixture(t, 4, historyChars, nil)
 			summarizer := &fixedSummarizer{}
+			req := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
+			if tc.instruction != "" {
+				req.Config.SystemInstruction = genai.NewContentFromText(tc.instruction, "user")
+			}
+			tools := lookupTools(t, tc.tools)
 
 			var contents []*genai.Content
 			for ev := range sess.Events().All() {
 				contents = append(contents, ev.Content)
 			}
-			t.Logf("threshold=%d tokens; contents-only estimate=%d tokens; system instruction and tools=%d chars (about %d tokens)",
-				threshold, compactioninternal.EstimateTokensFromContents(contents),
-				requestChars(t, tc.config), requestChars(t, tc.config)/4)
+			chars := preambleChars(t, req, tools)
+			t.Logf("threshold=%d tokens; contents-only estimate=%d tokens; system instruction and tool declarations=%d chars (about %d tokens)",
+				threshold, compactioninternal.EstimateTokensFromContents(contents), chars, chars/4)
 
-			runCompactionProcessorWithRequest(t, svc, sess, &model.LLMRequest{Config: tc.config}, &compaction.Config{
+			runCompactionProcessorWithRequest(t, svc, sess, req, tools, &compaction.Config{
 				TokenThreshold:     threshold,
 				EventRetentionSize: 2,
 				Summarizer:         summarizer,
 			})
 
 			if got := summarizer.calls > 0; got != tc.wantCompaction {
-				t.Errorf("compaction ran = %v, want %v: the estimate must count the system instruction and tool declarations on the request, not only the contents", got, tc.wantCompaction)
+				t.Errorf("compaction ran = %v, want %v: the estimate must count the system instruction and the tool declarations, not only the contents", got, tc.wantCompaction)
 			}
 		})
 	}
@@ -191,9 +227,10 @@ func TestCompactionProcessorEstimateCountsSystemInstructionAndTools(t *testing.T
 // suppress compaction.
 //
 // A server can report a constant such as 1. The prompt is plainly larger than
-// that, so the decision should use the larger of the reported count plus
-// everything appended since, and the estimate of the whole history. Today the
-// reported count wins whenever it is positive.
+// that, so the decision should use the larger of the reported count plus the
+// estimate of the events after it, and the estimate of the whole prompt. Today
+// a positive reported count plus the later events is used as is, and the
+// whole-prompt estimate is never compared with it.
 func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 	t.Parallel()
 
@@ -203,6 +240,8 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 		name           string
 		reported       int32
 		textChars      int
+		instruction    string
+		trailingChars  int
 		wantCompaction bool
 	}{
 		{
@@ -223,6 +262,17 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			textChars:      100,
 			wantCompaction: true,
 		},
+		{
+			// The reported count already includes the system instruction, so
+			// adding the instruction again to the estimate of the later turn
+			// would count it twice and cross the threshold.
+			name:           "accurate report with a large instruction and a later turn stays under the threshold",
+			reported:       3500,
+			textChars:      100,
+			instruction:    strings.Repeat("Follow the house style guide. ", 400),
+			trailingChars:  100,
+			wantCompaction: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,7 +280,14 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 
 			usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: tc.reported}
 			svc, sess := estimateFixture(t, 4, tc.textChars, usage)
+			if tc.trailingChars > 0 {
+				appendUserTurn(t, svc, sess, tc.trailingChars)
+			}
 			summarizer := &fixedSummarizer{}
+			req := &model.LLMRequest{Config: &genai.GenerateContentConfig{}}
+			if tc.instruction != "" {
+				req.Config.SystemInstruction = genai.NewContentFromText(tc.instruction, "user")
+			}
 
 			var contents []*genai.Content
 			for ev := range sess.Events().All() {
@@ -239,14 +296,14 @@ func TestCompactionProcessorDoesNotTrustAnImpossiblyLowCount(t *testing.T) {
 			t.Logf("threshold=%d tokens; reported=%d; contents estimate=%d tokens",
 				threshold, tc.reported, compactioninternal.EstimateTokensFromContents(contents))
 
-			runCompactionProcessorWithRequest(t, svc, sess, &model.LLMRequest{Config: &genai.GenerateContentConfig{}}, &compaction.Config{
+			runCompactionProcessorWithRequest(t, svc, sess, req, nil, &compaction.Config{
 				TokenThreshold:     threshold,
 				EventRetentionSize: 2,
 				Summarizer:         summarizer,
 			})
 
 			if got := summarizer.calls > 0; got != tc.wantCompaction {
-				t.Errorf("compaction ran = %v, want %v: the token count must be the larger of the reported count plus later events and the estimate", got, tc.wantCompaction)
+				t.Errorf("compaction ran = %v, want %v: the token count must be the larger of the reported count plus later events and the estimate of the whole prompt", got, tc.wantCompaction)
 			}
 		})
 	}
