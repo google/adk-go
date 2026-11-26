@@ -223,3 +223,99 @@ func TestInstrumentGenerateContent_UsageFromLatestReport(t *testing.T) {
 		t.Errorf("input tokens = %d, want 10", got)
 	}
 }
+
+func TestInstrumentGenerateContent_ResponseModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		schema    string
+		modelName string
+		stream    bool
+		chunks    []*model.LLMResponse
+		wantModel string
+	}{
+		{
+			name:      "non-streaming uses served model version on default schema",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			chunks:    []*model.LLMResponse{{ModelVersion: "served-model-v2", FinishReason: genai.FinishReasonStop}},
+			wantModel: "served-model-v2",
+		},
+		{
+			name:      "streaming falls back to requested model when chunks omit model version",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			stream:    true,
+			chunks: []*model.LLMResponse{
+				{Content: genai.NewContentFromText("hi", genai.RoleModel), Partial: true},
+				{FinishReason: genai.FinishReasonStop},
+			},
+			wantModel: "requested-model",
+		},
+		{
+			name:      "streaming picks latest non-empty model version across chunks",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			stream:    true,
+			chunks: []*model.LLMResponse{
+				{ModelVersion: "served-v1", Partial: true},
+				{FinishReason: genai.FinishReasonStop},
+			},
+			wantModel: "served-v1",
+		},
+		{
+			name:      "legacy schema records served model version",
+			schema:    "otel_semconv_1_36",
+			modelName: "requested-model",
+			chunks:    []*model.LLMResponse{{ModelVersion: "served-legacy"}},
+			wantModel: "served-legacy",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			spans := setupTestTracer(t)
+			logs := &inMemoryExporter{}
+			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
+
+			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					for _, c := range tc.chunks {
+						if !yield(c, nil) {
+							return
+						}
+					}
+				}
+			}
+			params := GenerateContentParams{ModelName: tc.modelName, Request: &model.LLMRequest{}, Stream: tc.stream}
+			for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+				if err != nil {
+					t.Fatalf("InstrumentGenerateContent() error = %v", err)
+				}
+			}
+
+			var spanModel string
+			for _, kv := range spans.GetSpans()[0].Attributes {
+				if kv.Key == semconv.GenAIResponseModelKey {
+					spanModel = kv.Value.AsString()
+				}
+			}
+			if spanModel != tc.wantModel {
+				t.Errorf("span gen_ai.response.model = %q, want %q", spanModel, tc.wantModel)
+			}
+
+			if tc.schema == "otel_semconv_1_44" {
+				var logModel string
+				logs.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+					if kv.Key == semconv.GenAIResponseModelKey {
+						logModel = kv.Value.AsString()
+					}
+					return true
+				})
+				if logModel != tc.wantModel {
+					t.Errorf("log event gen_ai.response.model = %q, want %q", logModel, tc.wantModel)
+				}
+			}
+		})
+	}
+}
