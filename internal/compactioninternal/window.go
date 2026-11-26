@@ -158,6 +158,11 @@ func LatestCompactionEvent(events []*session.Event) *session.Event {
 // isSubsumedAmong reports whether a later record replaces the earlier compaction.
 // laterRecords must come after earlier's record in stream order.
 func isSubsumedAmong(earlier *session.EventCompaction, laterRecords []*session.Event) bool {
+	// Unlike adk-python, where a wider range subsumes regardless of position,
+	// only later records are considered. A summary never covers events appended
+	// after it, so an earlier wide record evicting a later one would leave the
+	// later one's events raw in the prompt but covered for window selection,
+	// and so never compacted.
 	for _, record := range laterRecords {
 		if !HasUsableSummary(record) {
 			continue
