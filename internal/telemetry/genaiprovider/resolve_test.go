@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package telemetry
+package genaiprovider_test
 
 import (
 	"fmt"
 	"testing"
 
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 )
 
 // Cases from https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/tests/unittests/telemetry/test_spans.py#L2208-L2302
-func TestProviderName(t *testing.T) {
+func TestResolve(t *testing.T) {
 	for _, tc := range []struct {
 		model   string
 		backend genai.Backend
@@ -61,14 +63,14 @@ func TestProviderName(t *testing.T) {
 		{"apigee/v1/gemini-2.5-flash", genai.BackendUnspecified, "unknown"},
 	} {
 		t.Run(fmt.Sprintf("%s/%d", tc.model, tc.backend), func(t *testing.T) {
-			if got := providerName("", tc.model, tc.backend).Value.AsString(); got != tc.want {
-				t.Errorf("providerName(%q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
+			if got := genaiprovider.Resolve("", tc.model, tc.backend); got != tc.want {
+				t.Errorf("Resolve(\"\", %q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestProviderName_Reported(t *testing.T) {
+func TestResolve_Reported(t *testing.T) {
 	for _, tc := range []struct {
 		model   string
 		backend genai.Backend
@@ -77,8 +79,8 @@ func TestProviderName_Reported(t *testing.T) {
 		{"gemini-2.0-flash", genai.BackendGeminiAPI},
 		{"apigee/openai/gpt-4o", genai.BackendUnspecified},
 	} {
-		if got := providerName("gcp.vertex_ai", tc.model, tc.backend).Value.AsString(); got != "gcp.vertex_ai" {
-			t.Errorf("providerName(%q, %q, %v) = %q, want the reported gcp.vertex_ai", "gcp.vertex_ai", tc.model, tc.backend, got)
+		if got := genaiprovider.Resolve("gcp.vertex_ai", tc.model, tc.backend); got != "gcp.vertex_ai" {
+			t.Errorf("Resolve(%q, %q, %v) = %q, want the reported gcp.vertex_ai", "gcp.vertex_ai", tc.model, tc.backend, got)
 		}
 	}
 }

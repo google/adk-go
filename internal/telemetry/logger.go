@@ -27,6 +27,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
@@ -234,13 +235,11 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *at
 // Split out so the compaction spans can set the same attribute the rest of the
 // telemetry does, rather than deriving it a second way.
 func GenAISystemAttr(variant genai.Backend) (attribute.KeyValue, bool) {
-	switch variant {
-	case genai.BackendVertexAI:
-		return semconv.GenAISystemGCPVertexAI, true
-	case genai.BackendGeminiAPI:
-		return semconv.GenAISystemGCPGemini, true
+	provider, ok := genaiprovider.ForBackend(variant)
+	if !ok {
+		return attribute.KeyValue{}, false
 	}
-	return attribute.KeyValue{}, false
+	return semconv.GenAISystemKey.String(provider), true
 }
 
 func variantToGenAISystem(variant genai.Backend) *attribute.KeyValue {

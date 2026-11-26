@@ -15,85 +15,17 @@
 package telemetry
 
 import (
-	"regexp"
-	"strings"
-
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/telemetry/genaiprovider"
 )
 
 // genAIProviderName supersedes gen_ai.system in semantic conventions >1.36.
 var genAIProviderName = attribute.Key("gen_ai.provider.name")
 
-// providerName is the provider a model call's span, log record and metrics
-// report: the one the model reports, else named by the model name, else by the
-// provider segment of an Apigee path, else by the call's backend, else unknown.
+// providerName is the gen_ai.provider.name a model call's span, log record and
+// metrics report.
 func providerName(reported, modelName string, backend genai.Backend) attribute.KeyValue {
-	if reported != "" {
-		return genAIProviderName.String(reported)
-	}
-	name := bareModelName(modelName)
-	if !strings.HasPrefix(name, "gemini-") {
-		if anthropicModel.MatchString(name) {
-			return genAIProviderName.String("anthropic")
-		}
-		if provider, _, ok := strings.Cut(name, "/"); ok && provider != "" && !resourceCollections[strings.ToLower(provider)] {
-			return genAIProviderName.String(strings.ToLower(provider))
-		}
-	}
-	if rest, ok := strings.CutPrefix(modelName, "apigee/"); ok {
-		if segment, _, ok := strings.Cut(rest, "/"); ok && apigeeProviders[segment] != "" {
-			return genAIProviderName.String(apigeeProviders[segment])
-		}
-	}
-	if backend == genai.BackendEnterprise {
-		backend = genai.BackendVertexAI
-	}
-	if sys, ok := GenAISystemAttr(backend); ok {
-		return genAIProviderName.String(sys.Value.AsString())
-	}
-	return genAIProviderName.String("unknown")
-}
-
-var (
-	anthropicModel = regexp.MustCompile(`(?i)^claude[-.]`)
-
-	// Vertex AI and Apigee model paths.
-	modelPaths = []*regexp.Regexp{
-		regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/publishers/[^/]+/models/(.+)$`),
-		regexp.MustCompile(`^apigee/(?:[^/]+/)?(?:[^/]+/)?(.+)$`),
-	}
-
-	apigeeProviders = map[string]string{
-		"vertex_ai": "gcp.vertex_ai",
-		"gemini":    "gcp.gemini",
-		"openai":    "openai",
-	}
-
-	// Leading path segments that are not providers.
-	resourceCollections = map[string]bool{
-		"endpoints":   true,
-		"locations":   true,
-		"models":      true,
-		"projects":    true,
-		"publishers":  true,
-		"tunedmodels": true,
-	}
-)
-
-// bareModelName mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/utils/model_name_utils.py#L49-L91
-// Its malformed "projects/" path rule is left out: [providerName] names the same provider either way.
-func bareModelName(model string) string {
-	for _, p := range modelPaths {
-		if m := p.FindStringSubmatch(model); m != nil {
-			return m[1]
-		}
-	}
-	if rest, ok := strings.CutPrefix(model, "models/"); ok {
-		return rest
-	}
-	if i := strings.LastIndex(model, "/"); i >= 0 && strings.HasPrefix(model[i+1:], "gemini-") {
-		return model[i+1:]
-	}
-	return model
+	return genAIProviderName.String(genaiprovider.Resolve(reported, modelName, backend))
 }

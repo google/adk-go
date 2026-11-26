@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package genaiprovider lets a model built into ADK report the
-// gen_ai.provider.name its calls carry. The type is internal, so models
-// outside ADK cannot implement Reporter.
+// Package genaiprovider resolves the gen_ai.provider.name a model call
+// reports, and lets a model built into ADK report its own. The type is
+// internal, so models outside ADK cannot implement Reporter.
 package genaiprovider
 
 // Name is a gen_ai.provider.name value.
