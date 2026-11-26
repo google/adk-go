@@ -3558,10 +3558,11 @@ type invocationTrace struct {
 	// changes, keep them up to date and set lookalikesLen to the length of
 	// agentStack. A stack whose length differs from lookalikesLen was built
 	// some other way, and is counted afresh (see syncLookalikesLocked).
-	lookalikes               map[lookalikeKey]int
-	lookalikeDups            int
-	lookalikesLen            int
-	lastLookalikeInspections int
+	lookalikes                map[lookalikeKey]int
+	lookalikeDups             int
+	lookalikesLen             int
+	lastLookalikeInspections  int
+	lastLauncherExcludeVisits int
 	// llmSpans holds the running model calls, by llmKey.
 	llmSpans map[string]*spanRecord
 	// completedModels holds the model calls that OnModelErrorCallback
@@ -4734,7 +4735,10 @@ func (inv *invocationTrace) launcherLocked(act any, launchLineage []visitedConte
 //     the returned witnesses are [worker-a, worker-b] and tree.enclosing stops
 //     at mid rather than demoting above worker-outer to root.
 //   - When selected has a non-empty node path containing id.path, only spans
-//     at or below selected's branch and path qualify; otherwise (for example, a
+//     at or below selected's branch and path qualify, except that when
+//     selected is not a workflow agent (so it inherited selected.path rather
+//     than opening a branch-scoped node there), branch-compatible peers on the
+//     exact same selected.path remain eligible. Otherwise (for example, a
 //     detached leaf on a non-empty branch whose node path is empty), any open
 //     member whose own branch and path can hold id counts as a possible
 //     launcher so a detached child cannot falsely attach to another peer's
@@ -4754,6 +4758,7 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 
 func (inv *invocationTrace) parentForRunWithLineageLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin, activation any, launchLineage []visitedContextStruct) *spanRecord {
 	inv.lastLookalikeInspections = 0
+	inv.lastLauncherExcludeVisits = 0
 	callerExcluded := exclude
 	var clonedExclude bool
 	ensureExcludeMutable := func() {
@@ -4837,9 +4842,15 @@ func (inv *invocationTrace) parentForRunWithLineageLocked(id identity, exclude m
 			break
 		}
 		parent = tree.enclosing(inv, ambiguous)
-		for parent != nil && parent.kind == spanKindAgent &&
-			(!withinBranch(id.branch, parent.branch) || !withinPath(id.path, parent.path, parent.name == id.agentName)) {
-			parent = parent.parent
+		if u, ok := tree.stackIdx[parent]; ok {
+			for u > 0 {
+				cand := inv.agentStack[u]
+				if withinBranch(id.branch, cand.branch) && withinPath(id.path, cand.path, cand.name == id.agentName) {
+					break
+				}
+				u = tree.openParent[u]
+			}
+			parent = inv.agentStack[u]
 		}
 	}
 	return parent
@@ -4858,7 +4869,11 @@ func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity
 		!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) {
 		return false
 	}
-	if requireSelected && (!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path)) {
+	// When selected is not a workflow agent, it inherited selected.path rather
+	// than opening a branch-scoped node there, so peers sharing exact
+	// selected.path on an ancestor branch stay eligible.
+	if requireSelected && (!atOrBelowPath(rec.path, selected.path) ||
+		(!withinBranch(rec.branch, selected.branch) && (selected.isWorkflow || rec.path != selected.path))) {
 		return false
 	}
 	return true
@@ -4892,6 +4907,22 @@ type qualifyingIndex struct {
 	inspections int
 }
 
+func (q *qualifyingIndex) isQualifying(u int) bool {
+	q.inspections++
+	return q.qualifies[u]
+}
+
+func (q *qualifyingIndex) firstQualifyingInRange(l, r int) (int, bool) {
+	q.inspections++
+	qFirst := q.nextQual[l]
+	return qFirst, qFirst <= r
+}
+
+func (q *qualifyingIndex) lastQualifyingInRange(r int) int {
+	q.inspections++
+	return q.prevQual[r]
+}
+
 func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclude map[string]bool, id identity, selected *spanRecord) qualifyingIndex {
 	m := len(tree.dfsSeq)
 	qualifies := make([]bool, len(inv.agentStack))
@@ -4906,6 +4937,7 @@ func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclu
 	nextQual := make([]int, m+1)
 	nextQual[m] = m
 	for p := m - 1; p >= 0; p-- {
+		inspections++
 		if p > 0 && qualifies[tree.dfsSeq[p]] {
 			nextQual[p] = p
 		} else {
@@ -4915,6 +4947,7 @@ func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclu
 	prevQual := make([]int, m)
 	prev := -1
 	for p := range m {
+		inspections++
 		if p > 0 && qualifies[tree.dfsSeq[p]] {
 			prev = p
 		}
@@ -4928,59 +4961,103 @@ func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclu
 	}
 }
 
-func collectSortedGroupMemberIdxs(dst []int, tree *openSpanTree, recs []*spanRecord) []int {
+func siftDownIdxsByTin(dst, tin []int, root, end int) int {
+	steps := 0
+	for {
+		child := 2*root + 1
+		if child >= end {
+			return steps
+		}
+		if right := child + 1; right < end {
+			steps++
+			if tin[dst[right]] > tin[dst[child]] {
+				child = right
+			}
+		}
+		steps++
+		if tin[dst[root]] >= tin[dst[child]] {
+			return steps
+		}
+		dst[root], dst[child] = dst[child], dst[root]
+		root = child
+	}
+}
+
+func collectSortedGroupMemberIdxs(dst []int, tree *openSpanTree, recs []*spanRecord) ([]int, int) {
+	steps := 0
 	for _, m := range recs {
+		steps++
 		if mIdx, ok := tree.stackIdx[m]; ok {
 			dst = append(dst, mIdx)
 		}
 	}
 	if len(dst) < 2 {
-		return dst
+		return dst, steps
 	}
 	sorted := true
 	for i := 1; i < len(dst); i++ {
+		steps++
 		if tree.tin[dst[i-1]] > tree.tin[dst[i]] {
 			sorted = false
 			break
 		}
 	}
 	if !sorted {
-		slices.SortFunc(dst, func(a, b int) int { return cmp.Compare(tree.tin[a], tree.tin[b]) })
+		n := len(dst)
+		for i := n/2 - 1; i >= 0; i-- {
+			steps += siftDownIdxsByTin(dst, tree.tin, i, n)
+		}
+		for end := n - 1; end > 0; end-- {
+			dst[0], dst[end] = dst[end], dst[0]
+			steps += siftDownIdxsByTin(dst, tree.tin, 0, end)
+		}
 	}
-	return slices.Compact(dst)
+	w := 1
+	for i := 1; i < len(dst); i++ {
+		steps++
+		if dst[i] != dst[w-1] {
+			dst[w] = dst[i]
+			w++
+		}
+	}
+	return dst[:w], steps
 }
 
-func checkQualifyingGap(tree *openSpanTree, stack []*spanRecord, qual *qualifyingIndex, mIdxs []int, first, last []*spanRecord, k, l, r int) (deltaOwners, deltaInspections int) {
+func checkQualifyingGap(tree *openSpanTree, stack []*spanRecord, qual *qualifyingIndex, mIdxs []int, first, last []*spanRecord, k, l, r int) int {
 	if l > r || first[k] == stack[mIdxs[k]] {
-		return 0, 0
+		return 0
 	}
-	if qFirst := qual.nextQual[l]; qFirst <= r {
+	if qFirst, ok := qual.firstQualifyingInRange(l, r); ok {
+		added := 0
 		if first[k] == nil {
 			first[k] = stack[tree.dfsSeq[qFirst]]
-			deltaOwners = 1
+			added = 1
 		}
-		last[k] = stack[tree.dfsSeq[qual.prevQual[r]]]
+		last[k] = stack[tree.dfsSeq[qual.lastQualifyingInRange(r)]]
+		return added
 	}
-	return deltaOwners, 1
+	return 0
 }
 
 func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, qual *qualifyingIndex, recs []*spanRecord, id identity) ([]*spanRecord, int) {
+	beforeQualInsp := qual.inspections
 	var mIdxBuf [16]int
-	mIdxs := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
+	mIdxs, steps := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
 	if len(mIdxs) < 2 {
-		return dst, len(mIdxs)
+		return dst, steps
 	}
 	if isPeerLookalikeGroup(recs, id) {
 		start := len(dst)
 		for _, mIdx := range mIdxs {
+			steps++
 			if !exclude[inv.agentStack[mIdx].spanID] {
 				dst = append(dst, inv.agentStack[mIdx])
 			}
 		}
 		if len(dst)-start < 2 {
-			return dst[:start], len(mIdxs)
+			return dst[:start], steps
 		}
-		return dst, len(mIdxs)
+		return dst, steps
 	}
 	var firstBuf, lastBuf [16]*spanRecord
 	var first, last []*spanRecord
@@ -4996,51 +5073,46 @@ func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecor
 	var activeBuf [16]activeMember
 	active := activeBuf[:0]
 	owners := 0
-	inspections := 0
 	for i, mIdx := range mIdxs {
-		inspections++
+		steps++
 		l := tree.tin[mIdx] - 1
 		r := tree.tout[mIdx] - 1
 		for len(active) > 0 && tree.tout[mIdxs[active[len(active)-1].k]]-1 < l {
+			steps++
 			top := active[len(active)-1]
 			active = active[:len(active)-1]
-			dO, dI := checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
-			owners += dO
-			inspections += dI
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
 		}
 		if len(active) > 0 {
+			steps++
 			top := &active[len(active)-1]
-			dO, dI := checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, l-1)
-			owners += dO
-			inspections += dI
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, l-1)
 			top.cursor = max(top.cursor, r+1)
 		}
 		hasDesc := i+1 < len(mIdxs) && tree.tin[mIdxs[i+1]] <= tree.tout[mIdx]
 		cursor := l + 1
-		if qual.qualifies[mIdx] {
+		if qual.isQualifying(mIdx) {
 			first[i] = inv.agentStack[mIdx]
 			last[i] = first[i]
 			owners++
 			cursor = r + 1
 		} else if !hasDesc {
-			dO, dI := checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, i, l+1, r)
-			owners += dO
-			inspections += dI
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, i, l+1, r)
 			cursor = r + 1
 		}
 		active = append(active, activeMember{k: i, cursor: cursor})
 	}
 	for len(active) > 0 {
+		steps++
 		top := active[len(active)-1]
 		active = active[:len(active)-1]
-		dO, dI := checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
-		owners += dO
-		inspections += dI
+		owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
 	}
 	if owners < 2 {
-		return dst, inspections
+		return dst, steps + (qual.inspections - beforeQualInsp)
 	}
-	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), inspections
+	steps += len(mIdxs)
+	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps + (qual.inspections - beforeQualInsp)
 }
 
 // appendPossibleOwnersLocked assigns each non-excluded qualifying open span to
@@ -5049,17 +5121,21 @@ func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecor
 // own (agentName, branch, path), in which case all non-excluded members of recs
 // are appended as peers). When selected has a non-empty path containing
 // id.path, only spans fitting both id and selected's branch and node path
-// qualify; otherwise any span fitting id qualifies. For each matched member k,
-// when another member follows inside k's subtree (tree.tin[mIdxs[k+1]] <=
+// qualify (except when selected is not a workflow agent, in which case peers on
+// exact selected.path with a compatible ancestor branch remain eligible);
+// otherwise any span fitting id qualifies. For each matched member k, when
+// another member follows inside k's subtree (tree.tin[mIdxs[k+1]] <=
 // tree.tout[mIdx]), k appends first[k] and last[k] (omitting last[k] if equal)
 // (even when first[k] == inv.agentStack[mIdx] or when no inner member matched)
-// so tree.enclosing stops at the nearest common ancestor inside k when
-// possible (or above k when k matched itself or spans straddle inner members);
-// otherwise it appends inv.agentStack[mIdx]. Up to 16 members use stack buffers
-// without allocating. inv.mu must be held.
+// so tree.enclosing stops at the nearest common ancestor inside k (or at k
+// itself when matched spans straddle inner members) when possible, or above k
+// when k matched itself; otherwise it appends inv.agentStack[mIdx]. Outside
+// -race builds, up to 16 members use stack buffers without allocating when
+// given a prebuilt openSpanTree/qualifyingIndex and sufficient dst capacity.
+// inv.mu must be held.
 func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
 	var mIdxBuf [16]int
-	mIdxs := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
+	mIdxs, _ := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
 	if len(mIdxs) < 2 {
 		return dst
 	}
@@ -5547,13 +5623,25 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map
 	}
 
 	if launcher := inv.launcherLocked(activation, launchLineage, excluded); launcher > 0 {
+		var excludeRoot []bool
 		for _, k := range multiKeys {
 			for _, mIdx := range groups[k] {
+				inv.lastLauncherExcludeVisits++
 				if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
 					continue
 				}
-				ensureExcludeMutable()
-				for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
+				if excludeRoot == nil {
+					excludeRoot = make([]bool, n)
+					ensureExcludeMutable()
+				}
+				excludeRoot[mIdx] = true
+			}
+		}
+		if excludeRoot != nil {
+			for _, u := range tree.dfsSeq[1:] {
+				inv.lastLauncherExcludeVisits++
+				if excludeRoot[u] || excludeRoot[tree.openParent[u]] {
+					excludeRoot[u] = true
 					excluded[u] = true
 					exclude[inv.agentStack[u].spanID] = true
 				}

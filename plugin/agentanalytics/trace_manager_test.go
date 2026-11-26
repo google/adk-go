@@ -29561,9 +29561,10 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 	})
 
 	t.Run("appendPossibleOwnersLocked allocates nothing for up to 16 nested lookalikes", func(t *testing.T) {
-		if raceEnabled {
-			t.Skip("the race detector allocates on its own")
-		}
+		// Behavioral checks run unconditionally (including under -race CI);
+		// the zero-alloc checks apply outside -race builds given a prebuilt
+		// openSpanTree / qualifyingIndex, sufficient dst capacity, and <= 16
+		// group members.
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-distinct-children-allocs", time.Unix(1_700_000_000, 0))
 		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
 		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
@@ -29576,23 +29577,43 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 
 		tree := inv.buildOpenSpanTreeLocked(nil)
 		recs := []*spanRecord{w1, w2, w3}
+		unsortedRecs := []*spanRecord{w3, w1, w2}
 		dst := make([]*spanRecord, 0, 4)
-		if allocs := testing.AllocsPerRun(100, func() {
-			out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA)
-			if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
-				t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
-			}
-		}); allocs != 0 {
-			t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
+		if out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA); len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+			t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
 		}
 		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selA)
-		if allocs := testing.AllocsPerRun(100, func() {
-			out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, recs, leaf)
-			if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
-				t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer worker-3]", spanIDs(out))
+		if out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, recs, leaf); len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer worker-3]", spanIDs(out))
+		}
+		if out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, unsortedRecs, leaf); len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+			t.Fatalf("appendPossibleOwnersWithIndexLocked(unsorted) = %v, want [sel-outer worker-3]", spanIDs(out))
+		}
+		if !raceEnabled {
+			if allocs := testing.AllocsPerRun(100, func() {
+				out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA)
+				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+					t.Fatalf("appendPossibleOwnersLocked = %v, want [sel-outer worker-3]", spanIDs(out))
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
 			}
-		}); allocs != 0 {
-			t.Errorf("appendPossibleOwnersWithIndexLocked allocated %v times per call, want 0", allocs)
+			if allocs := testing.AllocsPerRun(100, func() {
+				out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, recs, leaf)
+				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+					t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-outer worker-3]", spanIDs(out))
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersWithIndexLocked allocated %v times per call, want 0", allocs)
+			}
+			if allocs := testing.AllocsPerRun(100, func() {
+				out, _ := inv.appendPossibleOwnersWithIndexLocked(dst[:0], tree, nil, &qual, unsortedRecs, leaf)
+				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+					t.Fatalf("appendPossibleOwnersWithIndexLocked(unsorted) = %v, want [sel-outer worker-3]", spanIDs(out))
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersWithIndexLocked(unsorted) allocated %v times per call, want 0", allocs)
+			}
 		}
 	})
 
@@ -29653,6 +29674,27 @@ func TestParentForRunLocked_NestedLookalikeNearestOwner(t *testing.T) {
 		outS := invSelf.appendPossibleOwnersLocked(nil, treeS, excl, []*spanRecord{wOuterS, wInnerS}, leaf, selAfter2S)
 		if len(outS) != 3 || outS[0] != selAfter1S || outS[1] != selAfter2S || outS[2] != wInnerS {
 			t.Fatalf("appendPossibleOwnersLocked(self skip) = %v, want [sel-after-1 sel-after-2 worker-inner]", spanIDs(outS))
+		}
+	})
+
+	t.Run("single trailing child at r+1 detects off-by-one resume in appendPossibleOwnersWithIndexLocked", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-single-trailing-r-plus-1", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 99}
+		wOuter := &spanRecord{spanID: "worker-outer", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		wInner := &spanRecord{spanID: "worker-inner", kind: spanKindAgent, name: "worker", parent: wOuter, goroutineID: 102}
+		selInner := &spanRecord{spanID: "sel-inner", kind: spanKindAgent, name: "wf_inner", nonLLM: true, children: []string{"leaf"}, branch: "selected", path: "selected/wf@1", parent: wInner, goroutineID: 103}
+		selAfter := &spanRecord{spanID: "sel-after", kind: spanKindAgent, name: "wf_after", branch: "selected", path: "selected/wf@1", parent: wOuter, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, wOuter, wInner, selInner, selAfter)
+
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		qual := inv.buildQualifyingIndexLocked(tree, nil, leaf, selInner)
+		out, _ := inv.appendPossibleOwnersWithIndexLocked(nil, tree, nil, &qual, []*spanRecord{w1, wOuter, wInner}, leaf)
+		if len(out) != 2 || out[0] != selAfter || out[1] != wInner {
+			t.Fatalf("appendPossibleOwnersWithIndexLocked = %v, want [sel-after worker-inner]", spanIDs(out))
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != wOuter {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wOuter.spanID)
 		}
 	})
 
@@ -29935,7 +29977,7 @@ func TestRememberCompletedAtLocked_PrepareLateBeforeUnlinkAndClear(t *testing.T)
 		tm.mu.Lock()
 		inv := tm.invocations[id.invocationID]
 		origRootSpanID := inv.rootSpanID
-		// Force late destination creation to require newSpanID() so panickingRandReader
+		// Force late destination creation to require newSpanID() so panickingUUID
 		// panics while allocating the late trace.
 		inv.rootSpanID = ""
 		tm.mu.Unlock()
@@ -36623,82 +36665,92 @@ func TestParentForRunLocked_DetachedLeafAndPeerLookalikes(t *testing.T) {
 }
 
 func TestParentForRunLocked_OverlappingNestedLookalikeGroupsLinearTime(t *testing.T) {
-	const groups = 512
-	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-overlapping-512-groups", time.Unix(1_700_000_000, 0))
-	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
-	inv.agentStack = append(inv.agentStack, root)
+	runCase := func(t *testing.T, groups int) (inspections, openSpans int) {
+		t.Helper()
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, fmt.Sprintf("trace-overlapping-%d-groups", groups), time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+		inv.agentStack = append(inv.agentStack, root)
 
-	// Build two deep 512-level branches of nested lookalike groups plus leaves
-	// (~2,051 open agents total). Every group along the ancestor chain has an
-	// unmatched sibling on the second branch so every group is evaluated.
-	curA := root
-	for i := range groups {
-		g := &spanRecord{
-			spanID:      fmt.Sprintf("a-%d", i),
+		// Build two deep branches of nested lookalike groups plus leaves, with
+		// 2*groups padding spans placed inside a_0 (between a_0 and a_1) so
+		// any linear gap scan or unindexed subtree rescan scales as Theta(N^2).
+		curA := root
+		for i := range groups {
+			g := &spanRecord{
+				spanID:      fmt.Sprintf("a-%d", i),
+				kind:        spanKindAgent,
+				name:        fmt.Sprintf("grp_%d", i),
+				parent:      curA,
+				goroutineID: uint64(1000 + i),
+			}
+			inv.agentStack = append(inv.agentStack, g)
+			curA = g
+			if i == 0 {
+				for j := range 2 * groups {
+					inv.agentStack = append(inv.agentStack, &spanRecord{
+						spanID:      fmt.Sprintf("pad-%d", j),
+						kind:        spanKindAgent,
+						name:        fmt.Sprintf("pad_%d", j),
+						parent:      curA,
+						goroutineID: uint64(30_000 + j),
+					})
+				}
+			}
+		}
+		selA := &spanRecord{
+			spanID:      "sel-a",
 			kind:        spanKindAgent,
-			name:        fmt.Sprintf("grp_%d", i),
+			name:        "sel",
+			nonLLM:      true,
+			children:    []string{"leaf"},
+			branch:      "selected",
+			path:        "selected/wf@1",
 			parent:      curA,
-			goroutineID: uint64(1000 + i),
+			goroutineID: 10_000,
 		}
-		inv.agentStack = append(inv.agentStack, g)
-		curA = g
-	}
-	selA := &spanRecord{
-		spanID:      "sel-a",
-		kind:        spanKindAgent,
-		name:        "sel",
-		nonLLM:      true,
-		children:    []string{"leaf"},
-		branch:      "selected",
-		path:        "selected/wf@1",
-		parent:      curA,
-		goroutineID: 10_000,
-	}
-	inv.agentStack = append(inv.agentStack, selA)
+		inv.agentStack = append(inv.agentStack, selA)
 
-	curB := root
-	for i := range groups {
-		g := &spanRecord{
-			spanID:      fmt.Sprintf("b-%d", i),
+		curB := root
+		for i := range groups {
+			g := &spanRecord{
+				spanID:      fmt.Sprintf("b-%d", i),
+				kind:        spanKindAgent,
+				name:        fmt.Sprintf("grp_%d", i),
+				parent:      curB,
+				goroutineID: uint64(2000 + i),
+			}
+			inv.agentStack = append(inv.agentStack, g)
+			curB = g
+		}
+		selB := &spanRecord{
+			spanID:      "sel-b",
 			kind:        spanKindAgent,
-			name:        fmt.Sprintf("grp_%d", i),
+			name:        "sel",
+			nonLLM:      true,
+			children:    []string{"leaf"},
+			branch:      "selected",
+			path:        "selected/wf@1",
 			parent:      curB,
-			goroutineID: uint64(2000 + i),
+			goroutineID: 20_000,
 		}
-		inv.agentStack = append(inv.agentStack, g)
-		curB = g
-	}
-	selB := &spanRecord{
-		spanID:      "sel-b",
-		kind:        spanKindAgent,
-		name:        "sel",
-		nonLLM:      true,
-		children:    []string{"leaf"},
-		branch:      "selected",
-		path:        "selected/wf@1",
-		parent:      curB,
-		goroutineID: 20_000,
-	}
-	inv.agentStack = append(inv.agentStack, selB)
+		inv.agentStack = append(inv.agentStack, selB)
 
-	// Pad to >2,050 open agents with extra leaf-branch spans under root.
-	for i := len(inv.agentStack); i < 2051; i++ {
-		inv.agentStack = append(inv.agentStack, &spanRecord{
-			spanID:      fmt.Sprintf("pad-%d", i),
-			kind:        spanKindAgent,
-			name:        fmt.Sprintf("pad_%d", i),
-			parent:      root,
-			goroutineID: uint64(30_000 + i),
-		})
+		leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
+		got := inv.parentForRunLocked(leaf, nil, 99_999, goroutineOrigin{parent: 88_888}, nil)
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+		openCount := len(inv.agentStack)
+		if maxWant := 10 * openCount; inv.lastLookalikeInspections <= 0 || inv.lastLookalikeInspections > maxWant {
+			t.Fatalf("lastLookalikeInspections = %d, want in (0, %d] for %d open spans", inv.lastLookalikeInspections, maxWant, openCount)
+		}
+		return inv.lastLookalikeInspections, openCount
 	}
 
-	leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
-	got := inv.parentForRunLocked(leaf, nil, 99_999, goroutineOrigin{parent: 88_888}, nil)
-	if got != root {
-		t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
-	}
-	if maxWant := 4 * len(inv.agentStack); inv.lastLookalikeInspections <= 0 || inv.lastLookalikeInspections > maxWant {
-		t.Fatalf("lastLookalikeInspections = %d, want in (0, %d] for %d open spans", inv.lastLookalikeInspections, maxWant, len(inv.agentStack))
+	insp128, n128 := runCase(t, 128)
+	insp512, n512 := runCase(t, 512)
+	if insp512 > 5*insp128 {
+		t.Fatalf("non-linear scaling across 4x size (%d -> %d open spans): inspections jumped from %d to %d (> 5x)", n128, n512, insp128, insp512)
 	}
 }
 
@@ -37069,5 +37121,633 @@ func TestRunner_ConcurrentThreeOpenWorkers_FourthFromRootKeepsRootParent(t *test
 				t.Errorf("4th worker parent_span_id = %q, want %q (root)", w4Parent, rootSpan)
 			}
 		})
+	}
+}
+
+func TestParentForRunLocked_DetachedLeafSameInheritedPath(t *testing.T) {
+	t.Run("peer worker under wf_root sharing inherited emitting path demotes to wf_root", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-inherited-path-direct-wf", time.Unix(1_700_000_000, 0))
+		wfRoot := &spanRecord{spanID: "wf-root", kind: spanKindAgent, name: "wf_root", isWorkflow: true, nonLLM: true, parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", path: "fn@1", parent: wfRoot, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", path: "fn@1", parent: wfRoot, goroutineID: 102}
+		selected := &spanRecord{spanID: "selected-agent", kind: spanKindAgent, name: "selected_agent", branch: "selected", path: "fn@1", parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, wfRoot, w1, w2, selected)
+
+		leaf := identity{agentName: "leaf_opaque_with_delta", branch: "selected", path: "fn@1"}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != wfRoot {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, wfRoot.spanID, selected.spanID)
+		}
+	})
+
+	t.Run("spanQualifiesForOwner allows non-workflow same-path peer even under empty-path parent", func(t *testing.T) {
+		wfRoot := &spanRecord{spanID: "wf-root", kind: spanKindAgent, name: "wf_root", isWorkflow: true, path: ""}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", path: "fn@1", parent: wfRoot}
+		selected := &spanRecord{spanID: "selected-agent", kind: spanKindAgent, name: "selected_agent", branch: "selected", path: "fn@1", parent: wfRoot}
+		leaf := identity{agentName: "leaf", branch: "selected", path: "fn@1"}
+		if !spanQualifiesForOwner(w1, nil, leaf, selected, true) {
+			t.Fatal("spanQualifiesForOwner(worker-1) = false, want true when selected inherited fn@1 without isWorkflow")
+		}
+		selectedWF := &spanRecord{spanID: "wf-node", kind: spanKindAgent, name: "wf_node", isWorkflow: true, branch: "selected", path: "fn@1", parent: wfRoot}
+		if spanQualifiesForOwner(w1, nil, leaf, selectedWF, true) {
+			t.Fatal("spanQualifiesForOwner(worker-1) = true, want false when selected is a workflow node opening fn@1")
+		}
+	})
+}
+
+func TestRunner_ConcurrentNestedLookalike_InsideEmittingFunctionNode_DetachedLeafDemotes(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafOpaqueWithDelta := newOneEventAgent(t, "leaf_opaque_with_delta", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	selectedReady := make(chan struct{})
+	releaseSelected := make(chan struct{})
+	runW1Leaves := make(chan struct{})
+	selectedAgent, err := agent.New(agent.Config{
+		Name: "selected_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "selected_agent"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "selected open")
+				if !yield(ev, nil) {
+					return
+				}
+				close(selectedReady)
+				select {
+				case <-releaseSelected:
+				case <-ctx.Done():
+					return
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(selected_agent): %v", err)
+	}
+
+	var worker agent.Agent
+	mid, err := agent.New(agent.Config{
+		Name: "mid",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(mid): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err = agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 open")
+					if !yield(ev, nil) {
+						return
+					}
+					select {
+					case <-runW1Leaves:
+					case <-ctx.Done():
+						return
+					}
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					out := make(chan item, 4)
+					go func() {
+						go func() {
+							defer close(out)
+							var opaquePlain context.Context = noValueContext{parent: branchedCtx}
+							opaqueDelta := agent.PromoteWithDelta(branchedCtx, &agent.CommonContextDelta{
+								InvocationContextDelta: &agent.InvocationContextDelta{
+									Branch:  &selectedBranch,
+									Context: &opaquePlain,
+								},
+							})
+							for e, errRun := range leafOpaqueWithDelta.Run(opaqueDelta) {
+								out <- item{ev: e, err: errRun}
+							}
+						}()
+					}()
+					for it := range out {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				case 2:
+					for ev, runErr := range mid.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				default:
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					for ev, runErr := range selectedAgent.Run(branchedCtx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var w1Done sync.WaitGroup
+				w1Events := make(chan item, 8)
+				w1Done.Go(func() {
+					defer close(w1Events)
+					for ev, runErr := range worker.Run(ctx) {
+						w1Events <- item{ev: ev, err: runErr}
+					}
+				})
+				first, ok := <-w1Events
+				if ok && !yield(first.ev, first.err) {
+					return
+				}
+				w2Events := make(chan item, 8)
+				go func() {
+					defer close(w2Events)
+					for ev2, runErr2 := range worker.Run(ctx) {
+						w2Events <- item{ev: ev2, err: runErr2}
+					}
+				}()
+				select {
+				case <-selectedReady:
+				case <-ctx.Done():
+					return
+				}
+				close(runW1Leaves)
+				for it := range w1Events {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+				close(releaseSelected)
+				for it := range w2Events {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+				w1Done.Wait()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	emitNode := workflow.NewEmittingFunctionNode[any, any]("fn", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		if ctx.Path() == "" {
+			return nil, errors.New("expected non-empty ctx.Path() inside NewEmittingFunctionNode")
+		}
+		for ev, runErr := range root.Run(ctx) {
+			if runErr != nil {
+				return nil, runErr
+			}
+			if emitErr := emit(ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+	wfRoot, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_root",
+		Edges: workflow.Chain(workflow.Start, emitNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, wfRoot, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	selectedSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "selected_agent")["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_opaque_with_delta")["parent_span_id"].(string); got != rootSpan {
+		t.Errorf("leaf_opaque_with_delta parent_span_id = %q, want %q (shared root, not selected_agent %q)", got, rootSpan, selectedSpan)
+	}
+}
+
+func TestRunner_ConcurrentPeerLookalikes_CompatibilityWalkSkipsRetiredAncestor(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	model1Ready := make(chan struct{})
+	model2Ready := make(chan struct{})
+	releaseModels := make(chan struct{})
+	var m1Once, m2Once, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseModels) }) }
+	t.Cleanup(release)
+
+	// Serialize forwarding of llmagent events to runner.fromPlugin so llmagent
+	// resumes after root's yield (and runner.fromPlugin's Event mutations) end.
+	var eventAckMu sync.Mutex
+	eventAcks := make(map[*session.Event]chan struct{})
+	ackEvent := func(ev *session.Event) {
+		if ev == nil {
+			return
+		}
+		eventAckMu.Lock()
+		ch := eventAcks[ev]
+		delete(eventAcks, ev)
+		eventAckMu.Unlock()
+		if ch != nil {
+			close(ch)
+		}
+	}
+
+	sub1, err := llmagent.New(llmagent.Config{
+		Name: "sub_1",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &callbackLLM{
+			name: "sub1-model",
+			fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				m1Once.Do(func() { close(model1Ready) })
+				select {
+				case <-releaseModels:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return &model.LLMResponse{Content: textContent("model", "sub1 ok"), TurnComplete: true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub_1): %v", err)
+	}
+	sub2, err := llmagent.New(llmagent.Config{
+		Name: "sub_2",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &callbackLLM{
+			name: "sub2-model",
+			fn: func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				m2Once.Do(func() { close(model2Ready) })
+				select {
+				case <-releaseModels:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return &model.LLMResponse{Content: textContent("model", "sub2 ok"), TurnComplete: true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub_2): %v", err)
+	}
+
+	var worker agent.Agent
+	var workerCalls atomic.Int32
+	worker, err = agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			forwardChild := func(child agent.Agent, yield func(*session.Event, error) bool) {
+				for ev, runErr := range child.Run(ctx) {
+					var ack chan struct{}
+					if ev != nil {
+						ack = make(chan struct{})
+						eventAckMu.Lock()
+						eventAcks[ev] = ack
+						eventAckMu.Unlock()
+					}
+					ok := yield(ev, runErr)
+					if ack != nil {
+						if !ok || runErr != nil {
+							ackEvent(ev)
+						} else {
+							select {
+							case <-ack:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+					if !ok || runErr != nil {
+						return
+					}
+				}
+			}
+			var branchCalls atomic.Int32
+			b1Open := make(chan struct{})
+			b2Open := make(chan struct{})
+			bothBranchesOpen := make(chan struct{})
+			branchAgent, bErr := agent.New(agent.Config{
+				Name: "branch",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if branchCalls.Add(1) == 1 {
+							close(b1Open)
+						} else {
+							close(b2Open)
+						}
+						select {
+						case <-bothBranchesOpen:
+						case <-ctx.Done():
+							return
+						}
+						for ev, runErr := range worker.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if bErr != nil {
+				t.Fatalf("agent.New(branch): %v", bErr)
+			}
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					b := "b"
+					branchCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &b})
+					ch := make(chan item, 8)
+					var wg sync.WaitGroup
+					wg.Go(func() {
+						for ev, runErr := range branchAgent.Run(branchCtx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					select {
+					case <-b1Open:
+					case <-ctx.Done():
+						close(bothBranchesOpen)
+						wg.Wait()
+						return
+					}
+					wg.Go(func() {
+						for ev, runErr := range branchAgent.Run(branchCtx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					select {
+					case <-b2Open:
+					case <-ctx.Done():
+						close(bothBranchesOpen)
+						wg.Wait()
+						return
+					}
+					close(bothBranchesOpen)
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				case 2:
+					forwardChild(sub1, yield)
+				case 3:
+					forwardChild(sub2, yield)
+				default:
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "detached worker ok")
+					yield(ev, nil)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	outerEvents := make(chan item, 16)
+	ancRetired := make(chan struct{})
+	var ancRetiredOnce sync.Once
+	anc, err := agent.New(agent.Config{
+		Name: "anc",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				ancRetiredOnce.Do(func() { close(ancRetired) })
+				return nil, nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				go func() {
+					defer close(outerEvents)
+					for ev, runErr := range worker.Run(ctx) {
+						outerEvents <- item{ev: ev, err: runErr}
+					}
+				}()
+				select {
+				case <-model1Ready:
+				case <-ctx.Done():
+					return
+				}
+				select {
+				case <-model2Ready:
+				case <-ctx.Done():
+					return
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "anc"
+				ev.Content = textContent("model", "anc done")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(anc): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range anc.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						release()
+						return
+					}
+				}
+				select {
+				case <-ancRetired:
+				case <-ctx.Done():
+					release()
+					return
+				}
+
+				b := "b"
+				branchedRoot := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &b})
+				w4Events := make(chan item, 4)
+				go func() {
+					go func() {
+						defer close(w4Events)
+						var opaquePlain context.Context = noValueContext{parent: branchedRoot}
+						opaqueDelta := agent.PromoteWithDelta(branchedRoot, &agent.CommonContextDelta{
+							InvocationContextDelta: &agent.InvocationContextDelta{
+								Branch:  &b,
+								Context: &opaquePlain,
+							},
+						})
+						for ev, runErr := range worker.Run(opaqueDelta) {
+							w4Events <- item{ev: ev, err: runErr}
+						}
+					}()
+				}()
+				for it := range w4Events {
+					if !yield(it.ev, it.err) {
+						release()
+						return
+					}
+				}
+
+				release()
+				for it := range outerEvents {
+					ok := yield(it.ev, it.err)
+					ackEvent(it.ev)
+					if !ok {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	onlyAgentRow(t, rows, EventAgentCompleted, "anc")
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	ancSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "anc")["span_id"].(string)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 4 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 4", len(workerStarts))
+	}
+	outerSpan, _ := workerStarts[0]["span_id"].(string)
+	if outerParent, _ := workerStarts[0]["parent_span_id"].(string); outerParent != ancSpan {
+		t.Fatalf("outer worker parent_span_id = %q, want %q (anc)", outerParent, ancSpan)
+	}
+	branchStarts := agentRowsOfType(rows, EventAgentStarting, "branch")
+	if len(branchStarts) != 2 {
+		t.Fatalf("branch AGENT_STARTING count = %d, want 2", len(branchStarts))
+	}
+	branch1Span, _ := branchStarts[0]["span_id"].(string)
+	branch2Span, _ := branchStarts[1]["span_id"].(string)
+	for i, brRow := range branchStarts {
+		if got, _ := brRow["parent_span_id"].(string); got != outerSpan {
+			t.Fatalf("branch[%d] parent_span_id = %q, want %q (outer worker)", i, got, outerSpan)
+		}
+	}
+	innerParents := map[string]bool{}
+	for _, wRow := range workerStarts[1:3] {
+		pSpan, _ := wRow["parent_span_id"].(string)
+		innerParents[pSpan] = true
+	}
+	if !innerParents[branch1Span] || !innerParents[branch2Span] {
+		t.Fatalf("inner worker parent_span_ids = %v, want both %q and %q", innerParents, branch1Span, branch2Span)
+	}
+	detachedParent, _ := workerStarts[3]["parent_span_id"].(string)
+	if detachedParent != rootSpan {
+		t.Errorf("detached 4th worker parent_span_id = %q, want %q (open root, not retired anc %q)", detachedParent, rootSpan, ancSpan)
+	}
+}
+
+func TestParentForRunLocked_LauncherExclusionReverseGroupsLinearWork(t *testing.T) {
+	const groups = 256
+	type launcherMarkerCtx struct {
+		context.Context
+		tag string
+	}
+	launcherAct := &launcherMarkerCtx{Context: context.Background(), tag: "launcher"}
+	detachedCtx := context.WithoutCancel(context.WithoutCancel(launcherAct))
+	launchLineage := extractLaunchLineage(detachedCtx, nil)
+	defer runtime.KeepAlive(detachedCtx)
+	defer runtime.KeepAlive(launcherAct)
+
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launcher-reverse-256", time.Unix(1_700_000_000, 0))
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+	launcher := &spanRecord{
+		spanID:      "launcher",
+		kind:        spanKindAgent,
+		name:        "sel",
+		nonLLM:      true,
+		children:    []string{"leaf"},
+		branch:      "selected",
+		path:        "selected/wf@1",
+		parent:      root,
+		goroutineID: 2,
+		activation:  launcherAct,
+	}
+	inv.agentStack = append(inv.agentStack, root, launcher)
+
+	// Chain A opens grp_255 -> ... -> grp_0 so multiKeys is reverse-ordered.
+	curA := root
+	for i := groups - 1; i >= 0; i-- {
+		g := &spanRecord{
+			spanID:      fmt.Sprintf("a-%d", i),
+			kind:        spanKindAgent,
+			name:        fmt.Sprintf("grp_%d", i),
+			parent:      curA,
+			goroutineID: uint64(1000 + i),
+		}
+		inv.agentStack = append(inv.agentStack, g)
+		curA = g
+	}
+
+	// Chain B nests grp_0 -> ... -> grp_255 so per-member subtree rescans
+	// without parent propagation would take groups*(groups+1)/2 = 32,896 steps.
+	curB := root
+	for i := range groups {
+		g := &spanRecord{
+			spanID:      fmt.Sprintf("b-%d", i),
+			kind:        spanKindAgent,
+			name:        fmt.Sprintf("grp_%d", i),
+			parent:      curB,
+			goroutineID: uint64(2000 + i),
+		}
+		inv.agentStack = append(inv.agentStack, g)
+		curB = g
+	}
+
+	leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
+	got := inv.parentForRunWithLineageLocked(leaf, nil, 99_999, goroutineOrigin{parent: 88_888}, activationKey(detachedCtx), launchLineage)
+	if got != launcher {
+		t.Fatalf("parentForRunWithLineageLocked = %s, want %s", got.spanID, launcher.spanID)
+	}
+	if maxWant := 2 * len(inv.agentStack); inv.lastLauncherExcludeVisits <= 0 || inv.lastLauncherExcludeVisits > maxWant {
+		t.Fatalf("lastLauncherExcludeVisits = %d, want in (0, %d] for %d open spans", inv.lastLauncherExcludeVisits, maxWant, len(inv.agentStack))
 	}
 }
