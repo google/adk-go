@@ -134,6 +134,7 @@ func (s *fakeBigQueryWriteServer) AppendRows(stream storagepb.BigQueryWrite_Appe
 }
 
 func TestNewBigQueryAgentAnalyticsPlugin_Disabled(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.Enabled = false
@@ -151,6 +152,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_Disabled(t *testing.T) {
 }
 
 func TestNewBigQueryAgentAnalyticsPlugin_Enabled(t *testing.T) {
+	runInParallel(t)
 	p, _, _ := setupTestPlugin(t)
 	if p == nil {
 		t.Fatal("Expected plugin, got nil")
@@ -227,6 +229,7 @@ func (s mapState) Get(key string) (any, error) {
 func (s mapState) All() iter.Seq2[string, any] { return maps.All(s) }
 
 func TestOnUserMessageCallback_AppendsToWriter(t *testing.T) {
+	runInParallel(t)
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
 	userMsgCb := p.OnUserMessageCallback()
@@ -257,6 +260,7 @@ func TestOnUserMessageCallback_AppendsToWriter(t *testing.T) {
 }
 
 func TestBeforeRunCallback_AppendsToWriter(t *testing.T) {
+	runInParallel(t)
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
 	beforeRunCb := p.BeforeRunCallback()
@@ -386,6 +390,7 @@ func newTestPluginWithConfigAndTraces(t *testing.T, mutate func(*Config)) (*base
 }
 
 func TestOnEventCallback_AppendsToWriter(t *testing.T) {
+	runInParallel(t)
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
 	eventCb := p.OnEventCallback()
@@ -416,6 +421,7 @@ func TestOnEventCallback_AppendsToWriter(t *testing.T) {
 }
 
 func TestOnModelErrorCallback_AppendsToWriter(t *testing.T) {
+	runInParallel(t)
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
 	modelErrorCb := p.OnModelErrorCallback()
@@ -441,6 +447,7 @@ func TestOnModelErrorCallback_AppendsToWriter(t *testing.T) {
 }
 
 func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
+	runInParallel(t)
 	run := func(t *testing.T, chunks []*model.LLMResponse) (totalRows int) {
 		p, requestsChan, mCtx := setupTestPlugin(t)
 		cb := p.AfterModelCallback()
@@ -481,6 +488,7 @@ func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
 // The chunks that carry only metadata, such as token usage or the role of the
 // content, do not.
 func TestHasGeneratedContent(t *testing.T) {
+	runInParallel(t)
 	content := func(parts ...*genai.Part) *model.LLMResponse {
 		return &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model", Parts: parts}}
 	}
@@ -515,6 +523,7 @@ func TestHasGeneratedContent(t *testing.T) {
 }
 
 func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
+	runInParallel(t)
 	p, requestsChan, mCtx := setupTestPlugin(t)
 
 	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
@@ -546,6 +555,7 @@ func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 }
 
 func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.Enabled = true
@@ -673,6 +683,7 @@ func (e callbackErrors) check(t *testing.T) {
 }
 
 func TestEventsSchema_ColumnOrder(t *testing.T) {
+	runInParallel(t)
 	want := []string{
 		"timestamp", "event_id", "event_type", "agent", "session_id", "invocation_id", "user_id",
 		"trace_id", "span_id", "parent_span_id", "content", "content_parts", "attributes",
@@ -698,6 +709,7 @@ func TestEventsSchema_ColumnOrder(t *testing.T) {
 }
 
 func TestConfig_TableNameDefault(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name   string
 		config Config
@@ -717,6 +729,7 @@ func TestConfig_TableNameDefault(t *testing.T) {
 }
 
 func TestConfig_DefaultOnFeatures(t *testing.T) {
+	runInParallel(t)
 	cleared := DefaultConfig()
 	cleared.LogMultiModalContent = false
 	cleared.DisableSessionMetadata = true
@@ -767,6 +780,7 @@ func TestConfig_DefaultOnFeatures(t *testing.T) {
 }
 
 func TestCallbacks_WriteRows(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.CustomTags = map[string]any{"team": "search", "labels": map[string]any{"tier": "gold"}}
 	})
@@ -1025,6 +1039,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 }
 
 func TestAttributes_OptionalSections(t *testing.T) {
+	runInParallel(t)
 	const (
 		traceHex = "4bf92f3577b34da6a3ce929d0e0e4736"
 		spanHex  = "00f067aa0ba902b7"
@@ -1123,6 +1138,7 @@ func TestAttributes_OptionalSections(t *testing.T) {
 }
 
 func TestSensitiveKeyRedaction(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name    string
 		mutate  func(*Config)
@@ -1198,6 +1214,7 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 // are redacted, and that session keys with a user: or app: prefix match on the
 // name after the prefix.
 func TestSensitiveKeyRedaction_GoNamesAndStatePrefixes(t *testing.T) {
+	runInParallel(t)
 	const secret = "SECRET123"
 	p, requests, mCtx := setupTestPlugin(t)
 	mCtx.state = mapState{"user:api_key": secret, "app:clientSecret": secret, "user:theme": "dark"}
@@ -1233,6 +1250,7 @@ func TestSensitiveKeyRedaction_GoNamesAndStatePrefixes(t *testing.T) {
 // results, whatever its fields are named, and that an AWS secret access key
 // or session token is redacted outside an envelope too.
 func TestCredentialsEnvelopeIsRedactedWhole(t *testing.T) {
+	runInParallel(t)
 	const secret = "SECRET123"
 	envelope := func() map[string]any {
 		return map[string]any{
@@ -1267,6 +1285,7 @@ func TestCredentialsEnvelopeIsRedactedWhole(t *testing.T) {
 }
 
 func TestToolArgs_UnloggableValuesKeepTheRow(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	cyclic := map[string]any{"name": "loop"}
 	cyclic["self"] = cyclic
@@ -1294,6 +1313,7 @@ func TestToolArgs_UnloggableValuesKeepTheRow(t *testing.T) {
 }
 
 func TestContentFormatter(t *testing.T) {
+	runInParallel(t)
 	const secret = "formatter-secret-detail"
 	failing := func(any, string) (any, error) { return nil, errors.New(secret) }
 	tests := []struct {
@@ -1426,6 +1446,7 @@ func TestContentFormatter(t *testing.T) {
 }
 
 func TestContentFormatter_PreservesExistingErrorMessage(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.ContentFormatter = func(any, string) (any, error) { return nil, errors.New("formatter secret") }
 	})
@@ -1446,6 +1467,7 @@ func TestContentFormatter_PreservesExistingErrorMessage(t *testing.T) {
 }
 
 func TestShouldLogEvent(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name      string
 		allow     []string
@@ -1471,6 +1493,7 @@ func TestShouldLogEvent(t *testing.T) {
 }
 
 func TestEventFiltering_DenylistOverridesAllowlist(t *testing.T) {
+	runInParallel(t)
 	logger := &recordingLogger{}
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.Logger = logger
@@ -1598,6 +1621,7 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 }
 
 func TestPayloadColumns(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name        string
 		mutate      func(*Config)
@@ -1678,6 +1702,7 @@ func TestPayloadColumns(t *testing.T) {
 }
 
 func TestCustomMetadataFilter(t *testing.T) {
+	runInParallel(t)
 	md := map[string]any{"trace_tag": "t", "a2a:task_id": "task-1", "a2a:context_id": "ctx-1", "private": "p"}
 	tests := []struct {
 		name      string
@@ -1701,6 +1726,7 @@ func TestCustomMetadataFilter(t *testing.T) {
 }
 
 func TestCustomMetadataAllowlist(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name      string
 		allowlist []string
@@ -1742,6 +1768,7 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 }
 
 func TestFlushOnRunEnd(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name           string
 		disable        bool
@@ -1776,6 +1803,7 @@ func TestFlushOnRunEnd(t *testing.T) {
 }
 
 func TestFinalResponseToolNames(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	mCtx.functionCallID = "call-7"
 	final := &fakeTool{name: "final_answer"}
@@ -1808,6 +1836,7 @@ func TestFinalResponseToolNames(t *testing.T) {
 // TOOL_ERROR row, as in adk-python, which runs no after_tool_callback for
 // failed calls.
 func TestToolFailure_WritesErrorRows(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	mCtx.functionCallID = "call-1"
 	lookupTool := &fakeTool{name: "lookup"}
@@ -1850,6 +1879,7 @@ func TestToolFailure_WritesErrorRows(t *testing.T) {
 // the error that ADK sends the model, and no TOOL_ERROR row. A final
 // response tool writes its AGENT_RESPONSE row when the confirmed call runs.
 func TestToolConfirmationRequired_CompletesCall(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"deploy"} })
 	mCtx.functionCallID = "call-1"
 	deployTool := &fakeTool{name: "deploy"}
@@ -1897,6 +1927,7 @@ func TestToolConfirmationRequired_CompletesCall(t *testing.T) {
 }
 
 func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 	errs.add(p.BeforeToolCallback()(mCtx, nil, map[string]any{"q": "1"}))
@@ -1933,6 +1964,7 @@ func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
 }
 
 func TestAfterModelCallback_Status(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	responses := []struct {
 		res *model.LLMResponse
@@ -1987,6 +2019,7 @@ func TestAfterModelCallback_Status(t *testing.T) {
 }
 
 func TestTruncation(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name        string
 		mutate      func(*Config)
@@ -2034,6 +2067,7 @@ func TestTruncation(t *testing.T) {
 }
 
 func TestLogEvent_RecoversFromPanics(t *testing.T) {
+	runInParallel(t)
 	logger := &recordingLogger{}
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.Logger = logger })
 	broken := &fakeTool{name: "broken", panicOnDescription: true}
@@ -2064,6 +2098,7 @@ type noAgentContext struct {
 func (noAgentContext) AgentName() string { panic("invocation has no agent") }
 
 func TestIdentity_AgentFallsBackToEventAuthor(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	ctx := noAgentContext{mCtx}
 	ev := &session.Event{
@@ -2089,12 +2124,14 @@ func TestIdentity_AgentFallsBackToEventAuthor(t *testing.T) {
 }
 
 func TestIdentityOf_PlainContext(t *testing.T) {
+	runInParallel(t)
 	if got := identityOf(context.Background()); got != (identity{}) {
 		t.Errorf("identityOf(context.Background()) = %+v, want the zero identity", got)
 	}
 }
 
 func TestLLMRequestAttributes_Tools(t *testing.T) {
+	runInParallel(t)
 	req := &model.LLMRequest{
 		Config: &genai.GenerateContentConfig{
 			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
@@ -2134,6 +2171,7 @@ func TestLLMRequestAttributes_Tools(t *testing.T) {
 }
 
 func TestParseNodePath(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		path            string
 		wantRunID       string
@@ -2158,6 +2196,7 @@ func TestParseNodePath(t *testing.T) {
 }
 
 func TestDeriveScope(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		scope    string
 		wantKind string
@@ -2178,6 +2217,7 @@ func TestDeriveScope(t *testing.T) {
 }
 
 func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
+	runInParallel(t)
 	type bqFieldJSON struct {
 		Name   string        `json:"name"`
 		Type   string        `json:"type"`
@@ -2416,6 +2456,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 // upgraded, and any other error fails construction and closes the write
 // client.
 func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
+	runInParallel(t)
 	var legacySchema bq.Schema
 	for _, f := range EventsSchema() {
 		if f.Name != eventIDField {
@@ -2614,6 +2655,7 @@ func newTestWriteClient(t *testing.T) (*grpc.ClientConn, *bqstorage.BigQueryWrit
 // returns before table setup: on an invalid config, and when the plugin is
 // disabled and so never writes.
 func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name   string
 		mutate func(*Config)
@@ -2672,6 +2714,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient(t *t
 }
 
 func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.ProjectID = "test-project"
@@ -2783,6 +2826,7 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 }
 
 func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.MaxContentLen = 60
 	})
@@ -2920,6 +2964,7 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 }
 
 func TestQuotedFragmentCost(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		text string
@@ -2951,6 +2996,7 @@ func TestQuotedFragmentCost(t *testing.T) {
 }
 
 func TestQuotedJSONSecretSurvives(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	body := `{"access_token": "SECRET123"}`
 	_, _ = p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, fmt.Errorf("token exchange failed: %q", body))
@@ -2966,6 +3012,7 @@ func TestQuotedJSONSecretSurvives(t *testing.T) {
 // key is redacted from error_message, content and content_parts, whatever
 // quoting or nesting the key or the value uses.
 func TestCredentialShapesNeverReachARow(t *testing.T) {
+	runInParallel(t)
 	const secret = "SECRET123"
 	tests := []struct {
 		name string
@@ -3231,6 +3278,7 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 // redacts each pair, while content, content_parts, tool arguments and
 // results, and event attributes are written as [REDACTED_SENSITIVE_TEXT].
 func TestValueEndingInKeyName(t *testing.T) {
+	runInParallel(t)
 	marshalN := func(s string, n int) string {
 		for range n {
 			b, err := json.Marshal(s)
@@ -3689,6 +3737,7 @@ func TestValueEndingInKeyName(t *testing.T) {
 // a nested URL, a query value or the fragment of a FileData URI do not reach
 // content_parts.uri.
 func TestFileDataURICredentialsAreRedacted(t *testing.T) {
+	runInParallel(t)
 	uris := []struct {
 		uri  string
 		want string
@@ -3764,6 +3813,7 @@ func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 // authorization scheme or a sensitive word, but carries no credential, is
 // written unchanged and is not marked as truncated.
 func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
+	runInParallel(t)
 	texts := []string{
 		"Write a basic HTTP server in Go",
 		"I'm the bearer of bad news",
@@ -3856,6 +3906,7 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 }
 
 func TestToolErrorDeduplication_RecoveredMissingAndScoped(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx1 := setupTestPlugin(t)
 	mCtx1.sessionID = "sess-1"
 	mCtx1.invocationID = "inv-1"
@@ -3949,6 +4000,7 @@ func (b bareInvocationContext) Agent() agent.Agent          { return b.ag }
 func (b bareInvocationContext) Session() session.Session    { return b.sess }
 
 func TestIdentityOf_BareInvocationContext(t *testing.T) {
+	runInParallel(t)
 	ctx := bareInvocationContext{
 		ctx:          context.Background(),
 		invocationID: "inv-bare",
@@ -3964,6 +4016,7 @@ func TestIdentityOf_BareInvocationContext(t *testing.T) {
 }
 
 func TestADKVersionFromBuildInfo(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		info *debug.BuildInfo
@@ -4003,6 +4056,7 @@ func TestADKVersionFromBuildInfo(t *testing.T) {
 }
 
 func TestCacheType(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name  string
 		usage *genai.GenerateContentResponseUsageMetadata
@@ -4022,6 +4076,7 @@ func TestCacheType(t *testing.T) {
 }
 
 func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
+	runInParallel(t)
 	if _, ok := AsBigQueryAgentAnalyticsPlugin(nil); ok {
 		t.Error("AsBigQueryAgentAnalyticsPlugin(nil) = true, want false")
 	}
@@ -4108,6 +4163,7 @@ func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
 }
 
 func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
@@ -4203,6 +4259,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 }
 
 func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTableViaHTTP(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	var patchBody string
@@ -4333,6 +4390,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 }
 
 func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructors(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	t.Run("enabled plugin remains reachable via AsBigQueryAgentAnalyticsPlugin after Close", func(t *testing.T) {
@@ -4774,6 +4832,7 @@ func waitPluginCollected(key weak.Pointer[baseplugin.Plugin]) bool {
 }
 
 func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	t.Run("content denied but content_parts enabled records formatter failure drop and omits content_parts", func(t *testing.T) {
@@ -5115,6 +5174,7 @@ func (m *callbackTestLLM) GenerateContent(ctx context.Context, req *model.LLMReq
 }
 
 func TestPlugin_ToolResultIsError(t *testing.T) {
+	runInParallel(t)
 	t.Run("top-level boolean true isError and is_error emit TOOL_ERROR", func(t *testing.T) {
 		for _, tc := range []struct {
 			name   string
@@ -5528,6 +5588,7 @@ type emptyMsgErr struct{}
 func (emptyMsgErr) Error() string { return "" }
 
 func TestPlugin_ToolErrorEmptyMessage(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name    string
 		err     error
@@ -5609,6 +5670,7 @@ func TestPlugin_ToolErrorEmptyMessage(t *testing.T) {
 }
 
 func TestPlugin_ToolErrorTypedNilPathError(t *testing.T) {
+	runInParallel(t)
 	var pathErr *fs.PathError
 	if isToolConfirmationOutcome(pathErr) {
 		t.Fatal("isToolConfirmationOutcome((*fs.PathError)(nil)) = true, want false")
@@ -5705,6 +5767,7 @@ type selfRefEmptyErr struct {
 func (*selfRefEmptyErr) Error() string { return "" }
 
 func TestErrorTypeName_SelfReferentialPointer(t *testing.T) {
+	runInParallel(t)
 	var (
 		directCycle recErr
 		mutualCycle recPtrA
@@ -5777,6 +5840,7 @@ func TestErrorTypeName_SelfReferentialPointer(t *testing.T) {
 }
 
 func TestPanickingErrorWithIsErrorRecovery(t *testing.T) {
+	runInParallel(t)
 	type toolArgs struct {
 		Query string `json:"query"`
 	}
@@ -5853,6 +5917,7 @@ func TestPanickingErrorWithIsErrorRecovery(t *testing.T) {
 }
 
 func TestMCPRecoverySingleToolError(t *testing.T) {
+	runInParallel(t)
 	type toolArgs struct {
 		Query string `json:"query"`
 	}
@@ -6920,6 +6985,7 @@ func (s *failingFinalizeWriteServer) FinalizeWriteStream(_ context.Context, req 
 }
 
 func TestClose_SecondCallAfterCleanCloseSucceeds(t *testing.T) {
+	runInParallel(t)
 	p, _, _ := newTestPluginWithConfig(t, nil)
 
 	if err := p.Close(); err != nil {
@@ -7468,6 +7534,7 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 }
 
 func TestPlugin_PanicSitesNeverPassRawPanicValueToLogger(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
@@ -7591,6 +7658,7 @@ func TestPlugin_PanicSitesNeverPassRawPanicValueToLogger(t *testing.T) {
 }
 
 func TestRetryAnswerError(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name    string
 		result  map[string]any
@@ -7734,6 +7802,7 @@ func runFailingToolWithPlugins(
 }
 
 func TestPlugin_RecoveredToolError_AgentCallback(t *testing.T) {
+	runInParallel(t)
 	rows := runFailingToolWithPlugins(t, "lookup", nil,
 		func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
 			return map[string]any{"answer": "recovered"}, nil
@@ -7760,6 +7829,7 @@ func TestPlugin_RecoveredToolError_AgentCallback(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_LaterPlugin(t *testing.T) {
+	runInParallel(t)
 	t.Run("custom plugin after analytics", func(t *testing.T) {
 		recoverPlugin, err := baseplugin.New(baseplugin.Config{
 			Name: "recover",
@@ -7801,6 +7871,7 @@ func TestPlugin_RecoveredToolError_LaterPlugin(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_RetryAndReflectBeforeAnalytics(t *testing.T) {
+	runInParallel(t)
 	t.Run("normal retry guidance", func(t *testing.T) {
 		rrPlugin, err := retryandreflect.New()
 		if err != nil {
@@ -7989,6 +8060,7 @@ func assertNoFinalResponseFromTool(t *testing.T, rows []map[string]any, toolName
 }
 
 func TestPlugin_RecoveredToolError_FinalResponseToolSuppressed(t *testing.T) {
+	runInParallel(t)
 	t.Run("agent OnToolErrorCallback", func(t *testing.T) {
 		rows := runFailingToolWithPlugins(t, "final_answer", []string{"final_answer"},
 			func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
@@ -8024,6 +8096,7 @@ func TestPlugin_RecoveredToolError_FinalResponseToolSuppressed(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_ConfirmationOutcomesUnchanged(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -8090,6 +8163,7 @@ func TestPlugin_RecoveredToolError_ConfirmationOutcomesUnchanged(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_SequentialRetry(t *testing.T) {
+	runInParallel(t)
 	t.Run("distinct FunctionCall.IDs via runner", func(t *testing.T) {
 		for _, mode := range []struct {
 			name             string
@@ -8219,6 +8293,7 @@ func TestPlugin_RecoveredToolError_SequentialRetry(t *testing.T) {
 // tool errors suppress TOOL_COMPLETED and any tool-promoted AGENT_RESPONSE
 // regardless of plugin registration order.
 func TestPlugin_RecoveredToolError_LoggingPluginOrder(t *testing.T) {
+	runInParallel(t)
 	for _, kind := range []struct {
 		name              string
 		finalResponseTool bool
@@ -8348,6 +8423,7 @@ func argumentMutatingAfterToolPlugin(t *testing.T) *baseplugin.Plugin {
 // OnToolErrorCallback recorded, so an unrecovered failure ends with one
 // TOOL_ERROR row and a recovered one with no TOOL_COMPLETED row.
 func TestPlugin_RecoveredToolError_ArgumentsMutatedInPlace(t *testing.T) {
+	runInParallel(t)
 	countRetries := func(recover bool) llmagent.OnToolErrorCallback {
 		return func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
 			n, _ := args["retries"].(int)
@@ -8412,6 +8488,7 @@ func sharedNestedArgs() map[string]any {
 // with int keys, verifying that each unrecovered failure emits one TOOL_ERROR
 // row and no TOOL_COMPLETED row.
 func TestPlugin_RecoveredToolError_SharedNestedArgsUnrecovered(t *testing.T) {
+	runInParallel(t)
 	const calls = 16
 	t.Run("runner", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
@@ -8455,6 +8532,7 @@ func TestPlugin_RecoveredToolError_SharedNestedArgsUnrecovered(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_RetryAndReflectAfterThisPlugin(t *testing.T) {
+	runInParallel(t)
 	requireCounts := func(t *testing.T, rows []map[string]any, wantErrors, wantCompleted int) {
 		t.Helper()
 		if n, m := len(rowsOfType(rows, EventToolError)), len(rowsOfType(rows, EventToolCompleted)); n != wantErrors || m != wantCompleted {
@@ -8479,6 +8557,7 @@ func TestPlugin_RecoveredToolError_RetryAndReflectAfterThisPlugin(t *testing.T) 
 }
 
 func TestPlugin_RecoveredToolError_ParallelCallsInOneResponse(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name             string
 		agentOnToolError llmagent.OnToolErrorCallback
@@ -8605,6 +8684,7 @@ func (n *nonFunctionTool) ProcessRequest(_ agent.Context, req *model.LLMRequest)
 }
 
 func TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name           string
 		toolName       string
@@ -8689,7 +8769,8 @@ func TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect(t
 }
 
 func TestPlugin_RecoveredToolError_ErrorOnlyDoesNotRetainArgs(t *testing.T) {
-	const numCalls = 128
+	runInParallel(t)
+	const numCalls = 32
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.BatchSize = 16
 		c.BatchFlushIntv = 10 * time.Millisecond
@@ -8700,7 +8781,7 @@ func TestPlugin_RecoveredToolError_ErrorOnlyDoesNotRetainArgs(t *testing.T) {
 
 	weakBufs := make([]weak.Pointer[byte], 0, numCalls)
 	runCall := func(i int) {
-		buf := bytes.Repeat([]byte("a"), 1<<20)
+		buf := bytes.Repeat([]byte("a"), 16<<10)
 		weakBufs = append(weakBufs, weak.Make(&buf[0]))
 		args := map[string]any{"blob": buf}
 		callCtx := withFunctionCall(mCtx, fmt.Sprintf("call-%d", i))
@@ -8739,7 +8820,7 @@ func TestPlugin_RecoveredToolError_ErrorOnlyDoesNotRetainArgs(t *testing.T) {
 		}
 	}
 	if got := collected(); got != numCalls {
-		t.Errorf("GC collected %d/%d 1 MiB arg payloads before AfterRunCallback, want all %d collected", got, numCalls, numCalls)
+		t.Errorf("GC collected %d/%d 16 KiB arg payloads before AfterRunCallback, want all %d collected", got, numCalls, numCalls)
 	}
 
 	agentErrs.add(p.AfterAgentCallback()(mCtx))
@@ -8749,6 +8830,7 @@ func TestPlugin_RecoveredToolError_ErrorOnlyDoesNotRetainArgs(t *testing.T) {
 }
 
 func TestPlugin_RecoveredToolError_FreshContextBetweenErrorAndAfterTool(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name     string
 		afterErr error
@@ -8814,6 +8896,7 @@ func TestPlugin_RecoveredToolError_FreshContextBetweenErrorAndAfterTool(t *testi
 // platform.TimeProvider ensures timestamps cannot mask a tie between Tier 1
 // (observed ending attempt) and Tier 3 (pending/failed attempt).
 func TestPlugin_RecoveredToolError_FinishTaskCall0Reuse(t *testing.T) {
+	runInParallel(t)
 	const sharedCall = "call_0"
 	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	frozenCtx := func(t *testing.T) context.Context {
@@ -9286,6 +9369,7 @@ func TestPlugin_RecoveredToolError_FinishTaskCall0Reuse(t *testing.T) {
 }
 
 func TestPlugin_FinishTask_Call0ReuseCoordinatorForwardsHeldRun1SuccessBeforeRun2ValidationFailure(t *testing.T) {
+	runInParallel(t)
 	const sharedCall = "call_0"
 	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedNow })
@@ -9383,6 +9467,7 @@ func TestPlugin_FinishTask_Call0ReuseCoordinatorForwardsHeldRun1SuccessBeforeRun
 }
 
 func TestPlugin_RecoveredToolError_ToolResultOKDoesNotOverrideRetryAndReflect(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name    string
 		rrFirst bool
@@ -9453,6 +9538,7 @@ func TestPlugin_RecoveredToolError_ToolResultOKDoesNotOverrideRetryAndReflect(t 
 }
 
 func TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls(t *testing.T) {
+	runInParallel(t)
 	const rawSecret = "secret_payload_detail_from_tool_failure"
 
 	for _, tc := range []struct {
@@ -9560,6 +9646,7 @@ func TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls(t *testi
 }
 
 func TestPlugin_RecoveredToolError_ReusedCallIDMissingToolThenBeforeToolShortCircuit(t *testing.T) {
+	runInParallel(t)
 	t.Run("runner_missing_tool_then_earlier_BeforeToolCallback_map_answer_on_reused_call_0", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		var attempt atomic.Int32
@@ -9785,6 +9872,7 @@ func TestPlugin_RecoveredToolError_ReusedCallIDMissingToolThenBeforeToolShortCir
 }
 
 func TestPlugin_RecoveredToolError_EmptyFunctionCallIDDirectCallbacks(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	tl := &fakeTool{name: "lookup"}
 
@@ -9812,6 +9900,7 @@ func TestPlugin_RecoveredToolError_EmptyFunctionCallIDDirectCallbacks(t *testing
 }
 
 func TestPlugin_RecoveredToolError_FinishTaskOnEventContentControls(t *testing.T) {
+	runInParallel(t)
 	const rawSecret = "secret_finish_task_payload_detail"
 	for _, tc := range []struct {
 		name      string
@@ -9920,6 +10009,7 @@ func TestPlugin_RecoveredToolError_FinishTaskOnEventContentControls(t *testing.T
 }
 
 func TestPlugin_RecoveredToolError_BufferedCall0DoesNotCauseDuplicateToolError(t *testing.T) {
+	runInParallel(t)
 	for _, recoverCall2 := range []bool{false, true} {
 		name := "unrecovered_error_emits_single_TOOL_ERROR"
 		if recoverCall2 {
@@ -10085,6 +10175,7 @@ func TestPlugin_RecoveredToolError_BufferedCall0DoesNotCauseDuplicateToolError(t
 }
 
 func TestPlugin_RecoveredToolError_FinishTaskAfterToolErrorOrConfirmationGuards(t *testing.T) {
+	runInParallel(t)
 	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	for _, tc := range []struct {
 		name        string

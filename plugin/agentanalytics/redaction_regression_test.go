@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3060,7 +3061,7 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 // reads once more as written and with its keys sorted (see
 // keyRedactionHidesRunOn), scales linearly too.
 func TestNestedJSONTextDepthScaling(t *testing.T) {
-	runInParallel(t)
+	t.Parallel()
 	encode := func(v any) string {
 		var b strings.Builder
 		enc := json.NewEncoder(&b)
@@ -3135,6 +3136,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 	smallN, largeN := scalingUnits()
 	for _, sc := range shapes {
 		t.Run(sc.name, func(t *testing.T) {
+			runInParallel(t)
 			eps := largeTextEntryPoints(t)
 			small, large := sc.mk(smallN), sc.mk(largeN)
 			got, again, elapsed := timeEntryPoints(maxWall, large, eps)
@@ -3166,6 +3168,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 	// more, as written and with its keys sorted (see keyRedactionHidesRunOn),
 	// through every entry point that redacts it.
 	t.Run("objects with sensitive keys through smartTruncate", func(t *testing.T) {
+		runInParallel(t)
 		unit := `{"password":"x","note":"y <a&b>","n":1},`
 		small := "[" + strings.Repeat(unit, smallN) + `"z"]`
 		large := "[" + strings.Repeat(unit, largeN) + `"z"]`
@@ -3175,6 +3178,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 	})
 	t.Run("large ampersand leaves 15 levels deep", func(t *testing.T) {
+		runInParallel(t)
 		eps := largeTextEntryPoints(t)
 		n := 700_000
 		if raceEnabled {
@@ -3207,6 +3211,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 	})
 	t.Run("large plain ASCII 12 levels deep", func(t *testing.T) {
+		runInParallel(t)
 		eps := largeTextEntryPoints(t)
 		base := encode(map[string]string{"a": strings.Repeat("a", 8*largeN), "password": "SECRET1"})
 		for _, inLeaves := range []bool{false, true} {
@@ -3228,7 +3233,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 	})
 	t.Run("large plain ASCII 15 levels all-levels key-redacted", func(t *testing.T) {
-		eps := largeTextEntryPoints(t)
+		t.Parallel()
 		mkAllLevels := func(levels, n int) string {
 			doc := encode(map[string]string{"a": strings.Repeat("a", n), "password": "SECRET1"})
 			for range levels - 1 {
@@ -3240,55 +3245,68 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		if raceEnabled {
 			n = 128_000
 		}
-		doc15 := mkAllLevels(15, n)
-		plain1 := mkAllLevels(1, len(doc15))
 		sanFn := func(in string) func() { return func() { _, _ = sanitizeRawText(in) } }
-		if ratio, t1, t15 := linearRatio(64, sanFn(plain1), sanFn(doc15)); ratio > 64 {
-			t.Errorf("sanitizeRawText 15-level vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(plain1), t15, len(doc15))
-		}
-		doc15Small := mkAllLevels(15, n/16)
-		if ratio, ts, tl := linearRatio(64, sanFn(doc15Small), sanFn(doc15)); ratio > 64 {
-			t.Errorf("sanitizeRawText 15-level growing payload scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, ts, len(doc15Small), tl, len(doc15))
-		}
-		// Keep keyRedactionHidesRunOn outer-only: nesting a 49k-int leaf 12
-		// levels deep repeats node decoding only once for redaction and once
-		// at depth 0, staying well below 64x of equal-length 1-level input
-		// (measures ~22-23x without -race, leaving headroom while still
-		// catching per-level exponential blowup).
-		nums := 49_000
-		if raceEnabled {
-			nums = 20_000
-		}
-		arrDoc12 := fmt.Sprintf(`{"a":%s,"password":"SECRET1"}`, encode(make([]int, nums)))
-		for range 11 {
-			arrDoc12 = fmt.Sprintf(`{"z":%s,"password":"SECRET1"}`, encode(arrDoc12))
-		}
-		arrPlain1 := mkAllLevels(1, len(arrDoc12))
-		if ratio, t1, t12 := linearRatio(64, sanFn(arrPlain1), sanFn(arrDoc12)); ratio > 64 {
-			t.Errorf("sanitizeRawText 12-level array-leaf vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(arrPlain1), t12, len(arrDoc12))
-		}
-		san, _ := sanitizeRawText(doc15)
-		if strings.Contains(san, "SECRET") {
-			t.Errorf("sanitizeRawText(%d bytes) = %.80q kept the secret", len(doc15), san)
-		}
-		if san2, lost2 := sanitizeRawText(san); san2 != san || lost2 {
-			t.Errorf("sanitizeRawText(%d bytes) second pass changed=%v lost=%v", len(doc15), san2 != san, lost2)
-		}
-		smallDoc15 := mkAllLevels(15, 8*largeN)
-		smallPlain1 := mkAllLevels(1, len(smallDoc15))
-		for _, ep := range eps {
-			got := ep.f(smallDoc15)
-			again := ep.f(got)
-			if strings.Contains(got, "SECRET") {
-				t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(smallDoc15), got)
+
+		t.Run("15-level doc15 scaling and sanitizeRawText", func(t *testing.T) {
+			runInParallel(t)
+			doc15 := mkAllLevels(15, n)
+			plain1 := mkAllLevels(1, len(doc15))
+			if ratio, t1, t15 := linearRatio(64, sanFn(plain1), sanFn(doc15)); ratio > 64 {
+				t.Errorf("sanitizeRawText 15-level vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(plain1), t15, len(doc15))
 			}
-			if again != got {
-				t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got, again)
+			doc15Small := mkAllLevels(15, n/16)
+			if ratio, ts, tl := linearRatio(64, sanFn(doc15Small), sanFn(doc15)); ratio > 64 {
+				t.Errorf("sanitizeRawText 15-level growing payload scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, ts, len(doc15Small), tl, len(doc15))
 			}
-		}
-		if ratio, t1, t15 := linearRatio(64, runAll(t, smallPlain1), runAll(t, smallDoc15)); ratio > 64 {
-			t.Errorf("15-level all-levels key-redacted vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(smallPlain1), t15, len(smallDoc15))
-		}
+			san, _ := sanitizeRawText(doc15)
+			if strings.Contains(san, "SECRET") {
+				t.Errorf("sanitizeRawText(%d bytes) = %.80q kept the secret", len(doc15), san)
+			}
+			if san2, lost2 := sanitizeRawText(san); san2 != san || lost2 {
+				t.Errorf("sanitizeRawText(%d bytes) second pass changed=%v lost=%v", len(doc15), san2 != san, lost2)
+			}
+		})
+
+		t.Run("12-level arrDoc12 scaling", func(t *testing.T) {
+			runInParallel(t)
+			// Keep keyRedactionHidesRunOn outer-only: nesting a 49k-int leaf 12
+			// levels deep repeats node decoding only once for redaction and once
+			// at depth 0, staying well below 64x of equal-length 1-level input
+			// (measures ~22-23x without -race, leaving headroom while still
+			// catching per-level exponential blowup).
+			nums := 49_000
+			if raceEnabled {
+				nums = 20_000
+			}
+			arrDoc12 := fmt.Sprintf(`{"a":%s,"password":"SECRET1"}`, encode(make([]int, nums)))
+			for range 11 {
+				arrDoc12 = fmt.Sprintf(`{"z":%s,"password":"SECRET1"}`, encode(arrDoc12))
+			}
+			arrPlain1 := mkAllLevels(1, len(arrDoc12))
+			if ratio, t1, t12 := linearRatio(64, sanFn(arrPlain1), sanFn(arrDoc12)); ratio > 64 {
+				t.Errorf("sanitizeRawText 12-level array-leaf vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(arrPlain1), t12, len(arrDoc12))
+			}
+		})
+
+		t.Run("15-level smallDoc15 entry points", func(t *testing.T) {
+			runInParallel(t)
+			eps := largeTextEntryPoints(t)
+			smallDoc15 := mkAllLevels(15, 8*largeN)
+			smallPlain1 := mkAllLevels(1, len(smallDoc15))
+			for _, ep := range eps {
+				got := ep.f(smallDoc15)
+				again := ep.f(got)
+				if strings.Contains(got, "SECRET") {
+					t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(smallDoc15), got)
+				}
+				if again != got {
+					t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got, again)
+				}
+			}
+			if ratio, t1, t15 := linearRatio(64, runAll(t, smallPlain1), runAll(t, smallDoc15)); ratio > 64 {
+				t.Errorf("15-level all-levels key-redacted vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(smallPlain1), t15, len(smallDoc15))
+			}
+		})
 	})
 }
 
@@ -3672,7 +3690,7 @@ func TestOuterRunOnBudgetIdempotencyAndCandidateRecheck(t *testing.T) {
 			)
 		}
 		errs := make([][]string, len(cases)+1)
-		sem := make(chan struct{}, min(6, max(1, runtime.GOMAXPROCS(0))))
+		sem := make(chan struct{}, min(len(cases), max(1, runtime.GOMAXPROCS(0))))
 		var wg sync.WaitGroup
 		for idx, bc := range cases {
 			wg.Go(func() {
@@ -4330,29 +4348,47 @@ func TestMalformedJSONProseKeptAsOnMain(t *testing.T) {
 // text with many URIs.
 func TestURITokenSpansMatchExpression(t *testing.T) {
 	runInParallel(t)
-	check := func(s string) {
+	check := func(s string) bool {
 		t.Helper()
 		got, want := uriTokenSpans(s), uriTokenRe.FindAllStringIndex(s, -1)
 		if len(got) != len(want) || !slices.EqualFunc(got, want, func(a, b []int) bool { return slices.Equal(a, b) }) {
-			t.Fatalf("uriTokenSpans(%q) = %v, want %v", s, got, want)
+			t.Errorf("uriTokenSpans(%q) = %v, want %v", s, got, want)
+			return false
 		}
+		return true
 	}
 	alphabet := []string{"a", "Z", "9", "+", ":", "/", " ", `"`, "é"}
-	checked := 0
-	var walk func(prefix string, left int)
-	walk = func(prefix string, left int) {
-		check(prefix)
-		checked++
-		if left == 0 {
-			return
-		}
-		for _, c := range alphabet {
-			walk(prefix+c, left-1)
-		}
+	var checked atomic.Int64
+	if check("") {
+		checked.Add(1)
 	}
-	walk("", 6)
-	if want := 597_871; checked != want {
-		t.Fatalf("checked %d texts, want %d", checked, want)
+	var wg sync.WaitGroup
+	for _, c := range alphabet {
+		wg.Go(func() {
+			var localChecked int64
+			var walk func(prefix string, left int) bool
+			walk = func(prefix string, left int) bool {
+				if !check(prefix) {
+					return false
+				}
+				localChecked++
+				if left == 0 {
+					return true
+				}
+				for _, next := range alphabet {
+					if !walk(prefix+next, left-1) {
+						return false
+					}
+				}
+				return true
+			}
+			walk(c, 5)
+			checked.Add(localChecked)
+		})
+	}
+	wg.Wait()
+	if want := int64(597_871); checked.Load() != want {
+		t.Fatalf("checked %d texts, want %d", checked.Load(), want)
 	}
 	for _, s := range []string{
 		"see https://example.com/a?b=c, then ftp://h/x.",
@@ -4376,7 +4412,9 @@ func TestURITokenSpansMatchExpression(t *testing.T) {
 		strings.Repeat("://abc/def", 5000),
 		strings.Repeat("a://", 5000),
 	} {
-		check(s)
+		if !check(s) {
+			t.FailNow()
+		}
 	}
 
 	const smallReps, largeReps = 2 << 10, 32 << 10

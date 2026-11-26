@@ -42,6 +42,7 @@ import (
 )
 
 func TestFormatContentParts(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name      string
 		content   *genai.Content
@@ -214,6 +215,7 @@ type nestedStruct struct {
 }
 
 func TestSmartTruncate(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name      string
 		obj       any
@@ -366,6 +368,7 @@ func nested(depth int) any {
 }
 
 func TestSmartTruncate_Guards(t *testing.T) {
+	runInParallel(t)
 	cyclicMap := map[string]any{"a": 1}
 	cyclicMap["self"] = cyclicMap
 	cyclicSlice := make([]any, 1)
@@ -414,6 +417,7 @@ func TestSmartTruncate_Guards(t *testing.T) {
 }
 
 func TestSmartTruncate_DepthLimit(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name     string
 		depth    int
@@ -442,6 +446,7 @@ func TestSmartTruncate_DepthLimit(t *testing.T) {
 }
 
 func TestSmartTruncate_RedactsSensitiveKeys(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name     string
 		obj      any
@@ -592,6 +597,7 @@ func TestSmartTruncate_RedactsSensitiveKeys(t *testing.T) {
 }
 
 func TestRedactJSONText_FailClosed(t *testing.T) {
+	runInParallel(t)
 	deepJSON := `{"api_key":"secret"}`
 	for range maxSanitizeDepth + 2 {
 		deepJSON = `{"nested":` + deepJSON + `}`
@@ -667,6 +673,7 @@ func TestRedactJSONText_FailClosed(t *testing.T) {
 }
 
 func TestWalkStruct_OmitEmptyShadowsEmbeddedField(t *testing.T) {
+	runInParallel(t)
 	type Embedded struct {
 		X string `json:"x"`
 		Y string `json:"y"`
@@ -693,6 +700,7 @@ func TestWalkStruct_OmitEmptyShadowsEmbeddedField(t *testing.T) {
 }
 
 func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
+	runInParallel(t)
 	type promotedInner struct {
 		Name  string `json:"name"`
 		Token string `json:"token,omitempty"`
@@ -765,6 +773,7 @@ func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
 }
 
 func TestSanitizeURI(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name        string
 		uri         string
@@ -883,6 +892,7 @@ func TestSanitizeURI(t *testing.T) {
 }
 
 func TestRedactErrorMessage(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		msg  string
@@ -2470,6 +2480,7 @@ func TestRedactErrorMessage(t *testing.T) {
 }
 
 func TestSanitizeRawText(t *testing.T) {
+	runInParallel(t)
 	t.Run("deeply quoted credential text remains unparseable blob", func(t *testing.T) {
 		payload := `{"\u0061pi_key": "secret_credential_value"`
 		for range 8 {
@@ -3169,7 +3180,9 @@ func TestSanitizeRawText(t *testing.T) {
 }
 
 func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
+	t.Parallel()
 	t.Run("oversized slice stops at budget with single sentinel", func(t *testing.T) {
+		runInParallel(t)
 		items := make([]any, maxSanitizeNodes*2)
 		for i := range items {
 			items[i] = "x"
@@ -3197,6 +3210,7 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 	})
 
 	t.Run("oversized sensitive temp map charges budget and stops", func(t *testing.T) {
+		runInParallel(t)
 		m := make(map[string]any, maxSanitizeNodes+500)
 		for i := range maxSanitizeNodes + 500 {
 			m["temp:k_"+strconv.Itoa(i)] = "secret"
@@ -3221,6 +3235,7 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 	})
 
 	t.Run("JSON text shares sanitizer node budget", func(t *testing.T) {
+		runInParallel(t)
 		items := make([]any, maxSanitizeNodes-5)
 		for i := range items {
 			items[i] = "x"
@@ -3240,6 +3255,7 @@ func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
 }
 
 func TestContentSummaries(t *testing.T) {
+	runInParallel(t)
 	content := &genai.Content{Parts: []*genai.Part{
 		{Text: "hello world"},
 		{FunctionCall: &genai.FunctionCall{Name: "lookup"}},
@@ -3356,6 +3372,7 @@ func responseRowsOf(t *testing.T, content *genai.Content, maxLength int) map[str
 }
 
 func TestResponseMessageSummaryLengthCap(t *testing.T) {
+	runInParallel(t)
 	// Two text parts of fullLength runes, neither cut by the per-part limit
 	// when it is fullLength, join to a summary of exactly
 	// fullLength + responseSummarySlack runes.
@@ -3565,6 +3582,7 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 // result part are plain strings, so a summary redacts and bounds them like a
 // function name instead of printing them as they came.
 func TestMessageSummaryCodeLabel(t *testing.T) {
+	runInParallel(t)
 	atCap := strings.Repeat("n", 256)
 	overCap := strings.Repeat("n", 257)
 	wideAtCap := strings.Repeat("ñ", 256)
@@ -3647,6 +3665,7 @@ func TestMessageSummaryCodeLabel(t *testing.T) {
 }
 
 func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
+	runInParallel(t)
 	atCap := strings.Repeat("n", 256)
 	overCap := strings.Repeat("n", 257)
 	overCapCall := strings.Repeat("c", 257)
@@ -3932,6 +3951,7 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 }
 
 func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
+	runInParallel(t)
 	t.Run("function response with URL and query parameter preserves trailing query params", func(t *testing.T) {
 		content := &genai.Content{
 			Parts: []*genai.Part{
@@ -4031,6 +4051,7 @@ func partAttributes(t *testing.T, entry map[string]any) any {
 }
 
 func TestFormatContentParts_StructuredParts(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		part *genai.Part
@@ -4094,6 +4115,7 @@ func TestFormatContentParts_StructuredParts(t *testing.T) {
 }
 
 func TestPartsCollector_PartAttributesRedactSensitiveKeys(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name   string
 		redact bool
@@ -4128,6 +4150,7 @@ func TestPartsCollector_PartAttributesRedactSensitiveKeys(t *testing.T) {
 
 // TestPartsCollector_TruncatedFlag checks which parts make the row truncated.
 func TestPartsCollector_TruncatedFlag(t *testing.T) {
+	runInParallel(t)
 	const maxLen = 30
 	long := strings.Repeat("x", 50)
 	tests := []struct {
@@ -4166,6 +4189,7 @@ func TestPartsCollector_TruncatedFlag(t *testing.T) {
 }
 
 func TestFormatContentParts_EmptyParts(t *testing.T) {
+	runInParallel(t)
 	content := &genai.Content{Parts: []*genai.Part{nil, {}, {Text: ""}, {InlineData: nil}}}
 
 	got, _ := formatContentParts(content, 100, true)
@@ -4183,6 +4207,7 @@ func TestFormatContentParts_EmptyParts(t *testing.T) {
 }
 
 func TestPartsCollector_InlineDataWithoutMIMEType(t *testing.T) {
+	runInParallel(t)
 	content := singlePart(&genai.Part{InlineData: &genai.Blob{Data: []byte{1}}})
 	// Without offloading, a missing MIME type is written as it is.
 	want := []map[string]any{{
@@ -4242,6 +4267,7 @@ func TestPartsCollector_InlineDataWithoutMIMEType(t *testing.T) {
 // TestPartsCollector_Offloading is the decision table of what is queued for
 // upload and what stays in the row.
 func TestPartsCollector_Offloading(t *testing.T) {
+	runInParallel(t)
 	const inlineLimit = 10
 	on := partsOptions{maxLen: 100, offload: true, inlineLimit: inlineLimit}
 	textEntry := func(text string) map[string]any {
@@ -4365,6 +4391,7 @@ func TestPartsCollector_Offloading(t *testing.T) {
 }
 
 func TestPartsCollector_FileDataObjectRefs(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name         string
 		offload      bool
@@ -4434,6 +4461,7 @@ func TestPartsCollector_FileDataObjectRefs(t *testing.T) {
 // entry and its message correctly when there are several messages, and
 // entries that are not uploaded.
 func TestPartsCollector_SlotsAndOrdinals(t *testing.T) {
+	runInParallel(t)
 	png := func(b byte) *genai.Part {
 		return &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{b}}}
 	}
@@ -4467,6 +4495,7 @@ func TestPartsCollector_SlotsAndOrdinals(t *testing.T) {
 }
 
 func TestPartsCollector_QueuedDataIsACopy(t *testing.T) {
+	runInParallel(t)
 	blob := []byte{1, 2, 3}
 	part := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: blob}}
 	c := collectParts(partsOptions{maxLen: 100, offload: true, inlineLimit: 10}, singlePart(part))
@@ -4483,6 +4512,7 @@ func TestPartsCollector_QueuedDataIsACopy(t *testing.T) {
 }
 
 func TestPartsCollector_TextAndStructuredRedaction(t *testing.T) {
+	runInParallel(t)
 	secretJSON := `{"api_key":"sk-secret-key-999","msg":"` + strings.Repeat("x", 40) + `"}`
 	codeJSON := `{"password":"pw-secret-123"}`
 
@@ -4524,6 +4554,7 @@ func TestPartsCollector_TextAndStructuredRedaction(t *testing.T) {
 }
 
 func TestNormalizeFunctionResponse_PythonSnakeCaseParity(t *testing.T) {
+	runInParallel(t)
 	fr := &genai.FunctionResponse{
 		ID:           "call-1",
 		Name:         "lookup_doc",
@@ -4610,6 +4641,7 @@ func TestNormalizeFunctionResponse_PythonSnakeCaseParity(t *testing.T) {
 // payload: UTF-8 data is redacted and truncated as text, and binary data is
 // replaced by a placeholder.
 func TestNormalizeFunctionResponse_InlineMediaDataIsSanitized(t *testing.T) {
+	runInParallel(t)
 	const (
 		credentialText = "db password: hunter2\napi_key=SECRET123\nAuthorization: Bearer abc.def.ghi\n{\"token\": \"TOKENVALUE\"}"
 		keyedJSON      = `{"password": "p4ssw0rd", "user": "alice"}`
@@ -4693,6 +4725,7 @@ func TestNormalizeFunctionResponse_InlineMediaDataIsSanitized(t *testing.T) {
 }
 
 func TestPartsCollector_QueuedTextDoesNotMarkTruncated(t *testing.T) {
+	runInParallel(t)
 	longText := strings.Repeat("a", 50)
 	c := collectParts(partsOptions{maxLen: 20, offload: true, inlineLimit: 100}, singlePart(&genai.Part{Text: longText}))
 	if len(c.pending) != 1 {
@@ -4718,6 +4751,7 @@ func TestPartsCollector_QueuedTextDoesNotMarkTruncated(t *testing.T) {
 }
 
 func TestContentSummary_PartWithTextAndFileDataPrecedence(t *testing.T) {
+	runInParallel(t)
 	c := &genai.Content{
 		Role: "user",
 		Parts: []*genai.Part{
@@ -4734,6 +4768,7 @@ func TestContentSummary_PartWithTextAndFileDataPrecedence(t *testing.T) {
 }
 
 func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *testing.T) {
+	runInParallel(t)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			{
@@ -4782,6 +4817,7 @@ func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *tes
 // limited at all: invalid UTF-8 must not reach a BigQuery string column, and
 // in a JSON document encoding/json would replace it byte by byte instead.
 func TestJSONFormatter_InvalidUTF8(t *testing.T) {
+	runInParallel(t)
 	// The two invalid bytes are one run.
 	const in, want = "ok\xff\xfe tail", "ok\uFFFD tail"
 	// cut is want cut to its first four runes.
@@ -5221,6 +5257,7 @@ func (c CredsUserinfo) MarshalJSON() ([]byte, error) {
 // that a struct of a credential-named type without a marshaler is written by
 // its exported fields.
 func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
+	t.Parallel()
 	const secret = "SYNTHETIC_SECRET_8642"
 	type (
 		Token        string
@@ -5447,6 +5484,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("redacted values count against the node budget", func(t *testing.T) {
+		t.Parallel()
 		userinfo := url.UserPassword("user", secret)
 		fillAPIKeys := func(n int) any {
 			s := make([]APIKey, n)
@@ -5487,6 +5525,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"[]*url.Userinfo", fillUserinfos},
 		} {
 			t.Run(tt.name+"/over_budget", func(t *testing.T) {
+				runInParallel(t)
 				got, truncated, err := smartTruncate(tt.make(maxSanitizeNodes+10), 100, true)
 				if err != nil || !truncated {
 					t.Fatalf("smartTruncate(%s over budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
@@ -5501,6 +5540,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			})
 
 			t.Run(tt.name+"/exact_budget", func(t *testing.T) {
+				runInParallel(t)
 				const wantLen = maxSanitizeNodes - 1
 				got, truncated, err := smartTruncate(tt.make(wantLen), 100, true)
 				if err != nil || !truncated {
@@ -5517,6 +5557,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		}
 
 		t.Run("map[Token]string/over_budget", func(t *testing.T) {
+			runInParallel(t)
 			m := make(map[Token]string, maxSanitizeNodes+10)
 			for i := range maxSanitizeNodes + 10 {
 				m[Token(fmt.Sprintf("%s_%d", secret, i))] = "v"
@@ -5535,6 +5576,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("map[Token]*self/over_budget", func(t *testing.T) {
+			runInParallel(t)
 			// Values are skipped without walking when the credential key
 			// redacts whole; charging both key and skipped value stops the loop
 			// at maxSanitizeNodes.
@@ -5561,6 +5603,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("map[Token]*self/exact_budget", func(t *testing.T) {
+			runInParallel(t)
 			type selfHolder struct {
 				M map[Token]*selfHolder
 			}
@@ -5600,6 +5643,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("map[Token]string/two_node_budget", func(t *testing.T) {
+			runInParallel(t)
 			// With 2 nodes total, node 1 is the map and node 2 is the whole-redacted
 			// key, so the skipped value exhausts the budget and writes the budget
 			// placeholder instead of [REDACTED].
@@ -5630,6 +5674,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("pointers_at_max_depth/over_budget", func(t *testing.T) {
+			runInParallel(t)
 			n := 1
 			ptrs := make([]*int, maxSanitizeNodes+10)
 			for i := range ptrs {
@@ -5665,6 +5710,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("nil_pointer_at_max_depth", func(t *testing.T) {
+			runInParallel(t)
 			nestAtMaxDepth := func(leaf any) any {
 				cur := leaf
 				for range maxSanitizeDepth {
@@ -5964,6 +6010,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 // credentials, fields that hold no credential, and every field with redaction
 // off keep their omit options.
 func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
+	runInParallel(t)
 	const secret = "SYNTHETIC_SECRET_9753"
 	type (
 		Token        uint64
@@ -6143,6 +6190,7 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 // never zero or nil, so that the output is the same whether or not they are
 // read.
 func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
+	runInParallel(t)
 	type (
 		Token        uint64
 		APIKey       *string
@@ -6264,6 +6312,7 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 }
 
 func TestJSONFormatter_EmbeddedRedactsWholeNoShadow(t *testing.T) {
+	runInParallel(t)
 	const secret = "SYNTHETIC_SECRET_4321"
 	u := url.UserPassword("alice", secret)
 	var marshalerCalled atomic.Bool
@@ -6435,6 +6484,7 @@ func TestJSONFormatter_EmbeddedRedactsWholeNoShadow(t *testing.T) {
 }
 
 func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
+	runInParallel(t)
 	type (
 		Token      byte
 		Passphrase []byte
@@ -6523,6 +6573,7 @@ func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
 }
 
 func TestJSONFormatter_PlainCredentialStructMapKeys(t *testing.T) {
+	runInParallel(t)
 	const secret = "SYNTHETIC_SECRET_7531"
 	type (
 		Secret struct {
@@ -6784,6 +6835,7 @@ func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
 }
 
 func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
+	runInParallel(t)
 	// A small circular pointer still emits [CIRCULAR_REFERENCE] with truncated=false.
 	node := &cyclicNode{Name: "a"}
 	node.Next = node
@@ -6873,6 +6925,7 @@ func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
 }
 
 func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
+	runInParallel(t)
 	for _, tt := range []struct {
 		name      string
 		in        any
@@ -6923,6 +6976,7 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 }
 
 func TestJSONFormatter_DeclaredSensitiveTypeMapKey(t *testing.T) {
+	runInParallel(t)
 	type SyntaxToken int
 
 	gotMapOn, truncMapOn, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, true)

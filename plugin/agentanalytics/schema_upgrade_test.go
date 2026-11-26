@@ -90,6 +90,7 @@ func (m *mockTableOps) Update(_ context.Context, update bq.TableMetadataToUpdate
 }
 
 func TestEnsureTableAndSchema_NotFoundCreatesTableWithVersionLabel(t *testing.T) {
+	runInParallel(t)
 	for _, disableUpgrade := range []bool{true, false} {
 		name := "DisableSchemaUpgrade=false"
 		if disableUpgrade {
@@ -133,6 +134,7 @@ func TestEnsureTableAndSchema_NotFoundCreatesTableWithVersionLabel(t *testing.T)
 }
 
 func TestEnsureTableAndSchema_ConflictOnCreateRecovery(t *testing.T) {
+	runInParallel(t)
 	t.Run("DisableSchemaUpgrade=true re-fetches metadata after 409 and skips Update", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.DisableSchemaUpgrade = true
@@ -275,6 +277,7 @@ func TestEnsureTableAndSchema_ConflictOnCreateRecovery(t *testing.T) {
 }
 
 func TestEnsureTableAndSchema_PermissionDeniedFailsClosed(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name           string
 		disableUpgrade bool
@@ -348,6 +351,7 @@ func TestEnsureTableAndSchema_PermissionDeniedFailsClosed(t *testing.T) {
 }
 
 func TestEnsureTableAndSchema_NoOpSchemaDoesNotCallUpdate(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name   string
 		md     *bq.TableMetadata
@@ -422,6 +426,7 @@ func TestEnsureTableAndSchema_NoOpSchemaDoesNotCallUpdate(t *testing.T) {
 }
 
 func TestEnsureTableAndSchema_AdditiveTopLevelAndNestedRecordUpgrade(t *testing.T) {
+	runInParallel(t)
 	// Build a legacy v1 table schema that:
 	// 1. Has a custom column at index 0 ("custom_tenant_id") to verify order preservation.
 	// 2. Lacks top-level "event_id".
@@ -518,6 +523,7 @@ func TestEnsureTableAndSchema_AdditiveTopLevelAndNestedRecordUpgrade(t *testing.
 }
 
 func TestEnsureTableAndSchema_PreconditionFailedRetriesWithFreshETag(t *testing.T) {
+	runInParallel(t)
 	outdated := bq.Schema{{Name: "timestamp", Type: bq.TimestampFieldType, Required: true}}
 
 	t.Run("succeeds on retry with fresh ETag", func(t *testing.T) {
@@ -630,6 +636,7 @@ func TestEnsureTableAndSchema_PreconditionFailedRetriesWithFreshETag(t *testing.
 }
 
 func TestEnsureTableAndSchema_IncompatibleSchemaReturnsError(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name   string
 		schema bq.Schema
@@ -713,6 +720,7 @@ func TestEnsureTableAndSchema_IncompatibleSchemaReturnsError(t *testing.T) {
 }
 
 func TestEnsureTableAndSchema_StructLiteralConfigDefaultsToAutoSchemaUpgrade(t *testing.T) {
+	runInParallel(t)
 	outdated := bq.Schema{
 		{Name: "timestamp", Type: bq.TimestampFieldType, Required: true},
 	}
@@ -793,6 +801,7 @@ func TestEnsureTableAndSchema_StructLiteralConfigDefaultsToAutoSchemaUpgrade(t *
 }
 
 func TestEnsureTableAndSchema_IncompatibleSchemaErrorWrapsTableName(t *testing.T) {
+	runInParallel(t)
 	cfg := DefaultConfig()
 	cfg.TableName = "my_custom_table"
 	incompatibleSchema := bq.Schema{
@@ -817,6 +826,7 @@ func TestEnsureTableAndSchema_IncompatibleSchemaErrorWrapsTableName(t *testing.T
 }
 
 func TestUpgradeTableSchema_ExistingNullableDesiredRequired(t *testing.T) {
+	runInParallel(t)
 	existing := bq.Schema{
 		{Name: "timestamp", Type: bq.TimestampFieldType, Required: false},
 	}
@@ -836,6 +846,7 @@ func TestUpgradeTableSchema_ExistingNullableDesiredRequired(t *testing.T) {
 }
 
 func TestUpgradeTableSchema_CaseInsensitiveNestedRecordLookup(t *testing.T) {
+	runInParallel(t)
 	existing := bq.Schema{
 		{
 			Name:     "Content_Parts",
@@ -870,6 +881,7 @@ func TestUpgradeTableSchema_CaseInsensitiveNestedRecordLookup(t *testing.T) {
 }
 
 func TestValidateDestinationTableType(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name      string
 		tableType bq.TableType

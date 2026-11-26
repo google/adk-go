@@ -49,6 +49,7 @@ import (
 )
 
 func TestNotifySchemaCallbacks(t *testing.T) {
+	runInParallel(t)
 	t.Run("nil callbacks are no-ops", func(t *testing.T) {
 		logger := &recordingLogger{}
 		notifySchemaReady(nil, logger.Printf)
@@ -356,6 +357,7 @@ func newSchemaCallbackPlugin(t *testing.T, transport http.RoundTripper, rec *sch
 }
 
 func TestPlugin_OnSchemaReady_TablePass(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name        string
 		transport   *tableTransport
@@ -505,6 +507,7 @@ func TestPlugin_OnSchemaReady_TablePass(t *testing.T) {
 }
 
 func TestPlugin_OnSchemaError(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name      string
 		transport *tableTransport
@@ -697,6 +700,7 @@ func TestPlugin_OnSchemaError(t *testing.T) {
 
 func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	t.Run("called once from the background pass once every view is created", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		rec := newSchemaCallbackRecorder()
 		logger := &recordingLogger{}
@@ -726,6 +730,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called when a view fails, and OnSchemaError is not called either", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		// The second view DDL job is denied; the others succeed.
 		var jobIdx atomic.Int32
@@ -759,6 +764,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called when the view definitions are invalid", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		rec := newSchemaCallbackRecorder()
 		logger := &recordingLogger{}
@@ -785,6 +791,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called by a startup pass that SyncViews preempts, nor by SyncViews", func(t *testing.T) {
+		runInParallel(t)
 		started := make(chan struct{})
 		var startOnce sync.Once
 		var blockedOne atomic.Bool
@@ -835,6 +842,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	// context derives from. The pass then sees every view created, and only
 	// its check that it was not ended keeps it from calling OnSchemaReady.
 	t.Run("not called when Close ends an in-flight startup pass on the final view", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		pluginReady := make(chan struct{})
 		var p *baseplugin.Plugin
@@ -869,6 +877,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called when SyncViews preempts an in-flight startup pass on the final view", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		pluginReady := make(chan struct{})
 		var bqaap *BigQueryAgentAnalyticsPlugin
@@ -915,6 +924,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("SyncViews after a ready schema does not call it again", func(t *testing.T) {
+		runInParallel(t)
 		transport := &tableTransport{t: t}
 		rec := newSchemaCallbackRecorder()
 		p, err := newSchemaCallbackPlugin(t, transport, rec, nil)
@@ -940,6 +950,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("a panic in OnSchemaReady from the background pass is logged through a non-default Logger", func(t *testing.T) {
+		runInParallel(t)
 		logger := &recordingLogger{}
 		rec := newSchemaCallbackRecorder()
 		var calls atomic.Int32
@@ -1086,6 +1097,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("called when a retried DDL job gets 409 after the first attempt created the view", func(t *testing.T) {
+		runInParallel(t)
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
 		cfg.DatasetID = "test_dataset"
@@ -1149,6 +1161,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("called when a retried DDL job gets 409 while the in-flight DDL job finishes on a retry metadata read", func(t *testing.T) {
+		t.Parallel()
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
 		cfg.DatasetID = "test_dataset"
@@ -1190,6 +1203,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 			},
 		} {
 			t.Run(pendingState.name, func(t *testing.T) {
+				runInParallel(t)
 				transport := &tableTransport{t: t}
 				var (
 					hitConflict       atomic.Bool
@@ -1260,6 +1274,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("409 conflict error and logger omit raw response bodies while preserving Unwrap", func(t *testing.T) {
+		runInParallel(t)
 		const (
 			conflictSecret = "raw-409-secret-payload-xyz"
 			verifySecret   = "raw-403-verify-secret-abc"
@@ -1351,6 +1366,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 }
 
 func TestPlugin_SchemaCallbacks_NoPass(t *testing.T) {
+	runInParallel(t)
 	t.Run("a plugin built without a BigQuery client calls neither callback", func(t *testing.T) {
 		rec := newSchemaCallbackRecorder()
 		_, writeClient := newTestWriteClient(t)
@@ -1419,13 +1435,14 @@ func TestPlugin_SchemaCallbacks_NoPass(t *testing.T) {
 // once that share one OnSchemaReady, as a host that builds a plugin per
 // request does, and checks under -race that each calls it exactly once.
 func TestPlugin_SchemaCallbacks_ConcurrentPlugins(t *testing.T) {
+	t.Parallel()
 	const plugins = 6
 	var ready atomic.Int32
 	t.Run("construct", func(t *testing.T) {
 		for i := range plugins {
 			withViews := i%2 != 0
 			t.Run(fmt.Sprintf("plugin-%d", i), func(t *testing.T) {
-				t.Parallel()
+				runInParallel(t)
 				transport := &tableTransport{t: t}
 				rec := newSchemaCallbackRecorder()
 				p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
@@ -1467,6 +1484,7 @@ func (panickingPrintfLogger) Println(...any) {
 }
 
 func TestPlugin_PanickingLoggerInRecovery(t *testing.T) {
+	runInParallel(t)
 	t.Run("OnSchemaError + panicking Logger returns table error cleanly", func(t *testing.T) {
 		transport := &tableTransport{t: t, getStatuses: []int{http.StatusForbidden}}
 		rec := newSchemaCallbackRecorder()
@@ -1647,6 +1665,7 @@ func runLookupCall(t *testing.T, result map[string]any, toolErr error, plugins .
 // first (ToolResultError -> TOOL_ERROR, ToolResultOK -> TOOL_COMPLETED) and by
 // mcpResultError when the classifier is nil or abstains.
 func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
+	runInParallel(t)
 	// reflectAndRetryAnswer is the response_type of the answer with which
 	// plugin/retryandreflect replaces a tool error.
 	const reflectAndRetryAnswer = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
@@ -1784,6 +1803,7 @@ func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
 }
 
 func TestDocParity_SchemaCallbacksAtMostOnce(t *testing.T) {
+	runInParallel(t)
 	t.Run("table failure calls OnSchemaError once and fails construction", func(t *testing.T) {
 		var readyCalls, errCalls atomic.Int32
 		p, err := newSchemaCallbackPlugin(t, &tableTransport{t: t, getStatuses: []int{http.StatusForbidden}}, newSchemaCallbackRecorder(), func(c *Config) {
@@ -1821,6 +1841,7 @@ func TestDocParity_SchemaCallbacksAtMostOnce(t *testing.T) {
 }
 
 func TestPlugin_SchemaCallbacks_ClosuresReleased(t *testing.T) {
+	runInParallel(t)
 	for _, disableViews := range []bool{true, false} {
 		name := "async_views"
 		if disableViews {
@@ -1907,6 +1928,7 @@ func shortenConflictVerifyForTest(t *testing.T, initialBackoff, maxDuration time
 }
 
 func TestResolveDDLConflict_EdgeCases(t *testing.T) {
+	runInParallel(t)
 	cfg := DefaultConfig()
 	cfg.ProjectID = "test-project"
 	cfg.DatasetID = "test_dataset"
@@ -2277,6 +2299,7 @@ func (f *fakeTableMetadataOps) Update(context.Context, bq.TableMetadataToUpdate,
 }
 
 func TestMaybeUpgradeSchema_RetryRevalidatesDestinationTableType(t *testing.T) {
+	runInParallel(t)
 	var legacySchema bq.Schema
 	for _, field := range EventsSchema() {
 		if field.Name != eventIDField {
@@ -2301,6 +2324,7 @@ func TestMaybeUpgradeSchema_RetryRevalidatesDestinationTableType(t *testing.T) {
 }
 
 func TestIsRetryableConflictVerifyError(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		err  error

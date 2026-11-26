@@ -149,6 +149,7 @@ func requireToolCompletedRow(t *testing.T, rows []map[string]any) map[string]any
 }
 
 func TestToolResultDecision_String(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		decision ToolResultDecision
 		want     string
@@ -169,6 +170,7 @@ func TestToolResultDecision_String(t *testing.T) {
 }
 
 func TestPlugin_ToolResultClassifier_Verdicts(t *testing.T) {
+	runInParallel(t)
 	t.Run("OK records TOOL_COMPLETED and the AGENT_RESPONSE of a final response tool", func(t *testing.T) {
 		result := map[string]any{"status": "ERROR", "details": "handled upstream"}
 		rows, calls, logger := runClassifiedToolCall(t, ToolResultVerdict{Decision: ToolResultOK}, result, nil)
@@ -306,6 +308,7 @@ func TestPlugin_ToolResultClassifier_Verdicts(t *testing.T) {
 }
 
 func TestPlugin_ToolResultClassifier_ErrorMessageRedaction(t *testing.T) {
+	runInParallel(t)
 	const secret = "sk-live-SECRET"
 	message := "upstream failed: Bearer " + secret
 	redacted := redactErrorMessage(message)
@@ -376,6 +379,7 @@ func TestPlugin_ToolResultClassifier_ErrorMessageRedaction(t *testing.T) {
 // when the event filters drop the TOOL_COMPLETED and TOOL_ERROR rows: the
 // classifier runs before the filters are consulted.
 func TestPlugin_ToolResultClassifier_EventFilters(t *testing.T) {
+	runInParallel(t)
 	for _, filter := range []struct {
 		name   string
 		mutate func(*Config)
@@ -430,6 +434,7 @@ func TestPlugin_ToolResultClassifier_EventFilters(t *testing.T) {
 }
 
 func TestPlugin_ToolResultClassifier_FailuresAreSkipped(t *testing.T) {
+	runInParallel(t)
 	// secret stands for tool output that must not reach the log.
 	const secret = "result-secret-7f3a"
 	// A failing classifier is skipped: the call is recorded as it is without
@@ -617,6 +622,7 @@ func (l *printfArgsLogger) recordedArgs() [][]any {
 }
 
 func TestPlugin_ToolResultClassifier_Precedence(t *testing.T) {
+	runInParallel(t)
 	t.Run("a tool error that OnToolErrorCallback recorded is not classified", func(t *testing.T) {
 		var (
 			calls []classifierCall
@@ -745,6 +751,7 @@ func TestPlugin_ToolResultClassifier_Precedence(t *testing.T) {
 }
 
 func TestPlugin_ToolResultClassifier_Runner(t *testing.T) {
+	runInParallel(t)
 	t.Run("ERROR verdict on a FinalResponseToolNames tool suppresses its AGENT_RESPONSE", func(t *testing.T) {
 		type toolArgs struct {
 			Query string `json:"query"`
@@ -1326,6 +1333,7 @@ func TestPlugin_ToolResultClassifier_Runner(t *testing.T) {
 // response, each in a goroutine of its own. Under -race, the test also checks
 // that the classifier path shares no unsynchronized state.
 func TestPlugin_ToolResultClassifier_ConcurrentCalls(t *testing.T) {
+	runInParallel(t)
 	const calls = 16
 	var classified atomic.Int32
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
@@ -1500,6 +1508,7 @@ func isFailedTaskResponse(ev *session.Event) bool {
 // not take over the first activation's completion: the held response ends the
 // first activation, and the second ends on its own AfterAgentCallback.
 func TestPlugin_FinishTask_OverlappingErrorDoesNotStealCompletion(t *testing.T) {
+	runInParallel(t)
 	const sharedCall = "call_0"
 	toolErr := errors.New("tool execution failed")
 	// failRun2 fails the second activation's finish_task call in an agent
@@ -1659,6 +1668,7 @@ func TestPlugin_FinishTask_OverlappingErrorDoesNotStealCompletion(t *testing.T) 
 // while the second activation is running: the response must end the first
 // activation, which made the call, not the second, which is newer.
 func TestPlugin_FinishTask_PromotedErrorClosesOriginatingSpan(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name           string
 		err            func(tool.Tool) error
@@ -1733,6 +1743,7 @@ func TestPlugin_FinishTask_PromotedErrorClosesOriginatingSpan(t *testing.T) {
 // activations returned. The merged event must end the activation whose call
 // completed, not every activation whose attempts share one of its call IDs.
 func TestPlugin_FinishTask_MixedResponseEventEndsOwnActivation(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPluginWithConfig(t, nil)
 	var run atomic.Int32
 	worker, err := llmagent.New(llmagent.Config{
@@ -1786,6 +1797,7 @@ func TestPlugin_FinishTask_MixedResponseEventEndsOwnActivation(t *testing.T) {
 // activation is still open, and close the first activation only on its real
 // completion.
 func TestPlugin_FinishTask_FailedFirstThenCompletedInSameEventStaysOpen(t *testing.T) {
+	runInParallel(t)
 	type stepArgs struct {
 		Note string `json:"note"`
 	}
@@ -1969,6 +1981,7 @@ func TestPlugin_FinishTask_FailedFirstThenCompletedInSameEventStaysOpen(t *testi
 // reused call ID failing on Run 2 across event delivery orderings and plugin
 // short-circuiting.
 func TestPlugin_FinishTask_ReusedCallID_AttributionOrderings(t *testing.T) {
+	runInParallel(t)
 	const sharedCall = "call_0"
 
 	t.Run("held Run 1 success delivered right before Run 2 validation failure", func(t *testing.T) {
@@ -2139,6 +2152,7 @@ func TestPlugin_FinishTask_ReusedCallID_AttributionOrderings(t *testing.T) {
 }
 
 func TestClassifyTaskResponses_MultiPartOrderings(t *testing.T) {
+	runInParallel(t)
 	frPart := func(id, name string, resp map[string]any) *genai.Part {
 		return &genai.Part{
 			FunctionResponse: &genai.FunctionResponse{
@@ -2297,6 +2311,7 @@ func TestClassifyTaskResponses_MultiPartOrderings(t *testing.T) {
 // activation reusing "call_1" closes its own span rather than stealing Run 1's
 // open span, and Run 1 later completes cleanly reusing "call_1".
 func TestPlugin_FinishTask_FailedEmptyIDThenCompletedStaysOpenAndRetiresOverruledCall(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPluginWithConfig(t, nil)
 
 	var sawEmptyIDOverruled atomic.Int32
@@ -2422,6 +2437,7 @@ func TestPlugin_FinishTask_FailedEmptyIDThenCompletedStaysOpenAndRetiresOverrule
 // delivers Run 2's completion event BEFORE Run 1's held completion event,
 // Run 2's event closes Run 2's span and Run 1's held event closes Run 1's span.
 func TestPlugin_FinishTask_PromotedRun2DeliveredBeforeHeldRun1Completion(t *testing.T) {
+	runInParallel(t)
 	const sharedCall = "call_0"
 	toolErr := errors.New("transient finish failure")
 
@@ -2571,6 +2587,7 @@ func TestPlugin_FinishTask_PromotedRun2DeliveredBeforeHeldRun1Completion(t *test
 // activation via the trailing observed call ID instead of falling into
 // unobservedTaskLocked.
 func TestPlugin_FinishTask_TrailingObservedEndingCallIDResolvesActivation(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPluginWithConfig(t, nil)
 
 	earlier, err := baseplugin.New(baseplugin.Config{
@@ -2668,6 +2685,7 @@ func TestPlugin_FinishTask_TrailingObservedEndingCallIDResolvesActivation(t *tes
 }
 
 func TestPlugin_FinishTask_ConcurrentCall0ReuseFanOut(t *testing.T) {
+	runInParallel(t)
 	t.Run("deterministic_two_overlapping_runs_three_waves_on_frozen_clock", func(t *testing.T) {
 		p, requests, _ := setupTestPluginWithConfig(t, nil)
 		fixedNow := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -2852,6 +2870,7 @@ func TestPlugin_FinishTask_ConcurrentCall0ReuseFanOut(t *testing.T) {
 }
 
 func TestPlugin_FinishTask_MergedReusedLeadingShortCircuitedAndUniqueTrailingCallID(t *testing.T) {
+	runInParallel(t)
 	for _, frozen := range []bool{false, true} {
 		name := "wall_clock"
 		if frozen {
@@ -2981,6 +3000,7 @@ func TestPlugin_FinishTask_MergedReusedLeadingShortCircuitedAndUniqueTrailingCal
 }
 
 func TestPlugin_FinishTask_CoordinatorBufferedFailureDoesNotRetireNewerWorkerAttempt(t *testing.T) {
+	runInParallel(t)
 	for _, frozen := range []bool{false, true} {
 		name := "advancing_clock"
 		if frozen {
@@ -3133,6 +3153,7 @@ func TestPlugin_FinishTask_CoordinatorBufferedFailureDoesNotRetireNewerWorkerAtt
 }
 
 func TestPlugin_FinishTask_MergedParallelToolTimestampPredatingAfterToolRecordedAt(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPluginWithConfig(t, nil)
 
 	type emptyIn struct{}
@@ -3270,6 +3291,7 @@ func TestPlugin_FinishTask_MergedParallelToolTimestampPredatingAfterToolRecorded
 }
 
 func TestPlugin_FinishTask_NoteTaskStartAndOverruledEndingGuards(t *testing.T) {
+	runInParallel(t)
 	t.Run("noteTaskStart attributes finish_task when earlier plugin short-circuits AfterToolCallback", func(t *testing.T) {
 		p, requests, _ := setupTestPluginWithConfig(t, nil)
 		shortAfter, err := baseplugin.New(baseplugin.Config{

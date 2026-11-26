@@ -144,6 +144,7 @@ func withFunctionCall(ctx *mockInvocationContext, id string) *mockInvocationCont
 // must be a child of the agent, never of a sibling, and must end its own
 // span. Under -race, the test also checks the locking.
 func TestTraceManager_ConcurrentSiblingToolsRace(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	const calls = 20
 	lookupTool := &fakeTool{name: "lookup"}
@@ -229,6 +230,7 @@ func TestTraceManager_ConcurrentSiblingToolsRace(t *testing.T) {
 // OnToolErrorCallback, with the same error. The second callback must find
 // the span that the first one ended instead of ending the agent's span.
 func TestTraceManager_OnToolErrorThenAfterTool_NoDoublePop(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	toolCtx := withFunctionCall(mCtx, "call-1")
 	lookupTool := &fakeTool{name: "lookup"}
@@ -271,6 +273,7 @@ func TestTraceManager_OnToolErrorThenAfterTool_NoDoublePop(t *testing.T) {
 // nest as invocation > agent > model call and tool call, with the
 // invocation span under the ambient span.
 func TestTraceManager_AmbientOTelTraceIDInherited(t *testing.T) {
+	runInParallel(t)
 	const (
 		traceHex = "4bf92f3577b34da6a3ce929d0e0e4736"
 		spanHex  = "00f067aa0ba902b7"
@@ -361,6 +364,7 @@ func TestTraceManager_AmbientOTelTraceIDInherited(t *testing.T) {
 // response writes the single LLM_RESPONSE row, whose latency_ms column is a
 // JSON object, marshaled once, with the time to first token.
 func TestTraceManager_StreamingTTFTAndSingleMarshaledLatency(t *testing.T) {
+	runInParallel(t)
 	const gap = 20 * time.Millisecond
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
@@ -459,6 +463,7 @@ func (c *clockedPlugin) firstTokenTimed(t *testing.T, ctx *mockInvocationContext
 // token is that of the first chunk with generated content, at 800 ms, and not
 // that of the metadata.
 func TestAfterModel_FirstTokenIsFirstGeneratedContent(t *testing.T) {
+	runInParallel(t)
 	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}
 	tests := []struct {
 		name string
@@ -513,6 +518,7 @@ func TestAfterModel_FirstTokenIsFirstGeneratedContent(t *testing.T) {
 // first token, so the call gets a time to first token equal to its total
 // latency, as a call that is not streamed does.
 func TestAfterModel_MetadataOnlyChunksLeaveFirstTokenToFinalResponse(t *testing.T) {
+	runInParallel(t)
 	p := newClockedPlugin(t)
 	mCtx := &mockInvocationContext{ctx: t.Context(), agentName: "agent", invocationID: "inv-metadata-only"}
 	start := p.now
@@ -537,6 +543,7 @@ func TestAfterModel_MetadataOnlyChunksLeaveFirstTokenToFinalResponse(t *testing.
 // TOOL_ERROR row gets a span of its own under the agent, and the agent's
 // span stays open.
 func TestTraceManager_UnknownToolErrorKeepsAgentSpan(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 	errs.add(p.BeforeAgentCallback()(mCtx))
@@ -564,6 +571,7 @@ func TestTraceManager_UnknownToolErrorKeepsAgentSpan(t *testing.T) {
 }
 
 func TestTraceManager_ModelCallSpans(t *testing.T) {
+	runInParallel(t)
 	request := &model.LLMRequest{Model: "gemini-test"}
 	response := &model.LLMResponse{Content: textContent("model", "hi")}
 
@@ -653,6 +661,7 @@ func TestTraceManager_ModelCallSpans(t *testing.T) {
 // was not seen. The row gets a span of its own under the invocation, whose
 // span stays open.
 func TestTraceManager_AfterAgentWithoutBeforeAgent(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 	errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", "hello")))
@@ -681,6 +690,7 @@ func TestTraceManager_AfterAgentWithoutBeforeAgent(t *testing.T) {
 // TestTraceManager_InvocationsHaveTracesOfTheirOwn runs two invocations
 // outside any OpenTelemetry span: each one starts a trace of its own.
 func TestTraceManager_InvocationsHaveTracesOfTheirOwn(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	other := *mCtx
 	other.invocationID = "inv-2"
@@ -714,6 +724,7 @@ func TestTraceManager_InvocationsHaveTracesOfTheirOwn(t *testing.T) {
 // TestTraceManager_LatencyColumnDenied leaves latency_ms out when
 // PayloadColumnDenylist names it. The rows keep their spans.
 func TestTraceManager_LatencyColumnDenied(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.PayloadColumnDenylist = []string{columnLatencyMS} })
 	var errs callbackErrors
 	errs.add(p.BeforeAgentCallback()(mCtx))
@@ -736,6 +747,7 @@ func TestTraceManager_LatencyColumnDenied(t *testing.T) {
 // ADK runs them concurrently, on branches named after the parallel agent,
 // and they can end in any order.
 func TestTraceManager_ParallelBranches(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	id := func(agentName, branch string) identity {
@@ -839,6 +851,7 @@ func openSpans(t *testing.T, tm *traceManager, invocationID string) spanCounts {
 // branches named after both. worker runs on two of these branches at once.
 // After fan, the coordinator runs summary.
 func TestTraceManager_AgentNesting(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	id := func(agentName, branch string) identity {
@@ -959,6 +972,7 @@ func TestTraceManager_AgentNesting(t *testing.T) {
 // does: with OnToolErrorCallback, and then AfterToolCallback for the same
 // call.
 func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	id := identity{invocationID: "inv", agentName: "agent"}
@@ -1025,6 +1039,7 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 // belongs to the attempt that it ended: the later call's TOOL_COMPLETED row
 // gets a span of its own, and the call keeps its AGENT_RESPONSE row.
 func TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
 		c.FinalResponseToolNames = []string{"lookup"}
 	})
@@ -1129,6 +1144,7 @@ func (c actionsContext) Actions() *session.EventActions { return c.actions() }
 // Contexts that expose no EventActions match each other by call key alone,
 // and never a tool context.
 func TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt(t *testing.T) {
+	runInParallel(t)
 	ic := newAttemptInvocationContext()
 	newToolContext := func(actions *session.EventActions) agent.Context {
 		return agent.NewToolContext(ic, "call-1", actions, nil)
@@ -1339,6 +1355,7 @@ func TestToolAttempt_WeakAndNeverReused(t *testing.T) {
 // TOOL_COMPLETED and AGENT_RESPONSE (even when in FinalResponseToolNames) are
 // suppressed.
 func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	toolCtx := withFunctionCall(mCtx, "call-recovered")
 	final := &fakeTool{name: "final_answer"}
@@ -1389,6 +1406,7 @@ func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
 // tool. TOOL_COMPLETED closes the tool call's span with latency_ms, while
 // AGENT_RESPONSE is placed on the enclosing agent span without latency_ms.
 func TestTraceManager_FinalResponseToolRow(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	mCtx.functionCallID = "call-7"
 	final := &fakeTool{name: "final_answer"}
@@ -1418,6 +1436,7 @@ func TestTraceManager_FinalResponseToolRow(t *testing.T) {
 }
 
 func TestTraceManager_RootAgentName(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	// The runner's callbacks get the agent that the runner runs.
@@ -1451,6 +1470,7 @@ func trackedInvocations(tm *traceManager) []string {
 }
 
 func TestTraceManager_EvictsLeastRecentlyActiveInvocations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	tm.maxTracked = 3
@@ -1484,6 +1504,7 @@ func TestTraceManager_EvictsLeastRecentlyActiveInvocations(t *testing.T) {
 }
 
 func TestTraceManager_ExpiresIdleInvocations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	start := time.Unix(1000, 0)
@@ -1516,6 +1537,7 @@ func TestTraceManager_ExpiresIdleInvocations(t *testing.T) {
 }
 
 func TestTraceManager_UntrackedInvocations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	// Callbacks without an invocation ID still get IDs.
@@ -1582,6 +1604,7 @@ type zeroOuterConfigAgent struct {
 }
 
 func TestAgentStartingData(t *testing.T) {
+	runInParallel(t)
 	helper, err := llmagent.New(llmagent.Config{Name: "helper", Description: "Helps"})
 	if err != nil {
 		t.Fatalf("llmagent.New() error: %v", err)
@@ -1668,6 +1691,7 @@ func TestAgentStartingData(t *testing.T) {
 // the runner runs, which the first invocation callback that gets it
 // records.
 func TestTraceManager_AgentNamed(t *testing.T) {
+	runInParallel(t)
 	helper, err := llmagent.New(llmagent.Config{Name: "helper"})
 	if err != nil {
 		t.Fatalf("llmagent.New() error: %v", err)
@@ -1726,6 +1750,7 @@ func (c *agentContext) Agent() agent.Agent {
 // the agent that the runner runs, and an agent outside it. The agent
 // callbacks find the agents by name, without asking their context.
 func TestAgentStarting_LooksUpAgentInRunnerTree(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	helper, err := llmagent.New(llmagent.Config{Name: "helper", Description: "Helps"})
 	if err != nil {
@@ -1800,6 +1825,7 @@ func TestAgentStarting_LooksUpAgentInRunnerTree(t *testing.T) {
 // calls a tool twice, and ADK runs the two calls concurrently, before the
 // model answers.
 func TestTraceManager_Runner(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	type lookupArgs struct {
 		City string `json:"city"`
@@ -1973,6 +1999,7 @@ func TestTraceManager_Runner(t *testing.T) {
 // functionCallID (such as "call_0") do not collide in toolSpans or
 // completedTools.
 func TestTraceManager_SameFunctionCallIDAcrossConcurrentSubAgents(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	ctxOf := func(agentName, branch, callID string) *mockInvocationContext {
 		c := *mCtx
@@ -2035,6 +2062,7 @@ func TestTraceManager_SameFunctionCallIDAcrossConcurrentSubAgents(t *testing.T) 
 // execution node path) correlate their model calls, tool calls, session
 // events, and AGENT_COMPLETED rows with their own activation span.
 func TestTraceManager_SameAgentConcurrentNodePaths(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	ctxOf := func(agentName, path, callID string) *mockInvocationContext {
 		c := *mCtx
@@ -2129,6 +2157,7 @@ func TestTraceManager_SameAgentConcurrentNodePaths(t *testing.T) {
 // be parented to the sequential agent rather than the short-circuited sibling,
 // and no orphan agent span may remain when the sequential agent completes.
 func TestTraceManager_SequentialSiblingShortCircuitedInBeforeAgent(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	shortcut, err := llmagent.New(llmagent.Config{
 		Name: "shortcut",
@@ -2203,6 +2232,7 @@ func TestTraceManager_SequentialSiblingShortCircuitedInBeforeAgent(t *testing.T)
 // agent ("planner") and AGENT_STARTING for "planner" must still resolve its
 // config from the root agent tree.
 func TestTraceManager_SubAgentTransferContinuationTurn(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	transferTo := func(target string) *model.LLMResponse {
 		return &model.LLMResponse{
@@ -2294,6 +2324,7 @@ func TestTraceManager_SubAgentTransferContinuationTurn(t *testing.T) {
 // TestTraceManager_ExactMillisecondLatency verifies that recordFirstToken and
 // popLLMSpan compute exact millisecond durations from a controlled clock.
 func TestTraceManager_ExactMillisecondLatency(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	now := time.Unix(1000, 0)
@@ -2323,6 +2354,7 @@ func TestTraceManager_ExactMillisecondLatency(t *testing.T) {
 // AfterToolCallback with a non-nil err, the plugin still emits a TOOL_ERROR
 // row at the tool call's span with latency_ms.
 func TestToolFailure_ShortCircuitedOnToolErrorStillLogsError(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	toolCtx := withFunctionCall(mCtx, "call-short-circuit")
 	lookup := &fakeTool{name: "lookup"}
@@ -2367,6 +2399,7 @@ func TestToolFailure_ShortCircuitedOnToolErrorStillLogsError(t *testing.T) {
 //     invocation preserve its original trace_id and root_agent_name, and
 //     INVOCATION_COMPLETED omits a bogus near-zero latency_ms.
 func TestTraceManager_InFlightProtectedFromTTLSweepAndPreservesTraceOnCapEviction(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	start := time.Unix(1000, 0)
@@ -2430,6 +2463,7 @@ func TestTraceManager_InFlightProtectedFromTTLSweepAndPreservesTraceOnCapEvictio
 // locking (`inv.mu`) with 32 goroutines concurrently running sub-agent spans,
 // streaming model calls, tool calls, and event lookups on a single invocation.
 func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	rootID := identity{invocationID: "inv-concurrent", agentName: "root"}
@@ -2487,6 +2521,7 @@ func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
 // (`tm.mu`) with 32 goroutines concurrently starting, running, and ending
 // independent invocations.
 func TestTraceManager_ConcurrentInvocations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const workers = 32
@@ -2521,6 +2556,7 @@ func TestTraceManager_ConcurrentInvocations(t *testing.T) {
 // This pins the lock order between tm.mu and inv.mu so rememberAgentTree and
 // evictLocked cannot deadlock.
 func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	worker, err := llmagent.New(llmagent.Config{Name: "worker"})
 	if err != nil {
@@ -2596,6 +2632,7 @@ func (m *blockingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ 
 // LLM_RESPONSE and AGENT_COMPLETED row must match its starting span with
 // non-null latency_ms.
 func TestTraceManager_RunnerConcurrentWorkflowRunNodeSameAgent(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	bLLM := &blockingLLM{
 		entered: make(chan struct{}, 2),
@@ -2741,6 +2778,7 @@ func TestTraceManager_RunnerConcurrentWorkflowRunNodeSameAgent(t *testing.T) {
 // the plugin resolves the configured root agent ("configured_root") from the
 // runner's parent map in ctx on the very first callback.
 func TestTraceManager_ColdPersistedSessionResumeResolvesConfiguredRoot(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	sessSvc := session.InMemoryService()
 	createResp, err := sessSvc.Create(ctx, &session.CreateRequest{
@@ -2840,6 +2878,7 @@ func TestTraceManager_ColdPersistedSessionResumeResolvesConfiguredRoot(t *testin
 //     inv.started = true), endInvocation still omits latency_ms because
 //     inv.evicted is true.
 func TestTraceManager_EvictionPreservesInheritedOTelAndNestedCallbackContext(t *testing.T) {
+	runInParallel(t)
 	const (
 		ambientTraceHex = "4bf92f3577b34da6a3ce929d0e0e4736"
 		ambientSpanHex  = "00f067aa0ba902b7"
@@ -2918,6 +2957,7 @@ func TestTraceManager_EvictionPreservesInheritedOTelAndNestedCallbackContext(t *
 //     plugin keep their own root_agent_name and helper instruction even on a
 //     continuation turn that starts at `helper`.
 func TestTraceManager_SharedPluginAcrossIndependentRunnersAndApps(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 
 	// Part 1: first_root -> worker, then standalone worker.
@@ -3089,6 +3129,7 @@ func TestTraceManager_SharedPluginAcrossIndependentRunnersAndApps(t *testing.T) 
 // and helper1's AGENT_COMPLETED row must close helper1's own span with
 // non-null latency_ms.
 func TestTraceManager_PeerSubAgentTransferPreservesTransferringAgentSpan(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	transferTo := func(target string) *model.LLMResponse {
 		return &model.LLMResponse{
@@ -3161,6 +3202,7 @@ func TestTraceManager_PeerSubAgentTransferPreservesTransferringAgentSpan(t *test
 // agent is short-circuited in BeforeAgentCallback (so no subsequent sibling
 // starts before the parent itself finishes).
 func TestTraceManager_ShortCircuitedLastChildRetiredWhenParentPops(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	lastChild, err := llmagent.New(llmagent.Config{Name: "shortcut_last"})
@@ -3205,6 +3247,7 @@ func TestTraceManager_ShortCircuitedLastChildRetiredWhenParentPops(t *testing.T)
 //     open retires only spans whose parentSpanID lineage reaches p@1, leaving
 //     p@2 and p@2/x@2 intact to close with latency.
 func TestTraceManager_ConcurrentSiblingsAndInterleavedSameAgentActivations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	t.Run("configured sub-agents a and b concurrent on same branch", func(t *testing.T) {
@@ -3329,6 +3372,7 @@ type requestCtxWithNilEmbedded struct {
 }
 
 func TestContextInspection_NilEmbeddedStructDoesNotPanic(t *testing.T) {
+	runInParallel(t)
 	_ = (&dummyRouteInfo{route: "test"}).route
 	ctx := &requestCtxWithNilEmbedded{
 		Context:        context.Background(),
@@ -3345,6 +3389,7 @@ func TestContextInspection_NilEmbeddedStructDoesNotPanic(t *testing.T) {
 }
 
 func TestTraceManager_UnrecoveredErrorKeying_TwoFailuresOneRecovers(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	id1 := identity{invocationID: "inv-two-errs", agentName: "agentA", path: "pathA"}
@@ -3383,6 +3428,7 @@ func (m *failingLLM) GenerateContent(context.Context, *model.LLMRequest, bool) i
 }
 
 func TestRunner_FailedModelCall_EmitsAgentErrorAndInvocationError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 
 	modelErr := errors.New("model failure 404")
@@ -3436,6 +3482,7 @@ func TestRunner_FailedModelCall_EmitsAgentErrorAndInvocationError(t *testing.T) 
 }
 
 func TestRunner_ToolError_EmitsInvocationCompleted(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 
 	errTool, err := functiontool.New(functiontool.Config{
@@ -3545,6 +3592,7 @@ func agentErrorCounts(rows []map[string]any) map[string]int {
 // yields the cancellation and runs the after-run callbacks with no agent
 // span open; the invocation must still end with INVOCATION_ERROR.
 func TestRunner_BeforeRunCancellation_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -3604,6 +3652,7 @@ func TestRunner_BeforeRunCancellation_EmitsInvocationError(t *testing.T) {
 // AfterAgentCallback, so the plugin learns of the failure only from the agent
 // span that is left open with its model call.
 func TestRunner_BeforeModelCallbackError_EmitsAgentErrorAndInvocationError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	bot, err := llmagent.New(llmagent.Config{
 		Name:  "bot",
@@ -3664,6 +3713,7 @@ func TestRunner_BeforeModelCallbackError_EmitsAgentErrorAndInvocationError(t *te
 // AfterAgentCallback for the second child or the sequence either. Only the
 // failing child and the sequence it ran under get AGENT_ERROR rows.
 func TestRunner_SequentialSiblingShortcutThenChildFails_EmitsErrorOnlyForFailingChildAndSequence(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	child1, err := llmagent.New(llmagent.Config{
 		Name:  "child1",
@@ -3738,6 +3788,7 @@ func TestRunner_SequentialSiblingShortcutThenChildFails_EmitsErrorOnlyForFailing
 // the caller stops iterating after consuming that response, finalization writes
 // INVOCATION_COMPLETED with status OK.
 func TestRunner_CachedBeforeModelCallbackResponse_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	bot, err := llmagent.New(llmagent.Config{
 		Name:  "bot",
@@ -3781,6 +3832,7 @@ func TestRunner_CachedBeforeModelCallbackResponse_EmitsInvocationCompletedOK(t *
 // AfterAgentCallback and the agent's span is still open when the invocation
 // terminates; finalization must not report the agent as failed.
 func TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	customBot, err := agent.New(agent.Config{
 		Name: "custom_bot",
@@ -3828,6 +3880,7 @@ func TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK(t *testing.T) 
 // carries only an error code, shows that its author was streaming when the
 // caller stopped reading, which is not a failure either.
 func TestOnEvent_ResponseOrPartialEventKeepsAuthorFromFailing(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name          string
 		event         session.Event
@@ -3878,6 +3931,7 @@ func TestOnEvent_ResponseOrPartialEventKeepsAuthorFromFailing(t *testing.T) {
 // TestRunner_CustomRunError verifies that when an agent's custom Run returns an error,
 // the error reaches the caller and finalization writes AGENT_ERROR and INVOCATION_ERROR.
 func TestRunner_CustomRunError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	runErr := errors.New("custom run failure")
 	customBot, err := agent.New(agent.Config{
@@ -3920,6 +3974,7 @@ func TestRunner_CustomRunError(t *testing.T) {
 // from BeforeModelCallback (so no model span is opened), finalization writes AGENT_ERROR
 // and INVOCATION_ERROR.
 func TestRunner_PriorPluginBeforeModelCallbackError_EmitsAgentErrorAndInvocationError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	cbErr := errors.New("prior plugin before model failure")
 	priorPlugin, err := baseplugin.New(baseplugin.Config{
@@ -3967,6 +4022,7 @@ func TestRunner_PriorPluginBeforeModelCallbackError_EmitsAgentErrorAndInvocation
 // TestRunner_AfterAgentCallbackError verifies that when an agent's AfterAgentCallback
 // returns an error, the error reaches the caller while finalization writes INVOCATION_COMPLETED with status OK.
 func TestRunner_AfterAgentCallbackError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	cbErr := errors.New("after agent callback rejected")
 	bot, err := llmagent.New(llmagent.Config{
@@ -4005,6 +4061,7 @@ func TestRunner_AfterAgentCallbackError(t *testing.T) {
 // when the same worker runs repeatedly (e.g. @cached at step 1 and @failed at step 2),
 // failure attribution selects only the failing activation's lineage.
 func TestTraceManager_RepeatedWorker_AttributionToFailingActivationOnly(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -4043,6 +4100,7 @@ func TestTraceManager_RepeatedWorker_AttributionToFailingActivationOnly(t *testi
 // when two child model calls fail simultaneously without recovery, both failure lineages
 // are finalized, each child retains its corresponding error, and shared ancestors are deduplicated.
 func TestTraceManager_TwoFailuresNeitherRecovers_FinalizesBothActivations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -4099,6 +4157,7 @@ func TestTraceManager_TwoFailuresNeitherRecovers_FinalizesBothActivations(t *tes
 // a span whose recorded path is a different non-empty path, preventing late completions of a
 // retired activation from ending a live sibling on another path.
 func TestTraceManager_FindAgent_DoesNotMatchDifferentNodePath(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -4171,6 +4230,7 @@ func (m *streamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, s
 // and time to first token. A leading chunk that only reports token usage does
 // not time the first token.
 func TestRunner_SSEStreaming_ModelCallEndKeepsRequestSpanAndLatency(t *testing.T) {
+	runInParallel(t)
 	const gap = 20 * time.Millisecond
 	modelErr := errors.New("stream broken 503")
 	tests := []struct {
@@ -4267,6 +4327,7 @@ func TestRunner_SSEStreaming_ModelCallEndKeepsRequestSpanAndLatency(t *testing.T
 // model call of its author and mark the author, and the agents it runs under,
 // as responded: the invocation completed.
 func TestRunner_SubAgentCachedBeforeModelCallbackResponse_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	newSub := func(t *testing.T) agent.Agent {
 		t.Helper()
 		sub, err := llmagent.New(llmagent.Config{
@@ -4362,6 +4423,7 @@ func TestRunner_SubAgentCachedBeforeModelCallbackResponse_EmitsInvocationComplet
 // an unrecovered error, the failing descendant and its ancestors stay open so
 // popUnclosedAgentSpans emits AGENT_ERROR for them.
 func TestTraceManager_ErrorOfNormallyEndedActivation_StillFailsInvocation(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		// failing is the activation whose model call fails. ended is the
@@ -4432,6 +4494,7 @@ func TestTraceManager_ErrorOfNormallyEndedActivation_StillFailsInvocation(t *tes
 // not attributed to any open span. The invocation fails with the error, but
 // the open spans are not returned: they did not fail.
 func TestTraceManager_ErrorOfUnknownActivation_FailsInvocationWithoutAgentErrors(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invocationID = "inv-unknown-activation"
@@ -4460,6 +4523,7 @@ func TestTraceManager_ErrorOfUnknownActivation_FailsInvocationWithoutAgentErrors
 // so every open span is returned with the cancellation, including a span
 // whose agent already responded.
 func TestTraceManager_CancellationAttributesEveryOpenSpan(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	const invocationID = "inv-canceled"
 	rootID := identity{invocationID: invocationID, agentName: "root", path: "root"}
@@ -4535,6 +4599,7 @@ func requireChildStartedAfterPartialStop(t *testing.T, attempt func(t *testing.T
 // that the call completed, so the successful run must not be reported as
 // failed for a tool call that is still open.
 func TestRunner_AfterToolShortCircuit_EarlyStopDoesNotFail(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		// earlierResult is what the earlier plugin's AfterToolCallback returns.
@@ -4666,6 +4731,7 @@ func newShortcutSequenceGraph(t *testing.T, next agent.Agent, registerSequence b
 // graph node is not among the SubAgents of the runner's root agent, so the
 // hierarchy of the sequence is not known from the configured agent tree.
 func TestRunner_GraphSequentialSiblingAfterShortcut(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name             string
 		registerSequence bool
@@ -4724,6 +4790,7 @@ func TestRunner_GraphSequentialSiblingAfterShortcut(t *testing.T) {
 // AfterAgentCallback. Only the failing child and the agents it ran under get
 // AGENT_ERROR rows; the sibling that answered did not fail.
 func TestRunner_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	modelErr := errors.New("model failure 500")
 	next, err := llmagent.New(llmagent.Config{Name: "next", Model: &failingLLM{err: modelErr}})
@@ -4762,6 +4829,7 @@ func TestRunner_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
 // an empty one: the root learned from the other runner's tree must not become
 // the root agent of the independent runner's invocation.
 func TestRunner_SharedSameAgentRoot(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name      string
 		treeFirst bool
@@ -4821,6 +4889,7 @@ func TestRunner_SharedSameAgentRoot(t *testing.T) {
 // ADK runs no AfterAgentCallback. That final event shows that the run
 // succeeded; the span left open by the sub-agent must not fail it.
 func TestRunner_CustomParentSwallowsShortCircuitedChild_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		// respond sets the final response of the parent on its event, and
@@ -4902,6 +4971,7 @@ func TestRunner_CustomParentSwallowsShortCircuitedChild_EmitsInvocationCompleted
 // custom agent that fails without any model call, still gets an AGENT_ERROR row
 // together with the sequence.
 func TestRunner_SequentialSiblingShortcutThenCustomChildFails_BlamesOnlyFailingChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	child1, err := llmagent.New(llmagent.Config{
 		Name:  "child1",
@@ -4964,6 +5034,7 @@ func TestRunner_SequentialSiblingShortcutThenCustomChildFails_BlamesOnlyFailingC
 // runs no AfterAgentCallback for the sequence, whose span is still open; the
 // answer shows that the run succeeded.
 func TestRunner_PriorPluginAnswersOnlyChild_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name  string
 		drain bool
@@ -5034,6 +5105,7 @@ func TestRunner_PriorPluginAnswersOnlyChild_EmitsInvocationCompletedOK(t *testin
 // the response that recovers from it. The consumer stops at the final
 // response; it shows that the run succeeded.
 func TestRunner_RecoveredModelErrorWithSkippedAfterModel_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	earlier, err := baseplugin.New(baseplugin.Config{
 		Name: "earlier_after_model",
@@ -5089,6 +5161,7 @@ func TestRunner_RecoveredModelErrorWithSkippedAfterModel_EmitsInvocationComplete
 // custom agent, which carries an output and no content, so the run that the
 // consumer stops at that event is reported as completed.
 func TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	replacer, err := baseplugin.New(baseplugin.Config{
 		Name: "event_replacer",
@@ -5214,6 +5287,7 @@ func runSubAgentFailure(t *testing.T, childErr error, parentResponds bool) ([]ma
 // popUnclosedAgentSpans and afterRun document this: a change that reports
 // this failure has to update them and this test together.
 func TestRunner_SubAgentFailsAfterParentProducedContent_EmitsInvocationCompletedOK(t *testing.T) {
+	runInParallel(t)
 	childErr := errors.New("child failure")
 	rows, gotErr := runSubAgentFailure(t, childErr, true)
 	if !errors.Is(gotErr, childErr) {
@@ -5231,6 +5305,7 @@ func TestRunner_SubAgentFailsAfterParentProducedContent_EmitsInvocationCompleted
 // failure is reported with an AGENT_ERROR row for the sub-agent and one for the
 // parent that runs it, and the invocation ends with INVOCATION_ERROR.
 func TestRunner_SubAgentFailsWithoutParentContent_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	childErr := errors.New("child failure")
 	rows, gotErr := runSubAgentFailure(t, childErr, false)
 	if !errors.Is(gotErr, childErr) {
@@ -5252,6 +5327,7 @@ func TestRunner_SubAgentFailsWithoutParentContent_EmitsInvocationError(t *testin
 // that has not responded keeps failing the invocation, and so does a call of
 // another activation, even one that has the same function call ID.
 func TestTraceManager_FunctionResponseRetiresOnlyItsToolCall(t *testing.T) {
+	runInParallel(t)
 	type toolCall struct{ id, name string }
 	tests := []struct {
 		name string
@@ -5335,6 +5411,7 @@ func TestTraceManager_FunctionResponseRetiresOnlyItsToolCall(t *testing.T) {
 // the user or without an author settles nothing, and an event of one sibling
 // does not settle another.
 func TestTraceManager_FinalEventMarksActivationsAsResponded(t *testing.T) {
+	runInParallel(t)
 	root := identity{agentName: "root", path: "root"}
 	sub := identity{agentName: "sub", path: "root/sub"}
 	a := identity{agentName: "a", path: "root/a"}
@@ -5427,6 +5504,7 @@ func TestTraceManager_FinalEventMarksActivationsAsResponded(t *testing.T) {
 // other activations stay, including those of activations that run under the
 // author: the event does not show that the author handled them.
 func TestTraceManager_FinalEventClearsTheErrorsOfItsActivation(t *testing.T) {
+	runInParallel(t)
 	root := identity{agentName: "root", path: "root"}
 	a := identity{agentName: "a", path: "root/a"}
 	b := identity{agentName: "b", path: "root/b"}
@@ -5557,6 +5635,7 @@ func newTestAgent(t *testing.T, name string, subAgents ...agent.Agent) agent.Age
 // TestRunningAgentChildren reads the sub-agents of the agent that a callback
 // context runs. Anything but the agent that was asked for has no children.
 func TestRunningAgentChildren(t *testing.T) {
+	runInParallel(t)
 	a, b := newTestAgent(t, "a"), newTestAgent(t, "b")
 	sequence := newTestAgent(t, "sequence", a, b)
 	helper, err := llmagent.New(llmagent.Config{Name: "helper"})
@@ -5627,6 +5706,7 @@ func TestRunningAgentChildren(t *testing.T) {
 // agent's sub-agents transfer to peers, without either activation overwriting
 // the other.
 func TestInvocationTrace_RecordChildrenReplacesTheParent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invocationID = "inv-per-activation-children"
@@ -5682,6 +5762,7 @@ func TestInvocationTrace_RecordChildrenReplacesTheParent(t *testing.T) {
 // sub-agents, so the second one is parented to the workflow agent rather than
 // to the first, whose span is still open because a callback answered for it.
 func TestTraceManager_SubAgentsOfRunningAgentStayApartOutsideTheRunnerTree(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invocationID = "inv-running-agent-children"
@@ -5706,6 +5787,7 @@ func TestTraceManager_SubAgentsOfRunningAgentStayApartOutsideTheRunnerTree(t *te
 // TestFunctionResponseCalls lists the function call ID, or else the tool name,
 // of each function response of a piece of content.
 func TestFunctionResponseCalls(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name    string
 		content *genai.Content
@@ -5740,6 +5822,7 @@ func TestFunctionResponseCalls(t *testing.T) {
 // is what toolKeyCall finds at the end of the key that the tool callbacks
 // build for the call.
 func TestFunctionResponseCallsMatchToolKeys(t *testing.T) {
+	runInParallel(t)
 	id := identity{agentName: "bot", branch: "root.bot", path: "root/bot"}
 	tests := []struct {
 		name string
@@ -5772,6 +5855,7 @@ func TestFunctionResponseCallsMatchToolKeys(t *testing.T) {
 // recorded for the invocation. Without a parent map, the earlier tree is all
 // that is known, and it gives the invocation its root agent.
 func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T) {
+	runInParallel(t)
 	helper := newTestAgent(t, "helper")
 	worker := newTestAgent(t, "worker", helper)
 	root := newTestAgent(t, "root", worker)
@@ -5906,6 +5990,7 @@ func (m *waitThenStreamPartialLLM) GenerateContent(ctx context.Context, _ *model
 // single-agent, sequential, loop, and parallel roots (including when a parallel
 // sibling has an in-flight model call that has not yet delivered a token).
 func TestRunner_StopReadingMidStream_IsNotAnError(t *testing.T) {
+	runInParallel(t)
 	newStreamingBot := func(t *testing.T, name string) agent.Agent {
 		t.Helper()
 		bot, err := llmagent.New(llmagent.Config{
@@ -6213,6 +6298,7 @@ func (m *flakyOnFirstPassLLM) GenerateContent(_ context.Context, _ *model.LLMReq
 // ancestors or retries the child in a LoopAgent), the invocation still
 // terminates with INVOCATION_ERROR.
 func TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	t.Run("sequential sub-agent fails after sibling succeeds", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		modelErr := errors.New("subagent model failure 503")
@@ -6324,6 +6410,7 @@ func TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError(t *te
 //  3. If the coordinator's continuation fails, neither the completed task agent
 //     nor the first coordinator activation receives a spurious AGENT_ERROR row.
 func TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinatorActivation(t *testing.T) {
+	runInParallel(t)
 	newTaskWorker := func(t *testing.T) agent.Agent {
 		t.Helper()
 		worker, err := llmagent.New(llmagent.Config{
@@ -6516,6 +6603,7 @@ func (m *firstCallResponseThenErrLLM) GenerateContent(_ context.Context, _ *mode
 // AGENT_COMPLETED row are parented to its own sequential parent (flow_a or
 // flow_b) rather than escaping to the root or invocation span.
 func TestRunner_ConcurrentGraphParentsSameChildNames(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 
 	gatesReady := make(chan struct{})
@@ -6671,6 +6759,7 @@ func TestRunner_ConcurrentGraphParentsSameChildNames(t *testing.T) {
 // breaking span parenting, latency calculation, or endInvocation cleanup when
 // start events or INVOCATION_COMPLETED are filtered out.
 func TestLogEvent_EventFiltersPreserveSpansLatencyAndInvocationCleanup(t *testing.T) {
+	runInParallel(t)
 	t.Run("allowlist keeps only completed rows with intact spans and latency", func(t *testing.T) {
 		p, requests, ctx := setupTestPluginWithConfig(t, func(cfg *Config) {
 			cfg.EventAllowlist = []string{EventLLMResponse, EventAgentCompleted, EventInvocationCompleted}
@@ -6741,6 +6830,7 @@ func TestLogEvent_EventFiltersPreserveSpansLatencyAndInvocationCleanup(t *testin
 // tm.evicted reaches max(tm.maxTracked, 64), markEvictedLocked drops only the
 // oldest tombstone rather than clearing all tombstones.
 func TestTraceManager_EvictedTombstoneCapDropsOldestOnly(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -6781,6 +6871,7 @@ func TestTraceManager_EvictedTombstoneCapDropsOldestOnly(t *testing.T) {
 // callbacks (OnEventCallback, AfterRunCallback) and capacity eviction
 // (markEvictedLocked) also use the adopted trace_id.
 func TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan(t *testing.T) {
+	runInParallel(t)
 	const (
 		traceHex = "4bf92f3577b34da6a3ce929d0e0e4736"
 		spanHex  = "00f067aa0ba902b7"
@@ -6930,6 +7021,7 @@ func assertAgentSpansClosed(t *testing.T, rows []map[string]any) {
 }
 
 func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name   string
 		first  []string
@@ -6967,6 +7059,7 @@ func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
 }
 
 func TestRunner_ResumedTaskThenTransferBack_ClosesEverySpan(t *testing.T) {
+	runInParallel(t)
 	call := func(name string, args map[string]any) *model.LLMResponse {
 		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-" + name, Name: name, Args: args}}}}}
 	}
@@ -7088,6 +7181,7 @@ func TestRunner_ResumedTaskThenTransferBack_ClosesEverySpan(t *testing.T) {
 // popTaskAgentSpan does NOT mark a non-LLM workflow parent (sequentialagent) as
 // taskDelegated when a child ModeTask agent completes via finish_task.
 func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -7167,6 +7261,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 // false) whose configured SubAgents include the task sub-agent. This is the
 // positive control for the !nonLLM guard.
 func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -7241,6 +7336,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 // taskDelegated when the completing task (task_worker) is not in that
 // coordinator's configured SubAgents. This pins the slices.Contains guard.
 func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -7316,6 +7412,7 @@ func (m *singlePartialChunkLLM) GenerateContent(_ context.Context, _ *model.LLMR
 // streamed chunk (after plugin AfterModelCallback already ran), the invocation
 // ends with AGENT_ERROR and INVOCATION_ERROR rather than INVOCATION_COMPLETED.
 func TestRunner_FirstStreamedChunkRejectedByAgentCallback_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name  string
 		chunk *model.LLMResponse
@@ -7394,6 +7491,7 @@ func TestRunner_FirstStreamedChunkRejectedByAgentCallback_EmitsErrorTerminalRows
 // BeforeModelCallback fails, which no error callback reports, whether the
 // caller stops at the error or reads to the end.
 func TestRunner_PartialEventFromCustomRootThenSubAgentError_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	for _, stopAtError := range []bool{true, false} {
 		t.Run(fmt.Sprintf("stop at error %v", stopAtError), func(t *testing.T) {
 			p, requests, _ := setupTestPlugin(t)
@@ -7506,6 +7604,7 @@ func requireCompletedWithHandledAgentError(t *testing.T, rows []map[string]any, 
 // to end with INVOCATION_ERROR, while the failed activation ends with an
 // AGENT_ERROR row of its own.
 func TestRunner_InternallyRecoveredErrors_SingleTurnToolAndWorkflowRetry_EmitsCompletedTerminalRows(t *testing.T) {
+	runInParallel(t)
 	t.Run("single_turn sub-agent tool fails and parent recovers", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 
@@ -7635,6 +7734,7 @@ func TestRunner_InternallyRecoveredErrors_SingleTurnToolAndWorkflowRetry_EmitsCo
 // that the invocation still ends with INVOCATION_COMPLETED, whether the owner
 // calls it once or twice in one turn.
 func TestRunner_SingleTurnToolAnsweredByBeforeAgentCallback_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	helperCall := func(id string) *genai.Part {
 		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "helper", Args: map[string]any{"request": "cached?"}}}
 	}
@@ -7706,6 +7806,7 @@ func TestRunner_SingleTurnToolAnsweredByBeforeAgentCallback_EmitsNoAgentError(t 
 // AfterAgentCallback, but it did not fail, so it ends without a row and does
 // not take the error of the sibling that failed.
 func TestRunner_RetriedCompositeNodeSkipsCachedChildAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	cached, err := llmagent.New(llmagent.Config{
 		Name:  "cached",
@@ -7832,6 +7933,7 @@ func runHelperCoordinator(t *testing.T, helperModel model.LLM, stop bool) []map[
 // not reported as failed: the invocation completes, as for any other agent
 // that the stop canceled, so no AGENT_ERROR row of the helper contradicts it.
 func TestRunner_StopOnToolRunHelperPartialEvent_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	rows := runHelperCoordinator(t, streamThenWaitLLM{}, true)
 	if !slices.ContainsFunc(rowsOfType(rows, EventLLMError), func(row map[string]any) bool { return row["agent"] == "helper" }) {
 		t.Fatalf("got no LLM_ERROR row of helper, want the model call that the stop canceled; event types: %v", eventTypes(rows))
@@ -7845,6 +7947,7 @@ func TestRunner_StopOnToolRunHelperPartialEvent_EmitsNoAgentError(t *testing.T) 
 // reads on: only the cancellation by a stop is no failure, and ADK hands the
 // failure to the coordinator's model, so the invocation completes.
 func TestRunner_ToolRunHelperCanceledItselfAfterPartial_EmitsAgentError(t *testing.T) {
+	runInParallel(t)
 	rows := runHelperCoordinator(t, &selfCancelingStreamLLM{}, false)
 	requireCompletedWithHandledAgentError(t, rows, "helper", "context canceled")
 }
@@ -7855,6 +7958,7 @@ func TestRunner_ToolRunHelperCanceledItselfAfterPartial_EmitsAgentError(t *testi
 // and the invocation ends INVOCATION_ERROR (the cancellation is not a consumer
 // stop: it is a failure of the run).
 func TestRunner_ToolRunHelperCanceledByOuterCtxAfterPartial_EmitsAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -7891,6 +7995,7 @@ func TestRunner_ToolRunHelperCanceledByOuterCtxAfterPartial_EmitsAgentError(t *t
 // The purge must preserve lastSessionEventPartial and partialLineage so that
 // the consumer-stop suppression survives the purge.
 func TestRunner_TwoHelpersPartialThenHandledError_EmitsCompleted(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	slowEntered := make(chan struct{})
 
@@ -7978,6 +8083,7 @@ func TestRunner_TwoHelpersPartialThenHandledError_EmitsCompleted(t *testing.T) {
 // partial event: the helper never responded, but canceledByStop() exempts it
 // because the consumer stop canceled it.
 func TestRunner_StopOnContentlessPartialHelper_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 
 	// contentlessPartialLLM streams one partial chunk with no content, then
@@ -8036,6 +8142,7 @@ func TestRunner_StopOnContentlessPartialHelper_EmitsNoAgentError(t *testing.T) {
 // sets lastActivity and fails when that callback's touchAgentActivityLocked
 // call is deleted.
 func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-activity"
 	node := identity{invocationID: invID, agentName: "node", path: "wf@1/node@1"}
@@ -8210,6 +8317,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 // never moves lastActivity backward: touching with an earlier clock after a
 // later one leaves lastActivity unchanged.
 func TestTraceManager_TouchAgentActivityMonotonic(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-mono"
 	node := identity{invocationID: invID, agentName: "node", path: "wf@1/node@1"}
@@ -8251,6 +8359,7 @@ func TestTraceManager_TouchAgentActivityMonotonic(t *testing.T) {
 // over when the next attempt starts, so its row comes when the workflow agent
 // ends instead (see endRestartedNodeRuns).
 func TestRunner_PurgedRetryAttemptTimestampPrecedesNextAttempt(t *testing.T) {
+	runInParallel(t)
 	requireADKNodeCompletionEvents(t)
 	p, requests, _ := setupTestPlugin(t)
 	flaky, err := llmagent.New(llmagent.Config{
@@ -8375,6 +8484,7 @@ func TestRunner_PurgedRetryAttemptTimestampPrecedesNextAttempt(t *testing.T) {
 // popUnclosedAgentSpans) carry the clock time of their own emission rather than
 // being backdated to spanRecord.lastActivity.
 func TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated(t *testing.T) {
+	runInParallel(t)
 	t.Run("state_delta_and_agent_completed", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		const stepDelay = 25 * time.Millisecond
@@ -8467,6 +8577,7 @@ func TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated(t *testi
 // seq_root's AfterAgentCallback runs) still preserves custom_fail_child as
 // failed and ends the invocation with AGENT_ERROR and INVOCATION_ERROR.
 func TestRunner_SequentialRootWithFailedCustomChild_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	requireADKStopOnSubAgentError(t)
 	p, requests, _ := setupTestPlugin(t)
 	childErr := errors.New("custom child failed")
@@ -8550,6 +8661,7 @@ func (m *contextCanceledOnDoneLLM) GenerateContent(ctx context.Context, _ *model
 // context.Canceled (triggering onModelError), the invocation still terminates
 // with INVOCATION_COMPLETED rather than INVOCATION_ERROR.
 func TestRunner_ParallelRootStoppedMidStream_SiblingModelReturnsContextCanceled_EmitsCompletedTerminalRows(t *testing.T) {
+	runInParallel(t)
 	requireADKParallelEarlyStopTeardown(t)
 	p, requests, _ := setupTestPlugin(t)
 	slowEntered := make(chan struct{})
@@ -8613,6 +8725,7 @@ func TestRunner_ParallelRootStoppedMidStream_SiblingModelReturnsContextCanceled_
 // once the event was yielded, even when the caller stopped reading on it, and
 // then cancels its branches.
 func TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError(t *testing.T) {
+	runInParallel(t)
 	requireADKParallelEarlyStopTeardown(t)
 	for _, tc := range []struct {
 		name     string
@@ -8749,6 +8862,7 @@ func newStreamingAuthor(t *testing.T, child agent.Agent, withContent bool) agent
 // sibling waits for its cancellation, and as a node of a workflow, which does
 // not wait for its caller to read a partial event.
 func TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError(t *testing.T) {
+	runInParallel(t)
 	newChild := func(t *testing.T) agent.Agent {
 		t.Helper()
 		child, err := agent.New(agent.Config{
@@ -8865,6 +8979,7 @@ func (m *selfCancelingStreamLLM) GenerateContent(ctx context.Context, _ *model.L
 // only a cancellation of the work by the run, for a caller that stopped
 // reading, is not a failure.
 func TestRunner_ModelCanceledOwnRequestAfterPartial_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: &selfCancelingStreamLLM{}})
 	if err != nil {
@@ -8909,6 +9024,7 @@ func TestRunner_ModelCanceledOwnRequestAfterPartial_EmitsErrorTerminalRows(t *te
 // the partial event and cancels the sub-agent's context is the root or runs
 // under a sequential or a parallel agent.
 func TestRunner_AgentCanceledSubAgentContextAfterPartial_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	for _, wrap := range []string{"root", "sequential", "parallel"} {
 		t.Run(wrap, func(t *testing.T) {
 			p, requests, _ := setupTestPlugin(t)
@@ -9347,6 +9463,7 @@ func assertTerminalErrorRowsContain(t *testing.T, rows []map[string]any, wantSub
 // the caller read every event, so the work that the parallel agent canceled
 // does not stand for a caller that stopped reading mid-stream.
 func TestRunner_ParallelBranchFailsWhileSiblingStreams_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range branchFailureCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rows, gotErr := runUntilBranchFails(t, tc.newRoot, tc.cfg, false)
@@ -9385,6 +9502,7 @@ func TestRunner_ParallelBranchFailsWhileSiblingStreams_EmitsErrorTerminalRows(t 
 // context.Cause(ctx) is not context.Canceled, distinguishing the sibling
 // failure from a caller that stopped reading mid-stream.
 func TestRunner_ParallelBranchFailsWhileSiblingStreams_StopAtErrorEmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range branchFailureCases {
 		t.Run(tc.name, func(t *testing.T) {
 			rows, _ := runUntilBranchFails(t, tc.newRoot, tc.cfg, true)
@@ -9425,6 +9543,7 @@ func TestRunner_ParallelBranchFailsWhileSiblingStreams_StopAtErrorEmitsErrorTerm
 // cause and emits AGENT_ERROR(failer) and INVOCATION_ERROR for both draining
 // and stopping consumers.
 func TestRunner_ParallelBranchFailsBeforePartialAck_EmitsErrorTerminalRows(t *testing.T) {
+	runInParallel(t)
 	cases := []struct {
 		name    string
 		newRoot func(t *testing.T, seen <-chan struct{}, exited chan struct{}) agent.Agent
@@ -9566,6 +9685,7 @@ func (m *waitDoneStreamLLM) GenerateContent(ctx context.Context, _ *model.LLMReq
 // consumer stop on a partial or final event, or a drained run, into
 // INVOCATION_ERROR "context deadline exceeded".
 func TestRunner_WorkflowNodeTimeoutAfterBeforeAgentShortcut_ConsumerStopCompletes(t *testing.T) {
+	runInParallel(t)
 	for _, callerMode := range []string{"stop_on_partial", "stop_on_final", "drain"} {
 		t.Run(callerMode, func(t *testing.T) {
 			p, requests, _ := setupTestPlugin(t)
@@ -9654,6 +9774,7 @@ func TestRunner_WorkflowNodeTimeoutAfterBeforeAgentShortcut_ConsumerStopComplete
 // popUnclosedAgentSpans find the failing node's open call even while
 // lastEventPartial is still set without a siblingCause.
 func TestRunner_WorkflowNodeFailureWhileSiblingStreams_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 
 	makeStreamer := func(t *testing.T, ready <-chan struct{}) agent.Agent {
@@ -9822,6 +9943,7 @@ func TestRunner_WorkflowNodeFailureWhileSiblingStreams_EmitsInvocationError(t *t
 // AGENT_ERROR rows carry the failing branch's error text across both draining
 // and stopping consumers.
 func TestRunner_ParallelThreeBranchesAndStreamingBranchFailure_RecordsCallerError(t *testing.T) {
+	runInParallel(t)
 	for _, stopAtError := range []bool{false, true} {
 		mode := "drain"
 		if stopAtError {
@@ -9943,6 +10065,7 @@ func TestRunner_ParallelThreeBranchesAndStreamingBranchFailure_RecordsCallerErro
 // INVOCATION_ERROR with the branch's error and zero AGENT_ERROR rows under
 // both non-LLM and LLM roots.
 func TestRunner_ParallelRespondedBranchFailsWhileSiblingStreams_ConsistentAcrossDrainAndStop(t *testing.T) {
+	runInParallel(t)
 	for _, rootKind := range []string{"parallel_root", "llm_root_transfer"} {
 		t.Run(rootKind, func(t *testing.T) {
 			for _, stopAtError := range []bool{false, true} {
@@ -10081,6 +10204,7 @@ func TestRunner_ParallelRespondedBranchFailsWhileSiblingStreams_ConsistentAcross
 // activation, popUnclosedAgentSpans preserves that cause as the terminal error
 // without fabricating AGENT_ERROR attribution.
 func TestTraceManager_RespondedBranchFailureCauseFallback(t *testing.T) {
+	runInParallel(t)
 	t.Run("custom_cause", func(t *testing.T) {
 		ctx := context.Background()
 		errBranch := errors.New("branch exploded")
@@ -10135,6 +10259,7 @@ func TestTraceManager_RespondedBranchFailureCauseFallback(t *testing.T) {
 // enclosing agent, a subsequent final response emitted by that enclosing agent
 // clears its retiredCause so the invocation ends cleanly.
 func TestTraceManager_CompleteResponseClearsRetiredCause(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	errBranch := errors.New("branch exploded")
 	branchCtx, cancelBranch := context.WithCancelCause(ctx)
@@ -10175,6 +10300,7 @@ func TestTraceManager_CompleteResponseClearsRetiredCause(t *testing.T) {
 // child failed silently retires the sequential span so completeResponse's
 // open-span walk leaves the nested child open as AGENT_ERROR + INVOCATION_ERROR.
 func TestRunner_CustomAgentHandlesParallelFailure_RecoveryModes(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name            string
 		failerResponds  bool
@@ -10529,6 +10655,7 @@ func (m *funcStreamLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest
 // so attempt 1 is purged (emitting only AGENT_ERROR(par) with the branch's
 // error) and attempt 2 completes the invocation cleanly.
 func TestRunner_WorkflowRetryParallelRespondedBranches_PurgesFailedAttemptAndCompletes(t *testing.T) {
+	runInParallel(t)
 	for _, llmStreamer := range []bool{false, true} {
 		name := "custom_streamer"
 		if llmStreamer {
@@ -10726,6 +10853,7 @@ func TestRunner_WorkflowRetryParallelRespondedBranches_PurgesFailedAttemptAndCom
 // event, so neither says what the caller did. The sibling that never
 // responded fails the invocation only when the caller read on.
 func TestTraceManager_PopAgentSpanClearsPartialOnlyForDirectWorkflowRoot(t *testing.T) {
+	runInParallel(t)
 	const invID = "inv-root-end"
 	ctx := context.Background()
 	llmRoot, err := llmagent.New(llmagent.Config{Name: "root"})
@@ -10772,6 +10900,7 @@ func TestTraceManager_PopAgentSpanClearsPartialOnlyForDirectWorkflowRoot(t *test
 // that a sequential agent starts next and that fails is reported, because the
 // event is not a response of the sequential agent either.
 func TestRunner_ProgressEventWithoutContent(t *testing.T) {
+	runInParallel(t)
 	newPinger := func(t *testing.T, name string) agent.Agent {
 		t.Helper()
 		a, err := agent.New(agent.Config{
@@ -10858,6 +10987,7 @@ func TestRunner_ProgressEventWithoutContent(t *testing.T) {
 // partial, such as one that carries only actions, shows that the caller read
 // on.
 func TestTraceManager_PartialEventWithoutContentIsNoResponse(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name        string
 		withContent bool
@@ -10889,6 +11019,7 @@ func TestTraceManager_PartialEventWithoutContentIsNoResponse(t *testing.T) {
 // event that is not partial followed, and so does the author of an earlier
 // partial event that such a session event followed.
 func TestTraceManager_StopOnProgressEventOfParallelBranch(t *testing.T) {
+	runInParallel(t)
 	const invID = "inv-progress"
 	par := identity{invocationID: invID, agentName: "par"}
 	author := identity{invocationID: invID, agentName: "author", branch: "par.author"}
@@ -10946,6 +11077,7 @@ func TestTraceManager_StopOnProgressEventOfParallelBranch(t *testing.T) {
 // content does not count as a response of its author: once a session event
 // that is not partial followed, the author that never responded fails.
 func TestOnEvent_ProgressEventIsNoResponse(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 	errs.add(p.BeforeAgentCallback()(mCtx))
@@ -10975,6 +11107,7 @@ func TestOnEvent_ProgressEventIsNoResponse(t *testing.T) {
 // open, even when the last call to end succeeded, and that the invocation
 // still completes.
 func TestAfterTool_FailedToolRunEndsWithAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	with := func(agentName, branch, path, callID string) *mockInvocationContext {
 		c := *mCtx
@@ -11011,6 +11144,7 @@ func TestAfterTool_FailedToolRunEndsWithAgentError(t *testing.T) {
 // earlier plugin's AfterToolCallback answers it, and that the invocation still
 // completes.
 func TestOnToolError_FailedToolRunEndsWithAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	with := func(agentName, branch, path, callID string) *mockInvocationContext {
 		c := *mCtx
@@ -11045,6 +11179,7 @@ func TestOnToolError_FailedToolRunEndsWithAgentError(t *testing.T) {
 // rather than at a failure: alone, and as a sub-agent of a parallel agent
 // whose other sub-agent is still running when the caller stops.
 func TestRunner_StopReadingOnPartialEventWithoutContent_IsNotAnError(t *testing.T) {
+	runInParallel(t)
 	newPinger := func(t *testing.T) agent.Agent {
 		t.Helper()
 		a, err := agent.New(agent.Config{
@@ -11132,6 +11267,7 @@ func TestRunner_StopReadingOnPartialEventWithoutContent_IsNotAnError(t *testing.
 // has no tool call left open: until then, an activation may still be running
 // for another call.
 func TestTraceManager_ToolRunsPurgedOnceNoToolCallIsOpen(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-tool-runs"
@@ -11176,6 +11312,7 @@ func TestTraceManager_ToolRunsPurgedOnceNoToolCallIsOpen(t *testing.T) {
 // RetryConfig runs again did. A healthy earlier activation, such as the first
 // planner of a transfer-back chain within the node, is still running.
 func TestTraceManager_NodeReentryPurgesOnlyFailedAttempt(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	flaky := identity{invocationID: "inv-retry", agentName: "flaky", path: "wf@1/flaky@1"}
 	tests := []struct {
@@ -11270,6 +11407,7 @@ func TestTraceManager_NodeReentryPurgesOnlyFailedAttempt(t *testing.T) {
 // work of a concurrent sibling of the author, such as another sub-agent of a
 // parallel agent, does not.
 func TestTraceManager_LastPartialClearedByWorkUnderItsAuthor(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-partial"
 	par := identity{invocationID: invID, agentName: "par"}
@@ -11312,6 +11450,7 @@ func TestTraceManager_LastPartialClearedByWorkUnderItsAuthor(t *testing.T) {
 // invocation when its context is live, and when a session event followed the
 // partial one.
 func TestTraceManager_CanceledWorkAfterPartialIsNotAFailure(t *testing.T) {
+	runInParallel(t)
 	const invID = "inv-canceled-work"
 	par := identity{invocationID: invID, agentName: "par"}
 	author := identity{invocationID: invID, agentName: "author", branch: "par.author"}
@@ -11386,6 +11525,7 @@ func TestTraceManager_CanceledWorkAfterPartialIsNotAFailure(t *testing.T) {
 // target on the agent's own node path, stays open with its error when a tool
 // call of the agent ends.
 func TestTraceManager_ToolEndKeepsFailedActivationOutsideToolRun(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	coord := identity{invocationID: "inv-peer", agentName: "coordinator"}
@@ -11416,6 +11556,7 @@ func TestTraceManager_ToolEndKeepsFailedActivationOutsideToolRun(t *testing.T) {
 // request context of its own or an agent cancels the context of its
 // sub-agent.
 func TestTraceManager_CanceledModelCallAfterStopMidStream(t *testing.T) {
+	runInParallel(t)
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
@@ -11475,6 +11616,7 @@ func TestTraceManager_CanceledModelCallAfterStopMidStream(t *testing.T) {
 // stopPoint literal in pushAgentSpan includes id.path != parent.path for
 // this case; deleting that clause makes this test fail.
 func TestTraceManager_StopPointNodePathDiffersFromParent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-stoppoint-path"
 	// agent runs right under the invocation with no branch of its own.
@@ -11515,6 +11657,7 @@ func TestTraceManager_StopPointNodePathDiffersFromParent(t *testing.T) {
 // context.Canceled with the custom cause rather than treating the error as
 // collateral sibling-failure teardown.
 func TestTraceManager_RecordErrorWrapsNonCollateralCustomCancelCause(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-noncollateral-cause"
 	root := identity{invocationID: invID, agentName: "root", branch: "", path: ""}
@@ -11563,6 +11706,7 @@ func TestTraceManager_RecordErrorWrapsNonCollateralCustomCancelCause(t *testing.
 // TestTraceManager_PushAgentSpanReturnsOnlyOwnNodePurgedAttempt. Like the
 // former, it needs node completion events.
 func TestRunner_ConcurrentWorkflowRetries_OrdersPurgedAgentErrorBeforeNextStarting(t *testing.T) {
+	runInParallel(t)
 	requireADKNodeCompletionEvents(t)
 	for _, recorded := range []bool{true, false} {
 		name := "silent failure"
@@ -12131,6 +12275,7 @@ func TestRunner_ParallelWorkerPipelineWithCachedStep_EmitsInvocationCompleted(t 
 // sequential agent and directly with or without an event from the custom
 // parent).
 func TestRunner_CustomParentOverSequenceWithCachedStep_EmitsInvocationCompleted(t *testing.T) {
+	runInParallel(t)
 	t.Run("custom_parent_over_sequence_with_own_answer", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		seq, err := sequentialagent.New(sequentialagent.Config{
@@ -12242,6 +12387,7 @@ func TestRunner_CustomParentOverSequenceWithCachedStep_EmitsInvocationCompleted(
 // the workflow agent runs again and its node starts on the same path, whether
 // or not the caller read the first run of the workflow agent to its end.
 func TestRunner_WorkflowAgentRunAgainAfterForwardedNodeError_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// stopAtError makes guard stop reading the first run of wf at the
@@ -12316,6 +12462,7 @@ func TestRunner_WorkflowAgentRunAgainAfterForwardedNodeError_EmitsInvocationErro
 // node A's purged attempt and re-entering node B next returns only node B's
 // purged attempt.
 func TestTraceManager_PushAgentSpanReturnsOnlyOwnNodePurgedAttempt(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	ctx := t.Context()
 	wfID := identity{invocationID: "inv-purge-own", agentName: "wf"}
@@ -12361,6 +12508,7 @@ func TestTraceManager_PushAgentSpanReturnsOnlyOwnNodePurgedAttempt(t *testing.T)
 // own final event clears retiredCause still ends with the sibling branch's
 // error.
 func TestTraceManager_CompleteResponsePreservesCollateralError(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	ctx := t.Context()
 	guardID := identity{invocationID: "inv-m2", agentName: "guard"}
@@ -12396,6 +12544,7 @@ func TestTraceManager_CompleteResponsePreservesCollateralError(t *testing.T) {
 // branch, purging the composite node attributes that retiredCause to both the
 // responded child and the composite node rather than omitting the child.
 func TestTraceManager_FailuresLockedUsesRetiredCauseOnRespondedSpan(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	ctx := t.Context()
 	wfID := identity{invocationID: "inv-m3", agentName: "wf"}
@@ -12431,6 +12580,7 @@ func TestTraceManager_FailuresLockedUsesRetiredCauseOnRespondedSpan(t *testing.T
 // responded child branch has a collateral context.Canceled error recorded, the
 // child branch is retired with its parent rather than kept open on agentStack.
 func TestTraceManager_RetireAgentSkipsCollateralError(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	outerCtx, cancelOuter := context.WithCancel(t.Context())
 	defer cancelOuter()
@@ -12623,6 +12773,7 @@ func writeWSText(w *bufio.Writer, msg string) error {
 // silently while the tool runs, so the run is reported with AGENT_ERROR for
 // the sub-agent and INVOCATION_ERROR.
 func TestTraceManager_LiveToolCachedChildStopRace(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	answered := make(chan struct{})
 	release := make(chan struct{})
@@ -12760,6 +12911,7 @@ func TestTraceManager_LiveToolCachedChildStopRace(t *testing.T) {
 // completion synchronization point so popUnclosedAgentSpans sees responded()
 // via contextEnded (while an unanswered sub-agent still reports an error).
 func TestTraceManager_CachedChildStopBeforeParentRetires(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name      string
 		newCached func(t *testing.T) agent.Agent
@@ -12913,6 +13065,7 @@ func TestTraceManager_CachedChildStopBeforeParentRetires(t *testing.T) {
 // else when the tool call returns, and a caller that stops reading after that
 // and before the parallel agent ends gets INVOCATION_COMPLETED.
 func TestTraceManager_CachedChildRetiredWhileOtherBranchToolRuns(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	toolStarted := make(chan struct{})
 	parentDone := make(chan struct{})
@@ -13006,6 +13159,7 @@ func TestTraceManager_CachedChildRetiredWhileOtherBranchToolRuns(t *testing.T) {
 // running on its goroutine), and is settled once its parent ends, reporting
 // the run as completed.
 func TestTraceManager_CustomChildEndsOwnInvocationAfterEvent(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	gate, err := agent.New(agent.Config{
 		Name: "gate",
@@ -13118,6 +13272,7 @@ func newBranchA(t *testing.T, childStarted, done chan struct{}, withEvent bool) 
 // ended InvocationContext (go test -race reports the data race otherwise): it
 // is read once the tool call returns, and the run completes.
 func TestTraceManager_CrossBranchToolRunsCachedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	childStarted := make(chan struct{})
 	branchADone := make(chan struct{})
@@ -13176,6 +13331,7 @@ func TestTraceManager_CrossBranchToolRunsCachedChild(t *testing.T) {
 // must not read it (go test -race reports the data race otherwise): it is read
 // once branch_b ends, and the run completes.
 func TestTraceManager_CrossBranchDynamicNodeRunsCachedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	childStarted := make(chan struct{})
 	branchADone := make(chan struct{})
@@ -13270,6 +13426,7 @@ func setAgentSpan(t *testing.T, tm *traceManager, invocationID, name string, set
 // sub-agent's, and a direct parent that declared the sub-agent in SubAgents do
 // not hold it back.
 func TestTraceManager_SettleWaitsForLauncher(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-launcher"
 	par := identity{invocationID: invID, agentName: "par"}
@@ -13436,6 +13593,7 @@ func TestTraceManager_SettleWaitsForLauncher(t *testing.T) {
 // unblocks the parallelagent branch while an earlier OnEventCallback holds the
 // event.
 func TestTraceManager_ContentlessEventCancelAndSiblingFailureEndInvocationRace(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name          string
 		cancelRun     bool
@@ -13560,6 +13718,7 @@ func TestTraceManager_ContentlessEventCancelAndSiblingFailureEndInvocationRace(t
 // EndInvocation() write when a sibling sub-agent starts or ends concurrently,
 // and still settles and retires the cached child once the parent finishes.
 func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *testing.T) {
+	runInParallel(t)
 	for _, declareSubAgents := range []bool{true, false} {
 		subAgentsLabel := "without SubAgents declared"
 		if declareSubAgents {
@@ -13702,6 +13861,7 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 // if it failed without a response. Its sub-agent is not known to have failed
 // before the other tool call ends, so it gets no row.
 func TestTraceManager_ToolRunEndsWhileOtherToolCallIsOpen(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-tool-run-other-call"
 	coord := identity{invocationID: invID, agentName: "coordinator"}
@@ -13752,6 +13912,7 @@ func TestTraceManager_ToolRunEndsWhileOtherToolCallIsOpen(t *testing.T) {
 // launch it. The parent still settles and retires the cached child once it
 // finishes.
 func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *testing.T) {
+	runInParallel(t)
 	for _, declareSubAgents := range []bool{false, true} {
 		label := "without SubAgents declared"
 		if declareSubAgents {
@@ -13880,6 +14041,7 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 // invocation completes, and the AGENT_COMPLETED row of the sub-agent is on the
 // answering run's span.
 func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
+	runInParallel(t)
 	for _, asNode := range []bool{false, true} {
 		topology := "custom parent as root"
 		if asNode {
@@ -14061,6 +14223,7 @@ func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
 // runner yields no error, and the invocation completes with the same
 // AGENT_ERROR rows as when the guard recovers from Run.
 func TestFailedParallelAgent_RecoveredByRootAfterAgentCallbackReportsCompleted(t *testing.T) {
+	runInParallel(t)
 	for _, underRoot := range []bool{false, true} {
 		topology := "guard as root"
 		if underRoot {
@@ -14216,6 +14379,7 @@ func TestFailedParallelAgent_RecoveredByRootAfterAgentCallbackReportsCompleted(t
 // for the teardown of a caller that stopped on the partial event: the root
 // gets an AGENT_ERROR row and the invocation ends with INVOCATION_ERROR.
 func TestFailedAgent_RootFailsAfterContentlessPartialAndCompletedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	child, err := llmagent.New(llmagent.Config{
 		Name: "child",
@@ -14291,6 +14455,7 @@ func TestFailedAgent_RootFailsAfterContentlessPartialAndCompletedChild(t *testin
 // Ended() state until the parent finishes, both with and without SubAgents
 // declared on the parent.
 func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
+	runInParallel(t)
 	for _, declareSubAgents := range []bool{false, true} {
 		label := "without SubAgents declared"
 		if declareSubAgents {
@@ -14413,6 +14578,7 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 // does not read the short-circuited sub-agent's Ended() state while the parent
 // is still running it.
 func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	siblingAnswered := make(chan struct{})
 	cachedEntering := make(chan struct{})
@@ -14525,6 +14691,7 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 // runs on the failing peer too) does not mark the peer activation as responded
 // when the peer fails without responding.
 func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerResponse(t *testing.T) {
+	runInParallel(t)
 	testCases := []struct {
 		name               string
 		bufferUntilRetired bool
@@ -14688,6 +14855,7 @@ func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerRespons
 // INVOCATION_COMPLETED rather than reporting false AGENT_ERROR or
 // INVOCATION_ERROR rows.
 func TestConcurrencyRace_ConcurrentSilentCustomAgentRuns_EmitsInvocationCompleted(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	var entered atomic.Int32
 	bothOpen := make(chan struct{})
@@ -14784,6 +14952,7 @@ func (m *concurrentBarrierLLM) GenerateContent(ctx context.Context, req *model.L
 // unrecovered error, whether the parent drains the failing activation or stops
 // iterating it at the error.
 func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSuccess(t *testing.T) {
+	runInParallel(t)
 	modes := []struct {
 		name             string
 		breakOnErr       bool
@@ -15055,6 +15224,7 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 // the swallowable retiredCause on the ancestor root span so the invocation
 // completes with OK.
 func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclaredSibling(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	guardStarted := make(chan struct{})
 	siblingOpen := make(chan struct{})
@@ -15255,6 +15425,7 @@ func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclar
 // AfterAgentCallback returning trailer content: the invocation still ends with
 // INVOCATION_ERROR.
 func TestRunner_WorkflowAgentWithAfterAgentCallbackDrainedAfterBranchError_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	for _, wrapInSeq := range []bool{false, true} {
 		name := "parallel root with AfterAgentCallback"
 		if wrapInSeq {
@@ -15367,6 +15538,7 @@ func TestRunner_WorkflowAgentWithAfterAgentCallbackDrainedAfterBranchError_Emits
 // consumer-stop cancellation under the root workflow settles cleanly with
 // INVOCATION_COMPLETED rather than INVOCATION_ERROR.
 func TestRunner_WorkflowRootContentlessPartialStoppedAfterSiblingNodeStarts_EmitsCompleted(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	launcherReady := make(chan struct{})
 	partialDelivered := make(chan struct{})
@@ -15481,6 +15653,7 @@ func TestRunner_WorkflowRootContentlessPartialStoppedAfterSiblingNodeStarts_Emit
 // still open does not bypass launcherOpenLocked or read the child's Ended()
 // state concurrently with ADK's EndInvocation().
 func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	siblingReady := make(chan struct{})
 	cachedAnswering := make(chan struct{})
@@ -15621,6 +15794,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 // cached child on a goroutine, joins it (waits for it to finish), but does not
 // forward its event. All variants must end with INVOCATION_COMPLETED.
 func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t *testing.T) {
+	runInParallel(t)
 	for _, declareSubAgents := range []bool{true, false} {
 		name := "undeclared_subagent"
 		if declareSubAgents {
@@ -15871,6 +16045,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 // WorkflowAgent RetryConfig retry or read Ended() concurrently with
 // EndInvocation().
 func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T) {
+	runInParallel(t)
 	for _, cachedFirst := range []bool{true, false} {
 		order := "answering_run_starts_first"
 		if cachedFirst {
@@ -16050,6 +16225,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 // activation == nil) and read the first helper's ended state while agent.Run
 // writes it.
 func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocationRoot(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	secondEntered := make(chan struct{})
@@ -16197,6 +16373,7 @@ func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocat
 // absorption of the trailer (retiredPeerCount) protects. Both single-turn and
 // after a prior tool turn variants are covered.
 func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *testing.T) {
+	runInParallel(t)
 	for _, priorToolTurn := range []bool{false, true} {
 		name := "single_turn"
 		if priorToolTurn {
@@ -16417,6 +16594,7 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 // state there is reported by the race detector, and purging it writes a bogus
 // AGENT_ERROR row.
 func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	secondEntered := make(chan struct{})
@@ -16507,6 +16685,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.
 // attempt, so the second one must not take the first one for an earlier
 // attempt and read or purge it.
 func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	secondEntered := make(chan struct{})
@@ -16601,6 +16780,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *test
 // workflow agent's AfterAgentCallback. Reading the child's ended state there
 // is reported by the race detector.
 func TestConcurrencyRace_FunctionNodeReturnsBeforeUnjoinedCachedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	rootDone := make(chan struct{})
@@ -16766,6 +16946,7 @@ func runUnjoinedLateChild(t *testing.T, build func(sub agent.Agent, after agent.
 // that a ParallelAgent counts as waiting only for the branch goroutines that
 // it started itself: see runUnjoinedLateChild.
 func TestConcurrencyRace_ParallelAgentUnjoinedLateChild(t *testing.T) {
+	runInParallel(t)
 	runUnjoinedLateChild(t, func(sub agent.Agent, after agent.AfterAgentCallback) (agent.Agent, error) {
 		return parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{
 			Name:                "fanout",
@@ -16779,6 +16960,7 @@ func TestConcurrencyRace_ParallelAgentUnjoinedLateChild(t *testing.T) {
 // that a SequentialAgent counts as waiting only for the sub-agents that ran
 // on its own goroutine: see runUnjoinedLateChild.
 func TestConcurrencyRace_SequentialAgentUnjoinedLateChild(t *testing.T) {
+	runInParallel(t)
 	runUnjoinedLateChild(t, func(sub agent.Agent, after agent.AfterAgentCallback) (agent.Agent, error) {
 		return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
 			Name:                "pipeline",
@@ -16797,6 +16979,7 @@ func TestConcurrencyRace_SequentialAgentUnjoinedLateChild(t *testing.T) {
 // first one for an earlier attempt whose run returned and read its ended
 // state or purge it.
 func TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	firstStarted := make(chan struct{})
 	secondEntered := make(chan struct{})
@@ -16897,6 +17080,7 @@ func TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning(t *testing.T) {
 // TestParseGoroutineTrace covers the header and "created by" lines that
 // currentGoroutine reads from runtime.Stack.
 func TestParseGoroutineTrace(t *testing.T) {
+	runInParallel(t)
 	const frames = "main.f()\n\t/src/main.go:10 +0x1d\n"
 	for _, tc := range []struct {
 		name       string
@@ -16962,6 +17146,7 @@ func TestParseGoroutineTrace(t *testing.T) {
 // scheduler writes when a node run ends without an output, and the workflow
 // agent that wrote it, from the custom metadata keys that ADK uses.
 func TestNodeCompletion(t *testing.T) {
+	runInParallel(t)
 	event := func(path string, partial bool, meta map[string]any) *session.Event {
 		ev := &session.Event{}
 		ev.CustomMetadata = meta
@@ -17041,6 +17226,7 @@ func TestNodeCompletion(t *testing.T) {
 // activation for that node. The spans are built directly, with the goroutine
 // origins that pushAgentSpan reads from runtime.Stack in a real run.
 func TestTraceManager_RecordNodeCompletionAttributesOnlyUnambiguousRuns(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const nodePath = "wf@1/x@1"
 	key := nodeRunKey{path: nodePath}
@@ -17116,6 +17302,7 @@ func TestTraceManager_RecordNodeCompletionAttributesOnlyUnambiguousRuns(t *testi
 // runtime.Stack in a real run; anotherGoroutine stands for a goroutine other
 // than the test's.
 func TestTraceManager_RunsOnThisGoroutineAreOverOnlyAfterTheirFrame(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	newInvocation := func(t *testing.T) *invocationTrace {
 		t.Helper()
@@ -17202,6 +17389,7 @@ func TestTraceManager_RunsOnThisGoroutineAreOverOnlyAfterTheirFrame(t *testing.T
 // test starts: the origin names the function that ran the go statement and
 // the goroutine that ran it.
 func TestCurrentGoroutine(t *testing.T) {
+	runInParallel(t)
 	parentID, _, _ := currentGoroutine()
 	if parentID == 0 {
 		t.Fatal("currentGoroutine() returned no ID")
@@ -17229,6 +17417,7 @@ func TestCurrentGoroutine(t *testing.T) {
 // node of a workflow agent and of the branches of a ParallelAgent in the ADK
 // release under test, on the goroutines on which those agents started.
 func TestGoroutineCreatorsMatchADK(t *testing.T) {
+	runInParallel(t)
 	type started struct {
 		id     uint64
 		origin goroutineOrigin
@@ -17300,6 +17489,7 @@ func TestGoroutineCreatorsMatchADK(t *testing.T) {
 // the function that the go statement started up to the BeforeAgentCallback of
 // the node's agent, shows an attempt.
 func TestAttemptSiteOfTrace(t *testing.T) {
+	runInParallel(t)
 	var (
 		callback  = []string{"example.com/plugin.(*recorder).beforeAgent", adkPkgPrefix + "plugin.(*PluginManager).RunBeforeAgentCallback", agentPkgPath + ".runBeforeAgentCallbacks"}
 		agentRun  = agentPkgPath + ".(*agent).Run.func1"
@@ -17384,6 +17574,7 @@ func TestAttemptSiteOfTrace(t *testing.T) {
 // the events of another run or through iter.Pull2, and one that the function
 // node of a ParallelWorker item runs are not.
 func TestAttemptSitesMatchADK(t *testing.T) {
+	runInParallel(t)
 	var mu sync.Mutex
 	sites := map[string][]attemptSite{}
 	record := []agent.BeforeAgentCallback{func(ctx agent.Context) (*genai.Content, error) {
@@ -17584,6 +17775,7 @@ func functionNodeEdges(t *testing.T, fn workflow.Node, underWorker bool) []workf
 // activation must not take the first for an earlier attempt whose run is
 // over, so no AGENT_ERROR row is written and the invocation completes.
 func TestRunner_FunctionNodeNestedChildRuns_EmitNoAgentError(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name        string
 		underWorker bool
@@ -17648,6 +17840,7 @@ func TestRunner_FunctionNodeNestedChildRuns_EmitNoAgentError(t *testing.T) {
 // run still goes on. The first run answered, so nothing fails, and its
 // InvocationContext must not be read before its run returns.
 func TestConcurrencyRace_FunctionNodeResumesChildAfterNestedRun(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	nestedDone := make(chan struct{})
 	otherEnded := make(chan struct{})
@@ -17746,6 +17939,7 @@ func TestConcurrencyRace_FunctionNodeResumesChildAfterNestedRun(t *testing.T) {
 // node: the child's AGENT_ERROR row stays and the invocation ends with
 // INVOCATION_ERROR, as it does when custom recovery handles a failure.
 func TestRunner_FunctionNodeRerunsChildWithoutRetryConfig_KeepsFailure(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name, node  string
 		underWorker bool
@@ -17813,6 +18007,7 @@ func TestRunner_FunctionNodeRerunsChildWithoutRetryConfig_KeepsFailure(t *testin
 // the node, but does not show that its run is over, so the second activation
 // must not read its InvocationContext.
 func TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	reported := make(chan struct{})
 	secondAnswered := make(chan struct{})
@@ -17920,6 +18115,7 @@ func TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun(t *testing.T) {
 // this plugin's, so nothing that it does after EndInvocation orders that
 // write before the end of the tool call.
 func TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	toolDone := make(chan struct{})
@@ -18032,6 +18228,7 @@ func TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild(t *testing.T) 
 // AfterToolCallback, which runs after this plugin's, so nothing that it does
 // after EndInvocation orders that write before the end of the tool call.
 func TestConcurrencyRace_FunctionToolReturnsBeforeUnjoinedCachedChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	entered := make(chan struct{})
 	toolDone := make(chan struct{})
@@ -18124,6 +18321,7 @@ func TestConcurrencyRace_FunctionToolReturnsBeforeUnjoinedCachedChild(t *testing
 // state is not read while agent.Run may still end its InvocationContext. The
 // sub-agent is a declared sub-agent of the custom agent, or not declared.
 func TestRunner_ToolRunCustomParentWithUnjoinedCachedChild_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	for _, declared := range []bool{true, false} {
 		name := "undeclared_child"
 		if declared {
@@ -18238,6 +18436,7 @@ func TestRunner_ToolRunCustomParentWithUnjoinedCachedChild_EmitsNoAgentError(t *
 // concurrentPeer, and completeResponse would clear its error if the trailer
 // reached it.
 func TestTraceManager_StaleRetiredPeerTrailerDoesNotClearLaterActivationError(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-stale-trailer"
 	parent := identity{invocationID: invID, agentName: "parent"}
@@ -18278,6 +18477,7 @@ func TestTraceManager_StaleRetiredPeerTrailerDoesNotClearLaterActivationError(t 
 // markToolRunsDoneLocked), so the end of the last call, on another goroutine,
 // still knows that the other agent never responded.
 func TestRunner_ParallelToolRunsOfSilentlyFailingAgents_EmitAgentErrors(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	newRunTool := func(name string) tool.Tool {
 		t.Helper()
@@ -18348,6 +18548,7 @@ func TestRunner_ParallelToolRunsOfSilentlyFailingAgents_EmitAgentErrors(t *testi
 // parallel agent (see recordNodeCompletion and spanRecord.joins), which ADK
 // releases without node completion events do not.
 func TestRunner_RetriedParallelNodeWithSilentBranchFailure_EmitsBranchAgentError(t *testing.T) {
+	runInParallel(t)
 	requireADKNodeCompletionEvents(t)
 	p, requests, _ := setupTestPlugin(t)
 	var attempts atomic.Int32
@@ -18454,6 +18655,7 @@ func agentRowsOfType(rows []map[string]any, eventType, agent string) []map[strin
 // AGENT_COMPLETED rows close the spans of its LLM_REQUEST and AGENT_STARTING
 // rows with their latencies, and no AGENT_ERROR row is written.
 func TestRunner_ToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	gate := &blockingLLM{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: gate})
@@ -18544,6 +18746,7 @@ func TestRunner_ToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.
 // that nothing that its goroutine does after it returns can order its write
 // before OnEventCallback runs.
 func TestConcurrencyRace_ForwardedFinishTaskEventDoesNotEndRunningChild(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	forwarded := make(chan struct{})
 	child, err := agent.New(agent.Config{
@@ -18652,6 +18855,7 @@ func (m *finishTaskLLM) GenerateContent(context.Context, *model.LLMRequest, bool
 // InvocationContext of the second run, whose BeforeAgentCallback is answering
 // with cached content, and so ending its InvocationContext, at that time.
 func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	modelCalled := make(chan struct{})
 	finishCalled := make(chan struct{})
@@ -18765,6 +18969,7 @@ func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
 // second run that ended first would let the workflow return before the first
 // run's answer was handled.
 func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	reported := make(chan struct{})
 	secondStarted := make(chan struct{})
@@ -18872,6 +19077,7 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *te
 // completed.late across endInvocation, so completion or error callbacks firing
 // after AfterRun reuse the original span_id, parent_span_id, and latency_ms.
 func TestTraceManager_ToolSpanAcrossAfterRun(t *testing.T) {
+	runInParallel(t)
 	t.Run("direct pushToolSpan across endInvocation", func(t *testing.T) {
 		ctx := context.Background()
 		tm := newTraceManager()
@@ -19158,6 +19364,7 @@ func TestTraceManager_ToolSpanAcrossAfterRun(t *testing.T) {
 // callbacks, and the completed run no longer counts as one with open late
 // spans, so that the idle runs that complete after it prune it first.
 func TestLateShortcutAgentRetained(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	tm.maxTracked = 1 // Completed runs are kept up to 64 (see rememberCompletedLocked).
@@ -19208,6 +19415,7 @@ func TestLateShortcutAgentRetained(t *testing.T) {
 // {"result": "Task completed."} does not trigger popTaskAgentSpan in onEvent
 // or emit a premature duplicate AGENT_COMPLETED row.
 func TestRunner_NonTaskModeFinishTaskTool(t *testing.T) {
+	runInParallel(t)
 	type emptyArgs struct{}
 	newCustomFinishTaskTool := func(t *testing.T) tool.Tool {
 		t.Helper()
@@ -19343,6 +19551,7 @@ func TestRunner_NonTaskModeFinishTaskTool(t *testing.T) {
 // activation that the response settles: the descendant's call may still be
 // running, and its AfterModelCallback ends it with its span and latency.
 func TestTraceManager_CompleteResponseEndsOnlyItsAuthorsModelCalls(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 
@@ -19391,6 +19600,7 @@ func TestTraceManager_CompleteResponseEndsOnlyItsAuthorsModelCalls(t *testing.T)
 // event may carry a node path that the context of the model callbacks lacks,
 // as for the agent that runner.Run runs.
 func TestTraceManager_StoppedStreamDoesNotPinCompletedRun(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name      string
@@ -19438,6 +19648,7 @@ func TestTraceManager_StoppedStreamDoesNotPinCompletedRun(t *testing.T) {
 // another agent still moves to the late state, so that a late
 // AfterModelCallback ends the call's own span.
 func TestTraceManager_PartialEventStreamsOnlyItsAuthorsCall(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	root := identity{invocationID: "two-calls", agentName: "root"}
@@ -19477,6 +19688,7 @@ func TestTraceManager_PartialEventStreamsOnlyItsAuthorsCall(t *testing.T) {
 // completions (up to half of capacity) and a run with a pending span
 // reservation is kept over runs waiting for late calls.
 func TestTraceManager_CompletedRunsWithOpenLateCallsStayBounded(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	// endWithOpenTool runs id until its tool call starts and then ends it.
 	endWithOpenTool := func(tm *traceManager, id identity) rowSpan {
@@ -19624,6 +19836,7 @@ func newTraceOnlyPlugin(t *testing.T, tm *traceManager) *baseplugin.Plugin {
 // AfterRunCallback runs, leave no late state behind, so that the completed
 // runs stay within the trace manager's capacity.
 func TestRunner_StoppedStreamsKeepCompletedRunsBounded(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	tm.maxTracked = 1
 	limit := max(tm.maxTracked, 64)
@@ -19739,6 +19952,7 @@ func lateOpenCalls(t *testing.T, tm *traceManager, id identity) (open int, hasOp
 // of the late state, where a late AfterModelCallback may end the call at the
 // same time.
 func TestTraceManager_CallbacksAcrossEndOfRun(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	// start runs id with an agent span open.
 	start := func(tm *traceManager, id identity) {
@@ -19975,6 +20189,7 @@ func TestTraceManager_CallbacksAcrossEndOfRun(t *testing.T) {
 // late state, which callbacks after AfterRun read under the late state's own
 // lock.
 func TestTraceManager_StreamedEventRacingEndOfRunSharesNoCall(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	for i := range 200 {
@@ -20019,6 +20234,7 @@ func TestTraceManager_StreamedEventRacingEndOfRunSharesNoCall(t *testing.T) {
 // or wait in the completed entry for a callback after AfterRun, and for the
 // span that popToolSpan makes up for a call whose start it did not see.
 func TestTraceManager_LateStateKeepsNoCallbackContext(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	// holdsNoContext fails the test for each call in calls that keeps a
 	// context of its callback, and returns the number of calls, so that a test
@@ -20143,6 +20359,7 @@ func TestTraceManager_LateStateKeepsNoCallbackContext(t *testing.T) {
 // still finds it, with the span of its TOOL_ERROR row, and gets nothing purged
 // again, so no second TOOL_ERROR or AGENT_ERROR row is written.
 func TestTraceManager_ToolEndBeforeEndOfRunReturnsPurgedActivations(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	coord := identity{invocationID: "purged-late", agentName: "coordinator"}
@@ -20180,6 +20397,7 @@ func TestTraceManager_ToolEndBeforeEndOfRunReturnsPurgedActivations(t *testing.T
 // AfterModelCallback of a plugin that recovered from the error late, or the
 // AfterToolCallback that ADK runs after OnToolErrorCallback.
 func TestTraceManager_RunsWithOnlyEndedCallsKeepNoLateState(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const runs = 2000
@@ -20226,6 +20444,7 @@ func TestTraceManager_RunsWithOnlyEndedCallsKeepNoLateState(t *testing.T) {
 // runs whose model call fails, which ADK ends without AfterModelCallback when
 // no plugin recovers from the error, keep no late state.
 func TestRunner_FailedModelRunsKeepNoLateState(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	p := newTraceOnlyPlugin(t, tm)
 	bot, err := llmagent.New(llmagent.Config{
@@ -20265,6 +20484,7 @@ func TestRunner_FailedModelRunsKeepNoLateState(t *testing.T) {
 // LLM_REQUEST and LLM_RESPONSE rows share a span, and the response carries
 // the call's latency.
 func TestRunner_ContentEventKeepsInFlightSubAgentModelCall(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	gate := &blockingLLM{entered: make(chan struct{}), release: make(chan struct{})}
 	sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: gate})
@@ -20333,6 +20553,7 @@ func TestRunner_ContentEventKeepsInFlightSubAgentModelCall(t *testing.T) {
 // that a successful finish_task function response of an author that has no
 // open agent span writes no AGENT_COMPLETED row.
 func TestOnEvent_FinishTaskOfAgentWithoutSpanWritesNoAgentCompleted(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 	errs.add(p.BeforeAgentCallback()(mCtx))
@@ -20361,6 +20582,7 @@ func TestOnEvent_FinishTaskOfAgentWithoutSpanWritesNoAgentCompleted(t *testing.T
 // completion pressure (either ordinary completions or completions leaving open
 // late calls) before lockLive re-enters lookupInvocation on the late state.
 func TestTraceManager_LiveToLatePendingReservationSurvivesCompletionPressure(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	cases := []struct {
 		name     string
@@ -20505,6 +20727,7 @@ func TestTraceManager_LiveToLatePendingReservationSurvivesCompletionPressure(t *
 // moved the taskMode check before touchAgentActivityLocked: a rejected
 // non-task finish_task must not count as a completed descendant.
 func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	const invID = "inv-task-reject"
 	parent := identity{invocationID: invID, agentName: "parent", path: ""}
@@ -20568,6 +20791,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 // finished run's invocationTrace nor the context of its root callback stays
 // reachable: both are garbage collected without any further lookup.
 func TestTraceManager_StraddlingPushDoesNotRetainInvocationTrace(t *testing.T) {
+	runInParallel(t)
 	type payload struct{ _ [64]byte }
 	type payloadKey struct{}
 	ctx := context.Background()
@@ -20618,6 +20842,7 @@ func TestTraceManager_StraddlingPushDoesNotRetainInvocationTrace(t *testing.T) {
 // started the call, hold no completed-run slot, and that an ordinary run
 // that completes after a capacity's worth of them keeps its identity.
 func TestRepro_FailedModelCallsPinCompletedCache(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	tm.maxTracked = 1
 	limit := max(tm.maxTracked, 64)
@@ -20830,6 +21055,7 @@ func checkLateLookupFindsCompletedRun(t *testing.T, tm *traceManager, invID, aut
 // ordinary run keeps its identity at its completion, and a callback after its
 // AfterRun finds it.
 func TestRunner_CallsWithoutCallbacksHoldNoCompletedRuns(t *testing.T) {
+	t.Parallel()
 	lookup, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "Looks something up"},
 		func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
 	if err != nil {
@@ -20992,6 +21218,7 @@ func TestRunner_CallsWithoutCallbacksHoldNoCompletedRuns(t *testing.T) {
 			{name: "caller stops at the first error", stopAtError: true},
 		} {
 			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				runInParallel(t)
 				var cfg agent.RunConfig
 				if tc.maxLLMCalls != 0 && !setMaxLLMCalls(&cfg, tc.maxLLMCalls) {
 					t.Skip("agent.RunConfig.MaxLLMCalls was added after ADK v2.0.0")
@@ -21040,6 +21267,7 @@ func TestRunner_CallsWithoutCallbacksHoldNoCompletedRuns(t *testing.T) {
 // AfterModelCallback ends it without starting an active invocation: neither
 // the custom agent nor the workflow agent waits for that goroutine.
 func TestRunner_UnjoinedSubAgentCallOutlivesAfterRun(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// root returns the agent that the runner runs, which calls start and
@@ -21144,6 +21372,7 @@ func TestRunner_UnjoinedSubAgentCallOutlivesAfterRun(t *testing.T) {
 }
 
 func TestRepro_ParallelWorkerGuardrailPinsNothing(t *testing.T) {
+	runInParallel(t)
 	// The items run one ModeSingleTurn agent concurrently.
 	requireADKRaceFreeSharedSingleTurnTool(t)
 	tm := newTraceManager()
@@ -21253,6 +21482,7 @@ func (m *waitLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter
 // returns before the sub-agent's model call starts. That call can still get
 // its AfterModelCallback after AfterRun, so it should move to the late state.
 func TestRepro_UnjoinedCallStartedAfterLauncherReturnedMovesToLate(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	p := newTraceOnlyPlugin(t, tm)
 	sStarted, cReturned := make(chan struct{}), make(chan struct{})
@@ -21350,6 +21580,7 @@ func TestRepro_UnjoinedCallStartedAfterLauncherReturnedMovesToLate(t *testing.T)
 // invocation; after half of the capacity's worth of ordinary runs, such runs
 // hold at most half of it.
 func TestRunner_JoinedChildStoppedAtErrorKeepsCompletedIdentities(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	tm.maxTracked = 1
 	limit := max(tm.maxTracked, 64)
@@ -21469,6 +21700,7 @@ func TestRunner_JoinedChildStoppedAtErrorKeepsCompletedIdentities(t *testing.T) 
 // activation named like the agent that the runner runs is taken for the
 // runner's own, whose run is over (see endedWithRun).
 func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	p := newTraceOnlyPlugin(t, tm)
 	helperModel := &gatedLLM{entered: make(chan struct{}), release: make(chan struct{})}
@@ -21575,6 +21807,7 @@ func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
 // of its LLM_REQUEST row with a latency, as the tool's TOOL_COMPLETED row and
 // the invocation's end row do for their starting rows.
 func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.T) {
+	runInParallel(t)
 	for _, joined := range []bool{false, true} {
 		name := "helper released after the session closed"
 		if joined {
@@ -21720,6 +21953,7 @@ func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *test
 // the runs that still wait for handed-over calls are pruned before it, and the
 // later call keeps its span and latency.
 func TestTraceManager_ClosedHandoffThenLateCallIsNotPrunedAsWaiting(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -21821,6 +22055,7 @@ func clockReadBy(name string) bool {
 // where its later callbacks find it: its AGENT_COMPLETED row closes the span of
 // its AGENT_STARTING row with a latency, and its model call is under it.
 func TestRunner_AgentStartingAcrossAfterRunStartsInLateState(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	p, takeRows := newQueuedRowsPlugin(t, tm)
 	var childGoroutine atomic.Uint64
@@ -21912,6 +22147,7 @@ func TestRunner_AgentStartingAcrossAfterRunStartsInLateState(t *testing.T) {
 // endedWithRun), so without the partial event the call would move to the late
 // state and hold the completed run's slot.
 func TestRunner_UnjoinedStoppedStreamLeavesNoLateState(t *testing.T) {
+	runInParallel(t)
 	tm := newTraceManager()
 	p := newTraceOnlyPlugin(t, tm)
 	sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: &partialThenWaitLLM{chunkText: "hello "}})
@@ -21980,6 +22216,7 @@ func TestRunner_UnjoinedStoppedStreamLeavesNoLateState(t *testing.T) {
 // AGENT_ERROR row is written. The helper's call still ends on the span that
 // started it.
 func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAgentError(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name     string
 		toolCall bool
@@ -22142,6 +22379,7 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAge
 // response names the run that wrote it, so the first response ends the span
 // of the left run and the second the span of the right run.
 func TestRunner_FinishTaskWithReusedCallIDEndsTheRunOnTheEventPath(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	task, err := llmagent.New(llmagent.Config{
 		Name:  "task",
@@ -22212,6 +22450,7 @@ func TestRunner_FinishTaskWithReusedCallIDEndsTheRunOnTheEventPath(t *testing.T)
 // ID in each run, and only when one run there saw it complete: among several,
 // the call ID does not tell which one wrote the event.
 func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
+	runInParallel(t)
 	attempts := func(kind taskAttemptKind, calls []string) []taskAttempt {
 		out := make([]taskAttempt, len(calls))
 		for i, c := range calls {
@@ -22255,6 +22494,7 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 }
 
 func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
+	runInParallel(t)
 	id := identity{agentName: "task", branch: "b", path: "left/task@1"}
 
 	t.Run("pending attempt promoted by later callback matches finishedTaskLocked", func(t *testing.T) {
@@ -22314,6 +22554,7 @@ func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
 // failure decided the purge of the attempt, and that with openCalls it always
 // does.
 func TestFailuresLocked_OpenCallFailsWithoutOpenCallsOnlyARunThatIsOver(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name       string
 		recorded   bool
@@ -22370,6 +22611,7 @@ func TestFailuresLocked_OpenCallFailsWithoutOpenCallsOnlyARunThatIsOver(t *testi
 // custom agent outside a parallel branch that writes an event and then returns
 // an error ends INVOCATION_COMPLETED.
 func TestCustomFanOutHandlesCanceledChild(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 
 	a, err := agent.New(agent.Config{
@@ -22431,6 +22673,7 @@ func TestCustomFanOutHandlesCanceledChild(t *testing.T) {
 // custom parent's WithCancelCause cause remains suppressed when a subsequent
 // sub-agent runs under the same parent.
 func TestCustomFanOutHandlesCanceledChildWithSecondSubAgent(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 
 	failer, err := agent.New(agent.Config{
@@ -22514,6 +22757,7 @@ func TestCustomFanOutHandlesCanceledChildWithSecondSubAgent(t *testing.T) {
 // preserves the failing branch's error on the ParallelAgent branch and the
 // invocation ends with EventInvocationError carrying that error.
 func TestParallelAgentBranchFailureAfterContent_EmitsInvocationError(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 
 	failer, err := agent.New(agent.Config{
@@ -22658,6 +22902,7 @@ func checkLateRecordDropped(t *testing.T, late *invocationTrace, rec *spanRecord
 // and no other: a sibling that started after it keeps its span until its own
 // AfterAgentCallback.
 func TestLateReviewChildOutlivesParent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name     string
@@ -22711,6 +22956,7 @@ func TestLateReviewChildOutlivesParent(t *testing.T) {
 // agent that made the call, which nothing has ended yet, stays open with the
 // context of its callbacks.
 func TestLateReviewToolRunFailedGrandchild(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	// checkOwnerOpen fails t unless o, the agent that made the call, is the
 	// only late activation left and keeps the context of its callback and
@@ -22803,6 +23049,7 @@ func TestLateReviewToolRunFailedGrandchild(t *testing.T) {
 // run it, and then leaves the late state, as nothing can end it anymore,
 // keeping no context of its callbacks.
 func TestLateReviewShortcutUnderInvocationSpan(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-root-shortcut"
@@ -22834,6 +23081,7 @@ func TestLateReviewShortcutUnderInvocationSpan(t *testing.T) {
 // agent above it that is still open ends and takes the cause on: failure
 // reporting reads such a cause (see failuresLocked).
 func TestLateFailureCauseKeepsActivation(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-cause"
@@ -22888,6 +23136,7 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 // context of its callback for the cancellation checks to read until the
 // sub-agent retires too (see dropRetiredLateContextsLocked).
 func TestLateCancelThroughRetiredParent(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		late bool
@@ -22953,6 +23202,7 @@ func TestLateCancelThroughRetiredParent(t *testing.T) {
 // the parent, which the activation kept reachable, then drops the context of
 // its callback too.
 func TestLateCollateralErrorRetiresActivation(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name      string
 		late      bool
@@ -23037,6 +23287,7 @@ func TestLateCollateralErrorRetiresActivation(t *testing.T) {
 // agent above it, is still open: nothing else can end the activation anymore
 // (see retireLateSettledLocked).
 func TestLateRecoveryEventRetiresSettledActivation(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-recovery"
@@ -23110,6 +23361,7 @@ type liveInvocation struct{ agent.InvocationContext }
 func (*liveInvocation) Ended() bool { return false }
 
 func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
+	runInParallel(t)
 	t.Run("popLLMSpan recovered model response early return retires settled late activation", func(t *testing.T) {
 		ctx := context.Background()
 		tm := newTraceManager()
@@ -23572,6 +23824,7 @@ func TestEndInvocation_PanicWhileMutexHeldUnlocksTraceManager(t *testing.T) {
 }
 
 func TestHalfEndedInvocation(t *testing.T) {
+	runInParallel(t)
 	t.Run("endInvocation passes captured now without calling tm.now again", func(t *testing.T) {
 		ctx := context.Background()
 		tm := newTraceManager()
@@ -23670,6 +23923,7 @@ func TestHalfEndedInvocation(t *testing.T) {
 // dropRetiredLateContextsLocked). The other callers of checkLateRecordDropped
 // retire records that never held one, or that dropped it when they settled.
 func TestLateRetiredActivationDropsInvocationContext(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-ic"
@@ -23700,6 +23954,7 @@ func TestLateRetiredActivationDropsInvocationContext(t *testing.T) {
 // reaches, and an agent that is still open, keep both (see
 // dropRetiredLateContextsLocked).
 func TestLateRetiredChainDropsWithLastReachingSpan(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-retired-chain"
@@ -23774,6 +24029,7 @@ func TestLateRetiredChainDropsWithLastReachingSpan(t *testing.T) {
 // late agentStack only while o is still open, and each order leaves the same
 // cause on the invocation span.
 func TestLateCauseRetiresInAnyCallOrder(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// endedBefore is how many of p and o, in that order, end before x's
@@ -23853,6 +24109,7 @@ func TestLateCauseRetiresInAnyCallOrder(t *testing.T) {
 // retires, as nothing above it can read the cause, and then so does x, as
 // nothing above it is open anymore.
 func TestLateCauseKeepsNoAgentAbove(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-cause-above"
@@ -23923,6 +24180,7 @@ func TestLateCauseKeepsNoAgentAbove(t *testing.T) {
 // root agent starts after g, runs under the invocation span rather than under
 // g (see parentFor) and cannot have run g (see launcherOpenLocked).
 func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// first and second are the root agent's tool calls in the order in
@@ -24008,6 +24266,7 @@ func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
 // g's AGENT_ERROR row once and retires g, as on a live trace (see
 // endToolRunsLocked).
 func TestLateSubNodeCauseHeldUntilRootToolCall(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-cause-no-root-call"
@@ -24064,6 +24323,7 @@ func TestLateSubNodeCauseHeldUntilRootToolCall(t *testing.T) {
 // contexts), recovery clears them and lets them retire cleanly, and a third
 // tool call (call-3) does not repeat the rows.
 func TestLateRootToolCallAfterSubNodeCause(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	for _, tc := range []struct {
 		name              string
@@ -24657,6 +24917,7 @@ func checkAgentErrorRows(t *testing.T, purged []unclosedAgentSpan, want []string
 // own, as in TestLateCauseHeldWhileRootToolCallOpen, so call-2 runs under
 // the invocation span rather than under g.
 func TestLateDescendantCauseHeldWhileRootToolCallOpen(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	for _, cause := range []struct {
 		name string
@@ -24772,6 +25033,7 @@ func TestLateDescendantCauseHeldWhileRootToolCallOpen(t *testing.T) {
 //     it (see endToolRunsLocked). g retires while call-2 is still open, and
 //     the end of call-2 writes no AGENT_ERROR row.
 func TestLateRootToolCallHoldsOnlyCausesItReads(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	// leaveCause starts b and ends it once a failing sibling canceled its
 	// context, which leaves siblingErr on the activation that b runs under.
@@ -24902,6 +25164,7 @@ func TestLateRootToolCallHoldsOnlyCausesItReads(t *testing.T) {
 // Once g ended before call-1 returned, nothing can read the cause anymore,
 // and m and x leave the late state while call-2 is still open.
 func TestLateCauseKeepsLineageWhileReaderOpen(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	// startChain makes call-1 of caller, which runs g on branch at the node
 	// path base+"g", and under g, p, m, x and b as above, ends b, and then
@@ -25026,6 +25289,7 @@ func TestLateCauseKeepsLineageWhileReaderOpen(t *testing.T) {
 // right under the invocation span, whether the caller ends before or after
 // earlier tool calls return (see heldByCause and retireLateSettledLocked).
 func TestRetiredCallerReadsCause(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name                  string
 		callerEndsBeforeCall1 bool
@@ -25094,6 +25358,7 @@ func TestRetiredCallerReadsCause(t *testing.T) {
 // g (rather than falling through to the invocation span) and emits both h's
 // and g's AGENT_ERROR rows identically on live and late traces.
 func TestLaterChildUnderRootSubNodeCause(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	childErr := errors.New("child h failed")
 	for _, late := range []bool{false, true} {
@@ -25150,6 +25415,7 @@ func TestLaterChildUnderRootSubNodeCause(t *testing.T) {
 // a live trace, and an event on branch "g" finds held g1 directly on
 // agentStack rather than touching the other branch's open activation.
 func TestSecondActivationAndSameNamedOpenBranchWithHeldRootCause(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	for _, late := range []bool{false, true} {
 		t.Run(fmt.Sprintf("second activation response preserves held g1/late=%v", late), func(t *testing.T) {
@@ -25274,6 +25540,7 @@ func TestSecondActivationAndSameNamedOpenBranchWithHeldRootCause(t *testing.T) {
 // recordError finds g directly on agentStack so the subsequent drain reports
 // the recorded error rather than the sibling cause, matching live and late.
 func TestRecordErrorOnHeldRootSubNodeCause(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	modelErr := errors.New("model failed on held g")
 	for _, late := range []bool{false, true} {
@@ -25315,6 +25582,7 @@ func TestRecordErrorOnHeldRootSubNodeCause(t *testing.T) {
 // AGENT_ERROR row immediately from pushAgentSpan (not waiting for the next root
 // tool call), and writes no duplicate row when a later root tool call ends.
 func TestRetryHeldRootSubNodeCause(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	for _, late := range []bool{false, true} {
 		t.Run(fmt.Sprintf("late=%v", late), func(t *testing.T) {
@@ -25360,6 +25628,7 @@ func TestRetryHeldRootSubNodeCause(t *testing.T) {
 // trace across completion pressure, and once drained by a later root tool call
 // or cleared by recovery, hasOpenLateSpans reports false and pruning drops it.
 func TestHasOpenLateSpansAndPruneWhileRootSubNodeHeld(t *testing.T) {
+	runInParallel(t)
 	siblingErr := errors.New("sibling branch failed")
 	for _, recoverByEvent := range []bool{false, true} {
 		t.Run(fmt.Sprintf("recoverByEvent=%v", recoverByEvent), func(t *testing.T) {
@@ -25441,6 +25710,7 @@ func TestHasOpenLateSpansAndPruneWhileRootSubNodeHeld(t *testing.T) {
 // settles (leaving [o p]) and o ends while p stays open, agentStack holds
 // only [p] rather than [g p].
 func TestLateSettledActivationWithoutCauseRetiresAboveOpenChild(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-no-cause-settled-g-above-p"
@@ -25469,6 +25739,7 @@ func TestLateSettledActivationWithoutCauseRetiresAboveOpenChild(t *testing.T) {
 // on the goroutine that started it, then the nearest open enclosing span when
 // multiple concurrent lookalikes exist, and otherwise p.
 func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
+	runInParallel(t)
 	const g0, g2, g3, g4 = 100, 200, 300, 400
 	setup := func(goroutines ...uint64) (*invocationTrace, *spanRecord, []*spanRecord) {
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lookalike", time.Unix(1_700_000_000, 0))
@@ -25575,6 +25846,7 @@ func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
 // sub-agent runs on the activation's goroutine, on a goroutine that it starts
 // directly, or across an intermediate helper goroutine.
 func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T) {
+	runInParallel(t)
 	t.Run("own goroutine and directly started child goroutine", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		newLeaf := func(name string) agent.Agent {
@@ -26504,6 +26776,7 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 // AGENT_ERROR before attempt 2's AGENT_STARTING under W1's span_id) instead of
 // skipping the purge against W2.
 func TestRunner_ConcurrentLookalikeWorkflowRetry_PurgesOwnFailedAttempt(t *testing.T) {
+	runInParallel(t)
 	requireADKNodeCompletionEvents(t)
 	ctx := t.Context()
 	p, requests, _ := setupTestPlugin(t)
@@ -26786,6 +27059,7 @@ func (m *callbackLLM) GenerateContent(ctx context.Context, req *model.LLMRequest
 // open node subtree both in normal concurrent execution and when RetryConfig
 // retries W1 after an attempt-1 failure while W2 has seq_node -> step1 open.
 func TestRunner_ConcurrentLookalikeWorkflow_SequentialNodeSubtreeIsolation(t *testing.T) {
+	runInParallel(t)
 	t.Run("normal concurrent execution", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		w1Opened := make(chan struct{})
@@ -27015,6 +27289,7 @@ func TestRunner_ConcurrentLookalikeWorkflow_SequentialNodeSubtreeIsolation(t *te
 // own workflow activation, and retrying the item on the same worker goroutine
 // still purges the failed attempt and completes with INVOCATION_COMPLETED.
 func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAttempt(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name              string
 		closePeerPreRetry bool
@@ -27203,6 +27478,7 @@ func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAt
 // C1 transfers to spec_a, spec_a parents under C1 (not C2's open spec_b), and
 // purging a failing workflow retry of C2 leaves C1's live spec_a untouched.
 func TestRunner_ConcurrentLookalikeLLMCoordinators_TransferParentSpanID(t *testing.T) {
+	runInParallel(t)
 	transferTo := func(target string) *model.LLMResponse {
 		return &model.LLMResponse{
 			Content: genai.NewContentFromParts([]*genai.Part{
@@ -27607,6 +27883,7 @@ func TestRunner_ConcurrentLookalikeLLMCoordinators_TransferParentSpanID(t *testi
 // never mutates the caller's exclude map and keeps callerExcluded isolated from
 // internal peer exclusions added during resolution.
 func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
+	runInParallel(t)
 	const gOuter1, gOuter2, gInner1, gInner2, gChild = 101, 102, 201, 202, 301
 	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-caller-exclude", time.Unix(1_700_000_000, 0))
 	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
@@ -27664,6 +27941,7 @@ func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
 // back) followed by a WorkflowAgent with a ParallelWorker or NewWorkflowNode
 // still parent the child under wf and propagate AGENT_ERROR up the full chain.
 func TestRunner_NonConcurrentLookalike_NestedTransferChain(t *testing.T) {
+	runInParallel(t)
 	transferTo := func(target string) *model.LLMResponse {
 		return &model.LLMResponse{
 			Content: genai.NewContentFromParts([]*genai.Part{
@@ -27927,6 +28205,7 @@ func TestRunner_NonConcurrentLookalike_NestedTransferChain(t *testing.T) {
 // a fresh run of the same agent runs sequentially on that goroutine, its
 // ParallelWorker item still parents under the fresh WorkflowAgent span.
 func TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name         string
 		shortCircuit bool
@@ -28052,6 +28331,7 @@ func TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow(t *testing.T) 
 // yield, "sub" is parented to outer (the declaring activation), both alone and
 // alongside a concurrent peer "worker" on another goroutine.
 func TestRunner_NonConcurrentLookalike_SuspendedIterator(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name           string
 		concurrentPeer bool
@@ -28248,6 +28528,7 @@ func TestRunner_NonConcurrentLookalike_SuspendedIterator(t *testing.T) {
 //   - resolving outer ancestor groups before inner descendant groups; and
 //   - preserving direct goroutine matches on cross-goroutine nested ancestors.
 func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
+	runInParallel(t)
 	t.Run("keeps cross-goroutine nested ancestor of winner", func(t *testing.T) {
 		const gOuter, gInner, gPeer = 101, 102, 103
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancestor-keep", time.Unix(1_700_000_000, 0))
@@ -28959,6 +29240,7 @@ func BenchmarkLookalikeParentScaling(b *testing.B) {
 // branch and node path point at wf alone, so the item stays under wf instead
 // of moving up to the span that encloses both activations.
 func TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	itemAgent, err := llmagent.New(llmagent.Config{
 		Name: "item_agent",
@@ -29102,6 +29384,7 @@ func onlyAgentRow(t *testing.T, rows []map[string]any, eventType, agent string) 
 // child runs under the activation whose context it was run with, which is
 // also the one that declares it.
 func TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name         string
 		shortCircuit bool
@@ -29261,6 +29544,7 @@ func TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation(t *testing
 // goroutine that created the dispatcher is the one worker 1 runs on, but the
 // job is worker 2's, so leaf runs under worker 2.
 func TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	leaf := newOneEventAgent(t, "leaf", nil)
 	type item struct {
@@ -29384,6 +29668,7 @@ type lineageKey struct{}
 // the goroutine that started it is not its parent unless the child's context
 // derives from that activation.
 func TestParentForRunLocked_LaunchLineage(t *testing.T) {
+	runInParallel(t)
 	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launch-lineage", time.Unix(1_700_000_000, 0))
 	rootAct := &lineageContext{Context: context.Background()}
 	w1Act := &lineageContext{Context: rootAct}
@@ -29425,6 +29710,7 @@ func TestParentForRunLocked_LaunchLineage(t *testing.T) {
 // only when another member of the group also has an open span that the
 // child's branch and node path fit at or below the selected parent's.
 func TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch(t *testing.T) {
+	runInParallel(t)
 	item := identity{agentName: "item_agent", branch: "selected.item_agent@1", path: "selected/wf@1/items_work@1"}
 	build := func(peerChild *spanRecord) (*invocationTrace, *spanRecord, *spanRecord) {
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unique-branch-path", time.Unix(1_700_000_000, 0))
@@ -29506,6 +29792,7 @@ func TestParentForRunLocked_DistinctOpenSpansAllocateNothing(t *testing.T) {
 // agent name, branch and node path keys that two or more open activations
 // share follows pushAgentSpan and popAgentSpan.
 func TestTraceManager_LookalikeCountFollowsPushAndPop(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	tm := newTraceManager()
 	id := func(agentName string) identity {
@@ -29634,6 +29921,7 @@ func TestRememberCompletedAtLocked_PrepareLateBeforeUnlinkAndClear(t *testing.T)
 }
 
 func TestTraceManager_FinishedTaskLocked(t *testing.T) {
+	runInParallel(t)
 	base := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-task-unit", agentName: "worker", path: "work"}
 
@@ -30050,6 +30338,7 @@ func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
 }
 
 func TestHasNewEventUUID(t *testing.T) {
+	runInParallel(t)
 	cases := []struct {
 		id   string
 		want bool
@@ -30153,6 +30442,7 @@ func captureRunnerCallbackContext(t *testing.T, parentCtx context.Context, plugi
 }
 
 func TestContextHasAfterAgentPlugin(t *testing.T) {
+	runInParallel(t)
 	t.Run("later plugin with AfterAgentCallback returns true", func(t *testing.T) {
 		p := newNoopAnalyticsPluginForTest(t, pluginName)
 		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
@@ -30587,6 +30877,7 @@ func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession
 }
 
 func TestDiscoverPluginManagerCtxKey(t *testing.T) {
+	runInParallel(t)
 	p := newNoopAnalyticsPluginForTest(t, pluginName)
 	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
 	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
@@ -30951,6 +31242,7 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 }
 
 func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
+	runInParallel(t)
 	var calls atomic.Int32
 	provider := func() string {
 		calls.Add(1)
@@ -31212,6 +31504,7 @@ func TestCallbackAfterAgentActionMaps(t *testing.T) {
 }
 
 func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
+	runInParallel(t)
 	base := time.Date(2026, 11, 19, 13, 0, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-unobs-unit", agentName: "worker", path: "work"}
 
@@ -31309,6 +31602,7 @@ func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
 }
 
 func TestRetireFailedTaskAttemptsLocked_PreservesSiblingRecordedSuccess(t *testing.T) {
+	runInParallel(t)
 	base := time.Date(2026, 11, 19, 13, 30, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-preserve-sibling", agentName: "worker", branch: "b", path: "work"}
 
@@ -31391,6 +31685,7 @@ func TestRetireFailedTaskAttemptsLocked_PreservesSiblingRecordedSuccess(t *testi
 }
 
 func TestEndInvocation_ReconcilesEvictedAndRestoredActiveTrace(t *testing.T) {
+	runInParallel(t)
 	for _, viaRetry := range []bool{false, true} {
 		name := "endInvocationTarget"
 		if viaRetry {
@@ -31540,6 +31835,7 @@ func TestEndInvocation_ReconcilesEvictedAndRestoredActiveTrace(t *testing.T) {
 }
 
 func TestPushAgentSpan_PlatformClockOutsideLockAndTaskModeOnly(t *testing.T) {
+	runInParallel(t)
 	t.Run("non-task agent does not call custom platform TimeProvider", func(t *testing.T) {
 		normalAgent, err := llmagent.New(llmagent.Config{
 			Name:  "chat_agent",
@@ -31608,6 +31904,7 @@ func TestPushAgentSpan_PlatformClockOutsideLockAndTaskModeOnly(t *testing.T) {
 }
 
 func TestResolveFinishedTaskLocked_512OverlappingActivationsEquivalence(t *testing.T) {
+	runInParallel(t)
 	const numActivations = 512
 	base := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-512", agentName: "worker", path: "work"}
@@ -31738,6 +32035,7 @@ func TestResolveFinishedTaskLocked_512OverlappingActivationsEquivalence(t *testi
 }
 
 func TestCompleteResponseWithActions_CompletedToolsGuards(t *testing.T) {
+	runInParallel(t)
 	t.Run("different parentSpanID does not clear parent completedTools", func(t *testing.T) {
 		ctx := context.Background()
 		tm := newTraceManager()
@@ -32462,6 +32760,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 }
 
 func TestAgentHasAfterAgentCallbacks(t *testing.T) {
+	runInParallel(t)
 	if agentHasAfterAgentCallbacks(nil) {
 		t.Fatal("agentHasAfterAgentCallbacks(nil) = true, want false")
 	}
@@ -32669,6 +32968,7 @@ func TestAgentHasAfterAgentCallbacks(t *testing.T) {
 }
 
 func TestLLMKeyAndParseLLMKey_NULBytesAndDelimiters(t *testing.T) {
+	runInParallel(t)
 	for _, id := range []identity{
 		{},
 		{path: "wf@1/node@2", agentName: "worker", branch: "par.b1"},
@@ -32728,6 +33028,7 @@ func TestLLMKeyAndParseLLMKey_NULBytesAndDelimiters(t *testing.T) {
 }
 
 func TestRetiredSwallowerAndCause(t *testing.T) {
+	runInParallel(t)
 	sw := retiredSwallower{spanID: "span-1", seq: 7, name: "worker", branch: "par.b1", path: "root/worker"}
 	for _, tc := range []struct {
 		name   string
@@ -32841,6 +33142,7 @@ func TestRetiredSwallowerAndCause(t *testing.T) {
 }
 
 func TestActionMapsShares(t *testing.T) {
+	runInParallel(t)
 	if (actionMaps{}).shares(actionMaps{}) {
 		t.Fatal("zero actionMaps should not share")
 	}
@@ -32873,6 +33175,7 @@ func TestActionMapsShares(t *testing.T) {
 // GODEBUG=tracebacklabels=1, and of Go 1.27, which prints them after the
 // bracket and quotes only what needs it; each rejected row breaks one rule.
 func TestIsGoroutineTraceHeader(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name, header string
 		want         bool
@@ -32933,6 +33236,7 @@ func TestIsGoroutineTraceHeader(t *testing.T) {
 }
 
 func TestAfterAgentCallbackRunsOfTrace(t *testing.T) {
+	runInParallel(t)
 	frame := func(fn string) string {
 		return fn + "(0x1, 0x2)\n\t/src/file.go:10 +0x20\n"
 	}
@@ -33060,6 +33364,7 @@ func (panickingValueContext) Value(any) any               { panic("boom") }
 // hasEventCreationProvenance to real runner.Run / session.NewEvent output so a
 // change to ADK's default platform.NewUUID format breaks the test loudly.
 func TestEventCreationProvenance_RealRun(t *testing.T) {
+	runInParallel(t)
 	runOnce := func(parentCtx context.Context) []*session.Event {
 		root, err := agent.New(agent.Config{
 			Name: "provenance-real",
@@ -33332,6 +33637,7 @@ func TestEventCreationProvenance_RealRun(t *testing.T) {
 // TestUUIDProviderStateWith pins the lattice of uuidProviderState: a key that
 // saw activations with and without a custom provider stays mixed.
 func TestUUIDProviderStateWith(t *testing.T) {
+	runInParallel(t)
 	const (
 		unseen = uuidProviderUnseen
 		custom = uuidProviderCustom
@@ -33367,6 +33673,7 @@ func TestUUIDProviderStateWith(t *testing.T) {
 // created the event (see traceManager.eventUUIDProvider), on a traceManager
 // that the callbacks drive directly.
 func TestEventUUIDProvider(t *testing.T) {
+	runInParallel(t)
 	plain := t.Context()
 	customCtx := platform.WithUUIDProvider(plain, func() string { return "custom-id" })
 	// shadowed is what a custom agent passes to a sub-agent to turn the
@@ -34027,12 +34334,14 @@ func TestUUIDProviderLedger_DistinctPaths(t *testing.T) {
 }
 
 func TestUUIDProviderLedger_BoundedAcrossDistinctPathsAndCompletedRuns(t *testing.T) {
+	t.Parallel()
 	const paths = 20000
 	plain := t.Context()
 	customCtx := platform.WithUUIDProvider(plain, func() string { return "custom-id" })
 	shadowed := platform.WithUUIDProvider(customCtx, nil)
 
 	t.Run("20k distinct paths bound states and fail closed when mixed under overflow", func(t *testing.T) {
+		runInParallel(t)
 		tm := newTraceManager()
 		root := identity{invocationID: "inv-live", agentName: "wf"}
 		tm.invocationSpan(customCtx, root, nil)
@@ -34082,6 +34391,7 @@ func TestUUIDProviderLedger_BoundedAcrossDistinctPathsAndCompletedRuns(t *testin
 	})
 
 	t.Run("completed runs compact per-path keys to < 1 KB across 20k-path and multi-branch runs", func(t *testing.T) {
+		runInParallel(t)
 		tm := newTraceManager()
 		for runIdx := range 4 {
 			invID := fmt.Sprintf("inv-comp-%d", runIdx)
@@ -34402,6 +34712,7 @@ func runUnder(t *testing.T, name string, runs ...subRun) agent.Agent {
 // what OnEventCallback sees for each, where the delivery context, the
 // runner's, does not carry the provider that created the event.
 func TestEventCreationProvenance_RealRunShapes(t *testing.T) {
+	runInParallel(t)
 	// yielder returns an agent that yields a session.NewEvent, with the branch
 	// of its context when setBranch is true, or, when forged is not empty, an
 	// event built by hand with that ID.
@@ -34606,6 +34917,7 @@ func TestEventCreationProvenance_RealRunShapes(t *testing.T) {
 // plugin callbacks, including both a synchronous agent.New run and an
 // llmagent.New workflow-node run inside an AfterAgentCallback.
 func TestAfterAgentCallbackRunsOfTrace_RealRun(t *testing.T) {
+	runInParallel(t)
 	var (
 		beforeRuns, runBodyRuns, pluginAfterRuns, agentAfterRuns, nestedAfterRuns int
 		nestedLLMBeforeRuns, nestedLLMAfterRuns                                   int
@@ -34741,6 +35053,7 @@ func TestAfterAgentCallbackRunsOfTrace_RealRun(t *testing.T) {
 // runs right at Go's 100-frame runtime.Stack limit—where an extra helper frame
 // around runtime.Stack would trigger "...frames elided..." and lose attemptNode.
 func TestWorkflowRetry_DeepBeforeAgentStackAtTracebackLimit_EmitsCompleted(t *testing.T) {
+	runInParallel(t)
 	cp := newClockedPlugin(t)
 	ap := cp.analyticsPlugin
 
@@ -35071,6 +35384,7 @@ func BenchmarkContextLookups(b *testing.B) {
 // settlement and compaction of retired activations with a pair of cases that
 // differ only in that condition.
 func TestRetiredActivationSettlementAndHullConjuncts(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	t0 := time.Unix(1_700_000_000, 0)
 	rootID := identity{invocationID: "inv-conjuncts", agentName: "root"}
@@ -35329,6 +35643,7 @@ func TestRetiredActivationSettlementAndHullConjuncts(t *testing.T) {
 // first activation of inner retired at t2 as a concurrent peer of a second
 // one that started at t1 and is still open.
 func TestSoleOpenAuthor(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	t0 := time.Unix(1_700_000_000, 0)
 	t1 := t0.Add(10 * time.Millisecond)
@@ -35508,6 +35823,7 @@ func TestSoleOpenAuthor(t *testing.T) {
 // consumeAfterAgentCreditLocked settles only the credit-holding activation's
 // own credit while leaving other credits and unrespondedRetiredTools untouched.
 func TestAfterAgentCreditSettlesOnlyItsOwnActivation(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	t0 := time.Unix(1_700_000_000, 0)
 	rootID := identity{invocationID: "inv-after-agent-credit", agentName: "root"}
@@ -35578,6 +35894,7 @@ func TestAfterAgentCreditSettlesOnlyItsOwnActivation(t *testing.T) {
 // customGuardSpanIDsLocked, needsAfterAgentActionsLocked, and
 // canOwnEventCreatedAt.
 func TestProvenAfterAllRetiredLockedAndExclusionEdges(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 

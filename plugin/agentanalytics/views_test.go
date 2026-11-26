@@ -60,6 +60,7 @@ import (
 )
 
 func TestConfig_CreateViews(t *testing.T) {
+	runInParallel(t)
 	var decoded Config
 	if err := json.Unmarshal([]byte(`{"Enabled": true, "DisableCreateViews": true}`), &decoded); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
@@ -119,6 +120,7 @@ func TestConfig_CreateViews(t *testing.T) {
 }
 
 func TestViewDefinitions_OrderAndSQLStructure(t *testing.T) {
+	runInParallel(t)
 	const (
 		projectID = "my-domain.com:analytics-proj-1"
 		datasetID = "agent_analytics"
@@ -211,6 +213,7 @@ func TestViewDefinitions_OrderAndSQLStructure(t *testing.T) {
 // against adk-python's _VIEW_COMMON_COLUMNS and _EVENT_VIEW_DEFS (for the 24
 // identical views) and the documented safe expressions for v_event_compaction.
 func TestViewDefinitions_ExactProjectionParityWithADKPython(t *testing.T) {
+	runInParallel(t)
 	const (
 		projectID = "my-proj"
 		datasetID = "agent_analytics"
@@ -394,6 +397,7 @@ func TestViewDefinitions_ExactProjectionParityWithADKPython(t *testing.T) {
 }
 
 func TestViewDefinitions_CustomViewPrefixAndMultiTableDisjoint(t *testing.T) {
+	runInParallel(t)
 	defsA, err := viewDefinitionsWithDenied("proj", "shared_ds", "events_a", "v_agent_a", nil)
 	if err != nil {
 		t.Fatalf("ViewDefinitions(events_a) error = %v", err)
@@ -427,6 +431,7 @@ func TestViewDefinitions_CustomViewPrefixAndMultiTableDisjoint(t *testing.T) {
 }
 
 func TestViewDefinitions_IdentifierValidation(t *testing.T) {
+	runInParallel(t)
 	if _, err := viewDefinitionsWithDenied("proj", "ds", "agent events", "v", nil); err != nil {
 		t.Errorf("ViewDefinitions() with space in tableName error = %v, want nil", err)
 	}
@@ -595,6 +600,7 @@ func TestViewDefinitions_IdentifierValidation(t *testing.T) {
 }
 
 func TestViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
+	runInParallel(t)
 	byEventType := func(defs []ViewDefinition) map[string]ViewDefinition {
 		m := make(map[string]ViewDefinition, len(defs))
 		for _, d := range defs {
@@ -965,6 +971,7 @@ func evalCompactionTimestampSQL(expr string, content map[string]any) (float64, t
 }
 
 func TestViews_JSONPathsMatchEmittedPayloads(t *testing.T) {
+	runInParallel(t)
 	defs, err := viewDefinitionsWithDenied("test-project", "test_dataset", "test-table", "v", nil)
 	if err != nil {
 		t.Fatalf("ViewDefinitions() error = %v", err)
@@ -2395,6 +2402,7 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 }
 
 func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	var nilPlugin *BigQueryAgentAnalyticsPlugin
@@ -3118,6 +3126,7 @@ func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
 // cancel function keeps the constructor context, and forgets the view runner
 // on Close, because its BigQuery client can refer to the caller's objects.
 func TestPluginState_ReleasesViewPassAndRunner(t *testing.T) {
+	runInParallel(t)
 	p, _, _ := setupTestPluginWithConfig(t, func(c *Config) { c.DisableCreateViews = true })
 	bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
 	if !ok {
@@ -3168,6 +3177,7 @@ func TestPluginState_ReleasesViewPassAndRunner(t *testing.T) {
 // failing every query of v_event_compaction, including when the plugin wrote
 // the value.
 func TestViews_EventCompactionWindowOutOfRangeIsNull(t *testing.T) {
+	runInParallel(t)
 	defs, err := (Config{ProjectID: "test-project", DatasetID: "test_dataset", TableName: "test-table"}).ViewDefinitions()
 	if err != nil {
 		t.Fatalf("Config.ViewDefinitions() error = %v", err)
@@ -3274,6 +3284,7 @@ func TestViews_EventCompactionWindowOutOfRangeIsNull(t *testing.T) {
 // views are skipped without being counted or logged as failures, while a
 // per-view timeout under a live context is a failure that the pass goes past.
 func TestSyncAnalyticsViews_ContextEndsPass(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	t.Run("SyncViews caller deadline is reported once as canceled", func(t *testing.T) {
@@ -3353,6 +3364,7 @@ func TestSyncAnalyticsViews_ContextEndsPass(t *testing.T) {
 // without a Logger, which gets a nil logf, still runs every view and reports
 // its failures in the returned error.
 func TestSyncAnalyticsViews_NilLogf(t *testing.T) {
+	runInParallel(t)
 	defs, err := viewDefinitionsWithDenied("test-project", "test_dataset", "test-table", "v", nil)
 	if err != nil {
 		t.Fatalf("viewDefinitionsWithDenied() error = %v", err)
@@ -3370,6 +3382,7 @@ func TestSyncAnalyticsViews_NilLogf(t *testing.T) {
 // TestBQViewRunner_DoesNotReplaceNonView checks that a table of the view's
 // name that is not a view is reported without running a DDL job.
 func TestBQViewRunner_DoesNotReplaceNonView(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	for _, tableType := range []string{"TABLE", "MATERIALIZED_VIEW"} {
 		t.Run(tableType, func(t *testing.T) {
@@ -3420,6 +3433,7 @@ func TestBQViewRunner_DoesNotReplaceNonView(t *testing.T) {
 // the table check, the write stream, the view runner and the views all use the
 // configured project even when bqClient was made for another one.
 func TestNewBigQueryAgentAnalyticsPlugin_ResolvesProjectForTableAndViews(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name          string
@@ -3565,6 +3579,7 @@ func extractRawEventsCTE(t *testing.T, query string) string {
 }
 
 func TestEvalViewDefinitions_ColumnsAndSQLStructure(t *testing.T) {
+	runInParallel(t)
 	wantSessionColumns := []string{
 		"session_id",
 		"user_id",
@@ -3721,6 +3736,7 @@ func assertQuerySHA256(t *testing.T, viewName, query string, wantLen int, wantSH
 }
 
 func TestEvalViewDefinitions_CustomViewPrefixAndValidation(t *testing.T) {
+	runInParallel(t)
 	defs, err := (Config{
 		ProjectID:  "my-proj",
 		DatasetID:  "shared_ds",
@@ -3809,6 +3825,7 @@ func TestEvalViewDefinitions_CustomViewPrefixAndValidation(t *testing.T) {
 }
 
 func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
+	runInParallel(t)
 	baseCfg := Config{ProjectID: "p", DatasetID: "d", TableName: "t"}
 
 	hashCases := []struct {
@@ -3928,6 +3945,7 @@ func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
 }
 
 func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T) {
+	runInParallel(t)
 	positiveCases := []struct {
 		name              string
 		tableName         string
@@ -4049,6 +4067,7 @@ func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T
 }
 
 func TestCreateEvalViews_ConfigValidation(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	t.Run("rejects content in PayloadColumnDenylist when CreateEvalViews is true", func(t *testing.T) {
@@ -4251,6 +4270,7 @@ func TestCreateEvalViews_ConfigValidation(t *testing.T) {
 }
 
 func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
@@ -5008,6 +5028,7 @@ type evalAgentInvocationContext struct {
 func (c *evalAgentInvocationContext) Agent() agent.Agent { return c.ag }
 
 func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
+	runInParallel(t)
 	evalDefs, err := (Config{ProjectID: "test-project", DatasetID: "test_dataset", TableName: "agent_events"}).EvalViewDefinitions()
 	if err != nil {
 		t.Fatalf("EvalViewDefinitions() error = %v", err)
@@ -6270,6 +6291,7 @@ func extractModelResponseTextsFromTrace(t *testing.T, trace map[string]any) []st
 }
 
 func TestEvalViews_SemanticExecution(t *testing.T) {
+	runInParallel(t)
 	defaultDefs, err := (Config{ProjectID: "p", DatasetID: "d", TableName: "t"}).EvalViewDefinitions()
 	if err != nil {
 		t.Fatalf("EvalViewDefinitions() error = %v", err)

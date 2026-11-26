@@ -134,6 +134,7 @@ func (s *scriptedClientStream) RecvMsg(m any) error {
 }
 
 func TestBatchProcessor_AppendAndFlush(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 
 	config := DefaultConfig()
@@ -169,6 +170,7 @@ func TestBatchProcessor_AppendAndFlush(t *testing.T) {
 }
 
 func TestBatchProcessor_WriteBatchErrors(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -226,6 +228,7 @@ func TestBatchProcessor_WriteBatchErrors(t *testing.T) {
 }
 
 func TestBatchProcessor_DataTypes(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
@@ -270,6 +273,7 @@ func TestBatchProcessor_DataTypes(t *testing.T) {
 }
 
 func TestBatchProcessor_WriteBatchEncodesRows(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
@@ -318,6 +322,7 @@ func TestBatchProcessor_WriteBatchEncodesRows(t *testing.T) {
 }
 
 func TestBatchProcessor_QueueFull(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	config := DefaultConfig()
@@ -357,6 +362,7 @@ func (l *panickingLogger) Println(...any) {
 // a Logger panicking while it reports a dropped event, a panic that the
 // plugin recovers, does not leave the processor locked so that Close hangs.
 func TestBatchProcessor_QueueFullPanickingLoggerDoesNotDeadlockClose(t *testing.T) {
+	runInParallel(t)
 	logger := &panickingLogger{}
 	p, _, mCtx := newTestPluginWithConfig(t, func(c *Config) {
 		c.QueueMaxSize = 1
@@ -389,6 +395,7 @@ func TestBatchProcessor_QueueFullPanickingLoggerDoesNotDeadlockClose(t *testing.
 }
 
 func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
@@ -451,6 +458,7 @@ func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
 }
 
 func TestStreamWriter_SendError(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -574,6 +582,7 @@ func TestStreamWriter_SendError(t *testing.T) {
 }
 
 func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -616,6 +625,7 @@ func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
 }
 
 func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.BatchSize = 100
@@ -651,6 +661,7 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 }
 
 func TestBatchProcessor_DropStats(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	var nilBP *batchProcessor
@@ -799,6 +810,7 @@ func (s *committedStreamTestServer) AppendRows(stream storagepb.BigQueryWrite_Ap
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_CommittedStreamAndOffsets(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	srv := &committedStreamTestServer{
@@ -909,6 +921,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CommittedStreamAndOffsets(t *testing
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_CreateWriteStreamFailure(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	srv := &committedStreamTestServer{
 		createErr: status.Error(codes.PermissionDenied, "cannot create stream"),
@@ -1082,6 +1095,7 @@ func exactlyOnceTestConfig() Config {
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvancesOffset(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name          string
 		alreadyErrVia string
@@ -1188,6 +1202,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvanc
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_UnrecoverableOffsetConflictRotatesStream(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	srv := &scriptedCommittedStreamServer{
 		onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
@@ -1310,6 +1325,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_UnrecoverableOffsetConflictRotatesSt
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOnNextBatch(t *testing.T) {
+	runInParallel(t)
 	t.Run("exhausted ambiguous retries rotate stream before next batch", func(t *testing.T) {
 		ctx := context.Background()
 		srv := &scriptedCommittedStreamServer{
@@ -1848,6 +1864,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseBoundedWhenRetiredStreamFinaliz
 // metadata, after that context is canceled, and that Close waits for it and
 // it logs its failure.
 func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAndLogsErrors(t *testing.T) {
+	runInParallel(t)
 	const retired = "projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1"
 	finalizeStarted := make(chan struct{})
 	var finalizeStartedOnce sync.Once
@@ -1978,6 +1995,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeBoundedByRotate
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_B1AmbiguousExhaustedThenB2AmbiguousDoesNotLoseBatch(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	// Track per-stream committed row count to model real BigQuery COMMITTED stream offset semantics:
@@ -2665,6 +2683,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationOnDepletedBudget(t *testing.
 // pauses rotation: until the cooldown has passed, the next batch is dropped
 // without calling CreateWriteStream.
 func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldown(t *testing.T) {
+	runInParallel(t)
 	const (
 		stream1 = "projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1"
 		stream2 = "projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-2"
@@ -2767,6 +2786,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldow
 // than ShutdownDrops although write budget is left, releases its pending
 // upload bytes, and logs the drop.
 func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	srv := &scriptedCommittedStreamServer{
 		onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
@@ -2824,6 +2844,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown
 }
 
 func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
+	runInParallel(t)
 	for iter := range 20 {
 		ctx := context.Background()
 		config := DefaultConfig()
@@ -2861,6 +2882,7 @@ func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
 }
 
 func TestBatchProcessor_CloseDrainsInFlightAndQueuedBatches(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.BatchSize = 5
@@ -2908,6 +2930,7 @@ func TestBatchProcessor_CloseDrainsInFlightAndQueuedBatches(t *testing.T) {
 }
 
 func TestBatchProcessor_ReusesCachedStreamAcrossFlushes(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -2964,6 +2987,7 @@ func TestBatchProcessor_ReusesCachedStreamAcrossFlushes(t *testing.T) {
 }
 
 func TestBatchProcessor_ConcurrentCloseWaitsForDrain(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.BatchSize = 5
@@ -3030,6 +3054,7 @@ func TestBatchProcessor_ConcurrentCloseWaitsForDrain(t *testing.T) {
 }
 
 func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_FreshStream(t *testing.T) {
+	runInParallel(t)
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -3091,6 +3116,7 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_F
 }
 
 func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_CachedStream(t *testing.T) {
+	runInParallel(t)
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -3167,6 +3193,7 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_C
 }
 
 func TestBatchProcessor_RootContextCancelBeforeFirstStreamOpenDrainsQueuedRowOnClose(t *testing.T) {
+	runInParallel(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -3226,6 +3253,7 @@ func TestBatchProcessor_RootContextCancelBeforeFirstStreamOpenDrainsQueuedRowOnC
 }
 
 func TestBatchProcessor_InitContextCanceledDoesNotStopProcessing(t *testing.T) {
+	runInParallel(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -3283,6 +3311,7 @@ func TestBatchProcessor_InitContextCanceledDoesNotStopProcessing(t *testing.T) {
 // TestBatchProcessor_ConcurrentStartAndClose verifies that multiple concurrent Start and Close
 // calls do not race or cause a close-of-closed-channel panic.
 func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
+	runInParallel(t)
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
@@ -4606,6 +4635,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 // pauses them keeps neither upload, so that the next flush does not upload
 // them even once the pause is over.
 func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		// firstBatchUploads reports whether the first batch has an upload,
@@ -4665,6 +4695,7 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			runInParallel(t)
 			lis, err := net.Listen("tcp", "localhost:0")
 			if err != nil {
 				t.Fatalf("listen: %v", err)
@@ -4935,6 +4966,7 @@ func TestBatchProcessor_FlushRunEndSucceededWriteReleasesCutShortUploadBytes(t *
 // back without calling the offloader. The pause lasts GCSUploadTimeout, so a
 // background flush after the run-end budget is over falls back too.
 func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name string
 		// rows returns the queued rows, one per batch. The first upload that
@@ -5071,6 +5103,7 @@ func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T)
 // take 400ms each and share a single slot, so neither flush reaches the end of
 // them before its upload time is up.
 func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *testing.T) {
+	runInParallel(t)
 	const (
 		rowCount = 12
 		retryLog = "pending retry on next flush"
@@ -5195,6 +5228,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 // long-text inline fallbacks on rows 1 and 2), and allows a subsequent
 // background flush to upload a new part as GCS_REFERENCE.
 func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *testing.T) {
+	runInParallel(t)
 	const (
 		longPrefix = "LONG-TEXT-PREFIX-"
 		retryLog   = "pending retry on next flush"
@@ -5568,6 +5602,7 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 // after six of them have failed, none of them having run for three quarters of
 // that time.
 func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T) {
+	runInParallel(t)
 	const (
 		batches = 3
 		uploads = 12
@@ -5655,6 +5690,7 @@ func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T)
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	var (
 		attempts atomic.Int32
@@ -5720,6 +5756,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent
 }
 
 func TestBatchProcessor_DefaultStream_SendsRoutingHeaderWithoutOffset(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	var (
 		appendReqParamsMu sync.Mutex
@@ -5797,6 +5834,7 @@ func TestBatchProcessor_DefaultStream_SendsRoutingHeaderWithoutOffset(t *testing
 // names, and gRPC rejects a non-ASCII metadata value before sending anything, so
 // an unencoded routing header would drop every batch.
 func TestBatchProcessor_RoutingHeader_UnicodeTableName(t *testing.T) {
+	runInParallel(t)
 	const (
 		defaultStream   = "projects/test-proj/datasets/test-ds/tables/événements/streams/_default"
 		committedStream = "projects/test-proj/datasets/test-ds/tables/événements/streams/committed-1"
@@ -5901,6 +5939,7 @@ func TestBatchProcessor_RoutingHeader_UnicodeTableName(t *testing.T) {
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_BoundedRotationOnPersistentRejection(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	var (
 		createCalls atomic.Int32
@@ -5962,6 +6001,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_BoundedRotationOnPersistentRejection
 }
 
 func TestBatchProcessor_ExactlyOnceDelivery_RetryAttemptRefundOnRotation(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	var (
 		attempts atomic.Int32
@@ -6028,6 +6068,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetryAttemptRefundOnRotation(t *test
 }
 
 func TestStreamWriterTraceID(t *testing.T) {
+	runInParallel(t)
 	if got := streamWriterTraceIDForVersion(""); got != "google-adk-bq-logger-go" {
 		t.Errorf("streamWriterTraceIDForVersion(\"\") = %q, want %q", got, "google-adk-bq-logger-go")
 	}
@@ -6044,6 +6085,7 @@ func TestStreamWriterTraceID(t *testing.T) {
 }
 
 func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
+	runInParallel(t)
 	t.Run("attaches TraceId across initial writes, reconnect retries, and committed stream rotations", func(t *testing.T) {
 		ctx := context.Background()
 		var (
@@ -6215,6 +6257,7 @@ func (s *scriptedCommittedStreamServer) attempts() int {
 }
 
 func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
+	runInParallel(t)
 	for _, exactlyOnce := range []bool{false, true} {
 		for _, tc := range []struct {
 			code         codes.Code
@@ -6264,6 +6307,7 @@ func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
 }
 
 func TestStreamWriter_TransientInBandErrorIsRetried(t *testing.T) {
+	runInParallel(t)
 	for _, exactlyOnce := range []bool{false, true} {
 		for _, code := range []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Internal, codes.DeadlineExceeded, codes.Aborted} {
 			t.Run(fmt.Sprintf("%s/exactlyOnce=%v", code, exactlyOnce), func(t *testing.T) {
@@ -6302,6 +6346,7 @@ func TestStreamWriter_TransientInBandErrorIsRetried(t *testing.T) {
 }
 
 func TestStreamWriter_InBandErrorRetriesAreBounded(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		code         codes.Code
 		wantAttempts int
@@ -6422,6 +6467,7 @@ func (s *streamEndingServer) received() (streams int, delivered []deliveredReque
 // the request. TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream
 // pins both places.
 func TestNextBatchAfterServerEndedStream(t *testing.T) {
+	runInParallel(t)
 	endCodes := []codes.Code{
 		// OK ends the stream cleanly, which Send and Recv report as io.EOF.
 		codes.OK,
@@ -6516,6 +6562,7 @@ func TestNextBatchAfterServerEndedStream(t *testing.T) {
 // on a fresh stream whatever the status is, and only a permanent status from
 // that stream fails the batch.
 func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
+	runInParallel(t)
 	permanent := []codes.Code{
 		codes.PermissionDenied,
 		codes.InvalidArgument,
@@ -6616,6 +6663,7 @@ func (s *directSendErrClientStream) SendMsg(any) error { return s.err }
 // on a fresh stream (2 streams opened) before failing fast without exhausting
 // all retries.
 func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
+	runInParallel(t)
 	wantErr := map[string]string{
 		"open":        "failed to open append rows stream",
 		"send":        "failed to send row batch",
@@ -6790,6 +6838,7 @@ func (s *sendHookClientStream) SendMsg(m any) error {
 //   - "recv": Send completes before the server closes the stream (still without
 //     calling stream.Recv()), so Recv observes the status directly.
 func TestFreshStreamClosedBeforeRecvIsRetried(t *testing.T) {
+	runInParallel(t)
 	endCodes := []codes.Code{
 		codes.OK,
 		codes.Unavailable,
@@ -6928,6 +6977,7 @@ func TestFreshStreamClosedBeforeRecvIsRetried(t *testing.T) {
 // and that a PermissionDenied fresh-stream retry does not replenish the
 // committed-stream rotation budget under ExactlyOnceDelivery.
 func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
+	runInParallel(t)
 	permanent := []codes.Code{
 		codes.PermissionDenied,
 		codes.InvalidArgument,
@@ -7232,6 +7282,7 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 }
 
 func TestSplitBatchByEstimatedBytes(t *testing.T) {
+	runInParallel(t)
 	row := func(n int) map[string]any { return map[string]any{"content": strings.Repeat("x", n)} }
 	rowCost := estimateRowBytes(row(1000))
 	for _, tc := range []struct {
@@ -7271,6 +7322,7 @@ func TestSplitBatchByEstimatedBytes(t *testing.T) {
 }
 
 func TestEstimateRowBytes_CountsNestedContentParts(t *testing.T) {
+	runInParallel(t)
 	row := map[string]any{
 		"content": strings.Repeat("a", 100),
 		"content_parts": []map[string]any{
@@ -7303,6 +7355,7 @@ func TestEstimateRowBytes_CountsNestedContentParts(t *testing.T) {
 // checks that every row arrives, in order, in requests that stay under the
 // Write API's limit on the size of a request.
 func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
+	runInParallel(t)
 	const (
 		numRows    = 100
 		contentLen = 500 * 1024
@@ -7317,6 +7370,7 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 	writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 	cfg := DefaultConfig()
 	cfg.RetryConfig.MaxRetries = 0
+	cfg.ShutdownTimeout = time.Minute
 	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
 		t.Fatalf("newBatchProcessor: %v", err)
@@ -7374,6 +7428,7 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 // batch fails without exhausting the final retry. The third request is never
 // sent.
 func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
+	runInParallel(t)
 	var (
 		mu           sync.Mutex
 		receivedReqs []*storagepb.AppendRowsRequest
@@ -7433,6 +7488,7 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 // earlier request (the reused-stream failure does not consume the fresh-stream
 // retry budget -> 4 sends for the second request with MaxRetries=3).
 func TestInBandResendThenPermanentStatus(t *testing.T) {
+	runInParallel(t)
 	for _, exactlyOnce := range []bool{false, true} {
 		t.Run(fmt.Sprintf("exactlyOnce=%v/stream_opened_by_this_request", exactlyOnce), func(t *testing.T) {
 			srv := &scriptedCommittedStreamServer{
@@ -7502,6 +7558,7 @@ func TestInBandResendThenPermanentStatus(t *testing.T) {
 // pre-serialized bytes without re-serializing recordBatch, and when batchBytes
 // is nil it serializes recordBatch directly.
 func TestStreamWriterAppend_UsesPreSerializedBatchBytes(t *testing.T) {
+	runInParallel(t)
 	var mu sync.Mutex
 	var captured []*storagepb.AppendRowsRequest
 	srv := &scriptedCommittedStreamServer{
@@ -7555,6 +7612,7 @@ func TestStreamWriterAppend_UsesPreSerializedBatchBytes(t *testing.T) {
 // flush through the queue, or through deferredBatch as the retry of an earlier
 // flush.
 func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
+	runInParallel(t)
 	for _, retry := range []bool{false, true} {
 		t.Run(fmt.Sprintf("retry=%v", retry), func(t *testing.T) {
 			srv := &scriptedCommittedStreamServer{
@@ -7601,6 +7659,7 @@ func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
 }
 
 func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
+	runInParallel(t)
 	if os.Getenv("REVIEW_CYCLIC_METADATA_SUBPROCESS") == "1" {
 		debug.SetMaxStack(64 * 1024)
 		requests := make(chan *storagepb.AppendRowsRequest, 4)
@@ -7663,6 +7722,7 @@ func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
 }
 
 func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
+	runInParallel(t)
 	t.Run("in_band_rejection_then_already_exists_recognizes_unconfirmed_offset_conflict", func(t *testing.T) {
 		srv := &scriptedCommittedStreamServer{
 			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
@@ -7753,6 +7813,7 @@ func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
 }
 
 func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *testing.T) {
+	t.Parallel()
 	const (
 		numRows              = 60
 		partsPerRow          = 10000
@@ -7765,6 +7826,7 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 	}
 
 	t.Run("writeBatch_splits_sparse_content_parts_under_10MiB", func(t *testing.T) {
+		runInParallel(t)
 		requests := make(chan *storagepb.AppendRowsRequest, numRows)
 		srv := &scriptedWriteServer{
 			script:   func(int32) (time.Duration, error) { return 0, nil },
@@ -7773,6 +7835,7 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
+		cfg.ShutdownTimeout = time.Minute
 		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
 			t.Fatalf("newBatchProcessor: %v", err)
@@ -7818,6 +7881,7 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 	})
 
 	t.Run("appendChunk_enforces_serialized_request_cap_directly", func(t *testing.T) {
+		runInParallel(t)
 		requests := make(chan *storagepb.AppendRowsRequest, numRows)
 		srv := &scriptedWriteServer{
 			script:   func(int32) (time.Duration, error) { return 0, nil },
@@ -7877,6 +7941,7 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 // whether the batch is cut by estimated size (through writeBatch) or halved by
 // serialized size (appendChunkRows calling itself on both halves).
 func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) {
+	runInParallel(t)
 	row := func(id string) map[string]any {
 		return map[string]any{"event_id": id, "content": strings.Repeat("x", 1000)}
 	}
@@ -8076,6 +8141,7 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 // the error, or else the first flush keeps all five rows and the retry
 // writes ev-0 twice.
 func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		rows  int
@@ -8104,6 +8170,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			runInParallel(t)
 			ids := make([]string, tc.rows)
 			for i := range ids {
 				ids[i] = fmt.Sprintf("ev-%d", i)
@@ -8270,6 +8337,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 }
 
 func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
+	runInParallel(t)
 	newProcessor := func(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool, logger Logger) *batchProcessor {
 		t.Helper()
 		ctx := context.Background()
@@ -9685,6 +9753,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 }
 
 func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name         string
 		attempt2Resp *storagepb.AppendRowsResponse
@@ -10115,6 +10184,7 @@ func (c *deadlineAfterReplyCtx) Err() error {
 // and they are never sent again, while the rows of the requests that were
 // never sent are kept for the next flush along with their uploads.
 func TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted(t *testing.T) {
+	runInParallel(t)
 	inBandStatus := func(code codes.Code) *storagepb.AppendRowsResponse {
 		return &storagepb.AppendRowsResponse{
 			Response: &storagepb.AppendRowsResponse_Error{Error: &statuspb.Status{Code: int32(code), Message: "scripted"}},
@@ -10272,6 +10342,7 @@ func TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted(t *tes
 // survivors of a RowErrors response. status.Code and errors.Is still classify
 // the failure.
 func TestBatchProcessor_AppendFailureReportsStatusCodeNotMessage(t *testing.T) {
+	runInParallel(t)
 	// The message quotes a row and holds a control run that once let a
 	// credential value through the log sanitizer.
 	const msg = "row content ROW_CONTENT_MARKER is invalid; token=\x05\n\x05hunter2"
