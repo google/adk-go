@@ -2923,10 +2923,11 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		fallback := "token=abc rest"
-		st := newQuoteScanState(len(fallback))
-		if got, want := nestedPairEndWithState(fallback, len("token=abc "), 0, openQuoteState{}, &st), len("token=abc "); got != want {
-			t.Errorf("nestedPairEndWithState fallback = %d, want %d", got, want)
+		if got := redactErrorMessage("token=abc rest"); got != "token=[REDACTED] rest" {
+			t.Errorf("redactErrorMessage(token=abc rest) = %q, want %q", got, "token=[REDACTED] rest")
+		}
+		if got, lost := sanitizeRawText("token=abc rest"); got != "token=[REDACTED] rest" || !lost {
+			t.Errorf("sanitizeRawText(token=abc rest) = (%q, %v), want (%q, true)", got, lost, "token=[REDACTED] rest")
 		}
 	})
 
