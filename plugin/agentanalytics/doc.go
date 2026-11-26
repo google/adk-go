@@ -37,6 +37,11 @@
 //	}
 //	defer bqPlugin.Close()
 //
+// Calling Close on the returned plugin is idempotent across concurrent and
+// repeated calls: shutdown runs once, recovers any panic on the calling
+// goroutine in an individual cleanup step as an error so subsequent cleanup
+// steps still run, and returns the cached error result on every call.
+//
 // Register this plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results, or agent content. ADK invokes plugin
 // callbacks in registration order and stops at the first non-nil replacement or
@@ -54,18 +59,26 @@
 // [Config.DisableSchemaUpgrade] is set, and creates 25 per-event SQL views
 // (such as v_llm_request, v_llm_response, and v_tool_completed; see
 // [Config.ViewDefinitions]) in the background unless [Config.DisableCreateViews]
-// is set. Pre-provisioned append-only deployments that lack table-read
+// is set. Table setup failures invoke [Config.OnSchemaError] before construction
+// returns the error; once table setup (and startup view creation when enabled)
+// succeeds, [Config.OnSchemaReady] is invoked, whereas a failed startup view
+// logs a warning (through a non-default [Config.Logger]) and returns without
+// invoking either [Config.OnSchemaReady] or [Config.OnSchemaError]
+// ([BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly).
+// Pre-provisioned append-only deployments that lack table-read
 // permissions can pass a nil BigQuery client to
 // [NewBigQueryAgentAnalyticsPluginWithClients].
 //
-// Automatic credential and sensitive-key redaction is enabled by default unless
+// Automatic credential and sensitive-key redaction (covering structured keys,
+// text and URI patterns, and declared Go types whose type name matches a
+// sensitive key) is enabled by default unless
 // [Config.DisableSensitiveKeyRedaction] is set. When [Config.MaxContentLen]
 // sets a limit (is non-negative and [Config.CaptureFullMessageContent] is not
 // set), string payloads are bounded by [Config.MaxContentLen], joined
 // [EventLLMResponse] summaries in content.response are bounded at
 // MaxContentLen + 4096 runes, and function call or response names in response
-// summaries are bounded at 256 runes before the 14-rune "...[TRUNCATED]"
-// suffix.
+// summaries, and the language or outcome of a code part in any summary, are
+// bounded at 256 runes before the 14-rune "...[TRUNCATED]" suffix.
 // Cloud Storage offloading requires content-parts logging (enabled by
 // [DefaultConfig] or by setting [Config.LogMultiModalContent] to true, and not
 // suppressed by [Config.DisableMultiModalContent] or by denying "content_parts"
@@ -123,6 +136,42 @@
 //     TestSessionEvents_EmitRichLifecycleTypes in events_test.go, and
 //     TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows in
 //     doc_test.go).
+//   - Reflect-and-retry recovery answers and [Config.ToolResultClassifier]:
+//     Like adk-python, Go records plugin/retryandreflect recovery maps
+//     (response_type "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") as
+//     [EventToolError] before calling [Config.ToolResultClassifier], and
+//     records top-level boolean "isError" or "is_error" maps as
+//     [EventToolError] when the classifier is nil, abstains, panics, or
+//     returns an undefined decision. Unlike adk-python, which copies
+//     error_details or error_type from a reflect-and-retry map into
+//     error_message unconditionally, Go writes the fixed fallback diagnostic
+//     when [Config.ContentFormatter] is set or "content" is in
+//     [Config.PayloadColumnDenylist]; when plugin/retryandreflect is
+//     registered before this plugin, calls to a non-FunctionTool or an
+//     unanswered missing tool skip AfterToolCallback in ADK Go and write no
+//     outcome row; and classifier panic or invalid-verdict warnings omit the
+//     tool name, panic value, and result. (Pinned by
+//     TestDocParity_ToolResultClassifierBuiltInRules in
+//     schema_callbacks_test.go,
+//     TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect
+//     and TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls in
+//     bigquery_agent_analytics_plugin_test.go, and
+//     TestPlugin_ToolResultClassifier_FailuresAreSkipped in
+//     tool_result_classifier_test.go).
+//   - [Config.OnSchemaReady] and [Config.OnSchemaError] run at most once per
+//     plugin: Unlike adk-python, which runs schema and view setup lazily on
+//     events and may retry across events, Go runs table setup eagerly and
+//     synchronously at plugin construction followed by a single background view
+//     sync when views are enabled. Only table setup failures invoke
+//     [Config.OnSchemaError]; a failed startup view logs a warning (through a
+//     non-default [Config.Logger]) and returns without invoking either
+//     [Config.OnSchemaReady] or [Config.OnSchemaError] (while
+//     [BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly),
+//     [Config.OnSchemaReady] runs once when table setup (and startup view
+//     creation when enabled) succeeds, and both callback references are
+//     released once startup settles. (Pinned by
+//     TestDocParity_SchemaCallbacksAtMostOnce and
+//     TestPlugin_SchemaCallbacks_ClosuresReleased in schema_callbacks_test.go).
 //   - [EventAgentResponse] on final events carrying function responses: Go's
 //     final-response check excludes FunctionCall parts, LongRunningToolIDs, and
 //     compaction events, and accepts final events (including events with
@@ -273,19 +322,31 @@
 //     TestDocParity_DefaultConfigBatchSizeAndRetryDelay in doc_test.go and
 //     TestBatchProcessor_SplitsOversizedBatchAcrossRequests in
 //     batch_processor_test.go).
-//   - [DropStats] structure: Go exposes [DropStats] as a typed struct of four
-//     category counters (QueueFullDrops, AppendFailureDrops,
+//   - [DropStats] structure: Go exposes [DropStats] as a typed struct of five
+//     category counters (QueueFullDrops, AppendFailureDrops, RowErrorDrops,
 //     FormatterFailureDrops, ShutdownDrops) plus TotalDrops via
-//     [BigQueryAgentAnalyticsPlugin.DropStats], whereas adk-python's
-//     get_drop_stats() returns a dictionary of per-reason counts. (Pinned by
-//     TestBigQueryAgentAnalyticsPlugin_DropStats in
-//     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats
-//     and TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in
+//     [BigQueryAgentAnalyticsPlugin.DropStats], and isolates in-range
+//     AppendRowsResponse.RowErrors rejections under RowErrorDrops (up to 8
+//     passes per chunk) when AppendResult is unset and the response status is
+//     nil or InvalidArgument (and not after an ambiguous send under
+//     ExactlyOnceDelivery), whereas a batch-level non-InvalidArgument failure
+//     such as PermissionDenied or exhausted Unavailable still sends the batch
+//     to AppendFailureDrops, as do RowErrors that arrive alongside AppendResult
+//     or after an ambiguous send, whose rows are never resent; adk-python's
+//     get_drop_stats() returns a dictionary of per-reason counts (dropping the
+//     batch when the response status is InvalidArgument and treating a
+//     response with no status set as committed without inspecting
+//     row_errors). (Pinned by TestBigQueryAgentAnalyticsPlugin_DropStats in
+//     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats,
+//     TestBatchProcessor_RowErrorsIsolation,
+//     TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted, and
+//     TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in
 //     batch_processor_test.go).
 //   - Response summary and function-name bounds: When [Config.MaxContentLen]
 //     sets a limit (MaxContentLen >= 0 and [Config.CaptureFullMessageContent]
 //     is false), Go caps FunctionCall and FunctionResponse names in response
-//     summaries at 256 runes (with redaction when enabled) and caps joined
+//     summaries, and the language or outcome of a code part in any summary,
+//     at 256 runes (with redaction when enabled) and caps joined
 //     multi-part response summaries at [Config.MaxContentLen] + 4096 runes
 //     before appending the 14-rune "...[TRUNCATED]" suffix; [EventLLMResponse]
 //     writes that summary directly to content.response, whereas
@@ -294,9 +355,11 @@
 //     [Config.MaxContentLen] string truncation, and setting
 //     [Config.CaptureFullMessageContent] or MaxContentLen to -1 lifts both
 //     length caps while preserving redaction when enabled. adk-python
-//     interpolates function names verbatim and applies no joined-length cap
+//     interpolates function names, and in response summaries the language or
+//     outcome of a code part, verbatim and applies no joined-length cap
 //     after joining part summaries. (Pinned by
-//     TestResponseMessageSummaryLengthCap and
-//     TestResponseMessageSummaryFunctionNameCap in json_formatter_test.go, and
+//     TestResponseMessageSummaryLengthCap,
+//     TestResponseMessageSummaryFunctionNameCap and
+//     TestMessageSummaryCodeLabel in json_formatter_test.go, and
 //     TestDocParity_ResponseSummaryAndFunctionNameBounds in doc_test.go).
 package agentanalytics

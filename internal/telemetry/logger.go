@@ -65,7 +65,7 @@ const (
 )
 
 var (
-	captureMode contentCaptureMode = captureNone
+	captureMode = captureNone
 	once        sync.Once
 )
 
