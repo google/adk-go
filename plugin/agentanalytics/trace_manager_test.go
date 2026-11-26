@@ -5774,32 +5774,60 @@ func TestFunctionResponseCallsMatchToolKeys(t *testing.T) {
 // recorded for the invocation. Without a parent map, the earlier tree is all
 // that is known, and it gives the invocation its root agent.
 func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T) {
-	helper := newTestAgent(t, "helper")
-	worker := newTestAgent(t, "worker", helper)
-	root := newTestAgent(t, "root", worker)
+	var capturedIC agent.InvocationContext
+	newCaptureAgent := func(name string, subAgents ...agent.Agent) agent.Agent {
+		a, err := agent.New(agent.Config{
+			Name:      name,
+			SubAgents: subAgents,
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					capturedIC = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%q) error: %v", name, err)
+		}
+		return a
+	}
+	captureContext := func(runnerAgent agent.Agent) context.Context {
+		capturedIC = nil
+		for _, runErr := range newTestRunner(t, runnerAgent).Run(t.Context(), "u1", "s-earlier-"+runnerAgent.Name(), textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run(%s) error: %v", runnerAgent.Name(), runErr)
+			}
+		}
+		if capturedIC == nil {
+			t.Fatalf("capturedIC is nil for runner %s", runnerAgent.Name())
+		}
+		return capturedIC
+	}
 
-	type parentsKey struct{}
+	helper := newCaptureAgent("helper")
+	worker := newCaptureAgent("worker", helper)
+	root := newCaptureAgent("root", worker)
+
 	tests := []struct {
-		name    string
-		runner  agent.Agent
-		parents map[string]agent.Agent // nil: the context carries no parent map
+		name         string
+		runner       agent.Agent
+		withRunnerPM bool // true: the context carries the runner's internal/agent/parentmap
 		// wantRoot is the root agent of the invocation, and wantParents the
 		// parent of each agent that the invocation records.
 		wantRoot    string
 		wantParents map[string]string
 	}{
 		{
-			name:        "parent map of the runner",
-			runner:      worker,
-			parents:     map[string]agent.Agent{"helper": worker},
-			wantRoot:    "worker",
-			wantParents: map[string]string{"helper": "worker"},
+			name:         "parent map of the runner",
+			runner:       worker,
+			withRunnerPM: true,
+			wantRoot:     "worker",
+			wantParents:  map[string]string{"helper": "worker"},
 		},
 		{
-			name:     "empty parent map",
-			runner:   helper,
-			parents:  map[string]agent.Agent{},
-			wantRoot: "helper",
+			name:         "empty parent map",
+			runner:       helper,
+			withRunnerPM: true,
+			wantRoot:     "helper",
 		},
 		{
 			name:        "no parent map",
@@ -5814,8 +5842,8 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 			// The earlier runner runs root.
 			tm.rememberAgentTree(root)
 			ctx := context.Background()
-			if tc.parents != nil {
-				ctx = context.WithValue(ctx, parentsKey{}, tc.parents)
+			if tc.withRunnerPM {
+				ctx = captureContext(tc.runner)
 			}
 			id := identity{invocationID: "inv-earlier-runner", agentName: tc.runner.Name()}
 			if got := tm.invocationSpan(ctx, id, tc.runner).rootAgentName; got != tc.wantRoot {
@@ -22280,12 +22308,13 @@ func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
 				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
 			},
 		}
-		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		act := activationKey(t.Context())
+		inv.retireFailedTaskAttemptsAtLocked(act, id, map[string]int{"call_0": 1}, 1, nil, 0, "", taskDispatchMaps{}, false, time.Time{})
 		if len(inv.agentStack[2].taskAttempts) != 0 {
 			t.Fatalf("newer run taskAttempts after retirement = %v, want empty", inv.agentStack[2].taskAttempts)
 		}
 		// An additional unobserved failure must never delete the earlier run's completed attempt.
-		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		inv.retireFailedTaskAttemptsAtLocked(act, id, map[string]int{"call_0": 1}, 1, nil, 0, "", taskDispatchMaps{}, false, time.Time{})
 		if got, status := inv.finishedTaskLocked(id, "call_0", false, time.Time{}); got != 1 || status != taskMatchFound {
 			t.Fatalf("finishedTaskLocked after retirement = (%d, %v), want (1, %v)", got, status, taskMatchFound)
 		}
@@ -22299,7 +22328,7 @@ func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
 				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
 			},
 		}
-		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		inv.retireFailedTaskAttemptsAtLocked(activationKey(t.Context()), id, map[string]int{"call_0": 1}, 1, nil, 0, "", taskDispatchMaps{}, false, time.Time{})
 		if len(inv.agentStack[2].taskAttempts) != 0 {
 			t.Fatalf("newer run taskAttempts after retirement = %v, want empty", inv.agentStack[2].taskAttempts)
 		}
@@ -29563,6 +29592,55 @@ func (d *viewContextDerivedICDecorator) WithContext(ctx context.Context) agent.I
 	return &viewContextDerivedICDecorator{InvocationContext: d.InvocationContext.WithContext(ctx)}
 }
 
+type viewWithOwnCtxAndICDelta struct {
+	agent.InvocationContext
+	ctx context.Context
+	ag  *atomic.Pointer[agent.Agent]
+}
+
+func (d *viewWithOwnCtxAndICDelta) Agent() agent.Agent {
+	if d.ag != nil {
+		if a := d.ag.Load(); a != nil && *a != nil {
+			return *a
+		}
+	}
+	return d.InvocationContext.Agent()
+}
+
+func (d *viewWithOwnCtxAndICDelta) Deadline() (time.Time, bool) { return d.ctx.Deadline() }
+func (d *viewWithOwnCtxAndICDelta) Done() <-chan struct{}       { return d.ctx.Done() }
+func (d *viewWithOwnCtxAndICDelta) Err() error                  { return d.ctx.Err() }
+func (d *viewWithOwnCtxAndICDelta) Value(key any) any           { return d.ctx.Value(key) }
+func (d *viewWithOwnCtxAndICDelta) WithContext(ctx context.Context) agent.InvocationContext {
+	return &viewWithOwnCtxAndICDelta{InvocationContext: d.InvocationContext, ctx: ctx, ag: d.ag}
+}
+
+func (d *viewWithOwnCtxAndICDelta) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	if delta == nil {
+		return d.InvocationContext.WithICDelta(nil)
+	}
+	if delta.Context == nil && delta.Branch == nil && delta.IsolationScope == nil && delta.UserContent == nil && d.ag != nil {
+		if delta.Agent != nil {
+			d.ag.Store(delta.Agent)
+		}
+		return d
+	}
+	next := &viewWithOwnCtxAndICDelta{
+		InvocationContext: d.InvocationContext,
+		ctx:               d.ctx,
+		ag:                &atomic.Pointer[agent.Agent]{},
+	}
+	if delta.Agent != nil {
+		next.ag.Store(delta.Agent)
+	} else if d.ag != nil {
+		next.ag.Store(d.ag.Load())
+	}
+	if delta.Context != nil {
+		next.ctx = *delta.Context
+	}
+	return next
+}
+
 type gatedViewLLM struct {
 	onCall func(ctx context.Context, call int32) *model.LLMResponse
 	calls  atomic.Int32
@@ -29945,8 +30023,8 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 	t.Run("self-referential pointer cycle terminates", func(t *testing.T) {
 		cyc := &lineageContext{}
 		cyc.Context = cyc
-		if got := inv.launcherLocked(cyc, excluded); got != 0 {
-			t.Fatalf("launcherLocked(self-cycle) = %d, want 0", got)
+		if got, steps := inv.launcherLockedCounted(cyc, excluded); got != 0 || steps > 4 {
+			t.Fatalf("launcherLockedCounted(self-cycle) = (%d, steps=%d), want (0, steps<=4)", got, steps)
 		}
 	})
 
@@ -29954,8 +30032,8 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 		a := &lineageContext{}
 		b := &lineageContext{Context: a}
 		a.Context = b
-		if got := inv.launcherLocked(a, excluded); got != 0 {
-			t.Fatalf("launcherLocked(2-cycle) = %d, want 0", got)
+		if got, steps := inv.launcherLockedCounted(a, excluded); got != 0 || steps > 8 {
+			t.Fatalf("launcherLockedCounted(2-cycle) = (%d, steps=%d), want (0, steps<=8)", got, steps)
 		}
 	})
 
@@ -29966,8 +30044,8 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 		for i := range 80 {
 			cur = context.WithValue(cur, lineageKey{}, i)
 		}
-		if got := inv.launcherLocked(&lineageContext{Context: cur}, excluded); got != 0 {
-			t.Fatalf("launcherLocked(deep-cycle) = %d, want 0", got)
+		if got, steps := inv.launcherLockedCounted(&lineageContext{Context: cur}, excluded); got != 0 || steps > 256 {
+			t.Fatalf("launcherLockedCounted(deep-cycle) = (%d, steps=%d), want (0, steps<=256)", got, steps)
 		}
 	})
 
@@ -30009,8 +30087,8 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 		cCtx, cCancel := context.WithCancel(af)
 		defer cCancel()
 		af.Context = cCtx
-		if got := inv.launcherLocked(&lineageContext{Context: cCtx}, excluded); got != 0 {
-			t.Fatalf("launcherLocked(stopCtx-cycle) = %d, want 0", got)
+		if got, steps := inv.launcherLockedCounted(&lineageContext{Context: cCtx}, excluded); got != 0 || steps > 8 {
+			t.Fatalf("launcherLockedCounted(stopCtx-cycle) = (%d, steps=%d), want (0, steps<=8)", got, steps)
 		}
 	})
 
@@ -30027,8 +30105,8 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 			}
 		}
 		cur.Context = cycleEntry
-		if got := inv.launcherLocked(head, excluded); got != 0 {
-			t.Fatalf("launcherLocked(deep-cycle>32) = %d, want 0", got)
+		if got, steps := inv.launcherLockedCounted(head, excluded); got != 0 || steps > 128 {
+			t.Fatalf("launcherLockedCounted(deep-cycle>32) = (%d, steps=%d), want (0, steps<=128)", got, steps)
 		}
 	})
 
@@ -30648,7 +30726,10 @@ func TestContextPath_PrefersInvocationContextOverReplacementContext(t *testing.T
 	t.Run("fallback inside invocationContext beats peer replacement and pairs LLM span", func(t *testing.T) {
 		plainIC := &mockInvocationContext{ctx: t.Context(), agentName: "plain", invocationID: "inv-owner"}
 		ownerFallback := agent.NewContext(plainIC).WithAgentContext(context.WithValue(icInner, lineageKey{}, "owner"))
-		peerCC := agent.NewCallbackContext(icOuter, nil).WithICDelta(nil).(agent.Context)
+		peerCC := agent.NewCallbackContext(icOuter, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.Background())
+		if peerPath := contextPath(peerCC); peerPath == "" || peerPath == "wf_inner@1/leaf@1" {
+			t.Fatalf("precondition failed: peerCC path = %q, want distinct non-empty outer path", peerPath)
+		}
 		wrapped := agent.NewCallbackContext(ownerFallback, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.WithValue(peerCC, lineageKey{}, "peer"))
 
 		if got := contextPath(wrapped); got != "wf_inner@1/leaf@1" {
@@ -30702,6 +30783,12 @@ func TestActivationKey_OverlappingViewContextDecorator(t *testing.T) {
 			name: "derived WithContext view decorator",
 			wrapView: func(base agent.InvocationContext) agent.InvocationContext {
 				return &viewContextDerivedICDecorator{InvocationContext: base}
+			},
+		},
+		{
+			name: "view decorator with own Go context and forwarding WithICDelta(nil)",
+			wrapView: func(base agent.InvocationContext) agent.InvocationContext {
+				return &viewWithOwnCtxAndICDelta{InvocationContext: base, ctx: base}
 			},
 		},
 	} {
@@ -30841,6 +30928,112 @@ func TestActivationKey_OverlappingViewContextDecorator(t *testing.T) {
 	}
 }
 
+type callbackViewBaseIC struct {
+	*stableBaseIC
+	ag agent.Agent
+}
+
+func (b *callbackViewBaseIC) Agent() agent.Agent              { return b.ag }
+func (b *callbackViewBaseIC) Memory() agent.Memory            { return nil }
+func (b *callbackViewBaseIC) Session() session.Session        { return nil }
+func (b *callbackViewBaseIC) IsolationScope() string          { return "" }
+func (b *callbackViewBaseIC) RunConfig() *agent.RunConfig     { return nil }
+func (b *callbackViewBaseIC) EndInvocation()                  {}
+func (b *callbackViewBaseIC) Ended() bool                     { return false }
+func (b *callbackViewBaseIC) ResumedInput(string) (any, bool) { return nil, false }
+func (b *callbackViewBaseIC) WithContext(ctx context.Context) agent.InvocationContext {
+	return &callbackViewBaseIC{
+		stableBaseIC: &stableBaseIC{mockInvocationContext: &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    b.agentName,
+			invocationID: b.invocationID,
+			sessionID:    b.sessionID,
+			userID:       b.userID,
+		}},
+		ag: b.ag,
+	}
+}
+
+func (b *callbackViewBaseIC) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return b
+}
+
+func TestActivationKey_OverlappingPublicCallbacksWithForwardingICDelta(t *testing.T) {
+	p, tm, requests, _ := setupTestPluginWithTraces(t)
+	clock := time.Unix(1_700_000_000, 0)
+	tm.now = func() time.Time {
+		clock = clock.Add(5 * time.Millisecond)
+		return clock
+	}
+
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	baseIC := &callbackViewBaseIC{
+		stableBaseIC: &stableBaseIC{mockInvocationContext: &mockInvocationContext{
+			ctx:          t.Context(),
+			agentName:    "worker",
+			invocationID: "inv-callback-view-overlap",
+		}},
+		ag: worker,
+	}
+	view1 := &deterministicICDecorator{InvocationContext: baseIC}
+	view2 := &deterministicICDecorator{InvocationContext: baseIC}
+	cb1 := agent.NewCallbackContext(view1, nil)
+	cb2 := agent.NewCallbackContext(view2, nil)
+
+	var errs callbackErrors
+	errs.add(p.BeforeRunCallback()(baseIC))
+	errs.add(p.BeforeAgentCallback()(cb1))
+	errs.add(p.BeforeAgentCallback()(cb2))
+	errs.add(p.BeforeModelCallback()(cb1, &model.LLMRequest{Model: "gemini-test"}))
+	errs.add(p.BeforeModelCallback()(cb2, &model.LLMRequest{Model: "gemini-test"}))
+	// Complete request 1 before request 2 while both activations overlap.
+	errs.add(p.AfterModelCallback()(cb1, &model.LLMResponse{Content: textContent("model", "reply-1")}, nil))
+	errs.add(p.AfterModelCallback()(cb2, &model.LLMResponse{Content: textContent("model", "reply-2")}, nil))
+	errs.add(p.AfterAgentCallback()(cb1))
+	errs.add(p.AfterAgentCallback()(cb2))
+	errs.check(t)
+	p.AfterRunCallback()(baseIC)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	requestRows := rowsOfType(rows, EventLLMRequest)
+	responseRows := rowsOfType(rows, EventLLMResponse)
+	if len(workerStarts) != 2 || len(requestRows) != 2 || len(responseRows) != 2 {
+		t.Fatalf("counts: workers=%d reqs=%d resps=%d, want 2 each", len(workerStarts), len(requestRows), len(responseRows))
+	}
+	req1 := placeOf(requestRows[0])
+	req2 := placeOf(requestRows[1])
+	resp1 := placeOf(responseRows[0])
+	resp2 := placeOf(responseRows[1])
+	if req1.span == "" || req2.span == "" || req1.span == req2.span {
+		t.Fatalf("LLM_REQUEST spans collapsed: req1=%+v req2=%+v", req1, req2)
+	}
+	if req1.parent != workerStarts[0]["span_id"] || req2.parent != workerStarts[1]["span_id"] {
+		t.Fatalf("LLM_REQUEST parents = (%q, %q), want (%q, %q)", req1.parent, req2.parent, workerStarts[0]["span_id"], workerStarts[1]["span_id"])
+	}
+	if resp1 != req1 {
+		t.Fatalf("LLM_RESPONSE 1 place = %+v, want %+v", resp1, req1)
+	}
+	if resp2 != req2 {
+		t.Fatalf("LLM_RESPONSE 2 place = %+v, want %+v", resp2, req2)
+	}
+	if _, ok := rowLatency(t, responseRows[0]); !ok {
+		t.Fatal("LLM_RESPONSE 1 missing latency_ms")
+	}
+	if _, ok := rowLatency(t, responseRows[1]); !ok {
+		t.Fatal("LLM_RESPONSE 2 missing latency_ms")
+	}
+}
+
 func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
 	baseIC := &stableBaseIC{mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "base", invocationID: "inv-base"}}
 
@@ -30873,10 +31066,54 @@ func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
 		}
 	})
 
-	t.Run("deterministic WithICDelta(nil) unwraps to baseIC", func(t *testing.T) {
-		dec := &deterministicICDecorator{InvocationContext: baseIC}
-		if got := activationKey(dec); got != any(baseIC) {
-			t.Fatalf("activationKey(deterministicDec) = %p, want %p", got, baseIC)
+	t.Run("deterministic WithICDelta(nil) external decorator keeps callback identity distinct", func(t *testing.T) {
+		dec1 := &deterministicICDecorator{InvocationContext: baseIC}
+		dec2 := &deterministicICDecorator{InvocationContext: baseIC}
+		if got := activationKey(dec1); got != any(baseIC) {
+			t.Fatalf("activationKey(deterministicDec1) = %p, want %p", got, baseIC)
+		}
+		if got := activationKey(dec2); got != any(baseIC) {
+			t.Fatalf("activationKey(deterministicDec2) = %p, want %p", got, baseIC)
+		}
+		if got1, got2 := activationKey(agent.NewCallbackContext(dec1, nil)), activationKey(agent.NewCallbackContext(dec2, nil)); got1 != any(dec1) || got2 != any(dec2) || got1 == got2 {
+			t.Fatalf("callback activationKeys = (%p, %p), want distinct (%p, %p)", got1, got2, dec1, dec2)
+		}
+	})
+
+	t.Run("replacement context on ADK wrapper does not hijack activationKey", func(t *testing.T) {
+		icOuter := &stableBaseIC{mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "outer", invocationID: "inv-base"}}
+		icInner1 := &stableBaseIC{mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "inner", invocationID: "inv-base"}}
+		icInner2 := &stableBaseIC{mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "inner", invocationID: "inv-base"}}
+
+		var outerCtx context.Context = icOuter
+		wrapped1 := agent.NewContext(icInner1).WithICDelta(&agent.InvocationContextDelta{Context: &outerCtx})
+		wrapped2 := agent.NewContext(icInner2).WithICDelta(&agent.InvocationContextDelta{Context: &outerCtx})
+		if got1, got2 := activationKey(wrapped1), activationKey(wrapped2); got1 != any(icInner1) || got2 != any(icInner2) || got1 == got2 {
+			t.Fatalf("Context delta hijacked activationKey: got=(%p, %p), want=(%p, %p)", got1, got2, icInner1, icInner2)
+		}
+		if got1, got2 := activationKey(agent.NewCallbackContext(wrapped1, nil)), activationKey(agent.NewCallbackContext(wrapped2, nil)); got1 != any(icInner1) || got2 != any(icInner2) || got1 == got2 {
+			t.Fatalf("callback Context delta hijacked activationKey: got=(%p, %p), want=(%p, %p)", got1, got2, icInner1, icInner2)
+		}
+
+		// Also verify WithAgentContext(WithValue(icOuter, ...)) does not hijack.
+		valWrapped1 := agent.NewContext(icInner1).WithAgentContext(context.WithValue(icOuter, lineageKey{}, "v1"))
+		valWrapped2 := agent.NewContext(icInner2).WithAgentContext(context.WithValue(icOuter, lineageKey{}, "v2"))
+		if got1, got2 := activationKey(valWrapped1), activationKey(valWrapped2); got1 != any(icInner1) || got2 != any(icInner2) || got1 == got2 {
+			t.Fatalf("WithAgentContext hijacked activationKey: got=(%p, %p), want=(%p, %p)", got1, got2, icInner1, icInner2)
+		}
+	})
+
+	t.Run("nested ADK wrapper keeps identical activationKey with or without delta", func(t *testing.T) {
+		view1 := agent.NewContext(baseIC)
+		outer := agent.NewContext(view1).WithAgentContext(context.WithValue(view1, lineageKey{}, "v"))
+		outerDelta := outer.WithICDelta(&agent.InvocationContextDelta{})
+		if any(outer) == any(outerDelta) {
+			t.Fatal("precondition failed: outer.WithICDelta(&InvocationContextDelta{}) must return a derived copy")
+		}
+		kOuter := activationKey(agent.NewCallbackContext(outer, nil))
+		kOuterDelta := activationKey(agent.NewCallbackContext(outerDelta, nil))
+		if kOuter == nil || kOuter != kOuterDelta || kOuter != any(baseIC) {
+			t.Fatalf("nested ADK wrapper activationKey mismatch: outer=%p outerDelta=%p want=%p", kOuter, kOuterDelta, baseIC)
 		}
 	})
 
@@ -30930,6 +31167,183 @@ func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
 		if remaining != 0 {
 			t.Fatalf("inv.llmSpans has %d leaked entries, want 0", remaining)
 		}
+	})
+}
+
+type lockOrderICDecorator struct {
+	embeddedInvocationContext
+	onHook func(method string)
+}
+
+func (d *lockOrderICDecorator) InvocationContext() agent.InvocationContext {
+	if d.onHook != nil {
+		d.onHook("InvocationContext")
+	}
+	return d.embeddedInvocationContext
+}
+
+func (d *lockOrderICDecorator) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	if d.onHook != nil {
+		d.onHook("WithICDelta")
+	}
+	if delta == nil {
+		return d.embeddedInvocationContext.WithICDelta(nil)
+	}
+	return &lockOrderICDecorator{
+		embeddedInvocationContext: d.embeddedInvocationContext.WithICDelta(delta),
+		onHook:                    d.onHook,
+	}
+}
+
+type deltaOnlyLockOrderICDecorator struct {
+	agent.InvocationContext
+	onHook func(method string)
+}
+
+func (d *deltaOnlyLockOrderICDecorator) WithICDelta(delta *agent.InvocationContextDelta) agent.InvocationContext {
+	if d.onHook != nil {
+		d.onHook("WithICDelta")
+	}
+	if delta == nil {
+		return d.InvocationContext.WithICDelta(nil)
+	}
+	return &deltaOnlyLockOrderICDecorator{
+		InvocationContext: d.InvocationContext.WithICDelta(delta),
+		onHook:            d.onHook,
+	}
+}
+
+func TestTraceManager_NoUserMethodCallsUnderInvMu(t *testing.T) {
+	t.Run("inv.mu is unlocked during WithICDelta and InvocationContext", func(t *testing.T) {
+		tm := newTraceManager()
+		clock := time.Unix(1_700_000_000, 0)
+		tm.now = func() time.Time {
+			clock = clock.Add(time.Millisecond)
+			return clock
+		}
+		baseIC := &stableBaseIC{mockInvocationContext: &mockInvocationContext{
+			ctx:          t.Context(),
+			agentName:    "worker",
+			invocationID: "inv-no-usermethod-under-mu",
+			branch:       "b1",
+		}}
+		id := identity{invocationID: "inv-no-usermethod-under-mu", agentName: "worker", branch: "b1"}
+		inv := tm.invocation(baseIC, id)
+		tm.invocationSpan(baseIC, id, nil)
+
+		var hookCalls atomic.Int32
+		checkUnlocked := func(method string) {
+			hookCalls.Add(1)
+			if !inv.mu.TryLock() {
+				t.Errorf("inv.mu was held while calling %s", method)
+				return
+			}
+			inv.mu.Unlock()
+		}
+
+		// Exercise both a callback-wrapped decorator (triggers InvocationContext)
+		// and a WithICDelta-only decorator (triggers WithICDelta via step-0,
+		// runningAgentChildren, and endedFunc), verifying inv.mu is never held.
+		decWithIC := &lockOrderICDecorator{embeddedInvocationContext: baseIC, onHook: checkUnlocked}
+		cbCtx := agent.NewCallbackContext(decWithIC, nil)
+		var deltaOnlyCalls atomic.Int32
+		decDeltaOnly := &deltaOnlyLockOrderICDecorator{
+			InvocationContext: baseIC,
+			onHook: func(method string) {
+				deltaOnlyCalls.Add(1)
+				checkUnlocked(method)
+			},
+		}
+
+		for _, ctx := range []context.Context{cbCtx, decDeltaOnly} {
+			tm.pushAgentSpan(ctx, id)
+			tm.noteTaskStart(ctx, id, "task-call")
+			tm.noteTaskAttempt(ctx, id, "task-call", false, false)
+			tm.pushLLMSpan(ctx, id)
+			tm.recordFirstToken(ctx, id)
+			tm.recordError(ctx, id, llmKey(id), errors.New("model error"))
+			tm.popLLMSpan(ctx, id, false)
+			tm.popLLMSpan(ctx, id, true)
+			tm.clearError(ctx, id, llmKey(id))
+			tm.pushToolSpan(ctx, id, "tool-call")
+			tm.popToolSpan(ctx, id, "tool-call", false)
+			tm.retireFailedTaskAttemptsForEvent(ctx, id, []string{"task-call"}, []string{"task-call"}, "task-call", taskDispatchMaps{}, true, clock)
+			tm.popTaskAgentSpanForEvent(ctx, id, []string{"task-call"}, "task-call", taskDispatchMaps{}, false, true, clock)
+			tm.endRestartedNodeRuns(ctx, id)
+			tm.popAgentSpan(ctx, id)
+		}
+
+		if got := hookCalls.Load(); got == 0 {
+			t.Fatal("expected InvocationContext decorator hook to run at least once")
+		}
+		if got := deltaOnlyCalls.Load(); got == 0 {
+			t.Fatal("expected WithICDelta decorator hook to run at least once")
+		}
+	})
+
+	t.Run("app mutex -> inv.mu lock order does not invert across concurrent callers", func(t *testing.T) {
+		tm := newTraceManager()
+		baseIC := &stableBaseIC{mockInvocationContext: &mockInvocationContext{
+			ctx:          t.Context(),
+			agentName:    "worker",
+			invocationID: "inv-lock-order-race",
+		}}
+		id := identity{invocationID: "inv-lock-order-race", agentName: "worker"}
+		inv := tm.invocation(baseIC, id)
+		tm.invocationSpan(baseIC, id, nil)
+
+		var appMu sync.Mutex
+		dec := &lockOrderICDecorator{
+			embeddedInvocationContext: baseIC,
+			onHook: func(method string) {
+				appMu.Lock()
+				defer appMu.Unlock()
+				if !inv.mu.TryLock() {
+					t.Errorf("lock order violation: inv.mu held while acquiring appMu inside %s", method)
+					return
+				}
+				inv.mu.Unlock()
+			},
+		}
+		cbCtx := agent.NewCallbackContext(dec, nil)
+		tm.pushAgentSpan(cbCtx, id)
+
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for i := range 25 {
+				appMu.Lock()
+				tm.pushLLMSpan(baseIC, id)
+				tm.popLLMSpan(baseIC, id, true)
+				appMu.Unlock()
+				if i == 12 {
+					runtime.Gosched()
+				}
+			}
+		})
+		wg.Go(func() {
+			for range 25 {
+				tm.pushLLMSpan(cbCtx, id)
+				tm.recordFirstToken(cbCtx, id)
+				tm.popLLMSpan(cbCtx, id, true)
+				tm.pushToolSpan(dec, id, "tool-race")
+				tm.popToolSpan(dec, id, "tool-race", false)
+			}
+		})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			t.Fatal("deadlock or lock-order inversion between appMu and inv.mu")
+		}
+		tm.popAgentSpan(cbCtx, id)
+		tm.endInvocation(baseIC, id)
 	})
 }
 
@@ -32758,9 +33172,9 @@ func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
 			parent:   inv.agentStack[1],
 		})
 
-		idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", time.Time{})
+		idx := inv.unobservedTaskForActivationLocked(activationKey(context.Background()), taskID, "call_unobs", time.Time{})
 		if idx < 0 || inv.agentStack[idx].spanID != "run-without-ending" {
-			t.Fatalf("unobservedTaskLocked() = %d, want run-without-ending", idx)
+			t.Fatalf("unobservedTaskForActivationLocked() = %d, want run-without-ending", idx)
 		}
 	})
 
@@ -32785,13 +33199,13 @@ func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
 			eventClockStart: base.Add(50 * time.Millisecond),
 		})
 
-		idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", base.Add(25*time.Millisecond))
+		idx := inv.unobservedTaskForActivationLocked(activationKey(context.Background()), taskID, "call_unobs", base.Add(25*time.Millisecond))
 		if idx < 0 || inv.agentStack[idx].spanID != "run-1" {
-			t.Fatalf("unobservedTaskLocked() = %d, want run-1", idx)
+			t.Fatalf("unobservedTaskForActivationLocked() = %d, want run-1", idx)
 		}
 	})
 
-	t.Run("ambiguous unobserved non-empty callID returns -1 while empty callID falls back to findAgentForContext", func(t *testing.T) {
+	t.Run("ambiguous unobserved non-empty callID returns -1 while empty callID falls back to findAgentForActivationLocked", func(t *testing.T) {
 		inv := newTaskInv()
 		inv.pushAgentLocked(&spanRecord{
 			spanID:          "run-1",
@@ -32812,11 +33226,12 @@ func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
 			eventClockStart: base.Add(15 * time.Millisecond),
 		})
 
-		if idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
-			t.Errorf("unobservedTaskLocked(non-empty callID) = %d, want newest matching activation run-2", idx)
+		act := activationKey(context.Background())
+		if idx := inv.unobservedTaskForActivationLocked(act, taskID, "call_unobs", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
+			t.Errorf("unobservedTaskForActivationLocked(non-empty callID) = %d, want newest matching activation run-2", idx)
 		}
-		if idx := inv.unobservedTaskLocked(context.Background(), taskID, "", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
-			t.Errorf("unobservedTaskLocked(empty callID) = %d, want newest matching activation run-2", idx)
+		if idx := inv.unobservedTaskForActivationLocked(act, taskID, "", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
+			t.Errorf("unobservedTaskForActivationLocked(empty callID) = %d, want newest matching activation run-2", idx)
 		}
 	})
 }
@@ -34036,6 +34451,89 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		case <-done:
 		case <-timer.C:
 			t.Fatal("contextParentMap / contextPath / identityOf hung on cyclic ctx any or params any wrapper")
+		}
+	})
+}
+
+func TestContextParentMap_IgnoresApplicationAgentRegistry(t *testing.T) {
+	fakeChild, err := agent.New(agent.Config{
+		Name: "app-child",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(app-child): %v", err)
+	}
+
+	type appAgentRegistry map[string]agent.Agent
+	type spoofCtxKey int
+	const zeroSpoofKey spoofCtxKey = 0
+
+	t.Run("ignores non-parentmap maps including zero int keys", func(t *testing.T) {
+		ctx := context.WithValue(t.Context(), lineageKey{}, map[string]agent.Agent{"wf_fake": fakeChild})
+		ctx = context.WithValue(ctx, zeroSpoofKey, map[string]agent.Agent{"wf_zero": fakeChild})
+		ctx = context.WithValue(ctx, zeroSpoofKey, appAgentRegistry{"wf_named": fakeChild})
+
+		if got := contextParentMap(ctx); got != nil {
+			t.Fatalf("contextParentMap(app registry) = %v, want nil", got)
+		}
+	})
+
+	t.Run("ignores outer application map and finds inner ADK parentmap", func(t *testing.T) {
+		var capturedIC agent.InvocationContext
+		leaf, err := agent.New(agent.Config{
+			Name: "leaf_pm",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					capturedIC = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(leaf_pm): %v", err)
+		}
+		leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf_real_pm",
+			Edges: workflow.Chain(workflow.Start, leafNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		realParent, err := agent.New(agent.Config{
+			Name:      "real_parent",
+			SubAgents: []agent.Agent{wf},
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return wf.Run(ic)
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(real_parent): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, realParent).Run(t.Context(), "u1", "s-real-pm", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if capturedIC == nil {
+			t.Fatal("capturedIC is nil")
+		}
+
+		wrapped := context.WithValue(capturedIC, zeroSpoofKey, map[string]agent.Agent{"wf_fake": fakeChild})
+		wrapped = context.WithValue(wrapped, lineageKey{}, appAgentRegistry{"wf_named": fakeChild})
+		got := contextParentMap(wrapped)
+		if got == nil {
+			t.Fatal("contextParentMap(wrapped) = nil, want inner ADK parentmap")
+		}
+		if got["wf_fake"] != nil || got["wf_named"] != nil {
+			t.Fatalf("contextParentMap leaked application registry entries: %v", got)
+		}
+		if got["wf_real_pm"] != realParent {
+			t.Fatalf("contextParentMap[wf_real_pm] = %v, want %v", got["wf_real_pm"], realParent)
 		}
 	})
 }
