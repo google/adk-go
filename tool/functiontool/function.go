@@ -44,8 +44,8 @@ type Config struct {
 	Description string
 	// An optional JSON schema object defining the expected parameters for the tool.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.
-	// The schema must not be modified once the tool is created: the Gemini model
-	// sends the encoding taken at that point.
+	// The schema must not be modified once the tool is created: the Gemini
+	// model's generateContent requests send the encoding taken at that point.
 	InputSchema *jsonschema.Schema
 	// An optional JSON schema object defining the structure of the tool's output.
 	// If it is nil, FunctionTool tries to infer the schema based on the handler type.

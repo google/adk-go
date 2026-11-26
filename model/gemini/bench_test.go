@@ -16,6 +16,7 @@ package gemini
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"cloud.google.com/go/auth"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -75,13 +77,26 @@ func (t *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+type staticToken struct{}
+
+func (staticToken) Token(context.Context) (*auth.Token, error) {
+	return &auth.Token{Value: "test-token", Type: "Bearer"}, nil
+}
+
 func newFakeModel(t testing.TB, transport *fakeTransport) model.LLM {
 	t.Helper()
-	m, err := NewModel(t.Context(), "gemini-2.5-flash", &genai.ClientConfig{
-		APIKey:     "test-key",
-		Backend:    genai.BackendGeminiAPI,
-		HTTPClient: &http.Client{Transport: transport},
-	})
+	return newFakeModelOn(t, genai.BackendGeminiAPI, transport)
+}
+
+func newFakeModelOn(t testing.TB, backend genai.Backend, transport *fakeTransport) model.LLM {
+	t.Helper()
+	cfg := &genai.ClientConfig{Backend: backend, HTTPClient: &http.Client{Transport: transport}}
+	if backend == genai.BackendVertexAI {
+		cfg.Project, cfg.Location, cfg.Credentials = "test-project", "us-central1", auth.NewCredentials(&auth.CredentialsOptions{TokenProvider: staticToken{}})
+	} else {
+		cfg.APIKey = "test-key"
+	}
+	m, err := NewModel(t.Context(), "gemini-2.5-flash", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -59,47 +60,69 @@ func TestRemember_UnencodableSchema(t *testing.T) {
 	}
 }
 
-// TestRemember_Twice checks that remembering a schema again keeps the first
-// encoding, the one a resolved schema was frozen with.
+// TestRemember_Twice checks that remembering a schema again records its
+// current encoding: a schema changed between two tools built from it is sent
+// as the second tool declares it.
 func TestRemember_Twice(t *testing.T) {
 	s := &jsonschema.Schema{Type: "string", Description: "first"}
 	Remember(s)
 	s.Description = "second"
 	Remember(s)
 	got, _ := Encoded(s)
-	if want := `{"type":"string","description":"first"}`; string(got) != want {
+	if want := `{"type":"string","description":"second"}`; string(got) != want {
 		t.Errorf("Encoded after a second Remember = %s, want %s", got, want)
 	}
 }
 
-func entries() int {
-	n := 0
-	encoded.Range(func(any, any) bool { n++; return true })
-	return n
+// TestEncoded_CannotCorruptTheCache checks that appending to a returned
+// encoding leaves the remembered bytes alone.
+func TestEncoded_CannotCorruptTheCache(t *testing.T) {
+	s := &jsonschema.Schema{Type: "string"}
+	Remember(s)
+	got, _ := Encoded(s)
+	want := string(got)
+	_ = append(got, "garbage"...)
+	if again, _ := Encoded(s); string(again[:cap(again)]) != want {
+		t.Errorf("remembered bytes became %q after an append, want %q", again[:cap(again)], want)
+	}
 }
 
-// TestEntriesGoWithTheirSchemas checks that remembered schemas' entries are
-// deleted once the schemas are collected, so tools built per request do not
+// TestEntriesGoWithTheirSchemas checks that every remembered schema's entry is
+// deleted once the schema is collected, so tools built per request do not
 // grow the map without bound.
 func TestEntriesGoWithTheirSchemas(t *testing.T) {
 	const n = 1000
-	before := entries()
-	schemas := make([]*jsonschema.Schema, n)
-	for i := range schemas {
-		schemas[i] = &jsonschema.Schema{Type: "string", Description: "collected"}
-		Remember(schemas[i])
-	}
-	runtime.GC()
-	for i, s := range schemas {
-		if _, ok := Encoded(s); !ok {
-			t.Fatalf("schema %d, still reachable, lost its entry", i)
+	// Built in a closure so no stack slot keeps a schema reachable, even
+	// without optimizations.
+	keys := func() []weak.Pointer[jsonschema.Schema] {
+		keys := make([]weak.Pointer[jsonschema.Schema], n)
+		schemas := make([]*jsonschema.Schema, n)
+		for i := range schemas {
+			schemas[i] = &jsonschema.Schema{Type: "string", Description: "collected"}
+			keys[i] = weak.Make(schemas[i])
+			Remember(schemas[i])
 		}
+		runtime.GC()
+		for i, s := range schemas {
+			if _, ok := Encoded(s); !ok {
+				t.Fatalf("schema %d, still reachable, lost its entry", i)
+			}
+		}
+		return keys
+	}()
+	left := func() int {
+		n := 0
+		for _, k := range keys {
+			if _, ok := encoded.Load(k); ok {
+				n++
+			}
+		}
+		return n
 	}
-	runtime.KeepAlive(schemas)
 	deadline := time.Now().Add(10 * time.Second)
-	for entries() >= before+n/10 {
+	for left() > 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("map still holds %d entries 10s after %d schemas became unreachable, started with %d", entries(), n, before)
+			t.Fatalf("%d of %d entries still present 10s after their schemas became unreachable", left(), n)
 		}
 		runtime.GC()
 		time.Sleep(10 * time.Millisecond)

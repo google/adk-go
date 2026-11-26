@@ -97,6 +97,23 @@ func schemaCorpus(t testing.TB) []tool.Tool {
 		func(agent.Context, map[string]any) (map[string]any, error) { return nil, nil }))
 	add(functiontool.NewStreaming(functiontool.Config{Name: "watch", Description: "Streams updates."},
 		func(agent.Context, WeatherArgs) iter.Seq2[string, error] { return func(func(string, error) bool) {} }))
+	// A pointer argument, and an any result whose schema is the literal true.
+	add(functiontool.New(functiontool.Config{Name: "loose", Description: "Takes a pointer, returns anything."},
+		func(agent.Context, *WeatherArgs) (any, error) { return nil, nil }))
+	// A recursive override through $defs and $ref, which inference cannot build.
+	tree := &jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"root": {Ref: "#/$defs/node"}},
+		Defs: map[string]*jsonschema.Schema{"node": {
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"name": {Type: "string"},
+				"kids": {Type: "array", Items: &jsonschema.Schema{Ref: "#/$defs/node"}},
+			},
+		}},
+	}
+	add(functiontool.New(functiontool.Config{Name: "walk", Description: "Walks a tree.", InputSchema: tree},
+		func(agent.Context, map[string]any) (map[string]any, error) { return nil, nil }))
 	return tools
 }
 
@@ -151,8 +168,13 @@ func handBuilt() []*genai.FunctionDeclaration {
 // It also fails the test if the call changed the request's own tools.
 func send(t *testing.T, stream bool, decls []*genai.FunctionDeclaration) []byte {
 	t.Helper()
+	return sendOn(t, genai.BackendGeminiAPI, stream, decls)
+}
+
+func sendOn(t *testing.T, backend genai.Backend, stream bool, decls []*genai.FunctionDeclaration) []byte {
+	t.Helper()
 	transport := &fakeTransport{bodies: [][]byte{geminiText}}
-	m := newFakeModel(t, transport)
+	m := newFakeModelOn(t, backend, transport)
 	tools := []*genai.Tool{{FunctionDeclarations: decls}}
 	type snapshot struct {
 		decl             *genai.FunctionDeclaration
@@ -213,18 +235,20 @@ func TestGenerateContent_RememberedSchemasSendTheSameBody(t *testing.T) {
 	}
 	cached := append(decls, handBuilt()...)
 	plain = append(plain, handBuilt()...)
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
-			got, want := send(t, stream, cached), send(t, stream, plain)
-			if !bytes.Equal(got, want) {
-				t.Errorf("body with remembered schemas differs from the body with encoded ones:\n got: %s\nwant: %s", got, want)
-			}
-			for _, d := range decls {
-				if !bytes.Contains(got, []byte(fmt.Sprintf("%q", d.Name))) {
-					t.Errorf("body does not declare %s: %s", d.Name, got)
+	for _, backend := range []genai.Backend{genai.BackendGeminiAPI, genai.BackendVertexAI} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%v/stream=%v", backend, stream), func(t *testing.T) {
+				got, want := sendOn(t, backend, stream, cached), sendOn(t, backend, stream, plain)
+				if !bytes.Equal(got, want) {
+					t.Errorf("body with remembered schemas differs from the body with encoded ones:\n got: %s\nwant: %s", got, want)
 				}
-			}
-		})
+				for _, d := range decls {
+					if !bytes.Contains(got, []byte(fmt.Sprintf("%q", d.Name))) {
+						t.Errorf("body does not declare %s: %s", d.Name, got)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -334,5 +358,56 @@ func TestBeforeModelCallback_SeesTypedSchemas(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("BeforeModel ran %d times, want 2 (the call, then the answer)", calls)
+	}
+}
+
+// TestBeforeModelCallback_ReplacedSchemaIsSent checks that a callback that
+// replaces a function tool's schema for one call has its schema sent on that
+// call, and that the next call sends the tool's own schema again.
+func TestBeforeModelCallback_ReplacedSchemaIsSent(t *testing.T) {
+	weather, err := functiontool.New(functiontool.Config{Name: "get_weather", Description: "Reports the weather."},
+		func(agent.Context, WeatherArgs) (string, error) { return "sunny", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &fakeTransport{bodies: [][]byte{geminiCall, geminiText}}
+	calls := 0
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: newFakeModel(t, transport),
+		Tools: []tool.Tool{weather},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			calls++
+			if calls > 1 {
+				return nil, nil
+			}
+			decl := req.Config.Tools[0].FunctionDeclarations[0]
+			replaced := decl.ParametersJsonSchema.(*jsonschema.Schema).CloneSchemas()
+			replaced.Properties["city"].Description = "set by the callback"
+			c := *decl
+			c.ParametersJsonSchema = replaced
+			req.Config.Tools[0].FunctionDeclarations[0] = &c
+			return nil, nil
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range r.Run(t.Context(), "user", "s", genai.NewContentFromText("Weather in Paris?", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(transport.requests) != 2 {
+		t.Fatalf("got %d requests, want 2", len(transport.requests))
+	}
+	for i, want := range []string{"set by the callback", "the city to report on"} {
+		if !bytes.Contains(transport.requests[i], []byte(want)) {
+			t.Errorf("request %d = %s, want the description %q", i, transport.requests[i], want)
+		}
 	}
 }

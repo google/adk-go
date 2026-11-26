@@ -22,6 +22,7 @@ package schemacache
 import (
 	"encoding/json"
 	"runtime"
+	"slices"
 	"sync"
 	"weak"
 
@@ -33,9 +34,10 @@ import (
 // request do not grow the map.
 var encoded sync.Map // weak.Pointer[jsonschema.Schema] -> json.RawMessage
 
-// Remember records the encoding of s. s must not change afterwards, which
-// jsonschema already requires of a schema once it has been resolved. A schema
-// changed anyway is still sent with the encoding recorded here.
+// Remember records the encoding of s, replacing any earlier one. s must not
+// change afterwards, which jsonschema already requires of a schema once it has
+// been resolved. A schema changed anyway is still sent with the encoding
+// recorded here, until it is remembered again.
 func Remember(s *jsonschema.Schema) {
 	if s == nil {
 		return
@@ -47,7 +49,7 @@ func Remember(s *jsonschema.Schema) {
 		return
 	}
 	key := weak.Make(s)
-	if _, loaded := encoded.LoadOrStore(key, json.RawMessage(b)); !loaded {
+	if _, loaded := encoded.Swap(key, json.RawMessage(b)); !loaded {
 		runtime.AddCleanup(s, func(k weak.Pointer[jsonschema.Schema]) { encoded.Delete(k) }, key)
 	}
 }
@@ -64,5 +66,7 @@ func Encoded(v any) (json.RawMessage, bool) {
 	if !ok {
 		return nil, false
 	}
-	return raw.(json.RawMessage), true
+	b := raw.(json.RawMessage)
+	// Capped so an append by a caller cannot write into the shared array.
+	return slices.Clip(b), true
 }
