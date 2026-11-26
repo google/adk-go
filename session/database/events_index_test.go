@@ -158,10 +158,14 @@ func TestAutoMigrateAddsEventsIndexToExistingTable(t *testing.T) {
 	}
 }
 
-// Get's events query must be answered from the events index in index order:
-// a SEARCH on the index and no temporary B-tree to sort the rows. The SQL is
-// the statement Get actually ran, captured from GORM, so a filter or ORDER BY
-// in Get that the index cannot serve fails here.
+// Get's events query must request ORDER BY timestamp DESC, id DESC and be
+// answered from the events index in index order: a SEARCH on the index (with a
+// timestamp seek when After is set) and no temporary B-tree to sort the rows.
+// The SQL is the statement Get actually ran, captured from GORM, so a filter
+// or ORDER BY in Get that the index cannot serve fails here. Asserting the
+// ORDER BY clause directly is necessary because SQLite yields rows in index
+// order even without it, which would otherwise mask a missing tiebreak or
+// ORDER BY on PostgreSQL and MySQL.
 //
 // Only SQLite's plan is checked. PostgreSQL and MySQL plans were not checked
 // locally, since neither server is available to the test suite.
@@ -209,6 +213,9 @@ func TestGetEventsQueryUsesEventsIndex(t *testing.T) {
 			if query == "" {
 				t.Fatal("Get() ran no query on the events table")
 			}
+			if !strings.Contains(query, "ORDER BY timestamp DESC, id DESC") {
+				t.Errorf("events query missing ORDER BY timestamp DESC, id DESC.\nquery: %s", query)
+			}
 
 			var steps []struct{ Detail string }
 			if err := s.db.Raw("EXPLAIN QUERY PLAN " + query).Scan(&steps).Error; err != nil {
@@ -223,6 +230,9 @@ func TestGetEventsQueryUsesEventsIndex(t *testing.T) {
 			t.Logf("query: %s\nplan:\n%s", query, plan)
 			if !strings.Contains(plan, "SEARCH events USING INDEX "+eventsIndex) {
 				t.Errorf("events query does not search %s.\nquery: %s\nplan:\n%s", eventsIndex, query, plan)
+			}
+			if !tc.req.After.IsZero() && !strings.Contains(plan, "timestamp>?") {
+				t.Errorf("events query with After does not seek on timestamp.\nquery: %s\nplan:\n%s", query, plan)
 			}
 			if strings.Contains(plan, "TEMP B-TREE") {
 				t.Errorf("events query sorts in a temporary B-tree.\nquery: %s\nplan:\n%s", query, plan)
