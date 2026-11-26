@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/modelmetadata"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -52,11 +53,6 @@ func fromMetadata(u *genai.GenerateContentResponseUsageMetadata) Usage {
 	}
 }
 
-// CacheWriteKey is the custom metadata key under which the Anthropic model
-// reports the tokens a response wrote to the prompt cache. Duplicated so that
-// telemetry does not import the Anthropic SDK.
-const CacheWriteKey = "anthropic_cache_creation_input_tokens"
-
 // FromResponses returns what one model call spent: its newest usage
 // report, as each report covers the whole call so far. It returns the zero
 // value when no response reports usage, or when the newest report counts
@@ -67,7 +63,7 @@ func FromResponses(responses []*model.LLMResponse) Usage {
 			continue
 		}
 		if u := fromMetadata(r.UsageMetadata); u.Input != 0 || u.Output != 0 {
-			u.CacheWrite, _ = r.CustomMetadata[CacheWriteKey].(int64)
+			u.CacheWrite, _ = r.CustomMetadata[modelmetadata.AnthropicCacheCreationInputTokens].(int64)
 			return u
 		}
 		return Usage{}

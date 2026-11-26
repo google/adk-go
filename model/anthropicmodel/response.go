@@ -22,6 +22,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/modelmetadata"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -33,7 +34,7 @@ const (
 
 	// CacheCreationInputTokensMetadataKey is the key in [model.LLMResponse.CustomMetadata]
 	// holding the int64 count of prompt-cache creation tokens when > 0.
-	CacheCreationInputTokensMetadataKey = "anthropic_cache_creation_input_tokens"
+	CacheCreationInputTokensMetadataKey = modelmetadata.AnthropicCacheCreationInputTokens
 )
 
 func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*model.LLMResponse, error) {
