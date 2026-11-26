@@ -313,9 +313,19 @@ func TestSanitizeURIComponents(t *testing.T) {
 		{"query key after a word and a plus", "https://h/p?my+token=SECRET123", "https://h/p?my+token=" + r},
 		{"query key after an encoded byte order mark", "https://h/p?%EF%BB%BFtoken=SECRET123", "https://h/p?%EF%BB%BFtoken=" + r},
 		{"query key before an encoded no-break space", "https://h/p?token%C2%A0=SECRET123", "https://h/p?token%C2%A0=" + r},
+		{"query key after an encoded no-break space for token", "https://h/p?my%C2%A0token=SECRET", "https://h/p?my%C2%A0token=" + r},
+		{"query key after an encoded no-break space for temp:", "https://h/p?my%C2%A0temp:x=SECRET", "https://h/p?my%C2%A0temp:x=" + r},
+		{"query key with plus-joined multi-colon temp:", "https://h/p?my+temp:a:b=SECRET", "https://h/p?my+temp%3Aa%3A" + r + "=" + r},
+		{"query key with slash-joined multi-colon temp:", "https://h/p?a/temp:a:b=SECRET", "https://h/p?a%2Ftemp%3Aa%3A" + r + "=" + r},
+		{"query key after encoded NBSP with multi-colon temp:", "https://h/p?my%C2%A0temp:a:b=SECRET", "https://h/p?my%C2%A0temp%3Aa%3A" + r + "=" + r},
+		{"query key with temp: double colon stays unredacted at trailing equals", "https://h/p?my+temp:a:=PUBLIC", "https://h/p?my+temp:a:=PUBLIC"},
+		{"query key after non-ASCII letter before temp: stays", "https://h/p?caf%C3%A9temp:x=PUBLIC", "https://h/p?caf%C3%A9temp:x=PUBLIC"},
 		{"bearer token in a query key", "https://h/p?Bearer+SECRET123+token=VAL", "https://h/p?Bearer+" + r + "+token=" + r},
 		{"bearer token in a query value", "https://h/p?q=Bearer+SECRET123", "https://h/p?q=Bearer+" + r},
 		{"pair in a query value", "https://h/p?note=password%3DSECRET123", "https://h/p?note=password%3D" + r},
+		{"query value with backslash-t after Bearer", "https://h/p?note=Bearer%5CtSECRET", "https://h/p?note=%5BREDACTED_SENSITIVE_TEXT%5D"},
+		{"query key with plus-joined sensitive suffix", "https://h/p?my+X__API__KEY=V", "https://h/p?my+X__API__KEY=" + r},
+		{"query key with slash-joined sensitive suffix", "https://h/p?a/X__API__KEY=V", "https://h/p?a/X__API__KEY=" + r},
 		{"URL in a query value", "https://h/redirect?next=https://inner/p?token=SECRET123", "https://h/redirect?next=https%3A%2F%2Finner%2Fp%3Ftoken%3D" + r},
 		{"double-redirect signed file URI", "https://a.example/redirect?next=https%3A%2F%2Fb.example%2Fr%3Fnext%3Dhttps%253A%252F%252Fc.example%252Ff%253Faccess_token%253DSECRET", "https://a.example/redirect?next=%5BREDACTED_SENSITIVE_TEXT%5D"},
 		{"query key with empty value", "https://h/p?X-Amz-Security-Token=", "https://h/p?X-Amz-Security-Token="},
@@ -511,14 +521,67 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"state.temp: key", "state.temp:x=V", "state.temp:x=[REDACTED]"},
 			{"flag --temp: key", "run --temp:scratch=V --verbose", "run --temp:scratch=[REDACTED] --verbose"},
 			{"flag -temp: key", "-temp:x=V", "-temp:x=[REDACTED]"},
-			{"temp: key with colon before equals", "temp:cache:item = V", "temp:cache:item=[REDACTED]"},
-			{"temp: key with colon before colon and space", "temp:cache:item: V", "temp:cache:item:[REDACTED]"},
+			{"temp: key with colon before equals", "temp:cache:item = V", "temp:cache:[REDACTED]"},
+			{"temp: key with colon before colon and space", "temp:cache:item: V", "temp:cache:[REDACTED]"},
+			{"temp: key with padded base64 value", "temp:session:YWJjMTIz= expired", "temp:session:[REDACTED]"},
+			{"temp: key with double-padded base64 value", "temp:session:YWJjMTIz== expired", "temp:session:[REDACTED] expired"},
 			{"single-quoted padded multi-colon temp: key", "' temp:cache:item ': 'v'", "' temp:cache:item ':'[REDACTED]'"},
 			{"double-quoted padded multi-colon temp: key with equals", `log: " temp:cache:item " = V`, `log: " temp:cache:item "=[REDACTED]`},
 			{"single-quoted padded dotted multi-colon temp: key", "' state.temp:cache:item ': 'v'", "' state.temp:cache:item ':'[REDACTED]'"},
 			{"prose inside padded multi-colon temp: quotes keeps value", `' see temp:x ': 'v'`, `' see temp:x ': 'v'`},
 			{"temp: key with colon value", "temp:x:V", "temp:x:[REDACTED]"},
-			{"temp: key with colon before sensitive key", "temp:a:token=2", "temp:a:token=[REDACTED]"},
+			{"temp: key with colon before sensitive key", "temp:a:token=2", "temp:a:[REDACTED]"},
+			{"temp: key with nested colon key", "temp:a:b: V", "temp:a:[REDACTED]"},
+			{"quoted multi-colon temp: key", `log: "temp:a:b": SECRET`, `log: "temp:a:b":"[REDACTED]"`},
+			{"quoted multi-colon temp: key after prose", `foo "temp:a:b": SECRET`, `foo "temp:a:b":"[REDACTED]"`},
+			{"quoted multi-colon temp: key after colon", `a: "temp:a:b": SECRET`, `a: "temp:a:b":"[REDACTED]"`},
+			{"single-quoted multi-colon temp: key with equals", `'temp:a:b' = SECRET`, `'temp:a:b'=[REDACTED]`},
+			{"padded quoted multi-colon temp: key after bare temp:", `temp:x: ' temp:a:b ': SECRET`, `temp:x:'[REDACTED]'`},
+			{"padded quoted multi-colon temp: key after bare temp: pair", `temp:x=1 ' temp:a:b ': SECRET`, `temp:x=[REDACTED] ' temp:a:b ':[REDACTED]`},
+			{"outer plain key wrapping quoted padded state.temp: key", `log: "x": " state.temp:x"="<value>"`, `log: "x": " state.temp:x"="[REDACTED]"`},
+			{"outer sensitive JSON key wrapping quoted padded state.temp: key", `log: "password": " state.temp:x"="<value>"`, `log: "password":"[REDACTED]"`},
+			{"outer sensitive text key wrapping quoted padded state.temp: key", `password=" state.temp:x"="<value>"`, `password="[REDACTED]"`},
+			{"outer sensitive JSON key before Windows-style path key with colon", `log: "password": C:\ssl\token: V`, `log: "password":"[REDACTED]"`},
+			{"outer sensitive JSON key before Windows-style path key with equals", `log: "password": C:\ssl\token= V`, `log: "password":"[REDACTED]"`},
+			{"outer sensitive JSON key before quoted Windows-style path key", `log: "api.key": "C:\ssl\password": "V"`, `log: "api.key":"[REDACTED]"`},
+			{"single-quoted slash-prefixed padded key", "' config/github.token  ' : '<value>'", "' config/github.token  ':'[REDACTED]'"},
+			{"single-quoted slash-prefixed key", "'keys/api.key': <value>", "'keys/api.key':[REDACTED]"},
+			{"single-quoted leading-only space padded key", `' api_key': 'SECRET'`, `' api_key':'[REDACTED]'`},
+			{"single-quoted leading-only newline padded key", "'\napi_key': 'SECRET'", "'\napi_key':'[REDACTED]'"},
+			{"double-quoted leading-only newline padded key with equals", "log: \"\napi_key\" = \"SECRET\"", "log: \"\napi_key\"=\"[REDACTED]\""},
+			{"single-quoted leading-only NBSP padded key", "'\u00a0api_key': 'SECRET'", "'\u00a0api_key':'[REDACTED]'"},
+			{"single-quoted slash-prefixed padded temp: key", "' config/temp:x ' : 'SECRET'", "' config/temp:x ':'[REDACTED]'"},
+			{"single-quoted slash-prefixed newline temp: key", "'config/temp:x\n': 'SECRET'", "'config/temp:x\n':'[REDACTED]'"},
+			{"single-quoted Windows-path-prefixed padded temp: key", `'C:\ssl\temp:x ': 'SECRET'`, redactedSensitiveTextPlaceholder},
+			{"single-quoted slash-prefixed temp: key with vertical tab", "' config/temp:a\vb ': 'SECRET'", "' config/temp:a\vb ':'[REDACTED]'"},
+			{"single-quoted slash-prefixed temp: key with NBSP", "' config/temp:a\u00a0b ': 'SECRET'", "' config/temp:a\u00a0b ':'[REDACTED]'"},
+			{"prose before slash-prefixed temp: inside quotes stays", `' see config/temp:x ': 'v'`, `' see config/temp:x ': 'v'`},
+			{"single-quoted slash-prefixed padded multi-colon temp: key", "' config/temp:a:b ': 'SECRET'", "' config/temp:a:b ':'[REDACTED]'"},
+			{"single-quoted slash-prefixed multi-colon temp: key with NBSP", "' config/temp:a:b \u00a0': 'SECRET'", "' config/temp:a:b \u00a0':'[REDACTED]'"},
+			{"single-quoted slash-prefixed multi-colon temp: key with BOM", "'config/temp:a:b \ufeff': 'SECRET'", "'config/temp:a:b \ufeff':'[REDACTED]'"},
+			{"prose before slash-prefixed multi-colon temp: inside quotes stays unquoted key", `' see config/temp:a:b ': 'v'`, `' see config/temp:a:[REDACTED]`},
+			{"JSON key before non-sensitive joined single-quoted prose keeps tail", `log: "password": abc&' hello '`, `log: "password":"[REDACTED]" hello '`},
+			{"outer sensitive JSON key before slash-prefixed padded temp: key", `log: "password": " config/temp:x "="SECRET"`, `log: "password":"[REDACTED]"`},
+			{"JSON container followed by nested sensitive pair", `log: "dbPassword": [SECRET1]password: SECRET2`, `log: "dbPassword":"[REDACTED]"`},
+			{"long-padded JSON container followed by nested sensitive pair", `log: "` + strings.Repeat(" ", 2*maxNestedKeyLen+1) + `dbPassword ": [SECRET1]password: SECRET2`, `log: "dbPassword":"[REDACTED]"`},
+			{"inline quoted state-prefixed key with leading padding", `log: "password": " user:api_key"="SECRET"`, `log: "password":"[REDACTED]"`},
+			{"inline quoted exact key with leading padding", `password=" API_KEY"="SECRET"`, `password="[REDACTED]"`},
+			{"nested temp: stacked key before container-joined pair", "password=temp:a:b: [x]token: SECRET", "password=[REDACTED]"},
+			{"bare temp: key before container-joined pair", "temp:a:temp:b: [x]token: SECRET", "temp:a:[REDACTED]"},
+			{"nested compound key before container-joined pair", "password=x_password: {a}/token: SECRET", "password=[REDACTED]"},
+			{"JSON key before chained container-joined pairs", `log: "password": [a]token: [b]secret: SECRET`, `log: "password":"[REDACTED]"`},
+			{"nested temp: key with NBSP", "password=temp:a\u00a0: SECRET", "password=[REDACTED]"},
+			{"nested quoted temp: key with NBSP", "password='temp:a\u00a0': 'SECRET'", "password='[REDACTED]'"},
+			{"nested temp: key with BOM", "password=temp:a\ufeff: SECRET", "password=[REDACTED]"},
+			{"nested quoted temp: key with BOM", "password='temp:a\ufeff': 'SECRET'", "password='[REDACTED]'"},
+			{"single-quoted key with trailing newline", "'api_key\n': 'v'", "'api_key\n':'[REDACTED]'"},
+			{"single-quoted key with leading newline", "'\n api_key ': 'v'", "'\n api_key ':'[REDACTED]'"},
+			{"double-quoted key with trailing newline and equals", "log: \"password\n\" = \"v\"", "log: \"password\n\"=\"[REDACTED]\""},
+			{"prose inside newline-padded quotes is kept", "he said \"use DB_PASSWORD\n\" = \"v\"", "he said \"use DB_PASSWORD\n\" = \"v\""},
+			{"bare slash-prefixed .key path error is kept", "/run/secrets/api.key: no such file", "/run/secrets/api.key: no such file"},
+			{"nested temp: key with vertical tab", "password=temp:a\v: V", "password=[REDACTED]"},
+			{"nested path-prefixed temp: key with vertical tab", "password=x/temp:a\v: V", "password=[REDACTED]"},
+			{"nested quoted temp: key with vertical tab", "password='temp:a\vb': V", "password='[REDACTED]'"},
 			{"punctuation-joined container and pair", "dbPassword={abc}/password: V", "dbPassword=[REDACTED]"},
 			{"punctuation-joined colon container and pair", "dbPassword={a:b}/password: V", "dbPassword=[REDACTED]"},
 			{"punctuation-joined spaced container and pair", "dbPassword={a: b}/password: V", "dbPassword=[REDACTED]"},
@@ -526,6 +589,27 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"punctuation-joined backslash before container pair", `password=a\b/token={a: SECRET}`, "password=[REDACTED]"},
 			{"punctuation-joined backslash before quoted pair", `password=a\b/token="V1 V2"`, "password=[REDACTED]"},
 			{"punctuation-joined escaped-quote prefix before quoted pair", `password=\"foo \"x/token="V1 V2"`, "password=[REDACTED]"},
+			{"long bare temp: key inside checkedBareEnd", "password=token=a.temp:a:" + strings.Repeat("b", 300) + " = S3CR3T", "password=[REDACTED]"},
+			{"long bare temp: key inside quoted outer value", `password="token=a.temp:a:` + strings.Repeat("b", 300) + ` " = S3CR3T`, "password=[REDACTED]"},
+			{"container-prefixed stacked bare temp: in text pair", "password=temp:a:[x]: S3CR3T", "password=[REDACTED]"},
+			{"container-prefixed stacked bare temp: in JSON pair", `log: "password": temp:a:[x]: S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"brace-container stacked bare temp: in text pair", "password=temp:a:{x}: S3CR3T", "password=[REDACTED]"},
+			{"brace-container stacked bare temp: in JSON pair", `log: "password": temp:a:{x}: S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"chained container-prefixed stacked bare temp: after ampersand", "password=x&temp:a:[x]: S3CR3T", "password=[REDACTED]&temp:a:[REDACTED]"},
+			{"chained container-prefixed stacked bare temp: in bareCache path", "password=x/temp:a:[x]: S3CR3T", "password=[REDACTED]"},
+			{"container-prefixed stacked bare temp: ampersand-joined to padded quoted key", `log: "password": temp:a:[x]: y&' token ': S3CR3T`, `log: "password":"[REDACTED]"&' token ':[REDACTED]`},
+			{"container-prefixed stacked bare temp: slash-joined to padded quoted key", `log: "password": temp:a:[x]: y/' token ': S3CR3T`, `log: "password":"[REDACTED]"`},
+			{"unquoted bare temp: does not cross newline into leading colon", "temp:a:hello\n: note", "temp:a:[REDACTED]\n: note"},
+			{"unquoted bare temp: does not cross newline into leading equals", "temp:a:hello\n= note", "temp:a:[REDACTED]\n= note"},
+			{"multiline single-quoted temp: still redacts across newline before equals", "'temp:a:hello\n' = S3CR3T", "'temp:a:hello\n'=[REDACTED]"},
+			{"multiline log-prefixed quoted temp: still redacts across newline before equals", "log: \"temp:a:hello\n\" = S3CR3T", "log: \"temp:a:hello\n\"=[REDACTED]"},
+			{"stacked bare temp: segment before brace container", "temp:a:b:{x}: S3CR3T", "temp:a:[REDACTED]"},
+			{"outer pair wrapping stacked bare temp: segment before brace container", "password=temp:a:b:{x}: S3CR3T", "password=[REDACTED]"},
+			{"stacked bare temp: segment before chained brace containers", "temp:a:b:{x}:{y}: S3CR3T", "temp:a:[REDACTED]"},
+			{"stacked bare temp: segment before spaced bracket container", "temp:a:b:[x y]: S3CR3T", "temp:a:[REDACTED]"},
+			{"stacked bare temp: chained bracket containers", "temp:a:[c]:[d e]: S3CR3T", "temp:a:[REDACTED]"},
+			{"double-quoted padded key containing single quote", `log: "foo'bar/token " = S3CR3T`, `log: "foo'bar/token "=[REDACTED]`},
+			{"single-quoted padded key containing double quote", `log: 'foo"bar/token ': S3CR3T`, `log: 'foo"bar/token ':[REDACTED]`},
 			{
 				"sensitive and plain keys",
 				"DB_PASSWORD=S1 my_api_key=S2 auth_token=S3 client-secret=S4 dbPassword=S5 temp:k=S6 user:temp:k=S7 app:client_secret=S8 app:region=us",
@@ -569,7 +653,103 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"value with a path before a key name", "password:\n  s3cr3t/dbPassword: SECRET123", "password:[REDACTED]"},
 			{"JSON pair value ending in compound key name", `log: "my_api_key": prod-api-key: SECRET`, `log: "my_api_key":"[REDACTED]"`},
 			{"JSON pair value ending in key before container", `log: "password": foo_password: {a: b}`, `log: "password":"[REDACTED]"`},
+			{"YAML block with Windows path before base sensitive key", "credentials:\n  C:\\ssl\\password: V", "credentials:[REDACTED]"},
+			{"YAML block with quoted non-base key and equals", "credentials:\n  \"api.key\" = \"V\"", "credentials:\"[REDACTED]\""},
+			{"YAML block with quoted temp key and equals", "credentials:\n  \"temp:x\" = \"V\"", "credentials:\"[REDACTED]\""},
 		})
+	})
+
+	t.Run("punctuation-joined pairs redact joined sensitive pairs completely", func(t *testing.T) {
+		const secret = "S3CR3T_JOIN_99"
+		cases := []string{
+			`log: "api.key": abc&"token": ` + secret,
+			`log: "private.key": [abc];"client_secret" : "` + secret + `"`,
+			`log: "my_api_key": abc/'password': '` + secret + `'`,
+			`log: "dbPassword": [abc]&token: ` + secret,
+			`log: "secret.key": abc+\"user:api_key\": \"` + secret + `\"`,
+			`log: "X-Amz-Security-Token": abc|"api_key":"` + secret + ` more"`,
+			"log: \"api.key\": [abc];\"\u00a0api_key\r\n\": \"" + secret + `"`,
+			`dbPassword={abc}/password: ` + secret,
+			`my_api_key={abc}|'token': '` + secret + `'`,
+			`dbPassword={a:b}/password: ` + secret,
+			`dbPassword={a: b}/password: ` + secret,
+			`my_api_key={unclosed "password": ` + secret,
+			`log: "dbPassword": [abc]&' token ': ` + secret,
+			`log: "api.key": abc/' token ': ` + secret,
+			`log: "api.key": [abc];' api_key ': '` + secret + `'`,
+			`log: "dbPassword": [abc]&\" token \" = ` + secret,
+			`log: "dbPassword": [abc]&'token ': ` + secret,
+			`log: "api.key": abc/'token ': ` + secret,
+			`log: "dbPassword": [abc]&"token " = ` + secret,
+			"log: \"dbPassword\": [abc]&'api_key\n': " + secret,
+			`log: "dbPassword": [abc]|'token':'` + secret + ` tail'`,
+			`log: "dbPassword": [abc]&"token"="` + secret + ` tail"`,
+			`log: "api.key": abc|'token':{a: ` + secret + `}`,
+			`log: "password": "token": abc&"secret": "` + secret + `"`,
+			`log: "password": "token": [a]&"secret": "` + secret + `"`,
+			`log: "password": "token": abc&secret: ` + secret,
+			`log: "password": "token": [a]&secret: ` + secret,
+			`log: "password": "token": [a]&' token ': ` + secret,
+			`log: "password": "token": abc&"secret": def&' token ': ` + secret,
+			`log: "password": [a]token: [b]' token ': ` + secret,
+			`log: "password": foo_password: x/' token ': ` + secret,
+			`log: "dbPassword": [abc]&"a&' token ' = ` + secret,
+			`log: "dbPassword": [abc]&\"foo\"&' token ' = ` + secret,
+			`log: "dbPassword": [abc]&token : ` + secret,
+			`log: password=abc&' token ': ` + secret,
+			`log: "password": "x": abc&"secret": "` + secret + `"`,
+			`log: "password": abc&"token": def&secret:'x"api_key":"y z" ` + secret + `'`,
+			`log: "password": abc&"token": def&secret:'x"api_key":[y z] ` + secret + `'`,
+			`log: "password": abc&"token": def&secret:'x"api_key":[y z]&foo ` + secret + `'`,
+			`log: "password": abc&"token": def&secret:{x"api_key":"y z" ` + secret + `}`,
+			`log: "dbPassword": [abc]&token` + strings.Repeat(" ", 2*maxNestedKeyLen+5) + `: ` + secret,
+			`log: "password": foo_password` + strings.Repeat(" ", 2*maxNestedKeyLen+5) + `: ` + secret,
+			`log: "dbPassword": [abc]&' token '` + strings.Repeat(" ", 2*maxNestedKeyLen+5) + `: ` + secret,
+			`log: "password": "foo token"=` + secret,
+			`log: "password": "foo token": ` + secret,
+			`log: "password": 'x"secret": "' token"=` + secret,
+			`log: "password": 'x"secret": "' token": ` + secret,
+		}
+		for _, in := range cases {
+			gotErr := redactErrorMessage(in)
+			if strings.Contains(gotErr, secret) {
+				t.Errorf("redactErrorMessage(%q) leaked secret: %q", in, gotErr)
+			}
+			if twice := redactErrorMessage(gotErr); twice != gotErr {
+				t.Errorf("redactErrorMessage(%q) not idempotent: pass1=%q pass2=%q", in, gotErr, twice)
+			}
+			gotSan, lost := sanitizeRawText(in)
+			if !lost || strings.Contains(gotSan, secret) {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without secret", in, gotSan, lost)
+			}
+			if twiceSan, lost2 := sanitizeRawText(gotSan); twiceSan != gotSan || lost2 {
+				t.Errorf("sanitizeRawText(%q) not idempotent: pass1=(%q,%v) pass2=(%q,%v)", in, gotSan, lost, twiceSan, lost2)
+			}
+			truncBytes, _, err := smartTruncate(map[string]any{"message": in}, 1<<20, true)
+			if err != nil {
+				t.Fatalf("smartTruncate(%q): %v", in, err)
+			}
+			if strings.Contains(string(truncBytes), secret) {
+				t.Errorf("smartTruncate(%q) leaked secret: %s", in, truncBytes)
+			}
+		}
+		spacedContainerJoined := `dbPassword={a: b}/password: ` + secret
+		wantSpacedContainerJoined := `dbPassword=[REDACTED]`
+		if got := redactErrorMessage(spacedContainerJoined); got != wantSpacedContainerJoined {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", spacedContainerJoined, got, wantSpacedContainerJoined)
+		}
+		if gotSan, lost := sanitizeRawText(spacedContainerJoined); !lost || gotSan != wantSpacedContainerJoined {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", spacedContainerJoined, gotSan, lost, wantSpacedContainerJoined)
+		}
+		for _, keptCase := range []redactionCase{
+			{"prose inside quoted value is not extended", `log: "password": "foo token: " SECRET`, `log: "password":"[REDACTED]" SECRET`},
+			{"trailing unclosed non-sensitive prose stays intact", `log: "password": abc&' hello '`, `log: "password":"[REDACTED]" hello '`},
+			{"quoted non-sensitive key after sensitive JSON pair stays intact", `log: "password": "x": abc`, `log: "password":"[REDACTED]": abc`},
+		} {
+			if got := redactErrorMessage(keptCase.in); got != keptCase.want {
+				t.Errorf("%s: redactErrorMessage(%q) = %q, want %q", keptCase.name, keptCase.in, got, keptCase.want)
+			}
+		}
 	})
 
 	t.Run("JSON string with state.temp: key", func(t *testing.T) {
@@ -661,15 +841,17 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 	t.Run("textKeyPrefixSpans matches reference regexp", func(t *testing.T) {
 		const (
 			keyWord  = `[A-Za-z0-9_.\x{0130}\x{017f}\x{212a}-]`
-			horizPad = `[\t \x0b\f\x{00a0}\x{feff}]`
+			anyPad   = `[\t \n\x0b\f\r\x{00a0}\x{feff}]`
 			tempSeg  = `[^=:"'\t\n\f\r ,}]+`
 			tempHead = `(?:` + keyWord + `*[.-])?(temp:` + tempSeg + `)`
+			tempCore = `temp:` + tempSeg + `(?::` + tempSeg + `)*`
 		)
-		refPaddedRe := regexp.MustCompile(`(?i)(\\?["'])` + horizPad + `*((?:(?:user|app):)*` +
-			`(?:` + tempHead + `(?::` + tempSeg + `)*|` + keyWord + `+))` + horizPad + `+` +
-			`(\\?["'])[\x00-\x20\x7f]*[=:]`)
-		refMultiTempRe := regexp.MustCompile(`(?i)` + `(?:` + keyWord + `*[.-])?(temp:` + tempSeg + `(?::` + tempSeg + `)+)` +
-			`(\\?["'])?[\x00-\x20\x7f]*(?:=[^=]|[\x00-\x20\x7f]:|:[\x00-\x20\x7f])`)
+		quotedKeyAlt := `(?:(?:user|app):)*(?:` + tempCore + `|` + keyWord + `+)|` + keyWord + `*[.-]` + tempCore + `|[^\s"']*[/\\\x0b](?:` + tempCore + `|` + keyWord + `+)`
+		refPaddedRe := regexp.MustCompile(`(?i)(\\?["'])(?:` +
+			anyPad + `+(` + quotedKeyAlt + `)` + anyPad + `*|` +
+			anyPad + `*(` + quotedKeyAlt + `)` + anyPad + `+|` +
+			`([^\s"']*[/\\\x0b]` + keyWord + `+)` +
+			`)(\\?["'])[\x00-\x20\x7f]*[=:]`)
 		refBareRe := regexp.MustCompile(`(?i)(?:` + tempHead + `|(` + keyWord + `+))(\\?["'])?[\x00-\x20\x7f]*[=:]`)
 		type span struct{ keyStart, keyEnd, quoteEnd, end int }
 		fromScanner := func(s string) []span {
@@ -684,36 +866,23 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			for from := 0; from < len(s); {
 				bestStart := len(s) + 1
 				var keyStart, keyEnd, quoteEnd, end int
-				var checkOpen bool
 				if loc := refPaddedRe.FindStringSubmatchIndex(s[from:]); loc != nil && from+loc[2] < bestStart {
-					openQ, closeQ := s[from+loc[2]:from+loc[3]], s[from+loc[8]:from+loc[9]]
+					openQ, closeQ := s[from+loc[2]:from+loc[3]], s[from+loc[10]:from+loc[11]]
 					if openQ == closeQ {
 						if len(openQ) == 2 || !strings.HasSuffix(s[from:from+loc[2]], `\`) || hasMatchingOpeningQuote(s, from+loc[3], from, openQ) {
 							bestStart = from + loc[2]
-							keyStart, keyEnd = from+loc[4], from+loc[5]
-							if loc[6] >= 0 {
-								keyStart = from + loc[6]
+							for _, g := range []int{4, 6, 8} {
+								if loc[g] >= 0 {
+									keyStart, keyEnd = from+loc[g], from+loc[g+1]
+									break
+								}
 							}
-							quoteEnd, end = from+loc[9], from+loc[1]
-							checkOpen = true
-						}
-					}
-				}
-				if loc := refMultiTempRe.FindStringSubmatchIndex(s[from:]); loc != nil {
-					candStart := from + loc[0]
-					if candStart < bestStart || (candStart == bestStart && !checkOpen) {
-						dEnd := from + loc[1] - 1
-						if s[dEnd] == ':' && s[dEnd-1] != ':' {
-							dEnd++
-						}
-						if s[dEnd-1] == '=' && !(dEnd < len(s) && s[dEnd] == '=') && valueStartsAt(s, dEnd) ||
-							(s[dEnd-1] == ':' && !(dEnd+1 < len(s) && s[dEnd:dEnd+2] == "//")) {
-							bestStart = candStart
-							keyStart, keyEnd, quoteEnd, end = from+loc[2], from+loc[3], from+loc[3], dEnd
-							if loc[5] >= 0 {
-								quoteEnd = from + loc[5]
+							if sub := s[keyStart:keyEnd]; !strings.HasPrefix(strings.ToLower(sub), "temp:") {
+								if idx := strings.Index(strings.ToLower(sub), "temp:"); idx > 0 && (sub[idx-1] == ':' || sub[idx-1] == '.' || sub[idx-1] == '-' || sub[idx-1] == '/' || sub[idx-1] == '\\') {
+									keyStart += idx
+								}
 							}
-							checkOpen = false
+							quoteEnd, end = from+loc[11], from+loc[1]
 						}
 					}
 				}
@@ -750,6 +919,10 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			"state.temp:x=V --temp:scratch=V -temp:x=V temp:cache:item = V temp:cache:item: V",
 			`"password"=1 'dbPassword':2 \"token\"=3 \'secret\':4 ' DB_PASSWORD ': 'v' " API_KEY " = "v"`,
 			`' temp:x ': 'v' " temp:cache:item " = 1 " user:api_key " = 1 ' state.temp:cache:item ': 'v' ' user:temp:cache:item ': 'v'`,
+			"' config/github.token  ' : 'v' 'api_key\n': 'v' '\n api_key ': 'v' \"password\n\" = \"v\"",
+			"' config/temp:x ' : 'v' 'config/temp:x\n': 'v' 'C:\\ssl\\temp:x ': 'v'",
+			"' config/temp:a\vb ': 'v' ' config/temp:a\u00a0b ': 'v'",
+			"' config/temp:a:b ': 'v' ' config/temp:a:b \u00a0': 'v' 'config/temp:a:b \ufeff': 'v' ' see config/temp:a:b ': 'v'",
 			"AP\u0130_KEY=1 pa\u017f\u017fword=2 api_\u212aey=3 next-page-token=4 x.sig=5",
 			"token\x01=1 token\x7f:2 token\\=3 token\\\\\"=4 temp:a\"=5 temp:a\\\"=6",
 			"a=b c:d === ::: user:next_page_token=1 temp:a:token=2",
@@ -1158,6 +1331,24 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 		{"pairs with plain keys", 1 << 20, func(n int) string { return strings.Repeat("a=b ", n/4) }},
 		{"sensitive key before dense plain pairs", 256 << 10, func(n int) string { return "password=SECRET " + strings.Repeat("a=1 ", n/4) }},
 		{"backslash-terminated tokens in bare value", 128 << 10, func(n int) string { return "password=" + strings.Repeat(`token=\`, n/7) + " tail" }},
+		{"repeated temp: prefixes", 64 << 10, func(n int) string { return strings.Repeat("temp:", n/5) + "x" }},
+		{"repeated temp: prefixes with trailing space word", 64 << 10, func(n int) string { return strings.Repeat("temp:", n/5) + " x" }},
+		{"repeated temp: prefixes with secret", 64 << 10, func(n int) string { return strings.Repeat("temp:", n/5) + "x=SECRET" }},
+		{"repeated stacked bare temp segments", 64 << 10, func(n int) string { return "temp:a:" + strings.Repeat("b:", n/2) + " tail" }},
+		{"repeated stacked bare temp open braces", 64 << 10, func(n int) string { return "temp:a:" + strings.Repeat("b:{", n/3) + " " }},
+		{"repeated stacked bare temp balanced braces", 64 << 10, func(n int) string { return "temp:a:" + strings.Repeat("b:{", n/6) + strings.Repeat("}", n/6) + " tail" }},
+		{"repeated temp: prefixes after pair with trailing words", 64 << 10, func(n int) string { return "password=" + strings.Repeat("temp:", n/5) + " foo bar" }},
+		{"repeated temp: prefixes with unmatched quote", 64 << 10, func(n int) string { return strings.Repeat("temp:", n/5) + "a'" }},
+		{"JSON string with repeated temp: prefixes", 64 << 10, func(n int) string { return `{"msg":"prefix ` + strings.Repeat("temp:", n/5) + `x"}` }},
+		{"URI query with repeated temp: prefixes and double colon", 64 << 10, func(n int) string { return "https://h/p?" + strings.Repeat("temp:", n/5) + "a::b=PUBLIC" }},
+		{"container-joined token chain in text pair", 64 << 10, func(n int) string { return "password=" + strings.Repeat("[x]token:", n/9) + " SECRET" }},
+		{"container-joined token chain in JSON pair", 64 << 10, func(n int) string { return `log: "password": ` + strings.Repeat("[a]token: ", n/10) + "SECRET" }},
+		{"chained JSON password and token keys", 64 << 10, func(n int) string { return strings.Repeat(`"password": "token": `, n/21) + "SECRET" }},
+		{"repeated JSON pairs", 64 << 10, func(n int) string { return strings.Repeat(`"password": x `, n/14) + "password=SECRET" }},
+		{"long bare temp: chain after checkedBareEnd", 64 << 10, func(n int) string {
+			return "password=token=" + strings.Repeat("a.temp:a:", n/18) + strings.Repeat("b", max(300, n/2)) + " = SECRET"
+		}},
+		{"stacked bare temp with bracketed containers before closer", 64 << 10, func(n int) string { return "(temp:a:" + strings.Repeat("b:[a]:", n/6) + ") tail" }},
 		{"bare delimiters", 1 << 20, func(n int) string { return strings.Repeat("=", n) }},
 		{"redacted pairs", 256 << 10, func(n int) string { return strings.Repeat("DB_PASSWORD=SECRET1 dbPassword=SECRET2 ", n/39) }},
 		{"header lines", 256 << 10, func(n int) string { return strings.Repeat("Authorization: Bearer SECRET\n", n/29) }},

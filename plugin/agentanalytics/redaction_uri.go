@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 var uriTokenRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
@@ -226,8 +228,48 @@ func endsInSensitiveTextKey(key string) bool {
 	if key == "" {
 		return false
 	}
-	loc := textKeyEndRe.FindStringSubmatchIndex(key)
-	return loc != nil && sensitiveKeyStart(key, loc[2], loc[3]) >= 0
+	start := len(key)
+	for start > 0 {
+		if sz := prevKeyRuneSize(key, start, 0); sz > 0 {
+			start -= sz
+			continue
+		}
+		break
+	}
+	if start < len(key) && sensitiveKeyStart(key, start, len(key)) >= 0 {
+		return true
+	}
+	if key[len(key)-1] == ':' {
+		return false
+	}
+	minI := 4
+	for p := len(key) - 1; p >= 0; p-- {
+		if strings.IndexByte("=\"' \t\r\n\f,}", key[p]) >= 0 {
+			minI = max(minI, p)
+			break
+		}
+		if key[p] == ':' && p+1 < len(key) && key[p+1] == ':' {
+			minI = max(minI, p+1)
+			break
+		}
+	}
+	for i := minI; i+1 < len(key); i++ {
+		if key[i] == ':' && strings.EqualFold(key[i-4:i], "temp") {
+			if i == 4 {
+				return true
+			}
+			if key[i-5] < utf8.RuneSelf {
+				if !isWordByte(key[i-5]) {
+					return true
+				}
+				continue
+			}
+			if r, _ := utf8.DecodeLastRuneInString(key[:i-4]); !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func redactEscapedComponent(raw string, unescape func(string) (string, error), escape func(string) string) (string, bool) {
@@ -247,8 +289,19 @@ func redactURIComponent(s string) (string, bool) {
 		return s, false
 	}
 	scrubbed := scrubTextPatterns(s)
-	if exposesEncodedPattern(scrubbed, scrubErrorTokens) {
+	if exposesEncodedPattern(scrubbed, scrubErrorTokens) ||
+		hasBackslashEscapedCredentialWith(s, scrubbed, canonicalizeCredentialMarker) ||
+		(scrubbed != s && strings.Contains(s, `\\u`) && hasBackslashEscapedCredentialWith(s, scrubbed, func(v string) string {
+			return canonicalizeCredentialMarkerWith(v, true)
+		})) {
 		return redactedSensitiveTextPlaceholder, true
+	}
+	for prev, pass := s, 1; scrubbed != prev; pass++ {
+		if pass == maxRedactionPasses {
+			return redactedSensitiveTextPlaceholder, true
+		}
+		prev = scrubbed
+		scrubbed = scrubTextPatterns(scrubbed)
 	}
 	return scrubbed, scrubbed != s
 }
