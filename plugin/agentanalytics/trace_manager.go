@@ -4531,22 +4531,22 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
+// agentLaunch holds the activation key and its launching activation, which is
+// read outside inv.mu because invocation contexts can be user implementations.
+type agentLaunch struct {
+	activation any
+	launcher   any
+}
+
 // maxLaunchLineage bounds the chain of contexts that launcherLocked follows.
 const maxLaunchLineage = 64
 
-// launcherLocked returns the index in agentStack of the open agent activation,
-// not excluded, whose context the agent run with activation key act (see
-// activationKey) was started with, or 0 if no such activation is known. ADK
-// derives the context of each agent run from the context passed to its Run,
-// and each of its contexts, like the context package's own, embeds the
-// context that it derives from, so the chain of embedded Context fields from
-// act passes through the activation key of every run that the new run's
-// context derives from, nearest first. The first one of an open activation
-// tells which activation started the run, whichever goroutine runs it. The
-// chain is read through exported fields alone, so no user code runs while
-// inv.mu is held.
-func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
-	if act == nil {
+// launcherLocked returns the index of the open, non-excluded activation that
+// started the new run, or 0 if none is known. The launching invocation context
+// is stronger evidence than the chain of embedded Context fields, which may
+// stop at an opaque wrapper.
+func (inv *invocationTrace) launcherLocked(launch *agentLaunch, excluded []bool) int {
+	if launch == nil || launch.activation == nil {
 		return 0
 	}
 	byActivation := make(map[any]int)
@@ -4558,7 +4558,12 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 			byActivation[rec.activation] = i
 		}
 	}
-	cur := act
+	if i := byActivation[launch.launcher]; i != 0 {
+		return i
+	}
+	// Read only exported fields here, without calling context methods under
+	// inv.mu.
+	cur := launch.activation
 	for step := range maxLaunchLineage {
 		v := reflect.ValueOf(cur)
 		if v.Kind() != reflect.Pointer || v.IsNil() {
@@ -4582,8 +4587,8 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 }
 
 // parentForRunLocked returns the span that an agent starting with id on
-// goroutine goid, whose origin is origin and whose activation key is
-// activation, runs under (see parentFor), leaving out any spans in exclude
+// goroutine goid, whose origin is origin and whose launch context is launch,
+// runs under (see parentFor), leaving out any spans in exclude
 // plus:
 //   - open activations of id's agent, branch and node path that the scheduler
 //     of their workflow agent (or of any open lookalike workflow activation
@@ -4598,18 +4603,14 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 //     keeping the winning member, its ancestors, and any earlier activations
 //     on its goroutine unexcluded.
 //
-// When no open activation is on the chain and the resolved parent itself (or
-// any ancestor of it) belongs to an unmatched multi-member concurrent
-// lookalike group (no member or descendant matches goid or origin.parent), it
-// moves up to the nearest open span enclosing the members of that group that
-// could hold the child (see appendPossibleOwnersLocked), so a helper-goroutine
-// activation cannot land inside one peer lookalike's open child span while the
-// child's branch and node path still pick out the only member that holds a
-// span they fit. Non-concurrent lookalike chains (nested re-entry,
-// same-goroutine stale spans, or suspended iterators) are left to parentFor
-// without exclusion or ambiguity demotion unless a cross-goroutine nested
-// ancestor directly matches goid or origin.parent.
-func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin, activation any) *spanRecord {
+// If the launcher is unknown and multiple concurrent members could hold the
+// child, it runs under the nearest eligible span shared by those choices. A
+// fitting span counts toward its nearest lookalike only, so a shared parent
+// inside an outer lookalike can still be selected. An incoming activation
+// with the group's name, branch and node path can be a peer of its members.
+// Non-concurrent lookalike chains are left to parentFor unless a
+// cross-goroutine nested ancestor directly matches goid or origin.parent.
+func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin, launch *agentLaunch) *spanRecord {
 	callerExcluded := exclude
 	var clonedExclude bool
 	ensureExcludeMutable := func() {
@@ -4658,7 +4659,7 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	var unmatchedByRec map[*spanRecord][]*spanRecord
 	var tree *openSpanTree
 	if goid != 0 {
-		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin, activation)
+		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin, launch)
 	}
 	var parent *spanRecord
 	if len(exclude) > 0 {
@@ -4669,6 +4670,7 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	selected := parent
 	var seenAmbiguous map[*spanRecord]bool
 	var ambiguous []*spanRecord
+	var fittingPositions []int
 	for parent != nil && parent.kind == spanKindAgent && len(unmatched) > 0 {
 		ambiguous = ambiguous[:0]
 		for cur := parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
@@ -4677,48 +4679,110 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 					seenAmbiguous = make(map[*spanRecord]bool)
 				}
 				seenAmbiguous[recs[0]] = true
-				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected)
+				if cur.name == id.agentName && cur.branch == id.branch && cur.path == id.path {
+					ambiguous = append(ambiguous, recs...)
+					continue
+				}
+				if fittingPositions == nil {
+					fittingPositions = make([]int, 0)
+					for pos, idx := range tree.dfsSeq[1:] {
+						rec := inv.agentStack[idx]
+						if !exclude[rec.spanID] &&
+							withinBranch(id.branch, rec.branch) && withinPath(id.path, rec.path, rec.name == id.agentName) &&
+							withinBranch(rec.branch, selected.branch) && atOrBelowPath(rec.path, selected.path) {
+							fittingPositions = append(fittingPositions, pos+1)
+						}
+					}
+				}
+				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, recs, fittingPositions)
 			}
 		}
 		if len(ambiguous) == 0 {
 			break
 		}
 		parent = tree.enclosing(inv, ambiguous)
+		for parent.kind == spanKindAgent && (exclude[parent.spanID] ||
+			!withinBranch(id.branch, parent.branch) || !withinPath(id.path, parent.path, parent.name == id.agentName)) {
+			parent = inv.agentStack[tree.openParent[tree.stackIdx[parent]]]
+		}
 	}
 	return parent
 }
 
-// appendPossibleOwnersLocked appends to dst the members of the unmatched
-// lookalike group recs that could hold a child agent starting with id whose
-// parent would otherwise be selected: the members with an open span, not
-// excluded, in their subtree (themselves included) that id's branch and node
-// path fit as they fit a parent (see parentFor) at or below selected's branch
-// and node path. A child cannot run under a member without such a span, so
-// when fewer than two members have one, their branch and node path already
-// tell which member holds the child, and nothing is appended. inv.mu must be
-// held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
-	start := len(dst)
-	for _, m := range recs {
-		mIdx, ok := tree.stackIdx[m]
-		if !ok {
-			continue
+// appendPossibleOwnersLocked appends spans that bound where the child could
+// run when at least two members of recs qualify on their own. A member
+// qualifies only for fitting spans outside any nested member's subtree. A
+// sole qualifying nested member still leaves the launcher ambiguous, so in
+// that case all members are considered. recs are in tree order and fits holds
+// the sorted tree positions of eligible spans. inv.mu must be held.
+func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, recs []*spanRecord, fits []int) []*spanRecord {
+	type owner struct {
+		idx, start  int
+		first, last *spanRecord
+		nested      bool
+	}
+	var stackBuf [16]owner
+	stack := stackBuf[:0]
+	var witnessBuf [16]*spanRecord
+	witnesses := witnessBuf[:0]
+	owners := 0
+	nestedOwner := false
+	addMatches := func(m *owner, end int) {
+		first, _ := slices.BinarySearch(fits, m.start)
+		last, _ := slices.BinarySearch(fits, end)
+		if first == last {
+			return
 		}
-		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
-			rec := inv.agentStack[u]
-			if exclude[rec.spanID] ||
-				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
-				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
-				continue
+		if m.first == nil {
+			m.first = inv.agentStack[tree.dfsSeq[fits[first]]]
+		}
+		m.last = inv.agentStack[tree.dfsSeq[fits[last-1]]]
+	}
+	finish := func() {
+		m := &stack[len(stack)-1]
+		addMatches(m, tree.tout[m.idx])
+		if m.first != nil {
+			owners++
+			nestedOwner = nestedOwner || len(stack) > 1
+			if m.nested {
+				witnesses = append(witnesses, m.first)
+				if m.last != m.first {
+					witnesses = append(witnesses, m.last)
+				}
+			} else {
+				witnesses = append(witnesses, inv.agentStack[m.idx])
 			}
-			dst = append(dst, m)
-			break
 		}
+		stack = stack[:len(stack)-1]
 	}
-	if len(dst)-start < 2 {
-		return dst[:start]
+
+	for _, rec := range recs {
+		idx := tree.stackIdx[rec]
+		start := tree.tin[idx] - 1
+		for len(stack) > 0 && tree.tout[stack[len(stack)-1].idx] <= start {
+			finish()
+		}
+		if len(stack) > 0 {
+			m := &stack[len(stack)-1]
+			addMatches(m, start)
+			// Exclude the nested member's entire interval from this owner.
+			// Tree order guarantees the next interval starts at or after
+			// the end of this one.
+			m.start = tree.tout[idx]
+			m.nested = true
+		}
+		stack = append(stack, owner{idx: idx, start: start})
 	}
-	return dst
+	for len(stack) > 0 {
+		finish()
+	}
+	if owners == 1 && nestedOwner {
+		return append(dst, recs...)
+	}
+	if owners < 2 {
+		return dst
+	}
+	return append(dst, witnesses...)
 }
 
 // atOrBelowPath reports whether node path path is ancestor or one of its
@@ -5047,7 +5111,7 @@ func (s maxSegTree) query(l, r int) int {
 // (O(N + G log G) when no witness node is excluded mid-pass), and in O(1)
 // time without allocating while no two open activations share a lookalikeKey
 // (see lookalikes). When an open activation is on the context chain of the
-// run whose activation key is activation (see launcherLocked), every member
+// run described by launch (see launcherLocked), every member
 // of every group that neither is nor encloses it is excluded with the agents
 // under it, and no group is left unmatched: the context that the run was
 // started with tells the members apart better than any goroutine does, as a
@@ -5064,7 +5128,7 @@ func (s maxSegTree) query(l, r int) int {
 // (countEffectivePeers); when at least two effective concurrent peers remain,
 // all live members within the group's matched scope are returned in unmatched
 // (re-filtered and re-collapsed against final exclusions). inv.mu must be held.
-func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin, activation any) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
+func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin, launch *agentLaunch) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
 	if goid == 0 || len(inv.agentStack) <= 2 {
 		return exclude, nil, nil, nil
 	}
@@ -5134,7 +5198,7 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 		*clonedExclude = true
 	}
 
-	if launcher := inv.launcherLocked(activation, excluded); launcher > 0 {
+	if launcher := inv.launcherLocked(launch, excluded); launcher > 0 {
 		for _, k := range multiKeys {
 			for _, mIdx := range groups[k] {
 				if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
@@ -6908,6 +6972,15 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	activation := activationKey(ctx)
+	launch := &agentLaunch{activation: activation}
+	if key, ok := activation.(agent.InvocationContext); ok {
+		// agent.Run installs a copy of its launching context as the activation
+		// key. The copy retains the launching invocation even when its
+		// embedded Context is an opaque decorator or a detached context.
+		if launcher := activationKey(key); launcher != activation {
+			launch.launcher = launcher
+		}
+	}
 	ended := endedFunc(ctx)
 	var goid uint64
 	var origin goroutineOrigin
@@ -6949,7 +7022,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
-	parent := inv.parentForRunLocked(id, nil, goid, origin, activation)
+	parent := inv.parentForRunLocked(id, nil, goid, origin, launch)
 	var concurrentPeer bool
 	isSyntheticRetry := func(other *spanRecord) bool {
 		return activation == nil && other.activation == nil && other.parent != nil && other.parent.activation == nil
@@ -7051,7 +7124,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		// whether they failed is read here.
 		later, synced := laterAttempt(rec)
 		sameWorker := attempt == attemptWorker && rec.attempt == attemptWorker && goid != 0 && rec.goroutineID == goid
-		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, activation))) {
+		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, launch))) {
 			continue
 		}
 		if synced {
@@ -7081,7 +7154,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
 	if didPurge {
-		parent = inv.parentForRunLocked(id, nil, goid, origin, activation)
+		parent = inv.parentForRunLocked(id, nil, goid, origin, launch)
 	}
 	for _, other := range inv.agentStack[1:] {
 		if other.kind == spanKindAgent &&
