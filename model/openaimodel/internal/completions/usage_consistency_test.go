@@ -33,16 +33,18 @@ func usageFields(prompt, completion, total, reasoning int64) string {
 
 // TestModel_ImpossibleUsageIsUnknown pins that usage which cannot be true is
 // reported as unknown rather than stored as is, in blocking and streaming mode.
-// total_tokens counts at least the prompt and completion tokens, so a total
-// below their sum contradicts its own parts. reasoning_tokens is a subset of
+// The test treats total_tokens as counting at least the prompt and completion
+// tokens, so a total below their sum contradicts its own parts. reasoning_tokens is a subset of
 // completion_tokens, so reasoning above completion is a contradiction in the
 // same way. Unknown (nil) says that the provider's numbers cannot be trusted.
 // The turn itself still succeeds.
 //
 // Some OpenAI-compatible providers may instead count reasoning outside
-// completion_tokens and add it to total_tokens. Whether to accept that shape
-// is left open, and no row pins it. The reasoning row below has a total of
-// prompt plus completion, so it does not fit that shape either.
+// completion_tokens and add it to total_tokens. With reasoning up to
+// completion that shape is kept by the rule above. Whether to accept it with
+// reasoning above completion is left open, and no row pins it. The
+// reasoning-above-completion rows below have a total of prompt plus
+// completion, or no total, so they do not fit that shape either.
 //
 // A total above the sum, reasoning equal to completion, and an omitted total
 // are not contradictions. An omitted total decodes to 0 and means not
@@ -78,7 +80,7 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 		},
 		{
 			name:   "omitted total is kept",
-			prompt: 100, completion: 50, total: -1, reasoning: 0,
+			prompt: 100, completion: 50, total: -1, reasoning: 20,
 			wantUsage: true,
 		},
 		{
