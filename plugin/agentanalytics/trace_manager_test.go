@@ -39358,19 +39358,19 @@ func TestParentForRunLocked_DetachedLeafSameInheritedPath(t *testing.T) {
 		leaf := identity{agentName: "leaf", branch: "selected", path: "fn@1"}
 
 		selectedAgent := &spanRecord{spanID: "selected-agent", kind: spanKindAgent, name: "selected_agent", branch: "selected", path: "fn@1", parent: wfRoot}
-		if !spanQualifiesForOwner(w1, nil, leaf, selectedAgent, true) {
+		if !spanQualifiesForOwner(w1, nil, leaf, selectedAgent, true, false) {
 			t.Fatal("spanQualifiesForOwner(worker-1) = false, want true when selected inherited fn@1 without isWorkflow")
 		}
 		selectedWFInherited := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, branch: "selected", path: "fn@1", parent: w2}
-		if !spanQualifiesForOwner(w1, nil, leaf, selectedWFInherited, true) {
+		if !spanQualifiesForOwner(w1, nil, leaf, selectedWFInherited, true, false) {
 			t.Fatal("spanQualifiesForOwner(worker-1) = false, want true when workflow selected inherited fn@1 from parent worker-2")
 		}
 		selectedWFOpened := &spanRecord{spanID: "wf-node", kind: spanKindAgent, name: "wf_node", isWorkflow: true, branch: "selected", path: "fn@1", parent: wfRoot}
-		if spanQualifiesForOwner(w1, nil, leaf, selectedWFOpened, true) {
+		if spanQualifiesForOwner(w1, nil, leaf, selectedWFOpened, true, false) {
 			t.Fatal("spanQualifiesForOwner(worker-1) = true, want false when workflow selected opened fn@1 (parent.path != selected.path)")
 		}
 		selectedNestedWF := &spanRecord{spanID: "nested-wf", kind: spanKindAgent, name: "nested_wf", isWorkflow: true, branch: "selected", path: "fn@1/wf@1", parent: w2}
-		if spanQualifiesForOwner(w1, nil, leaf, selectedNestedWF, true) {
+		if spanQualifiesForOwner(w1, nil, leaf, selectedNestedWF, true, false) {
 			t.Fatal("spanQualifiesForOwner(worker-1) = true, want false when workflow selected opened child path fn@1/wf@1")
 		}
 	})
@@ -39389,7 +39389,7 @@ func TestParentForRunLocked_DetachedLeafSameInheritedPath(t *testing.T) {
 		if got := inv.parentForRunLocked(descLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != subWF {
 			t.Fatalf("parentForRunLocked(descendant leaf inside sub_wf) = %s, want %s (not %s)", got.spanID, subWF.spanID, root.spanID)
 		}
-		if spanQualifiesForOwner(w1, nil, descLeaf, subWF, true) {
+		if spanQualifiesForOwner(w1, nil, descLeaf, subWF, true, false) {
 			t.Fatal("spanQualifiesForOwner(worker-1 at fn@1) = true for descendant leaf at fn@1/sub_wf@1/inner_node@1, want false")
 		}
 	})
@@ -39870,6 +39870,7 @@ func TestRunner_ConcurrentNestedLookalike_EmptyCallerPathWorkflowDescendantLeafK
 	}
 
 	innerNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		defer signalSubWFReady()
 		const wantPath = "sub_wf@1/inner_node@1"
 		if gotPath := ctx.Path(); gotPath != wantPath {
 			return nil, fmt.Errorf("inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
@@ -39901,6 +39902,7 @@ func TestRunner_ConcurrentNestedLookalike_EmptyCallerPathWorkflowDescendantLeafK
 	}
 
 	otherNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		defer signalOtherReady()
 		const wantPath = "other_wf@1/inner_node@1"
 		if gotPath := ctx.Path(); gotPath != wantPath {
 			return nil, fmt.Errorf("other_wf inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
@@ -40050,6 +40052,220 @@ func TestRunner_ConcurrentNestedLookalike_EmptyCallerPathWorkflowDescendantLeafK
 	}
 	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_other_wf")["parent_span_id"].(string); got != rootSpan {
 		t.Errorf("leaf_other_wf parent_span_id = %q, want %q (root for other_wf path, not sub_wf %q)", got, rootSpan, subWFSpan)
+	}
+}
+
+func TestRunner_ConcurrentNestedLookalike_ConcurrentSameWorkflowDetachedLeafDemotes(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafDetached := newOneEventAgent(t, "leaf_detached", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	w1Ready := make(chan struct{})
+	w2Ready := make(chan struct{})
+	firstSubWFReady := make(chan struct{})
+	secondSubWFReady := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var w1Once, w2Once, firstOnce, secondOnce, releaseOnce sync.Once
+	signalW1Ready := func() { w1Once.Do(func() { close(w1Ready) }) }
+	signalW2Ready := func() { w2Once.Do(func() { close(w2Ready) }) }
+	signalFirstSubWFReady := func() { firstOnce.Do(func() { close(firstSubWFReady) }) }
+	signalSecondSubWFReady := func() { secondOnce.Do(func() { close(secondSubWFReady) }) }
+	release := func() { releaseOnce.Do(func() { close(releaseSecond) }) }
+	t.Cleanup(func() {
+		signalW1Ready()
+		signalW2Ready()
+		signalFirstSubWFReady()
+		signalSecondSubWFReady()
+		release()
+	})
+
+	innerNode := workflow.NewEmittingFunctionNode[any, any]("inner_node", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		const wantPath = "sub_wf@1/inner_node@1"
+		if gotPath := ctx.Path(); gotPath != wantPath {
+			if ctx.Branch() == "selected" {
+				signalSecondSubWFReady()
+			} else {
+				signalFirstSubWFReady()
+				release()
+			}
+			return nil, fmt.Errorf("inner_node ctx.Path() = %q, want %q", gotPath, wantPath)
+		}
+		if ctx.Branch() == "selected" {
+			defer signalSecondSubWFReady()
+			signalSecondSubWFReady()
+			select {
+			case <-releaseSecond:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return nil, nil
+		}
+
+		defer release()
+		defer signalFirstSubWFReady()
+		signalFirstSubWFReady()
+		select {
+		case <-secondSubWFReady:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		ic, ok := ctx.(agent.InvocationContext)
+		if !ok {
+			return nil, errors.New("expected InvocationContext in inner_node")
+		}
+		selectedBranch := "selected"
+		detachedCtx := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch}).WithContext(context.WithoutCancel(ic))
+		out := make(chan item, 4)
+		go func() {
+			go func() {
+				defer close(out)
+				for ev, runErr := range leafDetached.Run(detachedCtx) {
+					out <- item{ev: ev, err: runErr}
+				}
+			}()
+		}()
+		for it := range out {
+			if it.err != nil {
+				return nil, it.err
+			}
+			if emitErr := emit(it.ev); emitErr != nil {
+				return nil, emitErr
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+
+	subWF, err := workflowagent.New(workflowagent.Config{
+		Name:  "sub_wf",
+		Edges: workflow.Chain(workflow.Start, innerNode),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(sub_wf): %v", err)
+	}
+
+	mid, err := agent.New(agent.Config{
+		Name: "mid",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				selectedBranch := "selected"
+				branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+				for ev, runErr := range subWF.Run(branchedCtx) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(mid): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					defer release()
+					defer signalFirstSubWFReady()
+					defer signalW1Ready()
+					signalW1Ready()
+					select {
+					case <-w2Ready:
+					case <-ctx.Done():
+						return
+					}
+					for ev, runErr := range subWF.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				default:
+					defer signalSecondSubWFReady()
+					defer signalW2Ready()
+					signalW2Ready()
+					select {
+					case <-firstSubWFReady:
+					case <-ctx.Done():
+						return
+					}
+					for ev, runErr := range mid.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var w1Done sync.WaitGroup
+				w1Events := make(chan item, 4)
+				w1Done.Go(func() {
+					defer close(w1Events)
+					for ev, runErr := range worker.Run(ctx) {
+						w1Events <- item{ev: ev, err: runErr}
+					}
+				})
+				select {
+				case <-w1Ready:
+				case <-ctx.Done():
+					release()
+					w1Done.Wait()
+					return
+				}
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						release()
+						w1Done.Wait()
+						return
+					}
+				}
+				for it := range w1Events {
+					if !yield(it.ev, it.err) {
+						return
+					}
+				}
+				w1Done.Wait()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", got)
+	}
+	subWFs := agentRowsOfType(rows, EventAgentStarting, "sub_wf")
+	if len(subWFs) != 2 {
+		t.Fatalf("sub_wf AGENT_STARTING count = %d, want 2", len(subWFs))
+	}
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	subWF1Span, _ := subWFs[0]["span_id"].(string)
+	subWF2Span, _ := subWFs[1]["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_detached")["parent_span_id"].(string); got != rootSpan {
+		t.Errorf("leaf_detached parent_span_id = %q, want %q (shared root across concurrent sub_wf activations, not %q or %q)", got, rootSpan, subWF1Span, subWF2Span)
 	}
 }
 
@@ -40530,8 +40746,145 @@ func TestParentForRunLocked_EmptyCallerPathWorkflowDescendant(t *testing.T) {
 		}
 	})
 
+	t.Run("same_name_workflow_on_sibling_branch_and_reentered_selected_demotes_to_root", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-same-wf-reentered-selected", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		subWF1 := &spanRecord{spanID: "sub-wf-1", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "", path: "", parent: w1, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		subWF2 := &spanRecord{spanID: "sub-wf-2", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "", parent: mid, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, root, w1, subWF1, w2, mid, subWF2)
+
+		leaf := identity{agentName: "leaf", branch: "selected", path: "sub_wf@1/inner_node@1"}
+		if got := inv.parentFor(leaf); got != subWF2 {
+			t.Fatalf("parentFor(precondition) = %s, want %s", got.spanID, subWF2.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s (demote across competing sub_wf activations, not %s)", got.spanID, root.spanID, subWF2.spanID)
+		}
+	})
+
+	t.Run("sub_wf_vs_sub_wf_canary_exact_workflow_segment", func(t *testing.T) {
+		canaryLeaf := identity{agentName: "leaf", branch: "selected", path: "sub_wf@canary@1/inner_node@1"}
+
+		// sub_wf does not match sub_wf@canary@1, so sub_wf@canary remains sole owner.
+		invUnique := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-canary-unique", time.Unix(1_700_000_000, 0))
+		rootU := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invUnique.agentStack[0], goroutineID: 100}
+		w1U := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootU, goroutineID: 101}
+		subWFU := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "", path: "", parent: w1U, goroutineID: 101}
+		w2U := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootU, goroutineID: 102}
+		canaryWFU := &spanRecord{spanID: "canary-wf", kind: spanKindAgent, name: "sub_wf@canary", isWorkflow: true, nonLLM: true, branch: "selected", path: "", parent: w2U, goroutineID: 103}
+		invUnique.agentStack = append(invUnique.agentStack, rootU, w1U, subWFU, w2U, canaryWFU)
+
+		if got := invUnique.parentFor(canaryLeaf); got != canaryWFU {
+			t.Fatalf("parentFor(canary unique precondition) = %s, want %s", got.spanID, canaryWFU.spanID)
+		}
+		if got := invUnique.parentForRunLocked(canaryLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != canaryWFU {
+			t.Fatalf("parentForRunLocked(canary unique) = %s, want %s (not %s)", got.spanID, canaryWFU.spanID, rootU.spanID)
+		}
+
+		// Competing sub_wf@canary on default branch demotes to root.
+		invCompete := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-canary-compete", time.Unix(1_700_000_000, 0))
+		rootC := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invCompete.agentStack[0], goroutineID: 100}
+		w1C := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootC, goroutineID: 101}
+		canary1C := &spanRecord{spanID: "canary-1", kind: spanKindAgent, name: "sub_wf@canary", isWorkflow: true, nonLLM: true, branch: "", path: "", parent: w1C, goroutineID: 101}
+		w2C := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootC, goroutineID: 102}
+		canary2C := &spanRecord{spanID: "canary-2", kind: spanKindAgent, name: "sub_wf@canary", isWorkflow: true, nonLLM: true, branch: "selected", path: "", parent: w2C, goroutineID: 103}
+		invCompete.agentStack = append(invCompete.agentStack, rootC, w1C, canary1C, w2C, canary2C)
+
+		if got := invCompete.parentFor(canaryLeaf); got != canary2C {
+			t.Fatalf("parentFor(canary compete precondition) = %s, want %s", got.spanID, canary2C.spanID)
+		}
+		if got := invCompete.parentForRunLocked(canaryLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != rootC {
+			t.Fatalf("parentForRunLocked(canary compete) = %s, want %s (not %s)", got.spanID, rootC.spanID, canary2C.spanID)
+		}
+
+		// When only sub_wf (not sub_wf@canary) is on "selected", sub_wf@canary@1 path must NOT stay forced under sub_wf.
+		invMismatch := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-canary-mismatch-selected", time.Unix(1_700_000_000, 0))
+		rootM := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invMismatch.agentStack[0], goroutineID: 100}
+		w1M := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootM, goroutineID: 101}
+		canary1M := &spanRecord{spanID: "canary-1", kind: spanKindAgent, name: "sub_wf@canary", isWorkflow: true, nonLLM: true, branch: "", path: "", parent: w1M, goroutineID: 101}
+		w2M := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootM, goroutineID: 102}
+		subWFM := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "", parent: w2M, goroutineID: 103}
+		invMismatch.agentStack = append(invMismatch.agentStack, rootM, w1M, canary1M, w2M, subWFM)
+
+		if got := invMismatch.parentFor(canaryLeaf); got != subWFM {
+			t.Fatalf("parentFor(canary mismatch precondition) = %s, want %s", got.spanID, subWFM.spanID)
+		}
+		if got := invMismatch.parentForRunLocked(canaryLeaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != rootM {
+			t.Fatalf("parentForRunLocked(canary mismatch) = %s, want %s (must not attach to %s)", got.spanID, rootM.spanID, subWFM.spanID)
+		}
+	})
+
+	t.Run("default_branch_empty_peer_excludes_unrelated_workflow", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-default-branch-wf-desc", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		otherWF := &spanRecord{spanID: "other-wf", kind: spanKindAgent, name: "other_wf", isWorkflow: true, nonLLM: true, parent: w1, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		subWF := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, root, w1, otherWF, w2, subWF)
+
+		leaf := identity{agentName: "leaf", branch: "", path: "sub_wf@1/inner_node@1"}
+		if got := inv.parentFor(leaf); got != subWF {
+			t.Fatalf("parentFor(default branch precondition) = %s, want %s", got.spanID, subWF.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != subWF {
+			t.Fatalf("parentForRunLocked(default branch) = %s, want %s (not %s)", got.spanID, subWF.spanID, root.spanID)
+		}
+	})
+
+	t.Run("nested_caller_path_competing_same_workflow_demotes_to_outer_wf", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-caller-competing-wf", time.Unix(1_700_000_000, 0))
+		outerWF := &spanRecord{spanID: "outer-wf", kind: spanKindAgent, name: "outer_wf", isWorkflow: true, nonLLM: true, parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", path: "fn@1", parent: outerWF, goroutineID: 101}
+		subWF1 := &spanRecord{spanID: "sub-wf-1", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "", path: "fn@1", parent: w1, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", path: "fn@1", parent: outerWF, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", path: "fn@1", parent: w2, goroutineID: 102}
+		subWF2 := &spanRecord{spanID: "sub-wf-2", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "fn@1", parent: mid, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, outerWF, w1, subWF1, w2, mid, subWF2)
+
+		leaf := identity{agentName: "leaf", branch: "selected", path: "fn@1/sub_wf@1/inner_node@1"}
+		if got := inv.parentFor(leaf); got != subWF2 {
+			t.Fatalf("parentFor(nested competing precondition) = %s, want %s", got.spanID, subWF2.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != outerWF {
+			t.Fatalf("parentForRunLocked(nested competing sub_wf) = %s, want %s (not %s)", got.spanID, outerWF.spanID, subWF2.spanID)
+		}
+	})
+
+	t.Run("nested_caller_path_default_branch_excludes_unrelated_and_shallower_outer", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-caller-default-wf", time.Unix(1_700_000_000, 0))
+		outerWF := &spanRecord{spanID: "outer-wf", kind: spanKindAgent, name: "fn", isWorkflow: true, nonLLM: true, path: "", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", path: "fn@1", parent: outerWF, goroutineID: 101}
+		otherWF := &spanRecord{spanID: "other-wf", kind: spanKindAgent, name: "other_wf", isWorkflow: true, nonLLM: true, path: "fn@1", parent: w1, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", path: "fn@1", parent: outerWF, goroutineID: 102}
+		subWF := &spanRecord{spanID: "sub-wf", kind: spanKindAgent, name: "sub_wf", isWorkflow: true, nonLLM: true, path: "fn@1", parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, outerWF, w1, otherWF, w2, subWF)
+
+		leaf := identity{agentName: "leaf", branch: "", path: "fn@1/sub_wf@1/inner_node@1"}
+		if got := inv.parentFor(leaf); got != subWF {
+			t.Fatalf("parentFor(nested default precondition) = %s, want %s", got.spanID, subWF.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != subWF {
+			t.Fatalf("parentForRunLocked(nested default branch) = %s, want %s (not %s)", got.spanID, subWF.spanID, outerWF.spanID)
+		}
+		if spanQualifiesForOwner(outerWF, nil, leaf, subWF, false, true) {
+			t.Fatal("spanQualifiesForOwner(shallower fn wf at empty path) = true when selected.path=fn@1, want false")
+		}
+		if spanQualifiesForOwner(otherWF, nil, leaf, subWF, false, true) {
+			t.Fatal("spanQualifiesForOwner(other_wf at fn@1) = true for fn@1/sub_wf@1/inner_node@1, want false")
+		}
+		deeperSpan := &spanRecord{spanID: "helper", kind: spanKindAgent, name: "helper", path: "fn@1/sub_wf@1", parent: w1}
+		if !spanQualifiesForOwner(deeperSpan, nil, leaf, subWF, false, true) {
+			t.Fatal("spanQualifiesForOwner(deeper helper at fn@1/sub_wf@1) = false, want true")
+		}
+	})
+
 	t.Run("insideWorkflowNode_edges_and_zero_allocs", func(t *testing.T) {
 		subWF := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: true, path: ""}
+		subWFCanary := &spanRecord{kind: spanKindAgent, name: "sub_wf@canary", isWorkflow: true, path: ""}
 		subWFNested := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: true, path: "fn@1"}
 		nonWF := &spanRecord{kind: spanKindAgent, name: "sub_wf", isWorkflow: false, path: ""}
 		emptyNameWF := &spanRecord{kind: spanKindAgent, name: "", isWorkflow: true, path: ""}
@@ -40544,6 +40897,10 @@ func TestParentForRunLocked_EmptyCallerPathWorkflowDescendant(t *testing.T) {
 		}{
 			{name: "root sub_wf node", path: "sub_wf@1", wf: subWF, want: true},
 			{name: "root sub_wf child node", path: "sub_wf@1/inner@1", wf: subWF, want: true},
+			{name: "root canary mismatch", path: "sub_wf@canary@1/inner_node@1", wf: subWF, want: false},
+			{name: "root canary match", path: "sub_wf@canary@1/inner_node@1", wf: subWFCanary, want: true},
+			{name: "root non-@1 run suffix mismatch", path: "sub_wf@10/inner_node@1", wf: subWF, want: false},
+			{name: "root sub_wf@1_extra mismatch", path: "sub_wf@1_extra/inner@1", wf: subWF, want: false},
 			{name: "root empty path", path: "", wf: subWF, want: false},
 			{name: "root exact name without at", path: "sub_wf", wf: subWF, want: false},
 			{name: "root prefix boundary mismatch", path: "sub_wf_2@1", wf: subWF, want: false},
@@ -40563,7 +40920,7 @@ func TestParentForRunLocked_EmptyCallerPathWorkflowDescendant(t *testing.T) {
 		}
 
 		if !raceEnabled {
-			longName := strings.Repeat("wf_", 24) + "sub"
+			longName := strings.Repeat("wf_", 24) + "sub" // 75 bytes
 			longWF := &spanRecord{kind: spanKindAgent, name: longName, isWorkflow: true, path: "fn@1"}
 			longPath := "fn@1/" + longName + "@1/inner@1"
 			if allocs := testing.AllocsPerRun(100, func() {

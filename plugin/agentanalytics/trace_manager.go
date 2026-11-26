@@ -4761,10 +4761,20 @@ func (inv *invocationTrace) launcherLockedCounted(act any, excluded []bool) (int
 //     parent agent shares selected.path), branch-compatible peers on the exact
 //     same selected.path remain eligible. Once id enters a deeper node path
 //     below selected.path, peers left at selected.path on another branch no
-//     longer qualify. Otherwise (for example, a detached leaf on a non-empty
-//     branch whose node path is empty), any open member whose own branch and
-//     path can hold id counts as a possible launcher so a detached child
-//     cannot falsely attach to another peer's branch subtree.
+//     longer qualify.
+//   - When selected is a workflow activation (at empty or non-empty caller path
+//     selected.path) and insideWorkflowNode(id.path, selected) matches an exact
+//     "<selected.name>@1" path segment right below selected.path, only spans
+//     at or below selected.path that either satisfy insideWorkflowNode(id.path,
+//     rec) (such as competing activations of the same workflow on any branch,
+//     including default) or sit on a strictly deeper enclosing path
+//     (rec.path != selected.path && atOrBelowPath(id.path, rec.path)) qualify,
+//     keeping competing workflow activations eligible while excluding
+//     unrelated peers on selected.path (including default-branch peers).
+//   - Otherwise (for example, a detached leaf on a non-empty branch whose node
+//     path is empty or names a different workflow), any open member whose own
+//     branch and path can hold id counts as a possible launcher so a detached
+//     child cannot falsely attach to another peer's branch subtree.
 //   - When an unmatched lookalike group shares id's own (agentName, branch,
 //     path), its live members are treated as peers of id even if nested across
 //     intermediate spans, and parent is further walked up past any agent span
@@ -4882,7 +4892,7 @@ func isPeerLookalikeGroup(recs []*spanRecord, id identity) bool {
 	return r0.name == id.agentName && r0.branch == id.branch && r0.path == id.path
 }
 
-func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity, selected *spanRecord, requireSelected bool) bool {
+func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity, selected *spanRecord, requireSelected, requireWorkflowNode bool) bool {
 	if exclude[rec.spanID] ||
 		!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) {
 		return false
@@ -4897,6 +4907,18 @@ func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity
 	if requireSelected && (!atOrBelowPath(rec.path, selected.path) ||
 		(!withinBranch(rec.branch, selected.branch) && !(inheritedPath && rec.path == selected.path))) {
 		return false
+	}
+	if requireWorkflowNode {
+		selectedPath := ""
+		if selected != nil {
+			selectedPath = selected.path
+		}
+		if selectedPath != "" && !atOrBelowPath(rec.path, selectedPath) {
+			return false
+		}
+		if !insideWorkflowNode(id.path, rec) && !(rec.path != selectedPath && atOrBelowPath(id.path, rec.path)) {
+			return false
+		}
 	}
 	return true
 }
@@ -4960,17 +4982,22 @@ func insideWorkflowNode(path string, wf *spanRecord) bool {
 		}
 		rest = path[len(wf.path)+1:]
 	}
-	return hasSegmentPrefix(rest, wf.name, '@')
+	if !strings.HasPrefix(rest, wf.name) {
+		return false
+	}
+	tail := rest[len(wf.name):]
+	return tail == "@1" || strings.HasPrefix(tail, "@1/")
 }
 
 func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclude map[string]bool, id identity, selected *spanRecord) qualifyingIndex {
 	m := len(tree.dfsSeq)
 	qualifies := make([]bool, len(inv.agentStack))
-	requireSelected := selected != nil && ((selected.path != "" && atOrBelowPath(id.path, selected.path)) || insideWorkflowNode(id.path, selected))
+	requireWorkflowNode := selected != nil && insideWorkflowNode(id.path, selected)
+	requireSelected := selected != nil && !requireWorkflowNode && selected.path != "" && atOrBelowPath(id.path, selected.path)
 	inspections := 0
 	for _, u := range tree.dfsSeq[1:] {
 		inspections++
-		if spanQualifiesForOwner(inv.agentStack[u], exclude, id, selected, requireSelected) {
+		if spanQualifiesForOwner(inv.agentStack[u], exclude, id, selected, requireSelected, requireWorkflowNode) {
 			qualifies[u] = true
 		}
 	}
