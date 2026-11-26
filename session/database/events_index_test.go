@@ -150,8 +150,8 @@ func TestAutoMigrateAddsEventsIndexToExistingTable(t *testing.T) {
 
 // Get's events query must be answered from the events index in index order:
 // a SEARCH on the index and no temporary B-tree to sort the rows. The SQL is
-// the statement Get actually ran, captured from GORM, so changing Get's
-// filter or ORDER BY without changing the index fails here.
+// the statement Get actually ran, captured from GORM, so a filter or ORDER BY
+// in Get that the index cannot serve fails here.
 //
 // Only SQLite's plan is checked. PostgreSQL and MySQL plans were not checked
 // locally, since neither server is available to the test suite.

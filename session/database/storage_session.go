@@ -73,10 +73,10 @@ func createSessionFromStorageSession(storage *storageSession) (*localSession, er
 type storageEvent struct {
 	// The primary key leads with the event id, so it cannot serve Get's
 	// per-session read. idx_events_app_user_session_ts_id matches that read's
-	// filter and its ORDER BY timestamp DESC, id DESC, so no sort step remains.
-	// adk-python defines the same index under the same name. The priorities
-	// are explicit because GORM otherwise orders index columns by field
-	// position, which would put id first.
+	// filter and its ORDER BY timestamp DESC, id DESC, so the rows come back in
+	// index order with no sort step. adk-python defines the same index under
+	// the same name. The priorities are explicit because GORM otherwise orders
+	// index columns by field position, which would put id first.
 	ID        string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:5,sort:desc"`
 	AppName   string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:1"`
 	UserID    string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:2"`
