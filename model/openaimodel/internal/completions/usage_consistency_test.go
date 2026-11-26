@@ -20,19 +20,30 @@ import (
 )
 
 // usageFields builds the usage member of a Chat Completions body or final
-// stream chunk.
+// stream chunk. A negative total omits total_tokens from the JSON.
 func usageFields(prompt, completion, total, reasoning int64) string {
-	return fmt.Sprintf(`"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d,`+
+	totalField := ""
+	if total >= 0 {
+		totalField = fmt.Sprintf(`"total_tokens":%d,`, total)
+	}
+	return fmt.Sprintf(`"usage":{"prompt_tokens":%d,"completion_tokens":%d,%s`+
 		`"completion_tokens_details":{"reasoning_tokens":%d}}`,
-		prompt, completion, total, reasoning)
+		prompt, completion, totalField, reasoning)
 }
 
 // TestModel_ImpossibleUsageIsUnknown pins that usage which cannot be true is
 // reported as unknown rather than stored as is, in blocking and streaming mode.
-// A total below prompt plus completion, or reasoning above completion, is a
-// provider bug: passing the numbers on makes readers that sum the fields
-// disagree with readers that use the total. Unknown (nil) is what readers
-// already handle. The turn itself still succeeds.
+// total_tokens is prompt plus completion tokens, so a total below that sum
+// contradicts its own parts. reasoning_tokens is a subset of
+// completion_tokens, so reasoning above completion is a contradiction in the
+// same way. Unknown (nil) says that the provider's numbers cannot be trusted.
+// The turn itself still succeeds.
+//
+// A total above the sum, reasoning equal to completion, and an omitted total
+// are not contradictions. An omitted total decodes to 0 and means not
+// reported, so it must not be treated as a total below the sum. Those rows keep
+// the provider's counts unchanged. The test does not assert
+// CandidatesTokenCount, which depends on how reasoning maps onto candidates.
 func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 	tests := []struct {
 		name                                 string
@@ -51,9 +62,24 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 			wantUsage: true,
 		},
 		{
+			name:   "total above prompt plus completion is kept",
+			prompt: 100, completion: 50, total: 170, reasoning: 20,
+			wantUsage: true,
+		},
+		{
+			name:   "reasoning equal to completion is kept",
+			prompt: 100, completion: 50, total: 150, reasoning: 50,
+			wantUsage: true,
+		},
+		{
+			name:   "omitted total is kept",
+			prompt: 100, completion: 50, total: -1, reasoning: 0,
+			wantUsage: true,
+		},
+		{
 			name:   "total below prompt plus completion",
-			prompt: 100, completion: 50, total: 7, reasoning: 0,
-			why: "total_tokens 7 is below prompt_tokens 100 + completion_tokens 50",
+			prompt: 100, completion: 50, total: 120, reasoning: 0,
+			why: "total_tokens 120 is below prompt_tokens 100 + completion_tokens 50",
 		},
 		{
 			name:   "reasoning above completion",
@@ -92,7 +118,15 @@ func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
 				}
 				switch {
 				case tt.wantUsage && final.UsageMetadata == nil:
-					t.Error("UsageMetadata = nil, want the provider's usage kept: the counts are consistent")
+					t.Error("UsageMetadata = nil, want the provider's usage kept: the counts are not contradictory")
+				case tt.wantUsage:
+					u := final.UsageMetadata
+					wantTotal := max(tt.total, 0) // an omitted total decodes to 0
+					if u.PromptTokenCount != int32(tt.prompt) || u.TotalTokenCount != int32(wantTotal) ||
+						u.ThoughtsTokenCount != int32(tt.reasoning) {
+						t.Errorf("UsageMetadata = {Prompt: %d, Thoughts: %d, Total: %d}, want {Prompt: %d, Thoughts: %d, Total: %d}: kept counts are unchanged",
+							u.PromptTokenCount, u.ThoughtsTokenCount, u.TotalTokenCount, tt.prompt, tt.reasoning, wantTotal)
+					}
 				case !tt.wantUsage && final.UsageMetadata != nil:
 					u := final.UsageMetadata
 					t.Errorf("UsageMetadata = {Prompt: %d, Candidates: %d, Thoughts: %d, Total: %d}, "+
