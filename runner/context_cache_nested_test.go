@@ -47,6 +47,8 @@ type cacheProbeModel struct {
 
 func (m *cacheProbeModel) Name() string { return "probe" }
 
+func (*cacheProbeModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *cacheProbeModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	reply := m.responses[min(len(m.configs), len(m.responses)-1)]

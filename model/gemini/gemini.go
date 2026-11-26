@@ -445,4 +445,17 @@ func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
 
-var _ googlellm.GoogleLLM = &geminiModel{}
+func (m *geminiModel) Capabilities() model.Capabilities {
+	if m == nil {
+		return model.Capabilities{}
+	}
+	return model.Capabilities{
+		AcceptsOutputSchemaAndTools: !googlellm.IsGeminiModel(m.name) ||
+			(m.GetGoogleLLMVariant() == genai.BackendVertexAI && googlellm.IsGemini2OrAbove(m.name)),
+	}
+}
+
+var (
+	_ googlellm.GoogleLLM = &geminiModel{}
+	_ model.LLM           = &geminiModel{}
+)

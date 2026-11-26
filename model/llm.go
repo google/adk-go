@@ -22,10 +22,33 @@ import (
 	"google.golang.org/genai"
 )
 
-// LLM provides the access to the underlying LLM.
+// LLM provides access to an underlying language model.
 type LLM interface {
 	Name() string
+	// Capabilities reports the resolved capabilities of this model instance.
+	// Implementations must be safe for concurrent use and must not mutate the
+	// model or have observable side effects.
+	Capabilities() Capabilities
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+}
+
+// Capabilities holds the resolved capabilities of an [LLM] instance.
+//
+// Each field reports whether the model supports a specific optional feature.
+// The zero value (Capabilities{}) indicates that none of the optional
+// capabilities are supported. Capabilities is a value type and is safe for
+// concurrent use.
+type Capabilities struct {
+	// AcceptsOutputSchemaAndTools reports whether the model accepts a native
+	// output schema (GenerateContentConfig.ResponseSchema) together with tools
+	// in the same request.
+	//
+	// When false and an agent configures both an output schema and tools (or
+	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
+	// request config and instead instructs the model to return its structured
+	// answer through a synthetic function tool. When an agent has no tools,
+	// ADK still sends the output schema natively.
+	AcceptsOutputSchemaAndTools bool
 }
 
 // LLMRequest is the raw LLM request.
