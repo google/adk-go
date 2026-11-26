@@ -378,3 +378,39 @@ func TestGenerateContentWithRequestModel(t *testing.T) {
 		})
 	}
 }
+
+// A proxy outside googleapis.com is not a Google API endpoint, so requests to
+// it do not name the hosting runtime. adk-python's ApigeeLlm leaves the
+// runtime out for every proxy. Here a proxy at an https host under
+// googleapis.com would get it, because the base URL decides, as for Gemini.
+func TestGenerateContentSendsNoRuntimeSuffixToProxy(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "test-key")
+	t.Setenv("K_SERVICE", "svc")
+	var got []string
+	client := newTestClient(func(req *http.Request) (*http.Response, error) {
+		got = append(got, req.Header.Get("User-Agent"), req.Header.Get("X-Goog-Api-Client"))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"parts":[{"text":"Paris"}]}}]}`)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+	apigeeModel, err := NewModel(t.Context(), "apigee/gemini/v1/gemini-1.5-flash", WithProxyURL(proxyURL), WithHTTPClient(client))
+	if err != nil {
+		t.Fatalf("NewModel() returned an unexpected error: %v", err)
+	}
+	for _, err := range apigeeModel.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("ping")}, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d header values, want those of one request", len(got))
+	}
+	for _, value := range got {
+		adk, _, _ := strings.Cut(value, " ")
+		if !strings.HasPrefix(adk, "google-adk/") || strings.Contains(adk, "+") {
+			t.Errorf("tracking header = %q, want it to start with a google-adk label without a suffix", value)
+		}
+	}
+}
