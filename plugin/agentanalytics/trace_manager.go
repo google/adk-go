@@ -4534,7 +4534,7 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
-const maxLaunchLineageSteps = 1 << 16
+const maxContextWalkDepth = 1 << 16
 
 // isThinContextWrapper reports whether t is a struct with a single anonymous
 // field of type context.Context. Requiring NumField() == 1 and an anonymous
@@ -4612,13 +4612,17 @@ func launchLineageNext(v reflect.Value, allowThinPtr bool) (any, bool) {
 // derives the context of each agent run from the context passed to its Run,
 // and Go standard library context wrappers (context and os/signal.NotifyContext,
 // except context.WithoutCancel), allowlisted immutable value wrappers such as
-// context.stopCtx, ADK contexts, and pointer wrappers embedding only
-// context.Context with no other fields (assumed immutable after handoff) expose
-// the parent they derive from, so the chain from act passes through the
-// activation key of every run that the new run's context derives from, nearest
-// first. The first one of an open activation tells which activation started the
-// run, whichever goroutine runs it. Multi-field and named-field user structs
-// are never read, and no user methods run while inv.mu is held.
+// context.stopCtx, ADK contexts that expose an exported Context or
+// InvocationContext field (callbackContextWrapper and toolContextWrapper hold
+// their inner Context in an unexported context field and stop the walk if
+// encountered unwrapped), and pointer wrappers embedding only context.Context
+// with no other fields (assumed immutable after handoff) expose the parent they
+// derive from, up to maxContextWalkDepth (65536) steps, so the chain from act
+// passes through the activation key of every run that the new run's context
+// derives from, nearest first. The first one of an open activation tells which
+// activation started the run, whichever goroutine runs it. Multi-field and
+// named-field user structs are never read, and no user methods run while inv.mu
+// is held.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if act == nil {
 		return 0
@@ -4639,7 +4643,7 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	var tortoise any
 	power := 1
 	lam := 0
-	for step := range maxLaunchLineageSteps {
+	for step := range maxContextWalkDepth {
 		v := reflect.ValueOf(cur)
 		if !v.IsValid() {
 			return 0
@@ -10304,12 +10308,7 @@ func activationKey(ctx context.Context) any {
 			if isADKType(elem.Type()) {
 				if f := directStructField(elem, "Context"); f.IsValid() && f.CanInterface() {
 					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && isNonNilPointer(inner) {
-						if iv := reflect.ValueOf(inner).Elem(); iv.Kind() != reflect.Struct || !isADKType(iv.Type()) {
-							if resolved := resolveInvocationActivationKey(inner, maxActivationKeyDepth); isNonNilPointer(resolved) {
-								return resolved
-							}
-						}
-						return stableStripICDelta(inner)
+						return inner
 					}
 				}
 			}
@@ -11550,6 +11549,52 @@ func (q *contextStructQueue) pop() (reflect.Value, bool) {
 	return v, true
 }
 
+type contextStructStack struct {
+	inline   [16]reflect.Value
+	count    int
+	overflow []reflect.Value
+}
+
+func (s *contextStructStack) push(v reflect.Value) {
+	if !v.IsValid() || ((v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) && v.IsNil()) {
+		return
+	}
+	if s.overflow != nil {
+		s.overflow = append(s.overflow, v)
+		return
+	}
+	if s.count == len(s.inline) {
+		s.overflow = make([]reflect.Value, len(s.inline)+1, len(s.inline)*2)
+		copy(s.overflow, s.inline[:])
+		clear(s.inline[:])
+		s.overflow[s.count] = v
+		s.count = 0
+		return
+	}
+	s.inline[s.count] = v
+	s.count++
+}
+
+func (s *contextStructStack) pop() (reflect.Value, bool) {
+	if s.overflow != nil {
+		if len(s.overflow) == 0 {
+			return reflect.Value{}, false
+		}
+		i := len(s.overflow) - 1
+		v := s.overflow[i]
+		s.overflow[i] = reflect.Value{}
+		s.overflow = s.overflow[:i]
+		return v, true
+	}
+	if s.count == 0 {
+		return reflect.Value{}, false
+	}
+	s.count--
+	v := s.inline[s.count]
+	s.inline[s.count] = reflect.Value{}
+	return v, true
+}
+
 func sameContextChild(a, b reflect.Value) bool {
 	if !a.IsValid() || !b.IsValid() {
 		return false
@@ -11642,7 +11687,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := range 512 {
+	for steps := range maxContextWalkDepth {
 		item, ok := q.pop()
 		if !ok {
 			break
@@ -11982,7 +12027,7 @@ func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pi
 		}
 	}()
 	var seen map[visitedContextStruct]bool
-	for steps := 0; cur.IsValid() && steps < 512; steps++ {
+	for steps := 0; cur.IsValid() && steps < maxContextWalkDepth; steps++ {
 		var ok bool
 		cur, ok = derefContextStructValueLazy(cur, &seen, steps >= 32)
 		if !ok {

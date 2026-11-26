@@ -373,18 +373,21 @@ type GCSContentOffloader interface {
 // context derived from it, was passed to the agent's Run, whichever goroutine
 // runs the agent. Launch lineage follows Go standard library context wrappers
 // (context and os/signal.NotifyContext, except context.WithoutCancel), ADK
-// contexts, and pointer wrappers whose sole field is an anonymously embedded
-// context.Context that must not be reassigned after handoff. Multi-field
+// contexts that expose an exported Context or InvocationContext field
+// (callbackContextWrapper and toolContextWrapper hold their inner Context in an
+// unexported context field and stop the walk if encountered unwrapped), and
+// pointer wrappers whose sole field is an anonymously embedded context.Context
+// that must not be reassigned after handoff, up to 65536 steps. Multi-field
 // wrappers (such as struct{ context.Context; id string }) and wrappers with a
 // named Context field (such as struct{ Context context.Context }) are
 // intentionally not inspected because user-owned structs may guard fields with
-// a sibling or external lock. When a context derives through any other wrapper,
-// goroutines decide instead: a child agent that runs on an activation's
-// goroutine, or on a goroutine that the activation starts directly, is placed
-// under that activation, and one launched across an intermediate goroutine that
-// runs no ADK callback is placed under the nearest open span enclosing the
-// concurrent activations that hold an open span its branch and node path fit
-// (or the invocation span if none encloses them).
+// a sibling or external lock. When a context derives through any other wrapper
+// or exceeds the step limit, goroutines decide instead: a child agent that runs
+// on an activation's goroutine, or on a goroutine that the activation starts
+// directly, is placed under that activation, and one launched across an
+// intermediate goroutine that runs no ADK callback is placed under the nearest
+// open span enclosing the concurrent activations that hold an open span its
+// branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
 	// _ prevents unkeyed literals, which adding a field would break.
 	_ struct{} `json:"-"`

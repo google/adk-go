@@ -2495,15 +2495,13 @@ type visitedContextStruct struct {
 	typ reflect.Type
 }
 
-const maxContextPathSteps = 1 << 16
-
 // contextPath returns the execution node path carried by ctx, or "".
 // ADK's callbackContextWrapper.Path logs an error and returns "", and
 // NewCallbackContext wraps the inner InvocationContext without copying its
 // path onto the outer commonContext, so contextPath inspects allowlisted
-// standard library and ADK context wrappers directly (visiting
-// invocationContext before a replacement Context) before falling back to Path()
-// on non-wrapper types.
+// standard library and ADK context wrappers via an iterative LIFO stack
+// (exploring the entire invocationContext subtree before falling back to a
+// replacement Context) before falling back to Path() on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2513,18 +2511,13 @@ func contextPath(ctx context.Context) (path string) {
 	if ctx == nil {
 		return ""
 	}
-	var primary, fallback contextStructQueue
-	primary.push(reflect.ValueOf(ctx))
+	var stack contextStructStack
+	stack.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := range maxContextPathSteps {
-		fromPrimary := true
-		item, ok := primary.pop()
+	for steps := range maxContextWalkDepth {
+		item, ok := stack.pop()
 		if !ok {
-			fromPrimary = false
-			item, ok = fallback.pop()
-			if !ok {
-				break
-			}
+			break
 		}
 		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
 		if !ok {
@@ -2555,30 +2548,20 @@ func contextPath(ctx context.Context) (path string) {
 		}
 		c1, c2 := adkContextChildren(v)
 		if c2.IsValid() {
-			// On commonContext and internal/context.ReadonlyContext, c2 is the
-			// authoritative invocationContext/InvocationContext and c1 is the
-			// replacement Context. On cancelledToolContext and authContext, c1
-			// is the wrapped ADK context and c2 is the secondary cancel/value
-			// context.
+			// Push the secondary/replacement child first so LIFO explores the
+			// authoritative ADK subtree (including any nested fallbacks) before
+			// returning to replacement or secondary contexts.
 			if (vt.PkgPath() == agentPkgPath && vt.Name() == "commonContext") ||
 				(vt.PkgPath() == internalContextPkgPath && vt.Name() == "ReadonlyContext") {
-				primary.push(c2)
-				fallback.push(c1)
+				stack.push(c1)
+				stack.push(c2)
 			} else {
-				if fromPrimary {
-					primary.push(c1)
-				} else {
-					fallback.push(c1)
-				}
-				fallback.push(c2)
+				stack.push(c2)
+				stack.push(c1)
 			}
 			continue
 		}
-		if fromPrimary {
-			primary.push(c1)
-		} else {
-			fallback.push(c1)
-		}
+		stack.push(c1)
 	}
 	type pathCarrier interface {
 		Path() string

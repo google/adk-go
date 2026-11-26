@@ -29542,6 +29542,41 @@ func (b *stableBaseIC) WithICDelta(*agent.InvocationContextDelta) agent.Invocati
 	return b
 }
 
+type viewContextSharedICDecorator struct {
+	agent.InvocationContext
+	ctx context.Context
+}
+
+func (d *viewContextSharedICDecorator) Deadline() (time.Time, bool) { return d.ctx.Deadline() }
+func (d *viewContextSharedICDecorator) Done() <-chan struct{}       { return d.ctx.Done() }
+func (d *viewContextSharedICDecorator) Err() error                  { return d.ctx.Err() }
+func (d *viewContextSharedICDecorator) Value(key any) any           { return d.ctx.Value(key) }
+func (d *viewContextSharedICDecorator) WithContext(ctx context.Context) agent.InvocationContext {
+	return &viewContextSharedICDecorator{InvocationContext: d.InvocationContext, ctx: ctx}
+}
+
+type viewContextDerivedICDecorator struct {
+	agent.InvocationContext
+}
+
+func (d *viewContextDerivedICDecorator) WithContext(ctx context.Context) agent.InvocationContext {
+	return &viewContextDerivedICDecorator{InvocationContext: d.InvocationContext.WithContext(ctx)}
+}
+
+type gatedViewLLM struct {
+	onCall func(ctx context.Context, call int32) *model.LLMResponse
+	calls  atomic.Int32
+}
+
+func (m *gatedViewLLM) Name() string { return "gated-view-model" }
+
+func (m *gatedViewLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		idx := m.calls.Add(1)
+		yield(m.onCall(ctx, idx), nil)
+	}
+}
+
 type syncContextWrapper struct {
 	mu      sync.RWMutex
 	Context context.Context
@@ -29997,13 +30032,19 @@ func TestLauncherLocked_CycleAndFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("very deep acyclic WithValue chain resolves", func(t *testing.T) {
-		var cur context.Context = w1Act
-		for i := range 1000 {
-			cur = context.WithValue(cur, lineageKey{}, i)
+	t.Run("exact maxContextWalkDepth WithValue chain boundaries", func(t *testing.T) {
+		const expectedWalkLimit = 65536
+		var passCtx context.Context = w1Act
+		for i := range expectedWalkLimit - 2 {
+			passCtx = context.WithValue(passCtx, lineageKey{}, i)
 		}
-		if got := inv.launcherLocked(&lineageContext{Context: cur}, excluded); got != 1 {
-			t.Fatalf("launcherLocked(1000 WithValue) = %d, want 1", got)
+		if got := inv.launcherLocked(&lineageContext{Context: passCtx}, excluded); got != 1 {
+			t.Fatalf("launcherLocked(%d WithValue) = %d, want 1", expectedWalkLimit-2, got)
+		}
+
+		failCtx := context.WithValue(passCtx, lineageKey{}, expectedWalkLimit-2)
+		if got := inv.launcherLocked(&lineageContext{Context: failCtx}, excluded); got != 0 {
+			t.Fatalf("launcherLocked(%d WithValue) = %d, want 0", expectedWalkLimit-1, got)
 		}
 	})
 
@@ -30140,6 +30181,53 @@ func TestContextPath_DeepWithValueAndSafety(t *testing.T) {
 	if got := contextPath(cur); got != "wf_deep@1/leaf@1" {
 		t.Fatalf("contextPath(520 WithValue) = %q, want wf_deep@1/leaf@1", got)
 	}
+
+	t.Run("exact maxContextWalkDepth boundaries", func(t *testing.T) {
+		const expectedWalkLimit = 65536
+		wantPath := "wf_deep@1/leaf@1"
+		plainIC := &mockInvocationContext{ctx: t.Context(), agentName: "plain", invocationID: "inv-bound"}
+		directTarget := agent.Promote(plainIC).WithDelta(&agent.CommonContextDelta{Path: &wantPath})
+
+		var directPass context.Context = directTarget
+		for i := range expectedWalkLimit - 1 {
+			directPass = context.WithValue(directPass, lineageKey{}, i)
+		}
+		if got := contextPath(directPass); got != wantPath {
+			t.Fatalf("contextPath(direct %d WithValue) = %q, want %s", expectedWalkLimit-1, got, wantPath)
+		}
+		directFail := context.WithValue(directPass, lineageKey{}, expectedWalkLimit-1)
+		if got := contextPath(directFail); got != "" {
+			t.Fatalf("contextPath(direct %d WithValue) = %q, want empty", expectedWalkLimit, got)
+		}
+
+		var cbPass context.Context = agent.NewCallbackContext(directTarget, nil)
+		for i := range expectedWalkLimit - 3 {
+			cbPass = context.WithValue(cbPass, lineageKey{}, i)
+		}
+		if got := contextPath(cbPass); got != wantPath {
+			t.Fatalf("contextPath(callback %d WithValue) = %q, want %s", expectedWalkLimit-3, got, wantPath)
+		}
+		cbFail := context.WithValue(cbPass, lineageKey{}, expectedWalkLimit-3)
+		if got := contextPath(cbFail); got != "" {
+			t.Fatalf("contextPath(callback %d WithValue) = %q, want empty", expectedWalkLimit-2, got)
+		}
+	})
+
+	t.Run("early cycle exit reaches replacement fallback", func(t *testing.T) {
+		plainIC := &mockInvocationContext{ctx: t.Context(), agentName: "plain", invocationID: "inv-cycle"}
+		c1 := agent.NewCallbackContext(plainIC, nil).WithICDelta(nil)
+		c2 := agent.NewCallbackContext(plainIC, nil).WithICDelta(nil)
+		w := agent.NewCallbackContext(c1, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.WithValue(capturedIC, lineageKey{}, "fallback"))
+		setICField := func(dst, target any) {
+			f := reflect.ValueOf(dst).Elem().FieldByName("invocationContext")
+			reflect.NewAt(f.Type(), f.Addr().UnsafePointer()).Elem().Set(reflect.ValueOf(target))
+		}
+		setICField(c1, c2)
+		setICField(c2, c1)
+		if got := contextPath(w); got != "wf_deep@1/leaf@1" {
+			t.Fatalf("contextPath(early-cycle-exit) = %q, want wf_deep@1/leaf@1", got)
+		}
+	})
 
 	if got := contextPath(&lineageContext{Context: cur}); got != "" {
 		t.Fatalf("contextPath(pointer thin wrapper) = %q, want empty", got)
@@ -30556,6 +30644,201 @@ func TestContextPath_PrefersInvocationContextOverReplacementContext(t *testing.T
 			t.Fatalf("contextParentMap(combined)[wf_nested_outer] = %v, want %v", got["wf_nested_outer"], wrapperParent)
 		}
 	})
+
+	t.Run("fallback inside invocationContext beats peer replacement and pairs LLM span", func(t *testing.T) {
+		plainIC := &mockInvocationContext{ctx: t.Context(), agentName: "plain", invocationID: "inv-owner"}
+		ownerFallback := agent.NewContext(plainIC).WithAgentContext(context.WithValue(icInner, lineageKey{}, "owner"))
+		peerCC := agent.NewCallbackContext(icOuter, nil).WithICDelta(nil).(agent.Context)
+		wrapped := agent.NewCallbackContext(ownerFallback, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.WithValue(peerCC, lineageKey{}, "peer"))
+
+		if got := contextPath(wrapped); got != "wf_inner@1/leaf@1" {
+			t.Fatalf("contextPath(wrapped) = %q, want wf_inner@1/leaf@1", got)
+		}
+		idPush := identityOf(ownerFallback)
+		idPop := identityOf(wrapped)
+		if idPush.path != "wf_inner@1/leaf@1" || idPop.path != "wf_inner@1/leaf@1" || idPush.invocationID != idPop.invocationID {
+			t.Fatalf("identity mismatch: push=%+v pop=%+v", idPush, idPop)
+		}
+		tm := newTraceManager()
+		now := time.Unix(1_700_000_000, 0)
+		tm.now = func() time.Time {
+			now = now.Add(5 * time.Millisecond)
+			return now
+		}
+		tm.invocationSpan(ownerFallback, idPush, nil)
+		tm.pushAgentSpan(ownerFallback, idPush)
+		pushSpan := tm.pushLLMSpan(ownerFallback, idPush)
+		popSpan := tm.popLLMSpan(wrapped, idPop, true)
+		if pushSpan.spanID == "" || popSpan.spanID != pushSpan.spanID {
+			t.Fatalf("LLM span mismatch across fallback wrapper: push=%q pop=%q", pushSpan.spanID, popSpan.spanID)
+		}
+		if popSpan.latency == nil {
+			t.Fatal("popLLMSpan returned nil latency")
+		}
+	})
+
+	t.Run("inner fallback beats outer shallow replacement", func(t *testing.T) {
+		plainIC := &mockInvocationContext{ctx: t.Context(), agentName: "plain", invocationID: "inv-item5"}
+		wInner := agent.NewContext(plainIC).WithAgentContext(context.WithValue(icInner, lineageKey{}, "inner"))
+		wOuter := agent.NewCallbackContext(wInner, nil).WithICDelta(nil).(agent.Context).WithAgentContext(context.WithValue(icOuter, lineageKey{}, "outer"))
+		if got := contextPath(wOuter); got != "wf_inner@1/leaf@1" {
+			t.Fatalf("contextPath(wOuter) = %q, want wf_inner@1/leaf@1", got)
+		}
+	})
+}
+
+func TestActivationKey_OverlappingViewContextDecorator(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		wrapView func(base agent.InvocationContext) agent.InvocationContext
+	}{
+		{
+			name: "shared invocation WithContext view decorator",
+			wrapView: func(base agent.InvocationContext) agent.InvocationContext {
+				return &viewContextSharedICDecorator{InvocationContext: base, ctx: base}
+			},
+		},
+		{
+			name: "derived WithContext view decorator",
+			wrapView: func(base agent.InvocationContext) agent.InvocationContext {
+				return &viewContextDerivedICDecorator{InvocationContext: base}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			req1Entered := make(chan struct{})
+			req2Entered := make(chan struct{})
+			release1 := make(chan struct{})
+			release2 := make(chan struct{})
+
+			llm := &gatedViewLLM{
+				onCall: func(_ context.Context, call int32) *model.LLMResponse {
+					switch call {
+					case 1:
+						close(req1Entered)
+						<-release1
+						return &model.LLMResponse{Content: textContent("model", "reply-1")}
+					case 2:
+						close(req2Entered)
+						<-release2
+						return &model.LLMResponse{Content: textContent("model", "reply-2")}
+					default:
+						return &model.LLMResponse{Content: textContent("model", "unexpected")}
+					}
+				},
+			}
+			worker, err := llmagent.New(llmagent.Config{
+				Name:  "worker",
+				Model: llm,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+
+			type item struct {
+				ev  *session.Event
+				err error
+				ack chan struct{}
+			}
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{worker},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						baseIC := agent.Promote(ctx)
+						dec1 := tc.wrapView(baseIC)
+						dec2 := tc.wrapView(baseIC)
+
+						ch1 := make(chan item)
+						ch2 := make(chan item)
+						go func() {
+							defer close(ch1)
+							for ev, runErr := range worker.Run(dec1) {
+								ack := make(chan struct{})
+								ch1 <- item{ev: ev, err: runErr, ack: ack}
+								<-ack
+							}
+						}()
+						<-req1Entered
+
+						go func() {
+							defer close(ch2)
+							for ev, runErr := range worker.Run(dec2) {
+								ack := make(chan struct{})
+								ch2 <- item{ev: ev, err: runErr, ack: ack}
+								<-ack
+							}
+						}()
+						<-req2Entered
+
+						time.Sleep(2 * time.Millisecond)
+						close(release1)
+						for it := range ch1 {
+							ok := yield(it.ev, it.err)
+							close(it.ack)
+							if !ok || it.err != nil {
+								close(release2)
+								for rem := range ch2 {
+									close(rem.ack)
+								}
+								return
+							}
+						}
+						close(release2)
+						for it := range ch2 {
+							ok := yield(it.ev, it.err)
+							close(it.ack)
+							if !ok || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-view-overlap", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			requestRows := rowsOfType(rows, EventLLMRequest)
+			responseRows := rowsOfType(rows, EventLLMResponse)
+			if len(workerStarts) != 2 || len(requestRows) != 2 || len(responseRows) != 2 {
+				t.Fatalf("counts: workers=%d reqs=%d resps=%d, want 2 each", len(workerStarts), len(requestRows), len(responseRows))
+			}
+
+			req1 := placeOf(requestRows[0])
+			req2 := placeOf(requestRows[1])
+			resp1 := placeOf(responseRows[0])
+			resp2 := placeOf(responseRows[1])
+			if req1.span == "" || req2.span == "" || req1.span == req2.span {
+				t.Fatalf("LLM_REQUEST spans collapsed: req1=%+v req2=%+v", req1, req2)
+			}
+			if req1.parent != workerStarts[0]["span_id"] || req2.parent != workerStarts[1]["span_id"] {
+				t.Fatalf("LLM_REQUEST parents = (%q, %q), want (%q, %q)", req1.parent, req2.parent, workerStarts[0]["span_id"], workerStarts[1]["span_id"])
+			}
+			if resp1 != req1 {
+				t.Fatalf("LLM_RESPONSE 1 place = %+v, want %+v", resp1, req1)
+			}
+			if resp2 != req2 {
+				t.Fatalf("LLM_RESPONSE 2 place = %+v, want %+v", resp2, req2)
+			}
+			if _, ok := rowLatency(t, responseRows[0]); !ok {
+				t.Fatal("LLM_RESPONSE 1 missing latency_ms")
+			}
+			if _, ok := rowLatency(t, responseRows[1]); !ok {
+				t.Fatal("LLM_RESPONSE 2 missing latency_ms")
+			}
+		})
+	}
 }
 
 func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
@@ -30594,6 +30877,30 @@ func TestActivationKey_ShallowCopyWithICDeltaDecorator(t *testing.T) {
 		dec := &deterministicICDecorator{InvocationContext: baseIC}
 		if got := activationKey(dec); got != any(baseIC) {
 			t.Fatalf("activationKey(deterministicDec) = %p, want %p", got, baseIC)
+		}
+	})
+
+	t.Run("ADK WithICDelta preserves callback activationKey parity", func(t *testing.T) {
+		adkBase := agent.NewContext(baseIC)
+		adkDelta := adkBase.WithICDelta(&agent.InvocationContextDelta{})
+		if any(adkBase) == any(adkDelta) {
+			t.Fatal("precondition failed: WithICDelta(&InvocationContextDelta{}) must return a derived copy")
+		}
+		kBase := activationKey(agent.NewCallbackContext(adkBase, nil))
+		kDelta := activationKey(agent.NewCallbackContext(adkDelta, nil))
+		if kBase == nil || kBase != kDelta || kBase != any(baseIC) {
+			t.Fatalf("activationKey parity failed for NewContext: base=%p delta=%p want=%p", kBase, kDelta, baseIC)
+		}
+
+		promoted := agent.Promote(baseIC)
+		promotedDelta := promoted.WithICDelta(&agent.InvocationContextDelta{})
+		if any(promoted) == any(promotedDelta) {
+			t.Fatal("precondition failed: Promote.WithICDelta(&InvocationContextDelta{}) must return a derived copy")
+		}
+		kPromoted := activationKey(agent.NewCallbackContext(promoted, nil))
+		kPromotedDelta := activationKey(agent.NewCallbackContext(promotedDelta, nil))
+		if kPromoted == nil || kPromoted != kPromotedDelta || kPromoted != any(baseIC) {
+			t.Fatalf("activationKey parity failed for Promote: promoted=%p delta=%p want=%p", kPromoted, kPromotedDelta, baseIC)
 		}
 	})
 
@@ -33371,13 +33678,18 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatalf("extractCallbackAfterAgentActionsValue(selfIface) = (%+v, %+v), want zero", am, pins)
 		}
 
-		// Chains exceeding the 512-step bound fail closed cleanly.
-		overBound := context.Context(agent.NewCallbackContext(mIC, nil))
-		for i := range 600 {
-			overBound = context.WithValue(overBound, cycleKey{}, i)
+		// Chains within expectedWalkLimit (65536) succeed, while chains exceeding it fail closed.
+		const expectedWalkLimit = 65536
+		atBound := context.Context(agent.NewCallbackContext(mIC, nil))
+		for i := range expectedWalkLimit - 2 {
+			atBound = context.WithValue(atBound, cycleKey{}, i)
 		}
+		if am, _ := callbackAfterAgentActions(atBound); am == (actionMaps{}) {
+			t.Fatalf("callbackAfterAgentActions(%d layers) = zero, want non-zero", expectedWalkLimit-2)
+		}
+		overBound := context.WithValue(atBound, cycleKey{}, expectedWalkLimit-2)
 		if am, keep := callbackAfterAgentActions(overBound); am != (actionMaps{}) || keep != nil {
-			t.Fatalf("callbackAfterAgentActions(>512 layers) = (%+v, %v), want zero", am, keep)
+			t.Fatalf("callbackAfterAgentActions(%d layers) = (%+v, %v), want zero", expectedWalkLimit-1, am, keep)
 		}
 
 		bad := panickingValueContext{}
@@ -33512,6 +33824,67 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			if got := contextPath(tc.ctx); got != "wf_cycle@1/leaf@1" {
 				t.Errorf("%s: contextPath() = %q, want wf_cycle@1/leaf@1", tc.name, got)
 			}
+		}
+
+		// >512-layer wrapper chain succeeds consistently across contextPath,
+		// contextParentMap, and callbackAfterAgentActions, and contextParentMap
+		// respects maxContextWalkDepth.
+		deepCB := context.Context(agent.NewCallbackContext(capturedIC, nil))
+		for i := range 600 {
+			deepCB = context.WithValue(deepCB, wrapKey{}, i)
+		}
+		if got := contextPath(deepCB); got != "wf_cycle@1/leaf@1" {
+			t.Errorf("contextPath(600 layers) = %q, want wf_cycle@1/leaf@1", got)
+		}
+		if got := contextParentMap(deepCB); got["wf_cycle"] != parentRoot {
+			t.Errorf("contextParentMap(600 layers)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
+		}
+		if am, _ := callbackAfterAgentActions(deepCB); am == (actionMaps{}) {
+			t.Error("callbackAfterAgentActions(600 layers) = zero, want non-zero")
+		}
+
+		// Measure exact internal BFS step count from capturedIC to the parent-map
+		// valueCtx so we can pin the exact maxContextWalkDepth boundary.
+		var q contextStructQueue
+		q.push(reflect.ValueOf(capturedIC))
+		var probeSeen map[visitedContextStruct]bool
+		innerSteps := -1
+		for step := range 64 {
+			item, ok := q.pop()
+			if !ok {
+				break
+			}
+			sv, ok := derefContextStructValueLazy(item, &probeSeen, true)
+			if !ok {
+				continue
+			}
+			if sv.Type().PkgPath() == "context" {
+				if val := directStructField(sv, "val"); val.IsValid() && val.Kind() == reflect.Interface && !val.IsNil() {
+					ve := val.Elem()
+					if ve.Kind() == reflect.Map && ve.Type().Key().Kind() == reflect.String && ve.Type().Elem() == agentInterfaceType {
+						innerSteps = step
+						break
+					}
+				}
+			}
+			c1, c2 := adkContextChildren(sv)
+			q.push(c1)
+			q.push(c2)
+		}
+		if innerSteps < 0 {
+			t.Fatal("failed to locate parent-map valueCtx inside capturedIC")
+		}
+		const expectedWalkLimit = 65536
+		atMapBound := context.Context(capturedIC)
+		for i := range expectedWalkLimit - 1 - innerSteps {
+			atMapBound = context.WithValue(atMapBound, wrapKey{}, i)
+		}
+		if got := contextParentMap(atMapBound); got["wf_cycle"] != parentRoot {
+			t.Errorf("contextParentMap(at boundary %d) = %v, want %v", expectedWalkLimit-1-innerSteps, got, parentRoot)
+		}
+		overMapBound := context.WithValue(atMapBound, wrapKey{}, expectedWalkLimit)
+		if got := contextParentMap(overMapBound); got != nil {
+			t.Errorf("contextParentMap(over boundary %d) = %v, want nil", expectedWalkLimit-innerSteps, got)
 		}
 
 		done := make(chan struct{})
