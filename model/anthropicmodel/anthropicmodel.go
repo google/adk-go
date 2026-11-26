@@ -437,6 +437,8 @@ func (m *anthropicModel) Name() string {
 	return m.name
 }
 
+var _ genaiprovider.Reporter = (*anthropicModel)(nil)
+
 // GenAIProvider is the platform serving the model.
 func (m *anthropicModel) GenAIProvider() genaiprovider.Name {
 	if m.backend == BackendVertex {
