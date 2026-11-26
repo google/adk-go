@@ -23,9 +23,24 @@ import (
 )
 
 // LLM provides the access to the underlying LLM.
+//
+// An implementation may also implement [OutputSchemaTool]. Returning
+// true asks agents to use set_model_response for structured output, including
+// when no other tools are configured. Task-mode agents still use finish_task.
+// Implementations without this method retain the model-name-based defaults.
 type LLM interface {
 	Name() string
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+}
+
+// OutputSchemaTool is implemented by models that deliver a declared output
+// schema as a set_model_response function tool instead of a native response
+// format; see ClientConfig.UseOutputSchemaTool in model/openaimodel. Wrappers
+// holding an inner LLM must forward UseOutputSchemaTool, otherwise the agent
+// silently falls back to the model-name-based defaults and native
+// response_format.
+type OutputSchemaTool interface {
+	UseOutputSchemaTool() bool
 }
 
 // LLMRequest is the raw LLM request.

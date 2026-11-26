@@ -70,7 +70,13 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*oairesponses.Fu
 		return nil, err
 	}
 	if paramsMap == nil && fn.ParametersJsonSchema != nil {
-		paramsMap, err = shared.NormalizeSchema(fn.ParametersJsonSchema)
+		// A genai schema uses upper-case type names, unlike raw JSON Schema.
+		// Preserve explicit JSON Schema as written, but normalize genai types.
+		if schema, ok := fn.ParametersJsonSchema.(*genai.Schema); ok {
+			paramsMap, err = shared.SchemaToMap(schema)
+		} else {
+			paramsMap, err = shared.NormalizeSchema(fn.ParametersJsonSchema)
+		}
 		if err != nil {
 			return nil, err
 		}
