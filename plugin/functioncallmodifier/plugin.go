@@ -16,12 +16,14 @@
 package functioncallmodifier
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/schemautil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 )
@@ -68,7 +70,11 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mo
 				}
 
 				if cfg.Predicate(decl.Name) {
-					tool.FunctionDeclarations[i] = modifiedDeclaration(cfg, decl)
+					modified, err := modifiedDeclaration(cfg, decl)
+					if err != nil {
+						return nil, err
+					}
+					tool.FunctionDeclarations[i] = modified
 				}
 			}
 		}
@@ -84,8 +90,27 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mo
 // agent with an InputSchema rebuilds its declaration on each call but uses that
 // schema as its parameters, so an in-place edit would add the arguments to the
 // agent's own InputSchema.
-func modifiedDeclaration(cfg FunctionCallModifierConfig, decl *genai.FunctionDeclaration) *genai.FunctionDeclaration {
+//
+// The arguments go into whichever of Parameters and ParametersJsonSchema the
+// declaration uses. The two are mutually exclusive, and functiontool and
+// mcptoolset declare ParametersJsonSchema, so setting Parameters beside it
+// would send both: model/anthropicmodel then ignores the arguments and
+// model/openaimodel the tool's own parameters.
+func modifiedDeclaration(cfg FunctionCallModifierConfig, decl *genai.FunctionDeclaration) (*genai.FunctionDeclaration, error) {
 	modified := *decl
+	if cfg.OverrideDescription != nil {
+		modified.Description = cfg.OverrideDescription(decl.Description)
+	}
+
+	if decl.ParametersJsonSchema != nil {
+		schema, err := withJSONSchemaArgs(decl.ParametersJsonSchema, cfg.Args)
+		if err != nil {
+			return nil, fmt.Errorf("functioncallmodifier: add arguments to the parameters of tool %q: %w", decl.Name, err)
+		}
+		modified.ParametersJsonSchema = schema
+		return &modified, nil
+	}
+
 	params := genai.Schema{Type: "OBJECT"}
 	if decl.Parameters != nil {
 		params = *decl.Parameters
@@ -96,11 +121,39 @@ func modifiedDeclaration(cfg FunctionCallModifierConfig, decl *genai.FunctionDec
 	}
 	maps.Copy(params.Properties, cfg.Args)
 	modified.Parameters = &params
+	return &modified, nil
+}
 
-	if cfg.OverrideDescription != nil {
-		modified.Description = cfg.OverrideDescription(decl.Description)
+// withJSONSchemaArgs returns a copy of the JSON Schema schema, which must be an
+// object, with args added to its properties. schema is decoded from its JSON
+// form, so the caller's value, often shared across requests, is left alone. A
+// schema that encodes as null, such as a typed-nil *jsonschema.Schema, is
+// taken to be an object schema with no properties.
+func withJSONSchemaArgs(schema any, args map[string]*genai.Schema) (map[string]any, error) {
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
 	}
-	return &modified
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = map[string]any{"type": "object"}
+	}
+	props, _ := out["properties"].(map[string]any)
+	if props == nil {
+		props = make(map[string]any, len(args))
+		out["properties"] = props
+	}
+	for name, arg := range args {
+		prop, err := schemautil.GeminiToJSONSchema(arg)
+		if err != nil {
+			return nil, fmt.Errorf("argument %q: %w", name, err)
+		}
+		props[name] = prop
+	}
+	return out, nil
 }
 
 func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
