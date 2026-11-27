@@ -518,6 +518,24 @@ func firstDiff[T any](want, got []T) string {
 
 var captureSettings = []string{"", "true", "EVENT_ONLY", "SPAN_ONLY", "SPAN_AND_EVENT"}
 
+// equivalenceCases pairs every request with the text response, and every
+// response with the request holding every part kind. noteLLMRequest and
+// logRequest read only the request, and responseContent, logResponse and
+// generateContentResultAttributes only the result, so each conversion still
+// sees every input of its own.
+func equivalenceCases() []struct{ request, response string } {
+	var cases []struct{ request, response string }
+	for req := range equivalenceRequests() {
+		cases = append(cases, struct{ request, response string }{req, "text"})
+	}
+	for resp := range equivalenceResponses() {
+		if resp != "text" {
+			cases = append(cases, struct{ request, response string }{"every part kind", resp})
+		}
+	}
+	return cases
+}
+
 // TestInstrumentGenerateContentMatchesReference holds a model call's spans and
 // log records to the reference for every listening consumer, schema and
 // capture setting, including a model that edits the request it is given.
@@ -534,8 +552,10 @@ func TestInstrumentGenerateContentMatchesReference(t *testing.T) {
 					setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: schema, captureMessageContentEnvVar: capture})
 					c := l.install(t)
 					var sawRecords, sawSpans bool
-					for reqName, buildReq := range equivalenceRequests() {
-						for respName, responses := range equivalenceResponses() {
+					requests, responseSets := equivalenceRequests(), equivalenceResponses()
+					for _, tc := range equivalenceCases() {
+						reqName, buildReq, respName, responses := tc.request, requests[tc.request], tc.response, responseSets[tc.response]
+						{
 							for _, edit := range []bool{false, true} {
 								what := fmt.Sprintf("request %s, response %s, edit %t", reqName, respName, edit)
 								drive := func(instrument func(GenerateContentParams, func(*model.LLMResponse) (*model.LLMResponse, string), func(context.Context) iter.Seq2[*model.LLMResponse, error]) iter.Seq2[*model.LLMResponse, error]) func() {
