@@ -45,6 +45,12 @@ func TestEventSearchText(t *testing.T) {
 			maxBytes: 7,
 			want:     "乌龙",
 		},
+		{
+			name:     "truncate leading continuation bytes",
+			parts:    []*genai.Part{{Text: "\x80\x80\x80abc"}},
+			maxBytes: 2,
+			want:     "",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, visible := eventSearchText(&genai.Content{Parts: tc.parts}, tc.maxBytes); !visible || got != tc.want {

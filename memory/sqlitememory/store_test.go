@@ -17,10 +17,12 @@ package sqlitememory
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,36 +91,80 @@ func TestUpsertAndReopen(t *testing.T) {
 }
 
 func TestMissingEventID(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, wantID, wantSearchText string
+	}{
+		{name: "plain text", text: "oolong tea", wantID: "15b2c8fffd99de1c278e4a51aab14b25", wantSearchText: "ool"},
+		{name: "HTML characters", text: "a<b & c>d", wantID: "214d76b476ab24cc29c00b5302f4b47a", wantSearchText: "a<b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
+			s := newTestStore(t, storeConfig{db: db, maxEventBytes: 3})
+			event := textEvent("", tc.text)
+			stamp := event.Timestamp
+			event.Timestamp = time.Time{}
+			req := &memory.AddEventsRequest{
+				AppName: "app", UserID: "user", Events: []*session.Event{nil, textEvent("blank", " \n "), event},
+			}
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return stamp })
+			for range 2 {
+				if err := s.AddEventsToMemory(ctx, req); err != nil {
+					t.Fatalf("AddEventsToMemory: %v", err)
+				}
+			}
+			checkCount(t, db, 1, `SELECT count(*) FROM memory_events`)
+			var sessionID, eventID, searchText string
+			var contentJSON []byte
+			if err := db.QueryRowContext(t.Context(), `SELECT session_id, event_id, search_text, content_json FROM memory_events`).Scan(&sessionID, &eventID, &searchText, &contentJSON); err != nil {
+				t.Fatalf("read fallback identifiers: %v", err)
+			}
+			// This ID is the Python SHA-256 prefix for the same text event and timestamp.
+			if sessionID != "__unknown_session_id__" || eventID != tc.wantID {
+				t.Error("missing session or event ID did not use the expected fallback")
+			}
+			var content genai.Content
+			if err := json.Unmarshal(contentJSON, &content); err != nil {
+				t.Fatal("could not decode stored event content")
+			}
+			if searchText != tc.wantSearchText || len(content.Parts) != 1 || content.Parts[0].Text != tc.text {
+				t.Error("byte limit should truncate only the search text")
+			}
+		})
+	}
+}
+
+func TestUpsertUpdatesMetadataWithSameSearchText(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db, maxEventBytes: 3})
-	event := textEvent("", "oolong tea")
-	stamp := event.Timestamp
-	event.Timestamp = time.Time{}
-	req := &memory.AddEventsRequest{
-		AppName: "app", UserID: "user", Events: []*session.Event{nil, textEvent("blank", " \n "), event},
+	s := newTestStore(t, storeConfig{db: db})
+	first := textEvent("first", "oolong tea")
+	req := &memory.AddEventsRequest{AppName: "app", UserID: "user", SessionID: "session", Events: []*session.Event{first}}
+	addEvents(t, s, req)
+
+	updated := textEvent(first.ID, first.Content.Parts[0].Text)
+	updated.Author = "agent"
+	updated.Timestamp = first.Timestamp.Add(time.Minute)
+	updated.Content.Role = genai.RoleModel
+	req.Events = []*session.Event{updated}
+	addEvents(t, s, req)
+
+	var author string
+	var timestamp float64
+	var encoded []byte
+	if err := db.QueryRowContext(t.Context(), `SELECT author, timestamp, content_json FROM memory_events`).Scan(&author, &timestamp, &encoded); err != nil {
+		t.Fatalf("read updated event: %v", err)
 	}
-	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return stamp })
-	for range 2 {
-		if err := s.AddEventsToMemory(ctx, req); err != nil {
-			t.Fatalf("AddEventsToMemory: %v", err)
-		}
+	if author != updated.Author {
+		t.Error("upsert did not store the new author")
 	}
-	checkCount(t, db, 1, `SELECT count(*) FROM memory_events`)
-	var sessionID, eventID, searchText string
-	var contentJSON []byte
-	if err := db.QueryRowContext(t.Context(), `SELECT session_id, event_id, search_text, content_json FROM memory_events`).Scan(&sessionID, &eventID, &searchText, &contentJSON); err != nil {
-		t.Fatalf("read fallback identifiers: %v", err)
-	}
-	// This ID is the Python SHA-256 prefix for the same text event and timestamp.
-	if sessionID != "__unknown_session_id__" || eventID != "15b2c8fffd99de1c278e4a51aab14b25" {
-		t.Error("missing session or event ID did not use the expected fallback")
+	if timestamp != float64(updated.Timestamp.Unix()) {
+		t.Error("upsert did not store the new timestamp")
 	}
 	var content genai.Content
-	if err := json.Unmarshal(contentJSON, &content); err != nil {
+	if err := json.Unmarshal(encoded, &content); err != nil {
 		t.Fatal("could not decode stored event content")
 	}
-	if searchText != "ool" || len(content.Parts) != 1 || content.Parts[0].Text != event.Content.Parts[0].Text {
-		t.Error("byte limit should truncate only the search text")
+	if content.Role != updated.Content.Role {
+		t.Error("upsert did not store the new content role")
 	}
 }
 
@@ -178,6 +224,55 @@ func TestFTSBackfillAndTriggers(t *testing.T) {
 	}
 	checkCount(t, db, 0, match, "black")
 	checkCount(t, db, 1, match, "green")
+}
+
+func TestConcurrentUpsertAcrossInstances(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		initialize bool
+	}{
+		{name: "upsert"},
+		{name: "initialize and upsert", initialize: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "memory.db")
+			dbs := []*sql.DB{openDBWithBusyTimeout(t, path, 5*time.Second), openDBWithBusyTimeout(t, path, 5*time.Second)}
+			for _, db := range dbs {
+				db.SetMaxOpenConns(1)
+			}
+			stores := []*store{
+				newTestStore(t, storeConfig{db: dbs[0], fts: "on"}),
+				newTestStore(t, storeConfig{db: dbs[1], fts: "on"}),
+			}
+			req := &memory.AddEventsRequest{
+				AppName: "app", UserID: "user", SessionID: "session", Events: []*session.Event{textEvent("first", "oolong tea")},
+			}
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i := range 40 {
+				wg.Go(func() {
+					<-start
+					instance := i % len(stores)
+					s := stores[instance]
+					if tc.initialize {
+						var err error
+						s, err = newStore(t.Context(), storeConfig{db: dbs[instance], fts: "on"})
+						if err != nil {
+							t.Errorf("newStore: %v", err)
+							return
+						}
+					}
+					if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+						t.Errorf("AddEventsToMemory: %v", err)
+					}
+				})
+			}
+			close(start)
+			wg.Wait()
+			checkCount(t, dbs[0], 1, `SELECT count(*) FROM memory_events`)
+			checkCount(t, dbs[0], 1, `SELECT count(*) FROM memory_events_fts WHERE search_text MATCH 'oolong'`)
+		})
+	}
 }
 
 func TestSchemaVersion(t *testing.T) {
@@ -258,7 +353,12 @@ func TestInvalidConfig(t *testing.T) {
 
 func openDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: "_pragma=busy_timeout(0)"}
+	return openDBWithBusyTimeout(t, path, 0)
+}
+
+func openDBWithBusyTimeout(t *testing.T, path string, timeout time.Duration) *sql.DB {
+	t.Helper()
+	uri := url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: fmt.Sprintf("_pragma=busy_timeout(%d)", timeout.Milliseconds())}
 	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		t.Fatalf("open SQLite: %v", err)

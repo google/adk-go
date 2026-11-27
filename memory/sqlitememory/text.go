@@ -45,7 +45,7 @@ func eventSearchText(content *genai.Content, maxBytes int) (string, bool) {
 	if len(text) <= maxBytes {
 		return text, true
 	}
-	for !utf8.RuneStart(text[maxBytes]) {
+	for maxBytes > 0 && !utf8.RuneStart(text[maxBytes]) {
 		maxBytes--
 	}
 	return text[:maxBytes], true

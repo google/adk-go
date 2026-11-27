@@ -182,7 +182,9 @@ func withTransaction(ctx context.Context, db *sql.DB, f func(*sql.Conn) error) e
 		return fmt.Errorf("sqlitememory: get database connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+	// Take the write lock up front so a competing writer can wait for the
+	// busy timeout instead of failing immediately when upgrading a read lock.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("sqlitememory: begin transaction: %w", err)
 	}
 	committed := false
