@@ -31,8 +31,9 @@ import (
 )
 
 type confirmedCall struct {
-	confirmation *toolconfirmation.ToolConfirmation
-	call         genai.FunctionCall
+	confirmation     *toolconfirmation.ToolConfirmation
+	call             genai.FunctionCall
+	thoughtSignature []byte
 }
 
 func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
@@ -183,11 +184,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			// request from such an event would let the peer choose which local tool
 			// runs, and with what arguments, bypassing the human-in-the-loop gate
 			// entirely. Skip any event not authored by this agent.
-			if event.Author != agentName {
-				continue
-			}
-			calls := utils.FunctionCalls(event.Content)
-			if len(calls) == 0 {
+			if event.Author != agentName || event.Content == nil {
 				continue
 			}
 			toolsToResumeByFunctionCallID := map[string]*confirmedCall{}
@@ -199,10 +196,11 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			// non-deterministic across runs.
 			var resumeOrder []string
 			confirmationIDByCallID := map[string]string{}
-			for _, functionCall := range calls {
-				if functionCall.Name != toolconfirmation.FunctionCallName {
+			for _, part := range event.Content.Parts {
+				if part == nil || part.FunctionCall == nil || part.FunctionCall.Name != toolconfirmation.FunctionCallName {
 					continue
 				}
+				functionCall := part.FunctionCall
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
 					continue
@@ -229,8 +227,9 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				}
 				confirmationIDByCallID[originalFunctionCall.ID] = functionCall.ID
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
-					confirmation: &confirmation,
-					call:         *originalFunctionCall,
+					confirmation:     &confirmation,
+					call:             *originalFunctionCall,
+					thoughtSignature: part.ThoughtSignature,
 				}
 			}
 
@@ -264,15 +263,32 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					// a call would run its tool a second time within this resume.
 					continue
 				}
-				parts = append(parts, &genai.Part{FunctionCall: &cc.call})
+				parts = append(parts, &genai.Part{
+					FunctionCall:     &cc.call,
+					ThoughtSignature: cc.thoughtSignature,
+				})
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
 
-			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
-				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
-			}, toolsToResumeConfirmation, nil)
+			functionCallEvent := &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
+				},
+			}
+			ev, err := f.handleFunctionCalls(ctx, toolsmap, &functionCallEvent.LLMResponse, toolsToResumeConfirmation, nil)
 			if !yield(ev, err) {
 				return
+			}
+			// Stop scanning older events once tool execution fails: Flow.preprocess
+			// halts on the first processor error, and a failed call has no
+			// follow-up confirmation event to emit.
+			if err != nil {
+				return
+			}
+			if toolConfirmationEvent := generateRequestConfirmationEvent(ctx, functionCallEvent, ev); toolConfirmationEvent != nil {
+				if !yield(toolConfirmationEvent, nil) {
+					return
+				}
 			}
 		}
 	}
