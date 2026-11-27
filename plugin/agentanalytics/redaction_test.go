@@ -149,12 +149,12 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				got, _, err := SmartTruncate(tt.obj, 1<<20)
+				got, _, err := smartTruncate(tt.obj, 1<<20, true)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if string(got) != tt.want {
-					t.Errorf("SmartTruncate = %s, want %s", got, tt.want)
+					t.Errorf("smartTruncate = %s, want %s", got, tt.want)
 				}
 			})
 		}
@@ -532,13 +532,13 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, got, lost, tc.want)
 			}
 		}
-		truncBytes, _, err := SmartTruncate(map[string]any{"AP\u0130_KEY": "SECRET123", "CL\u0130ENT_SECRET": "SECRET456"}, 1<<20)
+		truncBytes, _, err := smartTruncate(map[string]any{"AP\u0130_KEY": "SECRET123", "CL\u0130ENT_SECRET": "SECRET456"}, 1<<20, true)
 		if err != nil {
-			t.Fatalf("SmartTruncate error: %v", err)
+			t.Fatalf("smartTruncate error: %v", err)
 		}
 		wantTrunc := `{"AP` + "\u0130" + `_KEY":"[REDACTED]","CL` + "\u0130" + `ENT_SECRET":"[REDACTED]"}`
 		if string(truncBytes) != wantTrunc {
-			t.Errorf("SmartTruncate = %s, want %s", truncBytes, wantTrunc)
+			t.Errorf("smartTruncate = %s, want %s", truncBytes, wantTrunc)
 		}
 	})
 
@@ -744,12 +744,12 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 				if gotErr2 := redactErrorMessage(gotErr); gotErr2 != gotErr {
 					t.Errorf("redactErrorMessage second pass(%q) = %q, want unchanged", gotErr, gotErr2)
 				}
-				truncBytes, truncated, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+				truncBytes, truncated, err := smartTruncate(map[string]any{"message": in}, 1<<20, true)
 				if err != nil {
-					t.Fatalf("SmartTruncate error: %v", err)
+					t.Fatalf("smartTruncate error: %v", err)
 				}
 				if !truncated || strings.Contains(string(truncBytes), secret) || !strings.Contains(string(truncBytes), "region: us") {
-					t.Errorf("SmartTruncate(%q) = (%s, %v), want truncated=true without secret and keeping region: us", in, truncBytes, truncated)
+					t.Errorf("smartTruncate(%q) = (%s, %v), want truncated=true without secret and keeping region: us", in, truncBytes, truncated)
 				}
 			}
 		}
@@ -781,8 +781,8 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if got, lost := sanitizeRawText(in); !lost || got != unparseableJSONPlaceholder {
 				t.Errorf("%s: sanitizeRawText(%q) = (%q, %v), want (%q, true)", label, in, got, lost, unparseableJSONPlaceholder)
 			}
-			if truncBytes, truncated, err := SmartTruncate(in, 1<<20); err != nil || !truncated || string(truncBytes) != wantTruncJSON {
-				t.Errorf("%s: SmartTruncate(%q) = (%s, %v, %v), want (%s, true, <nil>)", label, in, truncBytes, truncated, err, wantTruncJSON)
+			if truncBytes, truncated, err := smartTruncate(in, 1<<20, true); err != nil || !truncated || string(truncBytes) != wantTruncJSON {
+				t.Errorf("%s: smartTruncate(%q) = (%s, %v, %v), want (%s, true, <nil>)", label, in, truncBytes, truncated, err, wantTruncJSON)
 			}
 		}
 
@@ -933,12 +933,12 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if got, lost := sanitizeRawText(in); got != want || lost != wantLost || strings.Contains(got, secret) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, %v)", in, got, lost, want, wantLost)
 			}
-			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			truncBytes, _, err := smartTruncate(map[string]any{"message": in}, 1<<20, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate(%q): %v", in, err)
+				t.Fatalf("smartTruncate(%q): %v", in, err)
 			}
 			if strings.Contains(string(truncBytes), secret) {
-				t.Errorf("SmartTruncate(%q) leaked secret: %s", in, truncBytes)
+				t.Errorf("smartTruncate(%q) leaked secret: %s", in, truncBytes)
 			}
 		}
 
@@ -1046,12 +1046,12 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if twiceSan, lost2 := sanitizeRawText(gotSan); twiceSan != gotSan || lost2 {
 				t.Errorf("sanitizeRawText(%q) not idempotent: pass1=(%q,%v) pass2=(%q,%v)", in, gotSan, lost, twiceSan, lost2)
 			}
-			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			truncBytes, _, err := smartTruncate(map[string]any{"message": in}, 1<<20, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate(%q): %v", in, err)
+				t.Fatalf("smartTruncate(%q): %v", in, err)
 			}
 			if strings.Contains(string(truncBytes), secret) {
-				t.Errorf("SmartTruncate(%q) leaked secret: %s", in, truncBytes)
+				t.Errorf("smartTruncate(%q) leaked secret: %s", in, truncBytes)
 			}
 		}
 		spacedContainerJoined := `dbPassword={a: b}/password: ` + secret
@@ -1082,16 +1082,16 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if got, lost := sanitizeRawText(in); got != in || lost {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
 			}
-			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			truncBytes, _, err := smartTruncate(map[string]any{"message": in}, 1<<20, true)
 			if err != nil {
-				t.Fatalf("SmartTruncate(%q): %v", in, err)
+				t.Fatalf("smartTruncate(%q): %v", in, err)
 			}
 			if !strings.Contains(string(truncBytes), "no such file") &&
 				!strings.Contains(string(truncBytes), "access denied") &&
 				!strings.Contains(string(truncBytes), "permission denied") &&
 				!strings.Contains(string(truncBytes), "reset-password/confirm") &&
 				!strings.Contains(string(truncBytes), "private.key/download") {
-				t.Errorf("SmartTruncate(%q) over-redacted diagnostic text: %s", in, truncBytes)
+				t.Errorf("smartTruncate(%q) over-redacted diagnostic text: %s", in, truncBytes)
 			}
 		}
 
@@ -1127,18 +1127,18 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if got, lost := sanitizeRawText(in); !lost || strings.Contains(got, secret) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without secret", in, got, lost)
 			}
-			if truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20); err != nil || strings.Contains(string(truncBytes), secret) {
-				t.Errorf("SmartTruncate(%q) = (%s, %v), leaked secret", in, truncBytes, err)
+			if truncBytes, _, err := smartTruncate(map[string]any{"message": in}, 1<<20, true); err != nil || strings.Contains(string(truncBytes), secret) {
+				t.Errorf("smartTruncate(%q) = (%s, %v), leaked secret", in, truncBytes, err)
 			}
 		}
 	})
 
 	t.Run("nested classifier fail-closed, over-budget, control-byte, inline-glued and word-joined pairs", func(t *testing.T) {
 		const secret = "SYNTHETIC_NESTKEY_77"
-		// Positive echo control on raw-string SmartTruncate before negative checks.
-		echoBytes, echoTrunc, err := SmartTruncate("benign_probe_text", 1<<20)
+		// Positive echo control on raw-string smartTruncate before negative checks.
+		echoBytes, echoTrunc, err := smartTruncate("benign_probe_text", 1<<20, true)
 		if err != nil || echoTrunc || string(echoBytes) != `"benign_probe_text"` {
-			t.Fatalf("SmartTruncate positive control = (%s, %v, %v), want (\"benign_probe_text\", false, nil)", echoBytes, echoTrunc, err)
+			t.Fatalf("smartTruncate positive control = (%s, %v, %v), want (\"benign_probe_text\", false, nil)", echoBytes, echoTrunc, err)
 		}
 
 		assertNoLeak := func(t *testing.T, label, in string) {
@@ -1157,9 +1157,9 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if gotErr2 := redactErrorMessage(gotErr); gotErr2 != gotErr {
 				t.Errorf("[%s] redactErrorMessage second pass(%q) = %q, want unchanged", label, gotErr, gotErr2)
 			}
-			truncRaw, truncated, err := SmartTruncate(in, 1<<20)
+			truncRaw, truncated, err := smartTruncate(in, 1<<20, true)
 			if err != nil || !truncated || strings.Contains(string(truncRaw), secret) {
-				t.Errorf("[%s] SmartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", label, in, truncRaw, truncated, err, secret)
+				t.Errorf("[%s] smartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", label, in, truncRaw, truncated, err, secret)
 			}
 		}
 
@@ -1213,13 +1213,13 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if !lost || gotSan != want || strings.Contains(gotSan, secret) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", in, gotSan, lost, want)
 			}
-			truncRaw, truncated, err := SmartTruncate(in, 1<<20)
+			truncRaw, truncated, err := smartTruncate(in, 1<<20, true)
 			if err != nil || !truncated || strings.Contains(string(truncRaw), secret) {
-				t.Fatalf("SmartTruncate(%q) = (%s, %v, %v), want truncated=true without secret", in, truncRaw, truncated, err)
+				t.Fatalf("smartTruncate(%q) = (%s, %v, %v), want truncated=true without secret", in, truncRaw, truncated, err)
 			}
 			var decoded string
 			if err := json.Unmarshal(truncRaw, &decoded); err != nil || decoded != want {
-				t.Errorf("SmartTruncate(%q) decoded = %q (err=%v), want %q", in, decoded, err, want)
+				t.Errorf("smartTruncate(%q) decoded = %q (err=%v), want %q", in, decoded, err, want)
 			}
 		}
 
@@ -1256,8 +1256,8 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if gotSan, lost := sanitizeRawText(composite); !lost || strings.Contains(gotSan, secret) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without secret", composite, gotSan, lost)
 			}
-			if truncRaw, _, err := SmartTruncate(composite, 1<<20); err != nil || strings.Contains(string(truncRaw), secret) {
-				t.Errorf("SmartTruncate(%q) = (%s, %v), leaked secret", composite, truncRaw, err)
+			if truncRaw, _, err := smartTruncate(composite, 1<<20, true); err != nil || strings.Contains(string(truncRaw), secret) {
+				t.Errorf("smartTruncate(%q) = (%s, %v), leaked secret", composite, truncRaw, err)
 			}
 		}
 
@@ -1298,9 +1298,9 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if gotSan2, lost2 := sanitizeRawText(gotSan); gotSan2 != gotSan || lost2 {
 				t.Errorf("[%s] sanitizeRawText second pass(%q) = (%q, %v), want unchanged and lost=false", label, gotSan, gotSan2, lost2)
 			}
-			truncRaw, truncated, err := SmartTruncate(in, 1<<20)
+			truncRaw, truncated, err := smartTruncate(in, 1<<20, true)
 			if err != nil || !truncated || strings.Contains(string(truncRaw), secret) {
-				t.Errorf("[%s] SmartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", label, in, truncRaw, truncated, err, secret)
+				t.Errorf("[%s] smartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", label, in, truncRaw, truncated, err, secret)
 			}
 		}
 
@@ -1363,8 +1363,8 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 		if gotSan, lost := sanitizeRawText(multilineHdr); !lost || strings.Contains(gotSan, secret) {
 			t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without %q", multilineHdr, gotSan, lost, secret)
 		}
-		if truncRaw, truncated, err := SmartTruncate(multilineHdr, 1<<20); err != nil || !truncated || strings.Contains(string(truncRaw), secret) {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", multilineHdr, truncRaw, truncated, err, secret)
+		if truncRaw, truncated, err := smartTruncate(multilineHdr, 1<<20, true); err != nil || !truncated || strings.Contains(string(truncRaw), secret) {
+			t.Errorf("smartTruncate(%q) = (%s, %v, %v), want truncated=true without %q", multilineHdr, truncRaw, truncated, err, secret)
 		}
 
 		// Enclosing-quote prose controls must remain intact without over-redacting trailing strings.
@@ -1453,20 +1453,20 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if gotSan2, lost2 := sanitizeRawText(gotSan); gotSan2 != gotSan || lost2 {
 				t.Errorf("[%s] sanitizeRawText second pass(%q) = (%q, %v), want unchanged and lost=false", label, gotSan, gotSan2, lost2)
 			}
-			truncRaw, truncated, err := SmartTruncate(in, 1<<20)
+			truncRaw, truncated, err := smartTruncate(in, 1<<20, true)
 			if err != nil || !truncated {
-				t.Errorf("[%s] SmartTruncate(%q) = (%s, %v, %v), want truncated=true without error", label, in, truncRaw, truncated, err)
+				t.Errorf("[%s] smartTruncate(%q) = (%s, %v, %v), want truncated=true without error", label, in, truncRaw, truncated, err)
 			}
 			for _, f := range forbidden {
 				if strings.Contains(string(truncRaw), f) {
-					t.Errorf("[%s] SmartTruncate(%q) leaked %q: %s", label, in, f, truncRaw)
+					t.Errorf("[%s] smartTruncate(%q) leaked %q: %s", label, in, f, truncRaw)
 				}
 			}
 			var truncDecoded string
 			if err := json.Unmarshal(truncRaw, &truncDecoded); err == nil && !isKnownSentinel(truncDecoded) {
-				truncRaw2, truncated2, err2 := SmartTruncate(truncDecoded, 1<<20)
+				truncRaw2, truncated2, err2 := smartTruncate(truncDecoded, 1<<20, true)
 				if err2 != nil || truncated2 || string(truncRaw2) != string(truncRaw) {
-					t.Errorf("[%s] SmartTruncate second pass(%q) = (%s, %v, %v), want (%s, false, nil)", label, truncDecoded, truncRaw2, truncated2, err2, truncRaw)
+					t.Errorf("[%s] smartTruncate second pass(%q) = (%s, %v, %v), want (%s, false, nil)", label, truncDecoded, truncRaw2, truncated2, err2, truncRaw)
 				}
 			}
 		}
@@ -1581,8 +1581,8 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			if gotSan, lost := sanitizeRawText(in); gotSan != in || lost {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, gotSan, lost)
 			}
-			if truncRaw, truncated, err := SmartTruncate(in, 1<<20); err != nil || truncated {
-				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want truncated=false", in, truncRaw, truncated, err)
+			if truncRaw, truncated, err := smartTruncate(in, 1<<20, true); err != nil || truncated {
+				t.Errorf("smartTruncate(%q) = (%s, %v, %v), want truncated=false", in, truncRaw, truncated, err)
 			}
 		}
 
@@ -1798,7 +1798,7 @@ func TestLegacyRegexScannerDifferential(t *testing.T) {
 }
 
 // assertRedactedIdempotent checks that redactErrorMessage, sanitizeRawText and
-// SmartTruncate keep none of forbidden in their output for in, that
+// smartTruncate keep none of forbidden in their output for in, that
 // sanitizeRawText reports the change, and that a second call of each returns
 // its own output unchanged, or fails closed what main fails closed in it (see
 // failsClosedAsOnMain).
@@ -1806,13 +1806,13 @@ func assertRedactedIdempotent(t *testing.T, label, in string, forbidden ...strin
 	t.Helper()
 	gotErr := redactErrorMessage(in)
 	gotSan, lost := sanitizeRawText(in)
-	truncRaw, _, err := SmartTruncate(in, -1)
+	truncRaw, _, err := smartTruncate(in, -1, true)
 	if err != nil {
-		t.Fatalf("[%s] SmartTruncate(%q): %v", label, in, err)
+		t.Fatalf("[%s] smartTruncate(%q): %v", label, in, err)
 	}
 	var gotTrunc string
 	if err := json.Unmarshal(truncRaw, &gotTrunc); err != nil {
-		t.Fatalf("[%s] SmartTruncate(%q) = %s, not a JSON string: %v", label, in, truncRaw, err)
+		t.Fatalf("[%s] smartTruncate(%q) = %s, not a JSON string: %v", label, in, truncRaw, err)
 	}
 	for _, f := range forbidden {
 		if strings.Contains(gotErr, f) {
@@ -1822,7 +1822,7 @@ func assertRedactedIdempotent(t *testing.T, label, in string, forbidden ...strin
 			t.Errorf("[%s] sanitizeRawText(%q) = %q kept %q", label, in, gotSan, f)
 		}
 		if strings.Contains(gotTrunc, f) {
-			t.Errorf("[%s] SmartTruncate(%q) = %q kept %q", label, in, gotTrunc, f)
+			t.Errorf("[%s] smartTruncate(%q) = %q kept %q", label, in, gotTrunc, f)
 		}
 	}
 	if len(forbidden) > 0 && !lost {
@@ -1834,13 +1834,13 @@ func assertRedactedIdempotent(t *testing.T, label, in string, forbidden ...strin
 	if got2, lost2 := sanitizeRawText(gotSan); lost2 != (got2 != gotSan) || (got2 != gotSan && !failsClosedAsOnMain(gotSan, got2)) {
 		t.Errorf("[%s] sanitizeRawText second call(%q) = (%q, %v), want unchanged and lost=false, or failed closed as on main and lost=true", label, gotSan, got2, lost2)
 	}
-	trunc2, truncated2, err := SmartTruncate(gotTrunc, -1)
+	trunc2, truncated2, err := smartTruncate(gotTrunc, -1, true)
 	var gotTrunc2 string
 	if err != nil || json.Unmarshal(trunc2, &gotTrunc2) != nil {
-		t.Fatalf("[%s] SmartTruncate second call(%q) = (%s, %v), want a JSON string", label, gotTrunc, trunc2, err)
+		t.Fatalf("[%s] smartTruncate second call(%q) = (%s, %v), want a JSON string", label, gotTrunc, trunc2, err)
 	}
 	if truncated2 != (gotTrunc2 != gotTrunc) || (gotTrunc2 != gotTrunc && !failsClosedAsOnMain(gotTrunc, gotTrunc2)) {
-		t.Errorf("[%s] SmartTruncate second call(%q) = (%q, %v), want unchanged and truncated=false, or failed closed as on main and truncated=true", label, gotTrunc, gotTrunc2, truncated2)
+		t.Errorf("[%s] smartTruncate second call(%q) = (%q, %v), want unchanged and truncated=false, or failed closed as on main and truncated=true", label, gotTrunc, gotTrunc2, truncated2)
 	}
 }
 
@@ -2006,14 +2006,14 @@ func TestCompoundKeyDifferentialAndIdempotencyRegressions(t *testing.T) {
 		if got, lost := sanitizeRawText(in); got != in || lost {
 			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
 		}
-		if truncRaw, truncated, err := SmartTruncate(in, -1); err != nil || truncated {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged and truncated=false", in, truncRaw, truncated, err)
+		if truncRaw, truncated, err := smartTruncate(in, -1, true); err != nil || truncated {
+			t.Errorf("smartTruncate(%q) = (%s, %v, %v), want unchanged and truncated=false", in, truncRaw, truncated, err)
 		}
 	}
 }
 
 // TestLegacyRegexCompositeParity checks redactErrorMessage, sanitizeRawText
-// and SmartTruncate, end to end, against the legacy regular expressions (see
+// and smartTruncate, end to end, against the legacy regular expressions (see
 // legacyReferenceScrub) over composite inputs built from the edge shapes
 // that the generated inputs of TestLegacyRegexScannerDifferential do not
 // combine: path- and backslash-joined keys after a closed quote, a quote
@@ -2062,7 +2062,7 @@ func TestLegacyRegexCompositeParity(t *testing.T) {
 }
 
 // TestAdversarialScaling checks that redactErrorMessage, sanitizeRawText and
-// SmartTruncate stay linear on repeated adversarial shapes that stress each
+// smartTruncate stay linear on repeated adversarial shapes that stress each
 // step added for the inputs of
 // TestCompoundKeyDifferentialAndIdempotencyRegressions and
 // TestCompoundKeyReviewLeakRegressions: the delimiters of a redacted
@@ -2116,7 +2116,7 @@ func TestAdversarialScaling(t *testing.T) {
 			scrub := func(s string) {
 				_ = redactErrorMessage(s)
 				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
+				_, _, _ = smartTruncate(s, -1, true)
 			}
 			scrub(small)
 			scrub(large)
@@ -2224,10 +2224,10 @@ func TestCompoundKeyReviewLeakRegressions(t *testing.T) {
 		if got, _ := sanitizeRawText(tc.in); got != tc.want {
 			t.Errorf("[%s] sanitizeRawText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
 		}
-		raw, _, err := SmartTruncate(tc.in, -1)
+		raw, _, err := smartTruncate(tc.in, -1, true)
 		var got string
 		if err != nil || json.Unmarshal(raw, &got) != nil || got != tc.want {
-			t.Errorf("[%s] SmartTruncate(%q) = (%s, %v), want %q", tc.label, tc.in, raw, err, tc.want)
+			t.Errorf("[%s] smartTruncate(%q) = (%s, %v), want %q", tc.label, tc.in, raw, err, tc.want)
 		}
 	}
 
@@ -2250,8 +2250,8 @@ func TestCompoundKeyReviewLeakRegressions(t *testing.T) {
 		if got, lost := sanitizeRawText(in); got != in || lost {
 			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
 		}
-		if raw, truncated, err := SmartTruncate(in, -1); err != nil || truncated {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged and truncated=false", in, raw, truncated, err)
+		if raw, truncated, err := smartTruncate(in, -1, true); err != nil || truncated {
+			t.Errorf("smartTruncate(%q) = (%s, %v, %v), want unchanged and truncated=false", in, raw, truncated, err)
 		}
 	}
 

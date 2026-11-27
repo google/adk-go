@@ -2343,6 +2343,23 @@ func TestValidateCardInterfaceOrigins(t *testing.T) {
 			false,
 		},
 
+		// A Google API's mTLS host counts as its plain host, as in adk-python's
+		// _card_target_origin: a card fetched from one, possibly after the
+		// client certificate moved the fetch to the mTLS host, may name the
+		// other.
+		{"mtls interface, plain source", "https://agent.googleapis.com", []string{"https://agent.mtls.googleapis.com/rpc"}, false},
+		{"plain interface, mtls source", "https://agent.mtls.googleapis.com", []string{"https://agent.googleapis.com/rpc"}, false},
+		{"mtls twin, mixed case", "https://Agent.GoogleAPIs.com", []string{"https://agent.MTLS.googleapis.com/rpc"}, false},
+		{"mtls host of another service", "https://agent.googleapis.com", []string{"https://other.mtls.googleapis.com/rpc"}, true},
+		{"mtls twin on another port", "https://agent.googleapis.com", []string{"https://agent.mtls.googleapis.com:8443/rpc"}, true},
+		{"mtls suffix outside googleapis", "https://agent.example.com", []string{"https://agent.mtls.example.com/rpc"}, true},
+		// U+0130 lowercases to i, but net/http dials the IDNA form of the
+		// name as written, which is outside googleapis.com.
+		{"mtls twin spelled with a letter that folds to ascii", "https://agent.googleapis.com", []string{"https://agent.mtls.googleap\u0130s.com/rpc"}, true},
+		{"mtls source, interface spelled with a letter that folds to ascii", "https://agent.mtls.googleapis.com", []string{"https://agent.googleap\u0130s.com/rpc"}, true},
+		{"the same non-ascii name in another case", "https://B\u00dcCHER.example", []string{"https://b\u00fccher.example/rpc"}, false},
+		{"mtls name a multi-region host does not have", "https://agent.us.rep.googleapis.com", []string{"https://agent.us.rep.mtls.googleapis.com/rpc"}, true},
+
 		// isLoopbackHost has its own table (TestIsLoopbackHost below); this
 		// case exists to confirm the two functions integrate correctly, not
 		// to re-cover isLoopbackHost's own cases.

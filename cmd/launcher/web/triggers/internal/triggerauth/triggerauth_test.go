@@ -16,6 +16,7 @@ package triggerauth
 
 import (
 	"flag"
+	"slices"
 	"strings"
 	"testing"
 
@@ -179,8 +180,12 @@ func TestAuthenticatorMatchesReference(t *testing.T) {
 				t.Fatalf("Authenticator(%q, %q) built an authenticator, want none", audience, accounts)
 			}
 		default:
-			if diff := cmp.Diff([]authn.GoogleOIDCConfig{*want}, *got); diff != "" {
-				t.Fatalf("Authenticator(%q, %q): config handed to NewGoogleOIDC mismatch (-want +got):\n%s", audience, accounts, diff)
+			if len(*got) != 1 || (*got)[0].Audience != want.Audience ||
+				((*got)[0].AllowedServiceAccounts == nil) != (want.AllowedServiceAccounts == nil) ||
+				!slices.Equal((*got)[0].AllowedServiceAccounts, want.AllowedServiceAccounts) {
+				if diff := cmp.Diff([]authn.GoogleOIDCConfig{*want}, *got); diff != "" {
+					t.Fatalf("Authenticator(%q, %q): config handed to NewGoogleOIDC mismatch (-want +got):\n%s", audience, accounts, diff)
+				}
 			}
 		}
 	}

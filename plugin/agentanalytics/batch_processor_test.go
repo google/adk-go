@@ -141,9 +141,9 @@ func TestBatchProcessor_AppendAndFlush(t *testing.T) {
 	config.BatchFlushIntv = 100 * time.Millisecond
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -202,9 +202,9 @@ func TestBatchProcessor_WriteBatchErrors(t *testing.T) {
 			config := DefaultConfig()
 			config.RetryConfig.MaxRetries = 0 // Prevent generic reconnect on nil client
 
-			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+			bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor error: %v", err)
+				t.Fatalf("newBatchProcessor error: %v", err)
 			}
 
 			mStream := &mockStream{
@@ -230,9 +230,9 @@ func TestBatchProcessor_DataTypes(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -274,9 +274,9 @@ func TestBatchProcessor_WriteBatchEncodesRows(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 	bp.streamWriter.stream = mStream
@@ -324,9 +324,9 @@ func TestBatchProcessor_QueueFull(t *testing.T) {
 	config.BatchSize = 10
 	config.QueueMaxSize = 1
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	// This should succeed and sit in queue
@@ -393,9 +393,9 @@ func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -528,9 +528,9 @@ func TestStreamWriter_SendError(t *testing.T) {
 			config := DefaultConfig()
 			config.RetryConfig.MaxRetries = 0 // Prevent generic reconnect on nil client
 
-			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+			bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor error: %v", err)
+				t.Fatalf("newBatchProcessor error: %v", err)
 			}
 
 			mStream := &mockStream{sendErr: tt.sendErr, recvErr: tt.recvErr, recvSeq: tt.recvSeq}
@@ -599,9 +599,9 @@ func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	dead := &mockStream{sendErr: io.EOF, recvErr: io.EOF}
@@ -622,9 +622,9 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 	bp.streamWriter.stream = mStream
@@ -633,7 +633,7 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 	bp.Append(map[string]any{"event_type": "before_close"})
 	bp.Close()
 
-	// Appends after Close must be ignored and counted in ShutdownDrops.
+	// Appends after bp.Close stops accepting rows must be ignored and counted in ShutdownDrops.
 	bp.Append(map[string]any{"event_type": "after_close"})
 	if len(bp.queue) != 0 {
 		t.Errorf("queue len after Close = %d, want 0", len(bp.queue))
@@ -645,7 +645,7 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 		ShutdownDrops: 1,
 		TotalDrops:    1,
 	}
-	if diff := cmp.Diff(wantStats, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(wantStats, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -653,9 +653,9 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 func TestBatchProcessor_DropStats(t *testing.T) {
 	ctx := context.Background()
 
-	var nilBP *BatchProcessor
-	if got := nilBP.DropStats(); got != (DropStats{}) {
-		t.Errorf("nil BatchProcessor.DropStats() = %+v, want zero DropStats", got)
+	var nilBP *batchProcessor
+	if got := nilBP.dropStats(); got != (DropStats{}) {
+		t.Errorf("nil batchProcessor.dropStats() = %+v, want zero DropStats", got)
 	}
 
 	config := DefaultConfig()
@@ -663,9 +663,9 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 	config.QueueMaxSize = 1
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	// 1. Trigger 2 queue-full drops (queue capacity is 1).
@@ -726,7 +726,7 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 		ShutdownDrops:         1,
 		TotalDrops:            12,
 	}
-	if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -839,9 +839,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CommittedStreamAndOffsets(t *testing
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Verify CreateWriteStream was called with COMMITTED type.
@@ -940,15 +940,15 @@ func TestBatchProcessor_ExactlyOnceDelivery_CreateWriteStreamFailure(t *testing.
 	config.DatasetID = "test-ds"
 	config.ExactlyOnceDelivery = true
 
-	if _, err := NewBatchProcessor(ctx, writeClient, "", config); err == nil {
-		t.Fatal("NewBatchProcessor() error = nil, want CreateWriteStream error")
+	if _, err := newBatchProcessor(ctx, writeClient, "", config); err == nil {
+		t.Fatal("newBatchProcessor() error = nil, want CreateWriteStream error")
 	}
 
 	t.Run("honors caller ctx cancellation during initial CreateWriteStream", func(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
-		if _, err := NewBatchProcessor(canceledCtx, writeClient, "", config); err == nil {
-			t.Fatal("NewBatchProcessor() with canceled ctx error = nil, want context canceled error")
+		if _, err := newBatchProcessor(canceledCtx, writeClient, "", config); err == nil {
+			t.Fatal("newBatchProcessor() with canceled ctx error = nil, want context canceled error")
 		}
 	})
 }
@@ -1149,9 +1149,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvanc
 				Multiplier:   1.0,
 			}
 
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -1170,7 +1170,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvanc
 				t.Fatalf("writeBatch(batch 2) error = %v, want nil", err)
 			}
 
-			if got := bp.DropStats(); got != (DropStats{}) {
+			if got := bp.dropStats(); got != (DropStats{}) {
 				t.Errorf("DropStats() = %+v, want zero drops", got)
 			}
 
@@ -1245,9 +1245,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_UnrecoverableOffsetConflictRotatesSt
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Batch 1 (2 rows) -> committed-1 @ offset 0.
@@ -1358,9 +1358,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 
 		// Batch A (2 rows) exhausts retries after ambiguous sends.
@@ -1384,7 +1384,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantStats, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantStats, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 
@@ -1470,9 +1470,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -1543,9 +1543,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -1610,9 +1610,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 
-	bp, err := NewBatchProcessor(callerCtx, writeClient, "", config)
+	bp, err := newBatchProcessor(callerCtx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Cancel the caller context before Close to verify context.WithoutCancel(b.ctx)
@@ -1645,9 +1645,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		shortCfg.ExactlyOnceDelivery = true
 		shortCfg.ShutdownTimeout = 5 * time.Millisecond
 
-		bpShort, err := NewBatchProcessor(context.Background(), writeClient, "", shortCfg)
+		bpShort, err := newBatchProcessor(context.Background(), writeClient, "", shortCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 
 		start := time.Now()
@@ -1674,9 +1674,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		remCfg.BatchFlushIntv = time.Hour
 		remCfg.ShutdownTimeout = 60 * time.Millisecond
 
-		bpRem, err := NewBatchProcessor(context.Background(), writeClient, "", remCfg)
+		bpRem, err := newBatchProcessor(context.Background(), writeClient, "", remCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		bpRem.Start()
 		bpRem.Append(map[string]any{"event_type": "DRAIN_BEFORE_FINALIZE"})
@@ -1708,9 +1708,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		exhaustCfg.RetryConfig.MaxRetries = 0
 		exhaustCfg.Logger = exhaustLog
 
-		bpExhaust, err := NewBatchProcessor(context.Background(), writeClient, "", exhaustCfg)
+		bpExhaust, err := newBatchProcessor(context.Background(), writeClient, "", exhaustCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		bpExhaust.Start()
 		bpExhaust.Append(map[string]any{"event_type": "EXHAUST_DRAIN_BUDGET"})
@@ -1807,9 +1807,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseBoundedWhenRetiredStreamFinaliz
 			config.ShutdownTimeout = tc.shutdownTimeout
 			config.RetryConfig.MaxRetries = 0
 			config.Logger = logger
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			t.Cleanup(func() {
 				bp.streamWriter.cancelFinalizations()
@@ -1844,7 +1844,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseBoundedWhenRetiredStreamFinaliz
 
 // TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAndLogsErrors
 // checks that the background finalization of a retired stream keeps the
-// values of the context given to NewBatchProcessor, such as outgoing
+// values of the context given to newBatchProcessor, such as outgoing
 // metadata, after that context is canceled, and that Close waits for it and
 // it logs its failure.
 func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAndLogsErrors(t *testing.T) {
@@ -1880,9 +1880,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAn
 	logger := &recordingLogger{}
 	config := exactlyOnceTestConfig()
 	config.Logger = logger
-	bp, err := NewBatchProcessor(callerCtx, writeClient, "", config)
+	bp, err := newBatchProcessor(callerCtx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(func() {
 		bp.streamWriter.cancelFinalizations()
@@ -1945,9 +1945,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeBoundedByRotate
 	logger := &recordingLogger{}
 	config := exactlyOnceTestConfig()
 	config.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", config)
+	bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(func() {
 		bp.streamWriter.cancelFinalizations()
@@ -2066,9 +2066,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_B1AmbiguousExhaustedThenB2AmbiguousD
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -2113,8 +2113,8 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 	t.Run("rejects non-empty or _default streamName when ExactlyOnceDelivery is enabled", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.ExactlyOnceDelivery = true
-		if _, err := NewBatchProcessor(ctx, nil, "projects/p/datasets/d/tables/t/streams/_default", cfg); err == nil {
-			t.Fatal("NewBatchProcessor() with _default streamName and ExactlyOnceDelivery=true succeeded, want error")
+		if _, err := newBatchProcessor(ctx, nil, "projects/p/datasets/d/tables/t/streams/_default", cfg); err == nil {
+			t.Fatal("newBatchProcessor() with _default streamName and ExactlyOnceDelivery=true succeeded, want error")
 		}
 	})
 
@@ -2157,9 +2157,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2250,9 +2250,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2365,9 +2365,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2484,9 +2484,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 		cfg.ExactlyOnceDelivery = true
 		cfg.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2541,9 +2541,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_HangingCreateWriteStreamArmsCooldown
 	// than the rotation timeout, so a hanging CreateWriteStream ends at the
 	// write deadline.
 	config.ShutdownTimeout = 300 * time.Millisecond
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -2622,9 +2622,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationOnDepletedBudget(t *testing.
 			config.BatchSize = 4
 			config.BatchFlushIntv = time.Hour
 			config.ShutdownTimeout = 450 * time.Millisecond
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -2650,7 +2650,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationOnDepletedBudget(t *testing.
 			if got := delivered.Load(); got != tc.wantDelivered {
 				t.Errorf("rows written = %d, want %d", got, tc.wantDelivered)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != tc.wantDrops {
+			if got := bp.dropStats().AppendFailureDrops; got != tc.wantDrops {
 				t.Errorf("AppendFailureDrops = %d, want %d", got, tc.wantDrops)
 			}
 			if got := srv.creates.Load(); got != tc.wantCreates {
@@ -2719,9 +2719,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldow
 					}
 				},
 			}
-			bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", exactlyOnceTestConfig())
+			bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", exactlyOnceTestConfig())
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 			now := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
@@ -2745,7 +2745,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldow
 			if got := srv.createCount(); got != 2 {
 				t.Errorf("CreateWriteStream calls during the cooldown = %d, want 2", got)
 			}
-			if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.DropStats()); diff != "" {
+			if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.dropStats()); diff != "" {
 				t.Errorf("DropStats() during the cooldown mismatch (-want +got):\n%s", diff)
 			}
 
@@ -2780,9 +2780,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown
 	config.BatchFlushIntv = time.Hour
 	config.GCSOffloader = off
 	config.Logger = logger
-	bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", config)
+	bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// The first stream's offset error replaces it, and the freshly rotated
@@ -2804,7 +2804,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown
 
 	bp.Close()
 
-	if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
 	}
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
@@ -2832,9 +2832,9 @@ func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
 		config.BatchFlushIntv = time.Hour
 		config.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 		if err != nil {
-			t.Fatalf("iter %d: NewBatchProcessor error: %v", iter, err)
+			t.Fatalf("iter %d: newBatchProcessor error: %v", iter, err)
 		}
 		mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 		bp.streamWriter.stream = mStream
@@ -2868,9 +2868,9 @@ func TestBatchProcessor_CloseDrainsInFlightAndQueuedBatches(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	firstSendStarted := make(chan struct{})
@@ -2937,9 +2937,9 @@ func TestBatchProcessor_ReusesCachedStreamAcrossFlushes(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -2971,9 +2971,9 @@ func TestBatchProcessor_ConcurrentCloseWaitsForDrain(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	firstSendEntered := make(chan struct{})
@@ -3059,9 +3059,9 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_F
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3120,9 +3120,9 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_C
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3196,9 +3196,9 @@ func TestBatchProcessor_RootContextCancelBeforeFirstStreamOpenDrainsQueuedRowOnC
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3254,9 +3254,9 @@ func TestBatchProcessor_InitContextCanceledDoesNotStopProcessing(t *testing.T) {
 	config.BatchFlushIntv = 10 * time.Millisecond
 	config.ShutdownTimeout = time.Second
 
-	bp, err := NewBatchProcessor(initCtx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(initCtx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	// Cancel the init context immediately after construction.
@@ -3310,9 +3310,9 @@ func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
 	config.BatchSize = 10
 	config.BatchFlushIntv = 10 * time.Millisecond
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	var wg sync.WaitGroup
@@ -3376,9 +3376,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3436,9 +3436,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3476,9 +3476,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = &fakeOffloader{}
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3505,7 +3505,7 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 			ShutdownDrops:      4,
 			TotalDrops:         5,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after stalled Close mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -3530,9 +3530,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.RetryConfig.MaxRetries = 0
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3573,9 +3573,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = &fakeOffloader{}
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3628,9 +3628,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3673,9 +3673,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3736,9 +3736,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3803,9 +3803,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3859,9 +3859,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3904,9 +3904,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.RetryConfig.MaxRetries = 0
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3973,9 +3973,9 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 		}
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -4002,7 +4002,7 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 			t.Fatalf("persisted rows = %d, want 10 (2 batches of 5)", persistedRows)
 		}
 
-		stats := bp.DropStats()
+		stats := bp.dropStats()
 		wantStats := DropStats{
 			AppendFailureDrops: 5,
 			ShutdownDrops:      51,
@@ -4019,9 +4019,9 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 	t.Run("writeBatchWithContexts counts batch in AppendFailureDrops when writeCtx is already canceled", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 
 		canceledCtx, cancel := context.WithCancel(context.Background())
@@ -4041,7 +4041,7 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 			AppendFailureDrops: 3,
 			TotalDrops:         3,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -4189,9 +4189,9 @@ func TestBatchProcessor_StalledAppendRowsEndsAtShutdownTimeout(t *testing.T) {
 	config.ShutdownTimeout = 200 * time.Millisecond
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4270,9 +4270,9 @@ func TestBatchProcessor_FlushRunEndDoesNotDropBatchWhenBudgetExpires(t *testing.
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4335,9 +4335,9 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 	bp.Start()
@@ -4353,7 +4353,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	if len(bp.deferredBatch) != 2 {
 		t.Fatalf("deferredBatch length after first flushRunEnd = %d, want 2", len(bp.deferredBatch))
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 0 {
+	if got := bp.dropStats().AppendFailureDrops; got != 0 {
 		t.Errorf("AppendFailureDrops after batch 1 was deferred = %d, want 0 (a deferred batch is not dropped)", got)
 	}
 
@@ -4367,7 +4367,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	if !logger.contains("Failed to write batch to BigQuery") {
 		t.Errorf("expected drop error logged after retry failure, got:\n%s", logger)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops after batch 1 was dropped = %d, want 2 (its 2 rows, counted once)", got)
 	}
 
@@ -4376,7 +4376,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	// retried once before being dropped.
 	bp.flushRunEnd()
 	bp.flushRunEnd()
-	if got := bp.DropStats().AppendFailureDrops; got != 4 {
+	if got := bp.dropStats().AppendFailureDrops; got != 4 {
 		t.Errorf("AppendFailureDrops after both batches were dropped = %d, want 4 (2 rows per batch, each batch counted once)", got)
 	}
 
@@ -4494,9 +4494,9 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	logger := &recordingLogger{}
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 	bp.Start()
@@ -4590,7 +4590,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	if got := contentPartsOf(t, last)[0]["storage_mode"]; got != "GCS_REFERENCE" {
 		t.Errorf("last row part storage_mode = %v, want GCS_REFERENCE", got)
 	}
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Errorf("DropStats after both rows were written = %+v, want no drops", ds)
 	}
 }
@@ -4718,9 +4718,9 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 			cfg.GCSOffloader = off
 			cfg.GCSMaxConcurrentUploads = 1
 			cfg.Logger = &recordingLogger{}
-			bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+			bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 
@@ -4826,7 +4826,7 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 					t.Errorf("part %d of the second batch has storage_mode %v and text %v, want %s and %q", i, parts[i]["storage_mode"], parts[i]["text"], wantMode, wantText)
 				}
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after both batches were written = %+v, want no drops", ds)
 			}
 		})
@@ -4866,9 +4866,9 @@ func TestBatchProcessor_FlushRunEndSucceededWriteReleasesCutShortUploadBytes(t *
 	cfg.GCSMaxConcurrentUploads = 1
 	logger := &recordingLogger{}
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5003,9 +5003,9 @@ func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T)
 			cfg.RetryConfig.MaxRetries = 0
 			cfg.GCSOffloader = off
 			cfg.Logger = logger
-			bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+			bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 
@@ -5081,7 +5081,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	var inRetry atomic.Bool
 	var pendingDuringRetryWrite atomic.Int64
 	pendingDuringRetryWrite.Store(-1)
-	var bp *BatchProcessor
+	var bp *batchProcessor
 	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
 		delay: &serverDelay,
 		onAppend: func() {
@@ -5108,9 +5108,9 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
 	var err error
-	bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5154,7 +5154,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	bp.flushRunEnd()
 	inRetry.Store(false)
 
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after the second flushRunEnd = %+v, want no drops: the uploads of the retry left the write too little time", ds)
 	}
 	if got := pendingDuringRetryWrite.Load(); got != 0 {
@@ -5204,7 +5204,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	var inRetry, postRetry atomic.Bool
 	var pendingDuringRetryWrite atomic.Int64
 	pendingDuringRetryWrite.Store(-1)
-	var bp *BatchProcessor
+	var bp *batchProcessor
 	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
 		delay: &serverDelay,
 		onAppend: func() {
@@ -5240,9 +5240,9 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
 	var err error
-	bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5290,7 +5290,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	bp.flushRunEnd()
 	inRetry.Store(false)
 
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after retry flushRunEnd = %+v, want no drops", ds)
 	}
 	if got := pendingDuringRetryWrite.Load(); got != 0 {
@@ -5402,7 +5402,7 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		var pendingDuringWrite atomic.Int64
 		pendingDuringWrite.Store(-1)
 
-		var bp *BatchProcessor
+		var bp *batchProcessor
 		writeClient := newScriptedWriteClient(t, &hookBigQueryWriteServer{
 			onAppend: func() {
 				if measure.Load() {
@@ -5427,9 +5427,9 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		cfg.Logger = logger
 
 		var err error
-		bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -5477,7 +5477,7 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		var pendingDuringWrite atomic.Int64
 		pendingDuringWrite.Store(-1)
 
-		var bp *BatchProcessor
+		var bp *batchProcessor
 		writeClient := newScriptedWriteClient(t, &hookBigQueryWriteServer{
 			onAppend: func() {
 				if measure.Load() {
@@ -5505,9 +5505,9 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		cfg.Logger = logger
 
 		var err error
-		bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -5591,9 +5591,9 @@ func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T)
 	cfg.GCSOffloader = off
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5633,7 +5633,7 @@ func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T)
 	if !logger.contains("upload skipped during timeout cooldown") {
 		t.Error("no log line says that an upload was skipped during the pause: no batch fell back without calling the offloader")
 	}
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after the run-end flush = %+v, want no drops", ds)
 	}
 	// Every batch is written, with all of its parts inline.
@@ -5698,9 +5698,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 	config.RetryConfig = RetryConfig{MaxRetries: 2, InitialDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, Multiplier: 1.0}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -5714,7 +5714,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent
 			t.Errorf("attempt %d sent the batch to %s after an attempt on %s whose outcome was unknown; it may now be stored on both streams", i+1, name, first)
 		}
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the batch's outcome is unknown, so it is dropped and counted)", got)
 	}
 }
@@ -5771,9 +5771,9 @@ func TestBatchProcessor_DefaultStream_SendsRoutingHeaderWithoutOffset(t *testing
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = false
 	defaultStream := "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default"
-	bp, err := NewBatchProcessor(ctx, writeClient, defaultStream, config)
+	bp, err := newBatchProcessor(ctx, writeClient, defaultStream, config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -5871,16 +5871,16 @@ func TestBatchProcessor_RoutingHeader_UnicodeTableName(t *testing.T) {
 			config.DatasetID = "test-ds"
 			config.TableName = "événements"
 			config.ExactlyOnceDelivery = tc.exactlyOnceDelivery
-			bp, err := NewBatchProcessor(ctx, writeClient, tc.streamName, config)
+			bp, err := newBatchProcessor(ctx, writeClient, tc.streamName, config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
 			if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "UNICODE_TABLE"}}); err != nil {
 				t.Fatalf("writeBatch() error = %v", err)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 0 {
+			if got := bp.dropStats().AppendFailureDrops; got != 0 {
 				t.Errorf("AppendFailureDrops = %d, want 0", got)
 			}
 
@@ -5944,9 +5944,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_BoundedRotationOnPersistentRejection
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 	config.RetryConfig = RetryConfig{MaxRetries: 1, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -6010,9 +6010,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetryAttemptRefundOnRotation(t *test
 	// with the default MaxRetries: 3. Only the rotation attempt refund allows
 	// sending on the newly created stream.
 	config.RetryConfig = RetryConfig{MaxRetries: 0, InitialDelay: time.Millisecond}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 	if got := bp.config.RetryConfig.MaxRetries; got != 0 {
@@ -6105,9 +6105,9 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 			MaxDelay:     5 * time.Millisecond,
 			Multiplier:   1.0,
 		}
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -6184,14 +6184,14 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 // newErrorClassificationProcessor returns a processor for srv, a scripted
 // write server, that retries four times in all (three retries) with
 // millisecond backoff. With exactlyOnce it writes to a committed stream.
-func newErrorClassificationProcessor(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool) *BatchProcessor {
+func newErrorClassificationProcessor(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool) *batchProcessor {
 	t.Helper()
 	return newErrorClassificationProcessorForClient(t, newScriptedWriteClient(t, srv), exactlyOnce)
 }
 
 // newErrorClassificationProcessorForClient is newErrorClassificationProcessor
 // over writeClient, a client of a scripted write server.
-func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstorage.BigQueryWriteClient, exactlyOnce bool) *BatchProcessor {
+func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstorage.BigQueryWriteClient, exactlyOnce bool) *batchProcessor {
 	t.Helper()
 	config := exactlyOnceTestConfig()
 	config.ExactlyOnceDelivery = exactlyOnce
@@ -6200,9 +6200,9 @@ func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstora
 	if !exactlyOnce {
 		streamName = "projects/test-proj/datasets/test-ds/tables/agent_events/_default"
 	}
-	bp, err := NewBatchProcessor(context.Background(), writeClient, streamName, config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, streamName, config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(bp.Close)
 	return bp
@@ -6255,7 +6255,7 @@ func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
 				if got := srv.attempts(); got != tc.wantAttempts {
 					t.Errorf("AppendRows attempts = %d, want %d (error: %v)", got, tc.wantAttempts, err)
 				}
-				if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				if got := bp.dropStats().AppendFailureDrops; got != 1 {
 					t.Errorf("AppendFailureDrops = %d, want 1", got)
 				}
 			})
@@ -6285,7 +6285,7 @@ func TestStreamWriter_TransientInBandErrorIsRetried(t *testing.T) {
 				if got := srv.attempts(); got != 3 {
 					t.Errorf("AppendRows attempts = %d, want 3", got)
 				}
-				if got := bp.DropStats().AppendFailureDrops; got != 0 {
+				if got := bp.dropStats().AppendFailureDrops; got != 0 {
 					t.Errorf("AppendFailureDrops = %d, want 0", got)
 				}
 				if exactlyOnce {
@@ -6331,7 +6331,7 @@ func TestStreamWriter_InBandErrorRetriesAreBounded(t *testing.T) {
 			if got := srv.attempts(); got != tc.wantAttempts {
 				t.Errorf("AppendRows attempts = %d, want %d", got, tc.wantAttempts)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Errorf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -6498,7 +6498,7 @@ func TestNextBatchAfterServerEndedStream(t *testing.T) {
 					if got := srv.createCount(); exactlyOnce && got != 1 {
 						t.Errorf("CreateWriteStream calls = %d, want 1: the committed stream stays", got)
 					}
-					if got := bp.DropStats().AppendFailureDrops; got != 0 {
+					if got := bp.dropStats().AppendFailureDrops; got != 0 {
 						t.Errorf("AppendFailureDrops = %d, want 0", got)
 					}
 				})
@@ -6568,7 +6568,7 @@ func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
 							if err != nil {
 								t.Fatalf("writeBatch() error = %v, want nil", err)
 							}
-							if got := bp.DropStats().AppendFailureDrops; got != 0 {
+							if got := bp.dropStats().AppendFailureDrops; got != 0 {
 								t.Errorf("AppendFailureDrops = %d, want 0", got)
 							}
 							return
@@ -6576,7 +6576,7 @@ func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
 						if got := status.Code(err); got != code {
 							t.Errorf("status.Code(writeBatch() error) = %v, want %v (error: %v)", got, code, err)
 						}
-						if got := bp.DropStats().AppendFailureDrops; got != 1 {
+						if got := bp.dropStats().AppendFailureDrops; got != 1 {
 							t.Errorf("AppendFailureDrops = %d, want 1", got)
 						}
 					})
@@ -6692,7 +6692,7 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 			if got := opened.Load(); got != tc.wantOpened {
 				t.Errorf("streams opened = %d, want %d", got, tc.wantOpened)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Errorf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -6912,7 +6912,7 @@ func TestFreshStreamClosedBeforeRecvIsRetried(t *testing.T) {
 							t.Errorf("CreateWriteStream calls = %d, want %d", gotCreates, wantCreates)
 						}
 					}
-					if gotDrops := bp.DropStats().AppendFailureDrops; gotDrops != 0 {
+					if gotDrops := bp.dropStats().AppendFailureDrops; gotDrops != 0 {
 						t.Errorf("AppendFailureDrops = %d, want 0", gotDrops)
 					}
 				})
@@ -7026,7 +7026,7 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 					if len(delivered) != 0 {
 						t.Errorf("delivered requests = %d, want 0", len(delivered))
 					}
-					if got := bp.DropStats().AppendFailureDrops; got != 1 {
+					if got := bp.dropStats().AppendFailureDrops; got != 1 {
 						t.Errorf("AppendFailureDrops = %d, want 1", got)
 					}
 				})
@@ -7053,9 +7053,9 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 		})
 		config := DefaultConfig()
 		config.RetryConfig = RetryConfig{MaxRetries: 0, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/test-proj/datasets/test-ds/tables/agent_events/_default", config)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/test-proj/datasets/test-ds/tables/agent_events/_default", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7066,7 +7066,7 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 		if streams, _ := srv.received(); streams != 1 {
 			t.Errorf("streams served = %d, want 1 when MaxRetries == 0", streams)
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+		if got := bp.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops = %d, want 1", got)
 		}
 	})
@@ -7317,9 +7317,9 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 	writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 	cfg := DefaultConfig()
 	cfg.RetryConfig.MaxRetries = 0
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -7356,7 +7356,7 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 			t.Fatalf("row %d = %q, want %q: rows must arrive in order", i, id, want)
 		}
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 0 {
+	if got := bp.dropStats().AppendFailureDrops; got != 0 {
 		t.Errorf("AppendFailureDrops = %d, want 0", got)
 	}
 }
@@ -7421,7 +7421,7 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	if want := []string{"a", "b", "b", "b"}; !slices.Equal(got, want) {
 		t.Errorf("requests received = %v, want %v: the third request must not be sent", got, want)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the rows after the confirmed first request)", got)
 	}
 }
@@ -7455,7 +7455,7 @@ func TestInBandResendThenPermanentStatus(t *testing.T) {
 			if got := srv.attempts(); got != 3 {
 				t.Fatalf("attempts = %d, want 3 (in-band transient on attempt 1 + stream-level PermissionDenied on attempt 2 + one fresh-stream retry on attempt 3)", got)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Fatalf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -7490,7 +7490,7 @@ func TestInBandResendThenPermanentStatus(t *testing.T) {
 			if got := srv.attempts() - 1; got != 4 {
 				t.Fatalf("second request attempts = %d, want 4 (in-band transient on reused stream + PermissionDenied on reused stream + fresh-stream attempt + one bounded fresh-stream retry)", got)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Fatalf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -7590,7 +7590,7 @@ func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
 				t.Errorf("AppendRows attempts = %d, want 4", got)
 			}
 			// Counting the whole batch as dropped would report 3 here.
-			if got := bp.DropStats().AppendFailureDrops; got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2 (b and c; a was confirmed)", got)
 			}
 			if got := len(bp.deferredBatch); got != 0 {
@@ -7612,9 +7612,9 @@ func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.BatchSize = 10
 		cfg.BatchFlushIntv = time.Hour
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -7689,7 +7689,7 @@ func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
 		if got := bp.streamWriter.streamOffset.Load(); got != 0 {
 			t.Errorf("streamOffset = %d, want 0 (neither request accepted the batch)", got)
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 2 {
+		if got := bp.dropStats().AppendFailureDrops; got != 2 {
 			t.Errorf("AppendFailureDrops = %d, want 2", got)
 		}
 		srv.mu.Lock()
@@ -7723,7 +7723,7 @@ func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
 		if err == nil {
 			t.Fatal("first writeBatch() error = nil, want failure after retries exhausted")
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+		if got := bp.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops after first batch = %d, want 1", got)
 		}
 		bp.streamWriter.mu.Lock()
@@ -7773,9 +7773,9 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7826,9 +7826,9 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7882,8 +7882,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 	}
 	for _, path := range []struct {
 		name  string
-		setup func(bp *BatchProcessor)
-		write func(bp *BatchProcessor, batch []map[string]any) error
+		setup func(bp *batchProcessor)
+		write func(bp *batchProcessor, batch []map[string]any) error
 		// countsDrops reports whether the entry point records
 		// DropStats.AppendFailureDrops.
 		countsDrops bool
@@ -7891,8 +7891,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 		{
 			// Each row is a request of its own under this estimated limit.
 			name:  "estimated_split_via_writeBatch",
-			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = estimateRowBytes(row("a")) },
-			write: func(bp *BatchProcessor, batch []map[string]any) error {
+			setup: func(bp *batchProcessor) { bp.maxAppendBytes = estimateRowBytes(row("a")) },
+			write: func(bp *batchProcessor, batch []map[string]any) error {
 				return bp.writeBatch(context.Background(), batch)
 			},
 			countsDrops: true,
@@ -7902,8 +7902,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			// 3-row chunk is halved into [a] and [b c], and [b c] into [b]
 			// and [c].
 			name:  "recursive_halving_via_appendChunkRows",
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
-			write: func(bp *BatchProcessor, batch []map[string]any) error {
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			write: func(bp *batchProcessor, batch []map[string]any) error {
 				_, _, _, err := bp.appendChunkRows(context.Background(), batch, nil)
 				return err
 			},
@@ -7960,7 +7960,7 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			}
 			// The first chunk was confirmed, so only the two rows after it
 			// are dropped.
-			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; path.countsDrops && got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2", got)
 			}
 		})
@@ -8052,7 +8052,7 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			if created != 2 {
 				t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + 1 entry rotation on chunk 1)", created)
 			}
-			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; path.countsDrops && got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2 (1 from first batch + 1 unconfirmed chunk from second batch)", got)
 			}
 		})
@@ -8079,20 +8079,20 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		rows  int
-		setup func(bp *BatchProcessor)
+		setup func(bp *batchProcessor)
 	}{
 		{
 			// Each row is a request of its own under this estimated limit.
 			name:  "estimated_split",
 			rows:  2,
-			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxAppendBytes = 1 },
 		},
 		{
 			// The batch is a single estimated chunk, which serializes to
 			// more than this limit, so it is halved into [ev-0] and [ev-1].
 			name:  "recursive_serialized_halving",
 			rows:  2,
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
 		},
 		{
 			// The batch is halved into [ev-0 ev-1] and [ev-2 ev-3 ev-4],
@@ -8100,7 +8100,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			// the one that fails.
 			name:  "recursive_serialized_halving_progress_in_first_half",
 			rows:  5,
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -8167,9 +8167,9 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			cfg.GCSOffloader = off
 			cfg.GCSMaxConcurrentUploads = 1
 			cfg.Logger = &recordingLogger{}
-			bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+			bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 			// Cleanups run last-in first-out: the blocked server request is
@@ -8208,7 +8208,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			if got, want := bp.pendingUploadBytes.Load(), int64(7*len(kept)); got != want {
 				t.Errorf("pendingUploadBytes after the first flushRunEnd = %d, want %d (ev-0's 5-byte upload released, the 7-byte upload of each other row kept)", got, want)
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the first flushRunEnd = %+v, want no drops", ds)
 			}
 
@@ -8226,7 +8226,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			if got := len(off.uploads()) - callsBefore; got != len(kept) {
 				t.Errorf("retry flushRunEnd offloader calls = %d, want %d (only the kept uploads of the rows that BigQuery had not confirmed)", got, len(kept))
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the retry flushRunEnd = %+v, want no drops", ds)
 			}
 
@@ -8270,7 +8270,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 }
 
 func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
-	newProcessor := func(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool, logger Logger) *BatchProcessor {
+	newProcessor := func(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool, logger Logger) *batchProcessor {
 		t.Helper()
 		ctx := context.Background()
 		lis, err := net.Listen("tcp", "localhost:0")
@@ -8310,9 +8310,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if exactlyOnce {
 			streamName = ""
 		}
-		bp, err := NewBatchProcessor(ctx, writeClient, streamName, cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, streamName, cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 		return bp
@@ -8378,7 +8378,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			RowErrorDrops: 1,
 			TotalDrops:    1,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 
@@ -8457,7 +8457,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			RowErrorDrops: 3,
 			TotalDrops:    3,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8491,7 +8491,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			RowErrorDrops: 2,
 			TotalDrops:    2,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8524,7 +8524,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8595,7 +8595,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			RowErrorDrops: 1,
 			TotalDrops:    1,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8660,7 +8660,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			RowErrorDrops: 1,
 			TotalDrops:    1,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8726,7 +8726,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
 		}
 		wantDrops := DropStats{RowErrorDrops: 3, TotalDrops: 3}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -8753,7 +8753,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
 		}
 		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 		if logged := logger.String(); !strings.Contains(logged, "out_of_range=2") {
@@ -8781,7 +8781,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 					t.Errorf("AppendRows calls = %d, want 1", got)
 				}
 				wantDrops := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
-				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 					t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 				}
 				wantLog := fmt.Sprintf("WARNING: BigQuery RowErrors reported 1 out-of-range row index(es) (first index=%d, batch_size=2)", idx)
@@ -8795,13 +8795,13 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 	t.Run("RowErrors in a split batch index into the rows of their own request", func(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
-			setup func(t *testing.T, bp *BatchProcessor, rows []map[string]any)
+			setup func(t *testing.T, bp *batchProcessor, rows []map[string]any)
 		}{
 			{
 				// splitBatchByEstimatedBytes cuts the batch into [r0 r1] and
 				// [r2 r3]; the serialized limit stays out of the way.
 				name: "estimated_split",
-				setup: func(_ *testing.T, bp *BatchProcessor, rows []map[string]any) {
+				setup: func(_ *testing.T, bp *batchProcessor, rows []map[string]any) {
 					bp.maxAppendBytes = 2 * estimateRowBytes(rows[0])
 					bp.maxSerializedAppendBytes = 1 << 30
 				},
@@ -8810,7 +8810,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 				// The batch is one estimated chunk whose request is over the
 				// serialized limit, so it is halved into [r0 r1] and [r2 r3].
 				name: "serialized_halving",
-				setup: func(t *testing.T, bp *BatchProcessor, rows []map[string]any) {
+				setup: func(t *testing.T, bp *batchProcessor, rows []map[string]any) {
 					size := func(rows []map[string]any) int {
 						rec := bp.buildRecordBatch(rows)
 						defer rec.Release()
@@ -8851,7 +8851,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 					t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
 				}
 				wantDrops := DropStats{RowErrorDrops: 2, TotalDrops: 2}
-				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 					t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 				}
 			})
@@ -8884,9 +8884,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			MaxDelay:     5 * time.Millisecond,
 			Multiplier:   1.0,
 		}
-		bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -8907,7 +8907,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
 		}
 		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 		logged := logger.String()
@@ -9020,9 +9020,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		cfg.GCSMaxConcurrentUploads = 1
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+		bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 		t.Cleanup(releaseServer)
@@ -9060,7 +9060,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("pendingUploadBytes after first flushRunEnd = %d, want %d (bad-1's 5-byte upload released, good-0 and good-2 retained)", got, want)
 		}
 		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after first flushRunEnd mismatch (-want +got):\n%s", diff)
 		}
 
@@ -9102,7 +9102,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if got := len(off.uploads()) - callsBefore; got != 2 {
 			t.Errorf("retry flushRunEnd offloader calls = %d, want 2 (only good-0 and good-2)", got)
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after retry flushRunEnd mismatch (-want +got):\n%s", diff)
 		}
 
@@ -9165,7 +9165,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         10,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -9199,7 +9199,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -9235,7 +9235,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -9318,7 +9318,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
 		}
 		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -9377,7 +9377,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 				t.Errorf("status.Code(err) = %v, want PermissionDenied", gotCode)
 			}
 			wantDrops := DropStats{RowErrorDrops: 1, AppendFailureDrops: 2, TotalDrops: 3}
-			if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 				t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -9420,7 +9420,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 				t.Errorf("status.Code(err) = %v, want PermissionDenied", gotCode)
 			}
 			wantDrops := DropStats{RowErrorDrops: 1, AppendFailureDrops: 1, TotalDrops: 2}
-			if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 				t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -9480,7 +9480,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				makeBP := func(t *testing.T) *BatchProcessor {
+				makeBP := func(t *testing.T) *batchProcessor {
 					t.Helper()
 					if tc.useMock {
 						cfg := DefaultConfig()
@@ -9489,9 +9489,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 						cfg.TableName = "agent_events"
 						cfg.Logger = &recordingLogger{}
 						cfg.RetryConfig.MaxRetries = 0
-						bp, err := NewBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+						bp, err := newBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
 						if err != nil {
-							t.Fatalf("NewBatchProcessor() error = %v", err)
+							t.Fatalf("newBatchProcessor() error = %v", err)
 						}
 						t.Cleanup(bp.Close)
 						bp.streamWriter.stream = &mockStream{recvSeq: tc.mockRecv}
@@ -9523,7 +9523,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 					t.Errorf("settled rows mismatch (-want +got):\n%s", diff)
 				}
 				wantDirectDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-				if diff := cmp.Diff(wantDirectDrops, bpDirect.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantDirectDrops, bpDirect.dropStats()); diff != "" {
 					t.Errorf("appendChunkRows DropStats() mismatch (-want +got):\n%s", diff)
 				}
 
@@ -9533,7 +9533,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 					t.Fatalf("writeBatch() error = %v, want substring %q", err, tc.wantErr)
 				}
 				wantBatchDrops := DropStats{RowErrorDrops: 1, AppendFailureDrops: 2, TotalDrops: 3}
-				if diff := cmp.Diff(wantBatchDrops, bpBatch.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantBatchDrops, bpBatch.dropStats()); diff != "" {
 					t.Errorf("writeBatch DropStats() mismatch (-want +got):\n%s", diff)
 				}
 			})
@@ -9548,9 +9548,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		cfg.TableName = "agent_events"
 		cfg.Logger = logger
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -9575,7 +9575,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 		if logged := logger.String(); logged != "" {
@@ -9608,7 +9608,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if len(unconfirmed) != 0 || len(settled) != 2 || rowErrDrops != 0 {
 			t.Errorf("appendChunkRows() = (unconfirmed=%d, settled=%d, rowErrDrops=%d), want (0, 2, 0): rows that may be committed are settled, not retried", len(unconfirmed), len(settled), rowErrDrops)
 		}
-		if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bpChunk.DropStats()); diff != "" {
+		if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bpChunk.dropStats()); diff != "" {
 			t.Errorf("appendChunkRows() DropStats() mismatch (-want +got):\n%s", diff)
 		}
 		if diff := cmp.Diff([][]string{{"bad-0", "good-1"}}, sentChunk()); diff != "" {
@@ -9631,7 +9631,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantBatchDrops, bpBatch.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantBatchDrops, bpBatch.dropStats()); diff != "" {
 			t.Errorf("writeBatch() DropStats() mismatch (-want +got):\n%s", diff)
 		}
 		wantWarn := "WARNING: BigQuery response carried both AppendResult (has_offset=true) and 1 RowErrors (batch_size=2); dropping the rows without resending them"
@@ -9648,9 +9648,9 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 				cfg.DatasetID = "test-ds"
 				cfg.TableName = "agent_events"
 				cfg.RetryConfig.MaxRetries = 0
-				bp, err := NewBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+				bp, err := newBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
 				if err != nil {
-					t.Fatalf("NewBatchProcessor() error = %v", err)
+					t.Fatalf("newBatchProcessor() error = %v", err)
 				}
 				t.Cleanup(bp.Close)
 
@@ -9796,9 +9796,9 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 				Multiplier:   1.0,
 			}
 
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -9811,7 +9811,7 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 			}
 
 			wantDropsAfterA := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
-			if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+			if diff := cmp.Diff(wantDropsAfterA, bp.dropStats()); diff != "" {
 				t.Errorf("DropStats() after Batch A mismatch (-want +got):\n%s", diff)
 			}
 
@@ -9907,9 +9907,9 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -9921,7 +9921,7 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 			t.Fatalf("writeBatch(Batch A) error = %v, want 1 row(s) rejected by RowErrors", err)
 		}
 		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 
@@ -9999,9 +9999,9 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -10018,7 +10018,7 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDropsAfterA, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after Batch A mismatch (-want +got):\n%s", diff)
 		}
 
@@ -10049,7 +10049,7 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 		if gotOffset := bp.streamWriter.streamOffset.Load(); gotOffset != 1 {
 			t.Errorf("streamOffset after Batch B = %d, want 1", gotOffset)
 		}
-		if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDropsAfterA, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after Batch B mismatch (-want +got):\n%s", diff)
 		}
 
@@ -10183,9 +10183,9 @@ func TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted(t *tes
 				cfg.BatchFlushIntv = time.Hour
 				cfg.GCSOffloader = stallingOffloader(&stalled)
 				cfg.Logger = logger
-				bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+				bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
 				if err != nil {
-					t.Fatalf("NewBatchProcessor() error = %v", err)
+					t.Fatalf("newBatchProcessor() error = %v", err)
 				}
 				t.Cleanup(bp.Close)
 
@@ -10223,7 +10223,7 @@ func TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted(t *tes
 					t.Errorf("deferredBatch event_ids mismatch (-want +got):\n%s", diff)
 				}
 				wantDrops := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
-				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 					t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 				}
 				if got, want := bp.pendingUploadBytes.Load(), int64(16*len(layout.wantDeferred)); got != want {
@@ -10256,7 +10256,7 @@ func TestBatchProcessor_RunEndDeadlineDoesNotResendRowsThatMayBeCommitted(t *tes
 				if diff := cmp.Diff(wantSent, gotSent); diff != "" {
 					t.Errorf("sent requests mismatch (-want +got):\n%s", diff)
 				}
-				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+				if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 					t.Errorf("DropStats() after the next flush mismatch (-want +got):\n%s", diff)
 				}
 			})
@@ -10310,9 +10310,9 @@ func TestBatchProcessor_AppendFailureReportsStatusCodeNotMessage(t *testing.T) {
 			cfg.TableName = "agent_events"
 			cfg.Logger = logger
 			cfg.RetryConfig = RetryConfig{MaxRetries: 1, InitialDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, Multiplier: 1.0}
-			bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+			bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			t.Cleanup(bp.Close)
 			rows := func() []map[string]any {

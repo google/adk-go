@@ -16,6 +16,7 @@ package responses
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,6 +25,16 @@ import (
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
+
+// errFunctionCallMissingItemID reports a function call arguments event with no
+// item_id. The translator keys a call's buffered arguments, name and call ID by
+// item ID, so such an event cannot be tied to its call: emitted anyway, the
+// call has no name, and every call without an item_id would share one argument
+// buffer. adk-python places stream events by output_index first
+// (_openai_responses_llm.py, _stream_output_key); this translator does not
+// track output_index, so it fails the turn rather than guess which call the
+// event belongs to.
+var errFunctionCallMissingItemID = errors.New("openai: streamed function call event missing item_id")
 
 // streamTranslator helps us process OpenAI streaming events by buffering
 // function arguments until a complete function call is received.
@@ -75,6 +86,9 @@ func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*
 		return shared.SinglePartResponse(&genai.Part{Text: delta.Delta, Thought: true}), nil
 	case responseFunctionCallArgumentsDelta:
 		delta := evt.AsResponseFunctionCallArgumentsDelta()
+		if delta.ItemID == "" {
+			return nil, errFunctionCallMissingItemID
+		}
 		if delta.Delta != "" {
 			// We buffer function call arguments as they stream in, identified by ItemID.
 			buf := t.buffer(delta.ItemID)
@@ -83,6 +97,9 @@ func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*
 		return nil, nil
 	case responseFunctionCallArgumentsDone:
 		done := evt.AsResponseFunctionCallArgumentsDone()
+		if done.ItemID == "" {
+			return nil, errFunctionCallMissingItemID
+		}
 		// When function call arguments are complete, we emit the full function call.
 		part, err := t.emitFunctionCall(done)
 		if err != nil {
@@ -131,9 +148,6 @@ func (t *streamTranslator) process(evt oairesponses.ResponseStreamEventUnion) (*
 // buffer is a helper that provides a strings.Builder for a given ItemID.
 // We use this to accumulate partial function call arguments as they stream in.
 func (t *streamTranslator) buffer(id string) *strings.Builder {
-	if id == "" {
-		id = "default"
-	}
 	if b, ok := t.functionArgs[id]; ok {
 		return b
 	}

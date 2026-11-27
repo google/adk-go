@@ -33,9 +33,19 @@ var unorderedArrayKeywords = map[string]bool{
 	"type":     true,
 }
 
+// Schema map keys are user-defined names.
+var schemaMapKeywords = map[string]bool{
+	"$defs":             true,
+	"definitions":       true,
+	"dependencies":      true,
+	"dependentSchemas":  true,
+	"properties":        true,
+	"patternProperties": true,
+}
+
 // CanonicalSchemaJSON marshals the schema to JSON, parses it back, and
 // re-emits it with object keys sorted alphabetically (recursively). Arrays keep
-// their original order, except the unordered set keywords (see
+// their original order, except the unordered set keywords in schema objects (see
 // unorderedArrayKeywords), whose elements are sorted so that equivalent schemas
 // canonicalize identically.
 func CanonicalSchemaJSON(s *jsonschema.Schema) ([]byte, error) {
@@ -54,6 +64,10 @@ func CanonicalSchemaJSON(s *jsonschema.Schema) ([]byte, error) {
 // order unless they are the value of an unordered set keyword, in which case
 // their elements are sorted. Primitive values are encoded via json.Marshal.
 func canonicalize(v any) ([]byte, error) {
+	return canonicalizeValue(v, false)
+}
+
+func canonicalizeValue(v any, schemaMap bool) ([]byte, error) {
 	switch val := v.(type) {
 	case map[string]any:
 		if val == nil {
@@ -75,10 +89,14 @@ func canonicalize(v any) ([]byte, error) {
 			buf.WriteByte(':')
 
 			var valBytes []byte
-			if arr, ok := val[k].([]any); ok && unorderedArrayKeywords[k] {
+			if !schemaMap && (k == "const" || k == "enum" || k == "default" || k == "examples") {
+				// Literal objects can contain keys named "required" or "type";
+				// their arrays remain ordered. json.Marshal still sorts map keys.
+				valBytes, err = json.Marshal(val[k])
+			} else if arr, ok := val[k].([]any); ok && unorderedArrayKeywords[k] {
 				valBytes, err = canonicalizeUnorderedArray(arr)
 			} else {
-				valBytes, err = canonicalize(val[k])
+				valBytes, err = canonicalizeValue(val[k], !schemaMap && schemaMapKeywords[k])
 			}
 			if err != nil {
 				return nil, err

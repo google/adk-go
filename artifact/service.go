@@ -33,22 +33,26 @@ type Service interface {
 	// Save saves an artifact to the artifact service storage.
 	// The artifact is a file identified by the app name, user ID, session ID, and fileName.
 	// After saving the artifact, a revision ID is returned to identify the artifact version.
+	// The first version of a new artifact is 0, and each subsequent save increments the
+	// highest existing version by 1.
 	// Implementations that assign versions optimistically may fail to claim one
 	// while other writers save the same artifact; that failure is transient and
 	// the call can be retried.
 	Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error)
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
+	// If req.Version is nil, the latest version is loaded.
 	Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error)
-	// Delete deletes an artifact. If req.Version is 0, all versions are deleted,
+	// Delete deletes an artifact. If req.Version is nil, all versions are deleted,
 	// and deleting an artifact that does not exist is not an error. If req.Version
-	// is set and that version does not exist, implementations may return an error.
+	// is non-nil and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
 	// GetArtifactVersion gets the metadata for a specific version of an artifact.
+	// If req.Version is nil, metadata for the latest version is returned.
 	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
 }
 
@@ -151,7 +155,9 @@ type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to load, or nil for the latest version.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
@@ -191,7 +197,9 @@ type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to delete, or nil to delete all versions.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
@@ -315,7 +323,9 @@ type GetArtifactVersionRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
-	Version int64
+
+	// Version is the version to inspect, or nil for the latest version.
+	Version *int64
 }
 
 // Validate checks if the struct is valid or if it is missing a field.

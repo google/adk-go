@@ -245,6 +245,8 @@ type raceFreeLLM struct{ calls atomic.Int64 }
 
 func (*raceFreeLLM) Name() string { return "race-free" }
 
+func (*raceFreeLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *raceFreeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	m.calls.Add(1)
 	return func(yield func(*model.LLMResponse, error) bool) {

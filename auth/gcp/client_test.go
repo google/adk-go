@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -890,15 +891,34 @@ func fakeADCWithQuotaProject(t *testing.T, quotaProject string) (requestedScope 
 	return func() string { return scope.Load().(string) }
 }
 
+var (
+	fakeADCKeyOnce sync.Once
+	fakeADCKeyPEM  string
+	fakeADCKeyErr  error
+)
+
+func cachedFakeADCKeyPEM() (string, error) {
+	fakeADCKeyOnce.Do(func() {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			fakeADCKeyErr = err
+			return
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			fakeADCKeyErr = err
+			return
+		}
+		fakeADCKeyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	})
+	return fakeADCKeyPEM, fakeADCKeyErr
+}
+
 // writeFakeADC points GOOGLE_APPLICATION_CREDENTIALS at a service-account key
 // whose token requests go to tokenURI.
 func writeFakeADC(t *testing.T, tokenURI, quotaProject string) {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(key)
+	keyPEM, err := cachedFakeADCKeyPEM()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,7 +926,7 @@ func writeFakeADC(t *testing.T, tokenURI, quotaProject string) {
 		"type":           "service_account",
 		"project_id":     "p",
 		"private_key_id": "key-id",
-		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"private_key":    keyPEM,
 		"client_email":   "sa@p.iam.gserviceaccount.com",
 		"client_id":      "1",
 		"token_uri":      tokenURI,
@@ -929,14 +949,16 @@ func writeFakeADC(t *testing.T, tokenURI, quotaProject string) {
 // the host's own Google Cloud setup would otherwise leak into the tests: a quota
 // project set in the shell overrides the one in the credentials file, a
 // universe domain set in the shell fails every request against googleapis.com
-// credentials, the client certificate lookup loads a workstation's SecureConnect
-// or enterprise certificate, and the trust boundary lookup sends the token to
-// iamcredentials.googleapis.com.
+// credentials, a client certificate turned on in the shell is loaded and moves
+// the default endpoints, the trust boundary lookup sends the token to
+// iamcredentials.googleapis.com, and an mTLS endpoint mode moves the default
+// endpoints or fails NewClient.
 func isolateADCEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
 	t.Setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
 	t.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
 	t.Setenv("GOOGLE_AUTH_TRUST_BOUNDARY_ENABLED", "")
 }
 

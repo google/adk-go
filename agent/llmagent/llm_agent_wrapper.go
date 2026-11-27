@@ -251,6 +251,11 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //     except when the OutputSchema produced a non-null parsed value, which
 //     is the output in its own right.
 //
+// When the agent's OutputArtifact was saved on this event, which its
+// ArtifactDelta records, the text is the artifact reference: it is not
+// parsed against OutputSchema, OutputKey is left as the save already wrote
+// it, and event.Output is the reference text.
+//
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
 func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
@@ -284,10 +289,11 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
+	artifactSaved := state.SavedOutputArtifact(ev)
 	// parsed stays nil for a reply of literal null, which validates as a nil
 	// map when the schema has no required fields.
 	var parsed map[string]any
-	if state.OutputSchema != nil {
+	if state.OutputSchema != nil && !artifactSaved {
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
@@ -302,7 +308,7 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 		output = text
 	}
 
-	if state.OutputKey != "" && output != nil {
+	if state.OutputKey != "" && output != nil && !artifactSaved {
 		if ev.Actions.StateDelta == nil {
 			ev.Actions.StateDelta = map[string]any{}
 		}

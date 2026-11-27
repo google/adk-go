@@ -19,14 +19,15 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 )
 
+// frontmatterPreloadSource serves the frontmatters from an in-memory copy of
+// the wrapped source's, which reload replaces as a whole, and everything else
+// from the wrapped source.
 type frontmatterPreloadSource struct {
 	Source
-	mu           sync.RWMutex
-	frontmatters map[string]*Frontmatter // for fast lookup.
-	sorted       []*Frontmatter          // for deterministic listing.
+	preload atomic.Pointer[inMemorySource]
 }
 
 // WithFrontmatterPreloadSource returns a Source proxy that wraps the given
@@ -43,19 +44,11 @@ func WithFrontmatterPreloadSource(ctx context.Context, source Source) (Source, f
 }
 
 func (s *frontmatterPreloadSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.sorted, nil
+	return s.preload.Load().ListFrontmatters(ctx)
 }
 
 func (s *frontmatterPreloadSource) LoadFrontmatter(ctx context.Context, name string) (*Frontmatter, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	frontmatter, exists := s.frontmatters[name]
-	if !exists {
-		return nil, ErrSkillNotFound
-	}
-	return frontmatter, nil
+	return s.preload.Load().LoadFrontmatter(ctx, name)
 }
 
 func (s *frontmatterPreloadSource) reload(ctx context.Context) error {
@@ -68,17 +61,16 @@ func (s *frontmatterPreloadSource) reload(ctx context.Context) error {
 		return strings.Compare(lhs.Name, rhs.Name)
 	})
 
-	frontmatters := make(map[string]*Frontmatter, len(sorted))
-	for _, frontmatter := range sorted {
-		if _, exists := frontmatters[frontmatter.Name]; exists {
+	skills := make([]InMemorySkill, 0, len(sorted))
+	for i, frontmatter := range sorted {
+		// The frontmatters are sorted by name, so a repeated name follows
+		// its first use.
+		if i > 0 && sorted[i-1].Name == frontmatter.Name {
 			return fmt.Errorf("%w: %q", ErrDuplicateSkill, frontmatter.Name)
 		}
-		frontmatters[frontmatter.Name] = frontmatter
+		skills = append(skills, InMemorySkill{Frontmatter: frontmatter})
 	}
 
-	s.mu.Lock()
-	s.frontmatters = frontmatters
-	s.sorted = sorted
-	s.mu.Unlock()
+	s.preload.Store(newInMemorySource(skills))
 	return nil
 }

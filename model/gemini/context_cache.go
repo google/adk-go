@@ -25,11 +25,13 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 )
@@ -88,16 +90,19 @@ const cacheCleanupTimeout = 30 * time.Second
 //     own runner has no ContextCache config, so its agent runs uncached.
 //     adk-python passes the caller's config on, with the TTL capped at five
 //     minutes (tools/agent_tool.py).
-//   - Nothing is logged when a cache cannot be created or deleted, since
-//     ADK Go library code has no logger. The request goes ahead uncached, as
-//     in adk-python.
+//   - A cache that cannot be created or deleted is reported on the
+//     create_cache or delete_cache span, which records the error, rather than
+//     in a warning log, since ADK Go library code has no logger. adk-python
+//     has no delete_cache span. The request goes ahead uncached, as in
+//     adk-python.
 type contextCache struct {
 	client *genai.Client
 	// model is the name the request is sent to, which explicit caches are
 	// specific to.
 	model string
-	// trackingHeader identifies ADK on the cache calls, as on the model calls.
-	trackingHeader string
+	// trackingHeader returns the labels that identify ADK on a cache call
+	// sent with the given options, as on the model calls.
+	trackingHeader func(*genai.HTTPOptions) string
 }
 
 // cachePlan is what prepare decided for one request.
@@ -139,13 +144,54 @@ func isMissingCacheError(err error) bool {
 	}
 }
 
+// explicitCachingUnsupportedPhrases are lowercased substrings from provider
+// API errors stating that a model does not support explicit context caching,
+// matching adk-python's _EXPLICIT_CACHING_UNSUPPORTED_SUBSTRINGS.
+var explicitCachingUnsupportedPhrases = []string{
+	"does not support explicit context caching",
+	"explicit caching is not supported for ",
+	"is not supported for context caching",
+}
+
+type explicitCachingRefusalKey struct {
+	scope cacheScope
+	model string
+}
+
+// modelsWithoutExplicitCaching remembers (scope, model) pairs whose provider
+// reported no support for explicit context caching, so later requests and model
+// instances skip create calls rather than failing on every turn.
+var modelsWithoutExplicitCaching sync.Map // map[explicitCachingRefusalKey]struct{}
+
+// isExplicitCachingUnsupported reports whether err is a provider API error
+// stating that the model does not support explicit context caching.
+//
+// Unlike adk-python's _is_explicit_caching_unsupported
+// (models/gemini_context_cache_manager.py), which matches str(error).lower()
+// on any exception, this inspects only genai.APIError.Message so non-API or
+// transport errors cannot permanently disable caching for a model.
+func isExplicitCachingUnsupported(err error) bool {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	for _, phrase := range explicitCachingUnsupportedPhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // prepare decides which cache req uses, creating a cache on the provider when
 // one is due.
 func (c *contextCache) prepare(ctx context.Context, req *model.LLMRequest) cachePlan {
 	if req.Config.CachedContent != "" {
 		return cachePlan{req: req}
 	}
-	fp := newFingerprinter(req, c.model, scopeFor(c.client.ClientConfig()))
+	scope := scopeFor(c.client.ClientConfig())
+	fp := newFingerprinter(req, c.model, scope)
 	old := req.CacheMetadata
 	if old == nil {
 		// No earlier prefix to compare against, so nothing is created yet.
@@ -171,7 +217,7 @@ func (c *contextCache) prepare(ctx context.Context, req *model.LLMRequest) cache
 	}
 
 	count := max(old.ContentsCount, countContentsToCache(req.Contents))
-	created := c.createCache(ctx, req, count, fp.of(count))
+	created := c.createCache(ctx, req, scope, count, fp.of(count))
 	if created == nil {
 		// No cache, for example because the prefix is still below the
 		// model's minimum. Keep the longest stable prefix for the next
@@ -225,15 +271,24 @@ func (c *contextCache) finish(ctx context.Context, plan cachePlan, responded boo
 
 // deleteCache deletes the named cache. It runs once the request that decided
 // to delete it has ended, possibly by cancellation, so it uses a context that
-// outlives one. A failure is ignored: the cache expires on its own when its
-// TTL runs out.
+// outlives one. A failure is recorded on its delete_cache span and otherwise
+// ignored: the cache expires on its own when its TTL runs out. A cache the
+// provider no longer holds is not a failure, since the delete wanted it gone.
 func (c *contextCache) deleteCache(ctx context.Context, name string) {
 	if name == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cacheCleanupTimeout)
+	ctx, span := telemetry.StartDeleteCacheSpan(context.WithoutCancel(ctx), name)
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, cacheCleanupTimeout)
 	defer cancel()
-	_, _ = c.client.Caches.Delete(ctx, name, &genai.DeleteCachedContentConfig{HTTPOptions: c.httpOptions(nil)})
+	_, err := c.client.Caches.Delete(ctx, name, &genai.DeleteCachedContentConfig{HTTPOptions: c.httpOptions(nil)})
+	if isMissingCacheError(err) {
+		// Expired, deleted elsewhere, or the cache a request just found
+		// missing.
+		return
+	}
+	telemetry.RecordError(span, err)
 }
 
 // httpOptions returns a copy of base, or new options when base is nil, with
@@ -248,8 +303,9 @@ func (c *contextCache) httpOptions(base *genai.HTTPOptions) *genai.HTTPOptions {
 	if out.Headers == nil {
 		out.Headers = http.Header{}
 	}
-	out.Headers.Set("x-goog-api-client", c.trackingHeader)
-	out.Headers.Set("user-agent", c.trackingHeader)
+	value := c.trackingHeader(out)
+	out.Headers.Set("x-goog-api-client", value)
+	out.Headers.Set("user-agent", value)
 	return out
 }
 
@@ -375,11 +431,16 @@ func declarationName(d *genai.FunctionDeclaration) string {
 
 // createCache creates a cache holding the first count contents of req, along
 // with its system instruction, tools and tool config, and returns its metadata
-// with fingerprint as the prefix's. It returns nil, creating nothing, when no
-// earlier prompt size is known, when that prompt was below MinTokens, when the
-// prefix is estimated to fall below the model's minimum cache size, or when
-// the provider refuses.
-func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, count int, fingerprint string) *model.CacheMetadata {
+// with fingerprint as the prefix's. It returns nil, creating nothing, when the
+// provider has already refused explicit context caching for this backend and
+// model, when no earlier prompt size is known, when that prompt was below
+// MinTokens, when the prefix is estimated to fall below the model's minimum
+// cache size, or when the call fails, which its create_cache span records.
+func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, scope cacheScope, count int, fingerprint string) *model.CacheMetadata {
+	refusalKey := explicitCachingRefusalKey{scope: scope, model: c.model}
+	if _, unsupported := modelsWithoutExplicitCaching.Load(refusalKey); unsupported {
+		return nil
+	}
 	if req.PreviousPromptTokenCount <= 0 || fingerprint == "" {
 		return nil
 	}
@@ -412,10 +473,20 @@ func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, c
 	if count > 0 {
 		createCfg.Contents = req.Contents[:count]
 	}
+	ctx, span := telemetry.StartCreateCacheSpan(ctx, telemetry.StartCreateCacheSpanParams{Model: c.model, ContentsCount: count, TTL: ttl})
+	defer span.End()
 	cached, err := c.client.Caches.Create(ctx, c.model, createCfg)
-	if err != nil || cached == nil || cached.Name == "" {
+	if err == nil && (cached == nil || cached.Name == "") {
+		err = errors.New("the cache service returned no cache name")
+	}
+	if err != nil {
+		telemetry.TraceCreateCacheResult(span, "", err)
+		if isExplicitCachingUnsupported(err) {
+			modelsWithoutExplicitCaching.Store(refusalKey, struct{}{})
+		}
 		return nil
 	}
+	telemetry.TraceCreateCacheResult(span, cached.Name, nil)
 
 	createdAt := platform.Now(ctx)
 	expireTime := cached.ExpireTime

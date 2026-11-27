@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"go.opentelemetry.io/otel/codes"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -96,76 +97,82 @@ func getRunLiveTestEvents(t *testing.T, sessionService session.Service, sessionI
 }
 
 func TestRunner_RunLive_NilEventYieldedTerminatesRun(t *testing.T) {
-	ctx := context.Background()
-	appName, userID, sessionID := "testApp", "testUser", "testSessionNilFlood"
+	forEachTraceSchema(t, func(t *testing.T) {
+		_, exp := newInvocationTraceExporter(t)
+		ctx := t.Context()
+		appName, userID, sessionID := "testApp", "testUser", "testSessionNilFlood"
 
-	sessionService := session.InMemoryService()
-	_, err := sessionService.Create(ctx, &session.CreateRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+		sessionService := session.InMemoryService()
+		_, err := sessionService.Create(ctx, &session.CreateRequest{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	testAgent := must(agent.New(agent.Config{Name: "nil_flood"}))
-	mockLive := &mockLiveAgent{
-		Agent: testAgent,
-		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-			return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
-				for {
-					if !yield(nil, nil) {
-						return
+		testAgent := must(agent.New(agent.Config{Name: "nil_flood"}))
+		mockLive := &mockLiveAgent{
+			Agent: testAgent,
+			runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+					for {
+						if !yield(nil, nil) {
+							return
+						}
 					}
-				}
-			}, nil
-		},
-	}
+				}, nil
+			},
+		}
 
-	r, err := New(Config{
-		AppName:        appName,
-		Agent:          mockLive,
-		SessionService: sessionService,
+		r, err := New(Config{
+			AppName:        appName,
+			Agent:          mockLive,
+			SessionService: sessionService,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+		if err != nil {
+			t.Fatalf("RunLive failed: %v", err)
+		}
+
+		type result struct {
+			err        error
+			iterations int
+		}
+		done := make(chan result, 1)
+		go func() {
+			got := result{}
+			for _, err := range iter {
+				got.err = err
+				got.iterations++
+				break
+			}
+			done <- got
+		}()
+
+		select {
+		case got := <-done:
+			if got.iterations != 1 {
+				t.Fatalf("RunLive() iterations = %d, want 1", got.iterations)
+			}
+			if got.err == nil {
+				t.Fatal("RunLive() yielded no error for a nil event")
+			}
+			if !strings.Contains(got.err.Error(), "nil_flood") {
+				t.Fatalf("RunLive() error = %v, want the agent name", got.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("RunLive() did not terminate after a nil event")
+		}
+		if got := invocationSpan(t, exp).Status.Code; got != codes.Error {
+			t.Errorf("invocation span status = %v, want Error", got)
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, iter, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
-	if err != nil {
-		t.Fatalf("RunLive failed: %v", err)
-	}
-
-	type result struct {
-		err        error
-		iterations int
-	}
-	done := make(chan result, 1)
-	go func() {
-		got := result{}
-		for _, err := range iter {
-			got.err = err
-			got.iterations++
-			break
-		}
-		done <- got
-	}()
-
-	select {
-	case got := <-done:
-		if got.iterations != 1 {
-			t.Fatalf("RunLive() iterations = %d, want 1", got.iterations)
-		}
-		if got.err == nil {
-			t.Fatal("RunLive() yielded no error for a nil event")
-		}
-		if !strings.Contains(got.err.Error(), "nil_flood") {
-			t.Fatalf("RunLive() error = %v, want the agent name", got.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("RunLive() did not terminate after a nil event")
-	}
 }
 
 // TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp checks that RunLive

@@ -868,12 +868,12 @@ func isScrubbedPlainText(out string) bool {
 // no longer parses.
 const maxRedactionPasses = 4
 
-// redactStringValue redacts str, a string value that SmartTruncate sanitizes
+// redactStringValue redacts str, a string value that smartTruncate sanitizes
 // at depth, with redactJSONTextPass and scrubErrorText, and reports
 // whether content was lost. A value that starts with "{" or "[" and is no
 // JSON document fails closed whatever it holds, as on main: sanitizeRawText
 // and redactErrorMessage keep such text when it is prose (see
-// isPositivelyHarmlessProse), and SmartTruncate keeps none. As in
+// isPositivelyHarmlessProse), and smartTruncate keeps none. As in
 // sanitizeRawText, the pass is run again over its result until that no
 // longer changes (see maxRedactionPasses), each further pass with a budget of
 // its own.

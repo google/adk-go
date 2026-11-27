@@ -265,9 +265,9 @@ func (r *retryAndReflect) resetFailuresForTool(ctx agent.Context, toolName strin
 // modelError is the type and text of a failed call of the tool named toolName
 // that the plugin may put in the response it answers with, which the model,
 // the session and REST clients all see. A panic recovered from the tool's
-// handler, at any wrapping depth, becomes an opaque type and a generic
-// message, because the panic error's own text carries the panic value and the
-// goroutine stack.
+// handler, or from a callback that ran for a call of the tool, at any wrapping
+// depth, becomes an opaque type and a generic message, because the panic
+// error's own text carries the panic value and the goroutine stack.
 func modelError(toolName string, err error) (errType, details string) {
 	if text, panicked := toolinternal.ModelErrorText(toolName, err); panicked {
 		return panicErrorType, text

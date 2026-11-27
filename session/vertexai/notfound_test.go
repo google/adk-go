@@ -72,6 +72,40 @@ func TestGet_wrongUser_wrapsErrNotFound(t *testing.T) {
 	}
 }
 
+// ExcludeEvents must not send ListEvents at all: that RPC chain is the cost the
+// field exists to avoid. A missing or foreign session still reports
+// session.ErrNotFound from GetSession alone.
+func TestGet_excludeEvents_skipsListEvents(t *testing.T) {
+	s, fake := newFakeService(t)
+
+	got, err := s.Get(t.Context(), &session.GetRequest{AppName: "123", UserID: "user1", SessionID: "owned", ExcludeEvents: true})
+	if err != nil {
+		t.Fatalf("Get(ExcludeEvents) error = %v", err)
+	}
+	if got.Session.ID() != "owned" || got.Session.Events().Len() != 0 {
+		t.Errorf("Get(ExcludeEvents) = session %q with %d events, want session \"owned\" with 0", got.Session.ID(), got.Session.Events().Len())
+	}
+	for _, req := range []*session.GetRequest{
+		{AppName: "123", UserID: "user1", SessionID: "other", ExcludeEvents: true},
+		{AppName: "123", UserID: "user2", SessionID: "owned", ExcludeEvents: true},
+	} {
+		if _, err := s.Get(t.Context(), req); !errors.Is(err, session.ErrNotFound) {
+			t.Errorf("Get(ExcludeEvents, user %q, session %q) error = %v, want session.ErrNotFound", req.UserID, req.SessionID, err)
+		}
+	}
+	if n := fake.listEvents.Load(); n != 0 {
+		t.Errorf("ListEvents RPCs = %d, want 0", n)
+	}
+
+	// Control: without the field, Get does list the events.
+	if _, err := s.Get(t.Context(), &session.GetRequest{AppName: "123", UserID: "user1", SessionID: "owned"}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := fake.listEvents.Load(); n != 1 {
+		t.Errorf("ListEvents RPCs after a full Get = %d, want 1", n)
+	}
+}
+
 func TestAppendEvent_missingSession_wrapsErrNotFound(t *testing.T) {
 	s, fake := newFakeService(t)
 

@@ -43,6 +43,8 @@ func (d *dummyLLM) Name() string {
 	return d.name
 }
 
+func (*dummyLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (d *dummyLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{

@@ -118,6 +118,38 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			wantTextContains: []string{"a memory"},
 		},
 		{
+			name: "thought-only user content skips search",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+			}},
+			wantNoSearch: true,
+		},
+		{
+			name: "thought before query text is omitted",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+				{Text: "my preferences"},
+			}},
+			wantQuery: "my preferences",
+		},
+		{
+			name: "thought between query text adds no separator",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "my"},
+				{Text: "private reasoning", Thought: true},
+				{Text: "preferences"},
+			}},
+			wantQuery: "my preferences",
+		},
+		{
+			name: "thought after query text adds no trailing separator",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "my preferences"},
+				{Text: "private reasoning", Thought: true},
+			}},
+			wantQuery: "my preferences",
+		},
+		{
 			name:            "no memories found",
 			userContent:     genai.NewContentFromText("test query", genai.RoleUser),
 			memories:        []memory.Entry{},
@@ -333,7 +365,7 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 				if mem.searchCalls != 1 {
 					t.Errorf("SearchMemory() called %d times, want 1", mem.searchCalls)
 				} else if mem.lastQuery != tt.wantQuery {
-					t.Errorf("SearchMemory() query = %q, want %q", mem.lastQuery, tt.wantQuery)
+					t.Errorf("SearchMemory() query differs from expected (got %d bytes, want %d)", len(mem.lastQuery), len(tt.wantQuery))
 				}
 			}
 

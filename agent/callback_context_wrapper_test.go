@@ -89,7 +89,7 @@ func (fakeArtifacts) Load(context.Context, string) (*artifact.LoadResponse, erro
 	return nil, nil
 }
 
-func (fakeArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+func (fakeArtifacts) LoadVersion(context.Context, string, *int64) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
 

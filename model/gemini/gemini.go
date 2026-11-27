@@ -38,13 +38,35 @@
 // once without it, and the next request creates a new cache.
 //
 // A request that already names a cache in its own config is sent as it is.
+// When the provider reports that a model does not support explicit context
+// caching, that refusal is remembered for the model and backend for the life
+// of the process (shared across model instances and never cleared), so later
+// requests are sent without trying to create a cache again until the process
+// restarts.
+//
+// Each request with a CacheConfig gets one handle_context_caching span, a
+// child of the generate_content span when an agent makes the call. Its
+// cache_action attribute is active_cache, with the cache in cache_name, when
+// the request is sent through a cache, its own included, and fingerprint_only
+// when it is sent without one. A create_cache child span covers each call that
+// creates a cache, and a delete_cache span each call that deletes one. A create
+// or delete that fails, whether the provider refuses it, it times out or it is
+// canceled, leaves its span failed with the error. Deleting a cache the
+// provider no longer holds is not a failure. A request resent without a missing
+// cache adds a context_cache_missing event, with the cache's name and the
+// provider's error, to the span the call was made under. The span names and
+// attributes are adk-python's, apart from delete_cache and
+// context_cache_missing, which adk-python does not have.
 package gemini
 
 import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -52,15 +74,20 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/schemacache"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
 
 // TODO: test coverage
 type geminiModel struct {
-	client             *genai.Client
-	name               string
-	versionHeaderValue string
+	client *genai.Client
+	name   string
+	// baseURL is the client's base URL, or nil if it does not parse. Whether
+	// a request goes to a Google API endpoint, and so may name the hosting
+	// runtime in its tracking headers, is decided by it.
+	baseURL *url.URL
 }
 
 // NewModel returns [model.LLM], backed by the Gemini API.
@@ -83,12 +110,20 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	// The genai SDK builds the live WebSocket handshake from the client's
 	// headers alone, so the tracking headers GenerateContent sets per request
 	// never reach it.
-	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(cfgCopy.HTTPOptions.Headers)
+	callerHeaders := cfgCopy.HTTPOptions.Headers
+	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, nil)
 
 	client, err := genai.NewClient(ctx, &cfgCopy)
 	if err != nil {
 		return nil, err
 	}
+	// genai resolves the base URL from the config, its defaults and the
+	// environment, so it is known only now. Live.Connect reads the headers
+	// from this map when it dials, so writing into it reaches the handshake.
+	// The client's Interactions service copied the headers while the client
+	// was built, so its calls, which ADK does not make, name no runtime.
+	baseURL, _ := url.Parse(client.ClientConfig().HTTPOptions.BaseURL)
+	maps.Copy(cfgCopy.HTTPOptions.Headers, version.WithTrackingHeaders(callerHeaders, baseURL))
 
 	if client.ClientConfig().HTTPClient != nil {
 		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
@@ -97,9 +132,9 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	}
 
 	return &geminiModel{
-		name:               modelName,
-		client:             client,
-		versionHeaderValue: version.TrackingHeader(),
+		name:    modelName,
+		client:  client,
+		baseURL: baseURL,
 	}, nil
 }
 
@@ -119,7 +154,7 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if req.Config.HTTPOptions.Headers == nil {
 		req.Config.HTTPOptions.Headers = make(http.Header)
 	}
-	m.addHeaders(req.Config.HTTPOptions.Headers)
+	m.addHeaders(req.Config.HTTPOptions)
 
 	if req.CacheConfig != nil {
 		return m.generateWithContextCache(ctx, req, stream)
@@ -153,8 +188,11 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // the recorded expiry.
 func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
-		plan := cache.prepare(ctx, req)
+		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.trackingHeader}
+		spanCtx, span := telemetry.StartHandleContextCachingSpan(ctx)
+		plan := cache.prepare(spanCtx, req)
+		telemetry.TraceContextCacheAction(span, plan.req.Config.CachedContent)
+		span.End()
 
 		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
 		responded := false
@@ -169,9 +207,11 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		// attempt sends r and yields what comes back. It reports whether r
 		// named a cache the provider no longer holds and nothing has been
 		// yielded yet, so the request can be sent again without it.
+		var missingErr error
 		attempt := func(r *model.LLMRequest) (retry bool) {
 			for resp, err := range m.callModel(ctx, r, stream) {
 				if err != nil && !yielded && r != req && isMissingCacheError(err) {
+					missingErr = err
 					return true
 				}
 				if err == nil && resp != nil && !resp.Partial && plan.metadata != nil {
@@ -199,6 +239,7 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		// The prefix is unchanged, so the next request can create a cache for
 		// it straight away.
 		plan = cachePlan{req: req, metadata: fingerprintOnly(plan.metadata), stale: plan.stale}
+		telemetry.TraceContextCacheMissing(ctx, missing, missingErr)
 		attempt(plan.req)
 	}
 }
@@ -215,9 +256,20 @@ func (m *geminiModel) callModel(ctx context.Context, req *model.LLMRequest, stre
 }
 
 // addHeaders sets the x-goog-api-client and user-agent headers
-func (m *geminiModel) addHeaders(headers http.Header) {
-	headers.Set("x-goog-api-client", m.versionHeaderValue)
-	headers.Set("user-agent", m.versionHeaderValue)
+func (m *geminiModel) addHeaders(opts *genai.HTTPOptions) {
+	value := m.trackingHeader(opts)
+	opts.Headers.Set("x-goog-api-client", value)
+	opts.Headers.Set("user-agent", value)
+}
+
+// trackingHeader returns the tracking labels for a request sent with opts,
+// whose BaseURL, when set, replaces the client's.
+func (m *geminiModel) trackingHeader(opts *genai.HTTPOptions) string {
+	if opts != nil && opts.BaseURL != "" {
+		baseURL, _ := url.Parse(opts.BaseURL)
+		return version.TrackingHeader(baseURL)
+	}
+	return version.TrackingHeader(m.baseURL)
 }
 
 // modelName returns the model name to use for the API call.
@@ -235,6 +287,7 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+	config.Tools = encodeToolSchemas(config.Tools)
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
@@ -253,6 +306,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+		config.Tools = encodeToolSchemas(config.Tools)
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
 			if err != nil {
 				yield(nil, err)
@@ -292,6 +346,57 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	httpOptions.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(httpOptions.ExtrasRequestProvider, fallbackProvider)
 	configCopy.HTTPOptions = httpOptions
 	return &configCopy
+}
+
+// encodeToolSchemas returns tools with each function declaration schema that
+// schemacache remembers replaced by its encoding, which genai sends as is
+// instead of encoding the schema again: genai marshals the whole request on
+// every call, and jsonschema.Schema's MarshalJSON dominates that for small
+// tools. The request's own tools are left alone, so callbacks and history
+// keep the schemas they set. Unchanged tools and declarations are shared, not
+// copied.
+func encodeToolSchemas(tools []*genai.Tool) []*genai.Tool {
+	var out []*genai.Tool
+	for i, t := range tools {
+		if t == nil {
+			continue
+		}
+		var decls []*genai.FunctionDeclaration
+		for j, d := range t.FunctionDeclarations {
+			if d == nil {
+				continue
+			}
+			params, paramsOK := schemacache.Encoded(d.ParametersJsonSchema)
+			response, responseOK := schemacache.Encoded(d.ResponseJsonSchema)
+			if !paramsOK && !responseOK {
+				continue
+			}
+			if decls == nil {
+				decls = slices.Clone(t.FunctionDeclarations)
+			}
+			encoded := *d
+			if paramsOK {
+				encoded.ParametersJsonSchema = params
+			}
+			if responseOK {
+				encoded.ResponseJsonSchema = response
+			}
+			decls[j] = &encoded
+		}
+		if decls == nil {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(tools)
+		}
+		withDecls := *t
+		withDecls.FunctionDeclarations = decls
+		out[i] = &withDecls
+	}
+	if out == nil {
+		return tools
+	}
+	return out
 }
 
 // providerPreservingEmptyTextThoughtSignatures returns an extras provider that
@@ -395,4 +500,17 @@ func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
 
-var _ googlellm.GoogleLLM = &geminiModel{}
+func (m *geminiModel) Capabilities() model.Capabilities {
+	if m == nil {
+		return model.Capabilities{}
+	}
+	return model.Capabilities{
+		AcceptsOutputSchemaAndTools: !googlellm.IsGeminiModel(m.name) ||
+			(m.GetGoogleLLMVariant() == genai.BackendVertexAI && googlellm.IsGemini2OrAbove(m.name)),
+	}
+}
+
+var (
+	_ googlellm.GoogleLLM = &geminiModel{}
+	_ model.LLM           = &geminiModel{}
+)

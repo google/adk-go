@@ -94,6 +94,10 @@ var casesWithoutReplay = map[string]string{
 	// TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched,
 	// both in vertexai_test.go.
 	"Test_vertexaiService_AppendEvent_requested_auth_config_that_does_not_decode_is_refused": "vertexai_test.go",
+	// Pinned offline against the in-process fake backend, including that no
+	// ListEvents RPC is sent, by TestGet_excludeEvents_skipsListEvents in
+	// notfound_test.go.
+	"Test_vertexaiService_Get_exclude_events": "notfound_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {

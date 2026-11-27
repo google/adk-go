@@ -131,6 +131,40 @@ func TestStreamTranslator_FunctionCallNameOnlyOnDoneEvent(t *testing.T) {
 	}
 }
 
+// TestStreamTranslator_MissingItemID pins that a function call arguments event
+// without an item_id is rejected rather than buffered or emitted: nothing ties
+// it to its call's arguments, name or call ID.
+func TestStreamTranslator_MissingItemID(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+	}{
+		{
+			name:  "delta",
+			event: `{"type":"response.function_call_arguments.delta","item_id":"","delta":"{\"query\":\"cats\"}"}`,
+		},
+		{
+			name:  "empty delta",
+			event: `{"type":"response.function_call_arguments.delta","item_id":"","delta":""}`,
+		},
+		{
+			name:  "done with inline arguments",
+			event: `{"type":"response.function_call_arguments.done","item_id":"","arguments":"{\"query\":\"cats\"}"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := newStreamTranslator().process(decodeEvent(t, tc.event))
+			if !errors.Is(err, errFunctionCallMissingItemID) {
+				t.Errorf("process() err = %v, want %v", err, errFunctionCallMissingItemID)
+			}
+			if resp != nil {
+				t.Errorf("process() returned a response, want none")
+			}
+		})
+	}
+}
+
 func TestStreamTranslator_WithAggregator(t *testing.T) {
 	tr := newStreamTranslator()
 	aggregator := llminternal.NewStreamingResponseAggregator()

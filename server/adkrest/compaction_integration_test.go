@@ -51,6 +51,8 @@ type echoModel struct {
 
 func (m *echoModel) Name() string { return "echo" }
 
+func (*echoModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *echoModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	m.prompts = append(m.prompts, req.Contents)

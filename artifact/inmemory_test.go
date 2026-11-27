@@ -70,7 +70,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: firstPart, CustomMetadata: metadata,
 			}); err != nil {
-				t.Fatalf("Save(v1) failed: %v", err)
+				t.Fatalf("Save(v0) failed: %v", err)
 			}
 			metadata["key"] = "changed after save"
 
@@ -79,7 +79,7 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				AppName: "app", UserID: "user", SessionID: tc.saveSessionID, FileName: tc.fileName,
 				Part: genai.NewPartFromText("text"),
 			}); err != nil {
-				t.Fatalf("Save(v2) failed: %v", err)
+				t.Fatalf("Save(v1) failed: %v", err)
 			}
 
 			readCtx := platform.WithTimeProvider(t.Context(), func() time.Time { return readTime })
@@ -90,8 +90,8 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 				t.Fatalf("GetArtifactVersion(latest) failed: %v", err)
 			}
 			wantLatest := &artifact.ArtifactVersion{
-				Version:        2,
-				CanonicalURI:   tc.uriPrefix + "2",
+				Version:        1,
+				CanonicalURI:   tc.uriPrefix + "1",
 				CustomMetadata: map[string]any{},
 				CreateTime:     secondCreateTime,
 				MimeType:       "text/plain",
@@ -101,40 +101,40 @@ func TestInMemoryArtifactVersionFields(t *testing.T) {
 			}
 
 			first, err := srv.GetArtifactVersion(readCtx, &artifact.GetArtifactVersionRequest{
-				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: new(int64(0)),
 			})
 			if err != nil {
-				t.Fatalf("GetArtifactVersion(v1) failed: %v", err)
+				t.Fatalf("GetArtifactVersion(v0) failed: %v", err)
 			}
 			wantFirst := &artifact.ArtifactVersion{
-				Version:        1,
-				CanonicalURI:   tc.uriPrefix + "1",
+				Version:        0,
+				CanonicalURI:   tc.uriPrefix + "0",
 				CustomMetadata: map[string]any{"key": "value", "count": "42", "enabled": "true"},
 				CreateTime:     firstCreateTime,
 				MimeType:       "image/png",
 			}
 			if diff := cmp.Diff(wantFirst, first.ArtifactVersion); diff != "" {
-				t.Errorf("GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+				t.Errorf("GetArtifactVersion(v0) mismatch (-want +got):\n%s", diff)
 			}
 			loaded, err := srv.Load(readCtx, &artifact.LoadRequest{
-				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: new(int64(0)),
 			})
 			if err != nil {
-				t.Fatalf("Load(v1) failed: %v", err)
+				t.Fatalf("Load(v0) failed: %v", err)
 			}
 			if got := loaded.Part.InlineData.MIMEType; got != first.ArtifactVersion.MimeType {
-				t.Errorf("Load(v1).Part.InlineData.MIMEType = %q, GetArtifactVersion(v1).MimeType = %q", got, first.ArtifactVersion.MimeType)
+				t.Errorf("Load(v0).Part.InlineData.MIMEType = %q, GetArtifactVersion(v0).MimeType = %q", got, first.ArtifactVersion.MimeType)
 			}
 
 			first.ArtifactVersion.CustomMetadata["key"] = "changed after read"
 			again, err := srv.GetArtifactVersion(readCtx, &artifact.GetArtifactVersionRequest{
-				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: 1,
+				AppName: "app", UserID: "user", SessionID: tc.getSessionID, FileName: tc.fileName, Version: new(int64(0)),
 			})
 			if err != nil {
-				t.Fatalf("second GetArtifactVersion(v1) failed: %v", err)
+				t.Fatalf("second GetArtifactVersion(v0) failed: %v", err)
 			}
 			if diff := cmp.Diff(wantFirst, again.ArtifactVersion); diff != "" {
-				t.Errorf("second GetArtifactVersion(v1) mismatch (-want +got):\n%s", diff)
+				t.Errorf("second GetArtifactVersion(v0) mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -149,22 +149,22 @@ func TestInMemoryCanonicalURIEscapesSegments(t *testing.T) {
 		{
 			name:     "session scoped",
 			fileName: "report?old#draft",
-			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%3Fold%23draft/versions/1",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%3Fold%23draft/versions/0",
 		},
 		{
 			name:     "user scoped",
 			fileName: "user:report?old#draft",
-			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%3Fold%23draft/versions/1",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%3Fold%23draft/versions/0",
 		},
 		{
 			name:     "session scoped percent and space",
 			fileName: "report 100%.txt",
-			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%20100%25.txt/versions/1",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/sessions/session%2Fthree/artifacts/report%20100%25.txt/versions/0",
 		},
 		{
 			name:     "user scoped percent and space",
 			fileName: "user:report 100%.txt",
-			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%20100%25.txt/versions/1",
+			wantURI:  "memory://apps/app%2Fone/users/user%2Ftwo/artifacts/user:report%20100%25.txt/versions/0",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,7 +273,7 @@ func mutateFullPart(p *genai.Part) {
 func TestInMemoryService_DoesNotAliasStoredPartFields(t *testing.T) {
 	ctx := t.Context()
 	s := artifact.InMemoryService()
-	load := func(version int64) *genai.Part {
+	load := func(version *int64) *genai.Part {
 		t.Helper()
 		resp, err := s.Load(ctx, &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.bin", Version: version})
 		if err != nil {
@@ -292,24 +292,24 @@ func TestInMemoryService_DoesNotAliasStoredPartFields(t *testing.T) {
 		part := fullPart()
 		save(part)
 		mutateFullPart(part)
-		if diff := cmp.Diff(fullPart(), load(0)); diff != "" {
+		if diff := cmp.Diff(fullPart(), load(nil)); diff != "" {
 			t.Errorf("Load() after editing the saved part mismatch (-want +got):\n%s", diff)
 		}
 	})
 
 	t.Run("edit after load", func(t *testing.T) {
-		mutateFullPart(load(0))
-		if diff := cmp.Diff(fullPart(), load(0)); diff != "" {
+		mutateFullPart(load(nil))
+		if diff := cmp.Diff(fullPart(), load(nil)); diff != "" {
 			t.Errorf("Load() after editing a loaded part mismatch (-want +got):\n%s", diff)
 		}
 	})
 
 	t.Run("edit after versioned load", func(t *testing.T) {
-		// Two versions, so Version: 1 takes the explicit-version path in Load.
+		// Two versions, so Version: new(int64(0)) takes the explicit-version path in Load.
 		save(genai.NewPartFromText("v2"))
-		mutateFullPart(load(1))
-		if diff := cmp.Diff(fullPart(), load(1)); diff != "" {
-			t.Errorf("Load(Version: 1) after editing a version-1 load mismatch (-want +got):\n%s", diff)
+		mutateFullPart(load(new(int64(0))))
+		if diff := cmp.Diff(fullPart(), load(new(int64(0)))); diff != "" {
+			t.Errorf("Load(Version: 0) after editing a version-0 load mismatch (-want +got):\n%s", diff)
 		}
 	})
 }
