@@ -249,17 +249,19 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	// caller makes afterwards to its event, or to a value it put in the
 	// event, changes neither the stored history nor the state, and a retry
 	// that re-delivers the caller's event reads none of what Get handed out.
-	// The exception is a value whose type has unexported fields, such as a
-	// *big.Int, or holds one by value: deepcopy.Of cannot copy it, so the
-	// stored event and state share it with the caller. adk-python's main
-	// branch stores a deep copy too (_copy_event in
-	// in_memory_session_service.py, added after 2.14.1).
+	// See [deepcopy.Of] for the values that stay shared with the caller.
 	//
-	// The copy is taken before sess.appendEvent publishes event in the live
-	// session, and nothing after that call reads event, so a Session.Events
-	// reader that writes into a newly appended event cannot race with
-	// AppendEvent. The copy and its key are made before taking s.mu, so their
-	// cost does not stall other sessions.
+	// The copy and its key are made before taking s.mu, so their cost does not
+	// stall other sessions, and before sess.appendEvent publishes event in the
+	// live session. Nothing after sess.appendEvent reads event, so a
+	// Session.Events reader that writes into a newly appended event does not
+	// race with that first append. Because deepcopy.Of and redeliveryKey read
+	// event and its nested values without holding a lock, callers must not
+	// edit a value inside event in place (such as a state map or slice shared
+	// with another goroutine) while an AppendEvent carrying it is running.
+	// Because sess.appendEvent publishes the caller's event in the live
+	// session, an event being retried must not be written through the live
+	// session while the retry runs either.
 	stored := deepcopy.Of(trimTempDeltaState(event))
 	key, keyErr := redeliveryKey(stored)
 
@@ -523,13 +525,12 @@ func trimTempDeltaState(event *Event) *Event {
 // handed out by Get, and a caller may write into it, so comparing against it
 // would read memory that another goroutine may be writing.
 //
-// Two events get the same key when their JSON encodings match, which is
-// close to adk-python's event equality but looser: a difference the encoding
-// does not record, such as an unexported field, or a []byte against the
-// base64 string it encodes to, gives equal keys. UTC drops the location and
-// the monotonic clock reading, so two copies of one instant get the same key.
-// An error means the event holds a value JSON cannot encode, such as NaN, a
-// channel or a func.
+// Two events get the same key when their JSON encodings match: a difference
+// the encoding does not record, such as an unexported field, or a []byte
+// against the base64 string it encodes to, gives equal keys. UTC drops the
+// location and the monotonic clock reading, so two copies of one instant get
+// the same key. An error means the event holds a value JSON cannot encode,
+// such as NaN, a channel or a func.
 func redeliveryKey(event *Event) (string, error) {
 	e := *event
 	e.Timestamp = e.Timestamp.UTC()

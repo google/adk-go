@@ -44,9 +44,13 @@ const maxDepth = 10000
 //   - Map keys, which the map compares by value.
 //   - Anything more than maxDepth steps below v.
 //
-// A pointer, map or slice that v reaches more than once is copied once, so the
-// copy has the same cycles and shared references as v. Nil stays nil, and an
-// empty slice or map stays empty and non-nil.
+// A pointer or map with the same type and address, or a slice with the same
+// type, first-element address and length, is copied once when v reaches it
+// more than once, so cycles and those shared references stay intact.
+// Overlapping slices with different starts or lengths, and pointers into slice
+// elements or struct fields, are copied separately and do not share backing
+// memory in the copy. Nil stays nil, and an empty slice or map stays empty and
+// non-nil.
 func Of[T any](v T) T {
 	out := v
 	var c copier
@@ -60,8 +64,8 @@ type copier struct {
 	copies map[ref]reflect.Value
 }
 
-// ref identifies a pointer, map or slice. A slice is identified by its
-// backing array and length, since two slices of one array can differ.
+// ref identifies a pointer, map or slice by its type and address, plus length
+// for a slice (where ptr is the address of its first element).
 type ref struct {
 	typ reflect.Type
 	ptr unsafe.Pointer

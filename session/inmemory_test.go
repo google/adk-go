@@ -169,8 +169,9 @@ func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 //
 // This does not exercise concurrent Set() calls — state.Set() is never on the
 // hot path here, since AppendEvent applies its StateDelta via maps.Copy and
-// holds the service mutex for its whole body, so the "writers" below serialize
-// against each other and only race against the reader. It also does not pin
+// holds the service mutex around the session and state updates, so the
+// "writers" below serialize against each other and only race against the
+// reader. It also does not pin
 // down the snapshot semantics #530 introduced (see
 // TestInMemoryState_All_IsSnapshot for that). What it does catch: if All() is
 // ever changed back to range the live map without cloning it first — for
@@ -199,9 +200,9 @@ func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 
-	// These calls serialize against each other (AppendEvent holds the service
-	// mutex for its whole body); what races is each of them against the reader
-	// goroutine's All() below.
+	// These calls serialize against each other while updating state (AppendEvent
+	// holds the service mutex around the session and state updates); what races
+	// is each of them against the reader goroutine's All() below.
 	for w := range writers {
 		wg.Go(func() {
 			<-start
@@ -728,11 +729,11 @@ func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testi
 // that the canonical record's StateDelta is a map of its own, not the one the
 // live session handle publishes.
 //
-// AppendEvent holds the session mutex until it finishes reading event.
-// After it returns, writes through the live handle must not change the
-// canonical record.
-// TestInMemoryService_AppendEvent_ConcurrentActionMapWrites checks that the
-// session stays locked until AppendEvent finishes all event reads.
+// AppendEvent copies event before sess.appendEvent publishes it in the live
+// session under the session mutex. After it returns, writes through the live
+// handle must not change the canonical record.
+// TestInMemoryService_AppendEvent_ConcurrentActionMapWrites checks that
+// AppendEvent finishes reading event before Session.Events exposes it.
 func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *testing.T) {
 	// Both delta shapes matter. trimTempDeltaState returns the event unchanged
 	// when it strips nothing, so with no temp: key the live session publishes

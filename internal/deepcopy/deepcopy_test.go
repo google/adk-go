@@ -241,9 +241,10 @@ type node struct {
 	Children []*node
 }
 
-// A pointer, map or slice reached more than once is copied once, so the copy
-// has the original's cycles and shared references, and copying a value with
-// a cycle that branches takes time in proportion to its size.
+// A pointer or map with the same type and address, or a slice with the same
+// type, first-element address and length, is copied once when reached more
+// than once, so cycles stay intact and copying a branching cycle takes time in
+// proportion to its size.
 func TestOf_CopiesSharedReferencesOnce(t *testing.T) {
 	t.Run("map that holds itself twice", func(t *testing.T) {
 		m := map[string]any{}
