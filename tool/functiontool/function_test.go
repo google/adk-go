@@ -38,6 +38,8 @@ import (
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -1357,4 +1359,58 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 			t.Errorf("expected error to contain %q, but it did not. Error: %v", part, err)
 		}
 	}
+}
+
+func TestFunctionTool_PanicMatchesErrPanicked(t *testing.T) {
+	panicTool, err := functiontool.New(functiontool.Config{Name: "panic_tool"}, func(agent.Context, struct{}) (struct{}, error) {
+		panic("intentional panic for testing")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		_, err := panicTool.(toolinternal.FunctionTool).Run(createToolContext(t), map[string]any{})
+		if !errors.Is(err, tool.ErrPanicked) {
+			t.Errorf("errors.Is(err, tool.ErrPanicked) = false for a recovered panic (%T)", err)
+		}
+		if !errors.Is(fmt.Errorf("wrapped: %w", err), tool.ErrPanicked) {
+			t.Error("errors.Is(wrapped err, tool.ErrPanicked) = false")
+		}
+	})
+
+	t.Run("plugin OnToolError", func(t *testing.T) {
+		var seen, matched bool
+		p, err := plugin.New(plugin.Config{
+			Name: "recognizer",
+			OnToolErrorCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any, err error) (map[string]any, error) {
+				seen = true
+				matched = errors.Is(err, tool.ErrPanicked)
+				return map[string]any{"error": "handled by plugin"}, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "panic_tool", Args: map[string]any{}}}}},
+			genai.NewContentFromText("done", "model"),
+		}}
+		a, err := llmagent.New(llmagent.Config{Name: "a", Model: m, Tools: []tool.Tool{panicTool}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+		for _, err := range r.Run(t, "s1", "hi") {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !seen {
+			t.Fatal("OnToolError callback was not called")
+		}
+		if !matched {
+			t.Error("plugin could not recognize the recovered panic with errors.Is(err, tool.ErrPanicked)")
+		}
+	})
 }
