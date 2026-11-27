@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -289,9 +290,7 @@ func TestConvertUsage(t *testing.T) {
 			"prompt_tokens_details":{"cached_tokens":40},
 			"completion_tokens_details":{"reasoning_tokens":7}}}`)
 	got := convertUsage(resp.Usage)
-	// The field names differ from the Responses API's on every count, so this
-	// pins the mapping rather than the arithmetic.
-	if got.PromptTokenCount != 100 || got.CandidatesTokenCount != 20 || got.TotalTokenCount != 120 {
+	if got.PromptTokenCount != 100 || got.CandidatesTokenCount != 13 || got.TotalTokenCount != 120 {
 		t.Errorf("totals = %#v", got)
 	}
 	if got.CachedContentTokenCount != 40 {
@@ -299,6 +298,20 @@ func TestConvertUsage(t *testing.T) {
 	}
 	if got.ThoughtsTokenCount != 7 {
 		t.Errorf("reasoning = %d, want 7", got.ThoughtsTokenCount)
+	}
+}
+
+func TestConvertUsage_DoesNotTreatOverflowedTotalAsSeparateReasoning(t *testing.T) {
+	// A malformed total of zero cannot account for both MaxInt64 counts
+	// and another two reasoning tokens, even though their sum wraps to it.
+	got := convertUsage(openai.CompletionUsage{
+		PromptTokens:            math.MaxInt64,
+		CompletionTokens:        math.MaxInt64,
+		CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{ReasoningTokens: 2},
+	})
+	// Counts beyond int32 make the usage unknown before any split is tried.
+	if got != nil {
+		t.Errorf("convertUsage() = %+v, want nil", got)
 	}
 }
 
