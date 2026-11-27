@@ -16,13 +16,17 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -117,11 +121,35 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 
 	output, err := runnable.Run(toolCtx, toolInput)
 	if err != nil {
+		if panicErr, ok := errors.AsType[*toolinternal.PanicError](err); ok {
+			// A recovered panic's text carries the panic value and the
+			// goroutine stack, and a workflow run error can reach REST
+			// clients and models. Keep the detail on the active span and
+			// surface a generic failure, as a function response would.
+			telemetry.RecordError(trace.SpanFromContext(toolCtx), err)
+			return nil, &toolPanicError{toolName: n.tool.Name(), panicErr: panicErr}
+		}
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
 	}
 
 	return output, nil
 }
+
+// toolPanicError reports a recovered tool panic with a generic message. It
+// still unwraps to the *toolinternal.PanicError, so a caller that turns the
+// error into a function response (toolinternal.ModelErrorText) recognizes the
+// panic however deeply the workflow error is wrapped, while the text that
+// reaches run errors and models carries neither the panic value nor the stack.
+type toolPanicError struct {
+	toolName string
+	panicErr *toolinternal.PanicError
+}
+
+func (e *toolPanicError) Error() string {
+	return fmt.Sprintf("tool %q execution failed with an internal error", e.toolName)
+}
+
+func (e *toolPanicError) Unwrap() error { return e.panicErr }
 
 // ValidateOutput validates the tool output against the node's output
 // schema, adding a FunctionTool-specific fallback on top of the default
