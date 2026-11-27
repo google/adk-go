@@ -21,7 +21,9 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"time"
 
@@ -93,6 +95,7 @@ func validateRequiredStrings(fields []requiredField) []string {
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
+// Errors caused solely by an empty or path-separated FileName wrap [fs.ErrInvalid].
 func (req *SaveRequest) Validate() error {
 	return req.validate(false)
 }
@@ -121,7 +124,7 @@ func (req *SaveRequest) validate(allowRef bool) error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return missingRequiredFieldsError("save", missingFields)
 	}
 
 	// A reference part carries neither Part.Text nor Part.InlineData; only the
@@ -138,9 +141,27 @@ func (req *SaveRequest) validate(allowRef bool) error {
 	return nil
 }
 
+// invalidNameError preserves the existing validation error text while matching
+// fs.ErrInvalid via errors.Is so callers can distinguish invalid artifact names
+// from storage or configuration errors.
+type invalidNameError struct {
+	msg string
+}
+
+func (e invalidNameError) Error() string { return e.msg }
+func (e invalidNameError) Unwrap() error { return fs.ErrInvalid }
+
+func missingRequiredFieldsError(kind string, missingFields []string) error {
+	msg := fmt.Sprintf("invalid %s request: missing required fields: %s", kind, strings.Join(missingFields, ", "))
+	if len(missingFields) == 1 && missingFields[0] == "FileName" {
+		return invalidNameError{msg: msg}
+	}
+	return errors.New(msg)
+}
+
 func validateFileName(name string) error {
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		return fmt.Errorf("invalid name: filename cannot contain path separators")
+		return invalidNameError{msg: "invalid name: filename cannot contain path separators"}
 	}
 	return nil
 }
@@ -161,6 +182,7 @@ type LoadRequest struct {
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
+// Errors caused solely by an empty or path-separated FileName wrap [fs.ErrInvalid].
 func (req *LoadRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -175,7 +197,7 @@ func (req *LoadRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid load request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return missingRequiredFieldsError("load", missingFields)
 	}
 
 	// Validate that FileName doesn't contain path separators
@@ -203,6 +225,7 @@ type DeleteRequest struct {
 }
 
 // Validate checks if the struct is valid or if it is missing fields.
+// Errors caused solely by an empty or path-separated FileName wrap [fs.ErrInvalid].
 func (req *DeleteRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -217,7 +240,7 @@ func (req *DeleteRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid delete request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return missingRequiredFieldsError("delete", missingFields)
 	}
 
 	// Validate that FileName doesn't contain path separators
@@ -262,7 +285,8 @@ type VersionsRequest struct {
 	AppName, UserID, SessionID, FileName string
 }
 
-// Validate checks if the struct is valid or if its missing field
+// Validate checks if the struct is valid or if it is missing a field.
+// Errors caused solely by an empty or path-separated FileName wrap [fs.ErrInvalid].
 func (req *VersionsRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -277,7 +301,7 @@ func (req *VersionsRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid versions request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return missingRequiredFieldsError("versions", missingFields)
 	}
 
 	// Validate that FileName doesn't contain path separators
@@ -329,6 +353,7 @@ type GetArtifactVersionRequest struct {
 }
 
 // Validate checks if the struct is valid or if it is missing a field.
+// Errors caused solely by an empty or path-separated FileName wrap [fs.ErrInvalid].
 func (req *GetArtifactVersionRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
@@ -343,7 +368,7 @@ func (req *GetArtifactVersionRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
-		return fmt.Errorf("invalid get artifact version request: missing required fields: %s", strings.Join(missingFields, ", "))
+		return missingRequiredFieldsError("get artifact version", missingFields)
 	}
 
 	// Validate that FileName doesn't contain path separators

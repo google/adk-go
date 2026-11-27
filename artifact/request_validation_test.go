@@ -15,7 +15,9 @@
 package artifact
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"reflect"
 	"testing"
 
@@ -459,6 +461,77 @@ func TestValidateRequiredStrings(t *testing.T) {
 			got := validateRequiredStrings(tc.input)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("validateRequiredStrings() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidFileNameWrapsErrInvalid(t *testing.T) {
+	tests := []struct {
+		name           string
+		req            Validator
+		wantErrInvalid bool
+	}{
+		{
+			name:           "load forward slash",
+			req:            &LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "a/b.txt"},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "load backslash",
+			req:            &LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: `a\b.txt`},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "load empty filename only",
+			req:            &LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: ""},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "versions empty filename only",
+			req:            &VersionsRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: ""},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "versions path separator",
+			req:            &VersionsRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "a/b.txt"},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "get version empty filename only",
+			req:            &GetArtifactVersionRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: ""},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "save empty filename only",
+			req:            &SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "", Part: genai.NewPartFromText("x")},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "delete empty filename only",
+			req:            &DeleteRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: ""},
+			wantErrInvalid: true,
+		},
+		{
+			name:           "load missing session and filename is not ErrInvalid",
+			req:            &LoadRequest{AppName: "app", UserID: "u"},
+			wantErrInvalid: false,
+		},
+		{
+			name:           "load missing app name is not ErrInvalid",
+			req:            &LoadRequest{UserID: "u", SessionID: "s", FileName: "doc.txt"},
+			wantErrInvalid: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+			if got := errors.Is(err, fs.ErrInvalid); got != tt.wantErrInvalid {
+				t.Errorf("errors.Is(err, fs.ErrInvalid) = %v, want %v (err: %v)", got, tt.wantErrInvalid, err)
 			}
 		})
 	}

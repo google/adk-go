@@ -239,7 +239,7 @@ func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 	if err := appendInitialInstructions(req, listed.FileNames); err != nil {
 		return err
 	}
-	return t.processLoadArtifactsFunctionCall(ctx, req, listed.FileNames)
+	return t.processLoadArtifactsFunctionCall(ctx, req)
 }
 
 func appendInitialInstructions(req *model.LLMRequest, artifactNames []string) error {
@@ -262,15 +262,15 @@ func appendInitialInstructions(req *model.LLMRequest, artifactNames []string) er
 	return nil
 }
 
-func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest, availableNames []string) error {
+func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {
 	if len(req.Contents) == 0 {
 		return nil
 	}
 	responses := slices.DeleteFunc(utils.FunctionResponses(req.Contents[len(req.Contents)-1]), func(response *genai.FunctionResponse) bool {
 		return response.Name != t.Name()
 	})
-	// Like Python, keep other calls' results when a parallel response is
-	// malformed or names an unavailable artifact. Preserve Go's single-call errors.
+	// Like Python, ignore a malformed sibling response when multiple
+	// load_artifacts calls run in parallel, while preserving single-call errors.
 	parallel := len(responses) > 1
 	var jobs []loadJob
 	for i, response := range responses {
@@ -287,17 +287,20 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		}
 		jobs = append(jobs, responseJobs...)
 	}
-	if parallel {
-		jobs = slices.DeleteFunc(jobs, func(job loadJob) bool {
-			return !slices.Contains(availableNames, job.Name)
-		})
-	}
 	if len(jobs) == 0 {
 		return nil
 	}
 
+	// Deliberate divergence from adk-python (load_artifacts_tool.py:553-558,
+	// 582-584), which logs a warning and silently skips unavailable or missing
+	// artifacts: Go library code has no global logger, and reporting
+	// model-fixable name errors (fs.ErrNotExist or fs.ErrInvalid from the
+	// service) back to the model as user-role text lets it recover while still
+	// letting custom services accept nested names. Storage, permission,
+	// unsupported, and cancellation errors still fail the run.
 	artifactsService := ctx.Artifacts()
 	results := make([]*genai.Content, len(jobs))
+	notes := make([]string, len(jobs))
 	group, childCtx := errgroup.WithContext(ctx)
 	for i, job := range jobs {
 		group.Go(func() error {
@@ -309,8 +312,8 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 				content, err = t.loadIndividualArtifact(childCtx, artifactsService, job.loadItem)
 			}
 			if err != nil {
-				// The file may have been removed after List completed.
-				if parallel && errors.Is(err, fs.ErrNotExist) {
+				if note := modelFixableNote(job, err); note != "" {
+					notes[i] = note
 					return nil
 				}
 				return err
@@ -329,7 +332,30 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 			req.Contents = append(req.Contents, content)
 		}
 	}
+	if failureNotes := slices.DeleteFunc(notes, func(note string) bool { return note == "" }); len(failureNotes) > 0 {
+		req.Contents = append(req.Contents, genai.NewContentFromText(strings.Join(failureNotes, "\n"), genai.RoleUser))
+	}
 	return nil
+}
+
+// modelFixableNote formats a user-role note for errors the model can correct on
+// its next turn (missing artifact/version or invalid filename). It returns ""
+// for errors that must continue to fail the run.
+func modelFixableNote(job loadJob, err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if !job.listVersions && job.Version != nil {
+			return fmt.Sprintf("artifact %q (version %d) was not found", job.Name, *job.Version)
+		}
+		return fmt.Sprintf("artifact %q was not found", job.Name)
+	case errors.Is(err, fs.ErrInvalid):
+		return fmt.Sprintf(
+			"artifact %q is not a valid artifact name; names must be non-empty plain filenames without path separators",
+			job.Name,
+		)
+	default:
+		return ""
+	}
 }
 
 // loadJob is one artifact to load, or whose versions to list.
@@ -431,12 +457,10 @@ func artifactNamesFromResponse(raw any) ([]string, error) {
 
 // redactFor redacts err, an error the artifact service returned for name. When
 // err wraps none of redactSentinels and name is empty or contains a path
-// separator, the message adds that fact to the error type. The in-memory and
-// GCS services reject such names with errors that wrap no sentinel, so the
-// type alone would not tell a bad name from a storage failure. The type stays
-// in the message because a service that accepts such names can fail for other
-// reasons, and the name is checked only after the service has failed, so such
-// a service still serves them.
+// separator, the message adds that fact to the error type. The type stays in
+// the message because a custom service that accepts such names can fail for
+// storage reasons, and the name is checked only after the service has failed,
+// so such a service still serves them.
 func redactFor(name string, err error) error {
 	if r := redactSentinel(err); r != nil {
 		return r
