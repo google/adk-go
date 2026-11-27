@@ -104,8 +104,16 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			return
 		}
 
-		emit, consumerGone := makeEmit(yield, ctx)
+		emit, finish := makeEmit(yield, ctx)
 		sub := newDynamicSubScheduler(ctx, n.composePath(ctx), emit)
+		ds := sub.(*dynamicSubScheduler)
+		// Detach the body's running children and close emit before the
+		// node yields anything itself; also when the body panics.
+		bodyReturned := func() (consumerGone bool) {
+			ds.bodyReturned()
+			return finish()
+		}
+		defer bodyReturned()
 
 		outputForAncestors := sub.OutputForAncestors()
 		delta := &agent.CommonContextDelta{
@@ -116,7 +124,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		orchestratorCtx := ctx.WithDelta(delta)
 
 		out, err := n.fn(orchestratorCtx, typedInput, emit)
-		if consumerGone() {
+		if bodyReturned() {
 			return
 		}
 		if err != nil {
@@ -131,7 +139,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			if errors.Is(err, ErrNodeInterrupted) {
 				return
 			}
-			publishFailureInventory(ctx, n, sub.(*dynamicSubScheduler).childFailures())
+			publishFailureInventory(ctx, n, ds.childFailures())
 			yield(nil, err)
 			return
 		}
@@ -200,10 +208,9 @@ func (n *dynamicNode[IN, OUT]) composePath(parent agent.Context) string {
 	return n.Name()
 }
 
-// makeEmit wraps yield as an emit callback and reports whether the
-// consumer rejected an event. Contract: nil return = delivered,
-// non-nil = orchestrator must stop (calling yield after it returned
-// false is a runtime error per the iter spec).
+// makeEmit wraps yield as an emit callback. Contract: nil return =
+// delivered, non-nil = orchestrator must stop (calling yield after it
+// returned false is a runtime error per the iter spec).
 //
 // When yield returns false without ctx cancellation, return
 // context.Canceled as a stand-in.
@@ -212,12 +219,28 @@ func (n *dynamicNode[IN, OUT]) composePath(parent agent.Context) string {
 // children (see WithUseSubBranch) that all emit through this one
 // callback, and calling the same yield from multiple goroutines panics
 // the iterator and races the parent runNode's completion accumulator.
-func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) (func(*session.Event) error, func() bool) {
+//
+// The caller calls finish once the body returns, before it yields
+// anything itself, and also when the body panics. From then on the
+// node's iterator is ending, so emit no longer calls yield and returns
+// errEmitAfterReturn instead; a detached RunNode child's events are
+// then delivered through the workflow's detachedRuns (see
+// dynamicSubScheduler.forward). finish reports whether the consumer
+// had already rejected an event, in which case the caller must return
+// without yielding.
+func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) (emit func(*session.Event) error, finish func() (consumerGone bool)) {
 	var mu sync.Mutex
 	stopped := false
-	emit := func(ev *session.Event) error {
+	finished := false
+	emit = func(ev *session.Event) error {
 		mu.Lock()
 		defer mu.Unlock()
+		if finished {
+			if err := parentCtx.Err(); err != nil {
+				return err
+			}
+			return errEmitAfterReturn
+		}
 		if err := parentCtx.Err(); err != nil {
 			return err
 		}
@@ -233,11 +256,11 @@ func makeEmit(yield func(*session.Event, error) bool, parentCtx agent.Context) (
 		}
 		return nil
 	}
-	consumerGone := func() bool {
+	finish = func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		// Once true, the caller must return without yielding again.
+		finished = true
 		return stopped
 	}
-	return emit, consumerGone
+	return emit, finish
 }

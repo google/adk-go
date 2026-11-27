@@ -357,9 +357,10 @@ func (n *FunctionNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 // event was already emitted), any other error fails the node, and a
 // nil output suppresses the terminal event.
 func (n *FunctionNode) runEmitting(ctx agent.Context, input any, yield func(*session.Event, error) bool) {
-	emit, consumerGone := makeEmit(yield, ctx)
+	emit, finish := makeEmit(yield, ctx)
+	defer finish() // also when the body panics
 	output, err := n.emittingFn(ctx, input, emit)
-	if consumerGone() {
+	if finish() {
 		return
 	}
 	if err != nil {

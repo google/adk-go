@@ -85,6 +85,13 @@ type scheduler struct {
 	// Per-node cancel funcs. Owned by the consumer goroutine.
 	runCancels map[string]context.CancelFunc
 
+	// finishedCancels are the cancel funcs of completed activations. A
+	// detached RunNode child runs under its node's context after the
+	// node completed, so cancelAll calls these too. One entry per
+	// completed activation, held for the run, as the contexts already
+	// were. Owned by the consumer goroutine.
+	finishedCancels []context.CancelFunc
+
 	// Timers for scheduled retries. Owned by the consumer goroutine.
 	retryTimers map[string]*time.Timer
 
@@ -92,6 +99,10 @@ type scheduler struct {
 	// goroutines to the consumer.
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
+
+	// detached tracks the RunNode children that dynamic nodes of this
+	// workflow did not wait for; run keeps going until they finish.
+	detached *detachedRuns
 
 	parentCtx    agent.Context
 	workflowName string
@@ -261,6 +272,7 @@ func (retryItem) isQueueItem() {}
 // tryDispatchPending as in-flight nodes complete. 0 disables the
 // cap (unlimited).
 func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler {
+	eventQueue := make(chan queueItem, defaultEventQueueCapacity)
 	return &scheduler{
 		state:          NewRunState(),
 		graph:          g,
@@ -269,7 +281,8 @@ func newScheduler(parent agent.Context, g *graph, maxConcurrency int) *scheduler
 		runsByName:     map[string]*nodeRun{},
 		runCancels:     map[string]context.CancelFunc{},
 		retryTimers:    map[string]*time.Timer{},
-		eventQueue:     make(chan queueItem, defaultEventQueueCapacity),
+		eventQueue:     eventQueue,
+		detached:       &detachedRuns{queue: eventQueue},
 		parentCtx:      parent,
 		maxConcurrency: maxConcurrency,
 	}
@@ -405,6 +418,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	} else {
 		perNodeCtx, cancel = perNodeCtx.WithAgentCancel()
 	}
+	perNodeCtx = withDetachedRuns(perNodeCtx, s.detached)
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
@@ -546,6 +560,9 @@ func (s *scheduler) cancelAll() {
 	for _, cancel := range s.runCancels {
 		cancel()
 	}
+	for _, cancel := range s.finishedCancels {
+		cancel()
+	}
 	for _, t := range s.retryTimers {
 		t.Stop()
 	}
@@ -576,7 +593,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 
 	doneChan := s.parentCtx.Done()
 
-	for len(s.runsByName) > 0 || len(s.retryTimers) > 0 {
+	for len(s.runsByName) > 0 || len(s.retryTimers) > 0 || !s.detached.closeIfIdle() {
 		var item queueItem
 		select {
 		case item = <-s.eventQueue:
@@ -646,6 +663,32 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 			delete(s.retryTimers, it.node.Name())
 			if !draining {
 				s.scheduleNode(it.node, it.input, it.triggeredBy, it.branch)
+			}
+		case detachedEventItem:
+			s.detached.handled(false)
+			s.handleDetachedEvent(it)
+			if !draining && !yield(it.ev, nil) {
+				draining = true
+				consumerGone = true
+				s.cancelAll()
+			}
+			if it.processed != nil {
+				close(it.processed)
+			}
+		case detachedDoneItem:
+			s.detached.handled(true)
+			err := detachedOutcome(it)
+			if err != nil && s.parentCtx.Err() != nil && s.echoesCancellation(err) {
+				// The invocation's own cancellation, echoed back by the
+				// child: run reports it as cancelErr below.
+				err = nil
+			}
+			if err != nil && pendingErr == nil {
+				pendingErr = err
+				if !draining {
+					draining = true
+					s.cancelAll()
+				}
 			}
 		}
 	}
@@ -807,27 +850,9 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
-	if !s.graph.isRootWrapper {
-		metadata := maps.Clone(it.ev.CustomMetadata)
-		if metadata == nil {
-			metadata = map[string]any{}
-		}
-		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
-		it.ev.CustomMetadata = metadata
-	}
-	// Stamp the activation's branch onto events that left
-	// Event.Branch empty; nodes that set a non-empty Event.Branch
-	// keep it.
-	if it.ev.Branch == "" && nr.branch != "" {
-		it.ev.Branch = nr.branch
-	}
-	// Default Content.Role for nodes that left it empty
-	// (FunctionNode/BaseNode set Parts but not Role); clients like
-	// the web UI rely on it. Before the descendant short-circuit so
-	// dynamic children are covered too.
-	if it.ev.Content != nil && it.ev.Content.Role == "" {
-		it.ev.Content.Role = defaultContentRole(it.ev.Content)
-	}
+	// Before the descendant short-circuit so dynamic children are
+	// covered too.
+	s.stampEvent(it.ev, nr.branch)
 	expectedPath := nr.nodePath
 	if expectedPath == "" {
 		expectedPath = it.nodeName
@@ -897,6 +922,38 @@ func (s *scheduler) handleEvent(it eventItem) {
 	}
 }
 
+// stampEvent fills in what every event this workflow yields carries:
+// the workflow's base path, the activation's branch when the event left
+// Event.Branch empty (nodes that set one keep it), and a default
+// Content.Role for nodes that left it empty (FunctionNode/BaseNode set
+// Parts but not Role), which clients like the web UI rely on.
+func (s *scheduler) stampEvent(ev *session.Event, branch string) {
+	if !s.graph.isRootWrapper {
+		metadata := maps.Clone(ev.CustomMetadata)
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
+		ev.CustomMetadata = metadata
+	}
+	if ev.Branch == "" && branch != "" {
+		ev.Branch = branch
+	}
+	if ev.Content != nil && ev.Content.Role == "" {
+		ev.Content.Role = defaultContentRole(ev.Content)
+	}
+}
+
+// handleDetachedEvent prepares an event of a detached RunNode child for
+// yielding. The child's node has completed, so the event updates no
+// activation's output, routes or interrupts; a detached child's
+// outcome reaches the workflow through its detachedDoneItem instead.
+func (s *scheduler) handleDetachedEvent(it detachedEventItem) {
+	if it.ev != nil {
+		s.stampEvent(it.ev, it.branch)
+	}
+}
+
 // handleCompletion finalizes a node's run: transitions its lifecycle
 // status, removes the live task, and (if scheduleNewWork is true)
 // schedules retries or successors. When the consumer is draining (caller
@@ -930,7 +987,10 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	// it will get a fresh accumulator in scheduleNode to avoid ErrMultipleOutputs
 	// from partial results of this failed run.
 	delete(s.runsByName, it.nodeName)
-	delete(s.runCancels, it.nodeName)
+	if cancel, ok := s.runCancels[it.nodeName]; ok {
+		s.finishedCancels = append(s.finishedCancels, cancel)
+		delete(s.runCancels, it.nodeName)
+	}
 
 	// A dead invocation context means the cancellation came from outside
 	// the scheduler, so this completion is not the benign sibling
