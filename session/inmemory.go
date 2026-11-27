@@ -115,31 +115,29 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	copiedSession := copySessionWithoutStateAndEvents(res)
 	copiedSession.state = s.mergeStates(res.state, appName, userID)
 
-	filteredEvents := res.events
+	events := res.events
 	if req.ExcludeEvents {
-		filteredEvents = nil
-	} else if req.NumRecentEvents > 0 {
-		start := max(len(filteredEvents)-req.NumRecentEvents, 0)
-		// create a new slice header pointing to the same array
-		filteredEvents = filteredEvents[start:]
+		events = nil
 	}
 
-	copiedSession.events = make([]*Event, 0, len(filteredEvents))
-	for _, event := range filteredEvents {
+	copiedSession.events = make([]*Event, 0, len(events))
+	for _, event := range events {
 		// Test every event rather than searching for a cut point: events are
 		// kept in append order, which need not be timestamp order, so a
 		// binary search over it could keep events from before req.After and
-		// drop ones at or after it. With NumRecentEvents unset, this returns
-		// every event at or after req.After, as the database and Vertex AI
-		// backends do. With it set, the trim above runs first, in append
-		// order, as in adk-python, while those backends filter first and
-		// then take the newest N. adk-python's in-memory filter scans back
-		// from the newest event to the first one before After, so it also
-		// drops a qualifying event appended ahead of that one.
+		// drop ones at or after it.
 		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
 			continue
 		}
 		copiedSession.events = append(copiedSession.events, event)
+	}
+	// Filter by After first, then keep the last NumRecentEvents of what is
+	// left, as adk-python's in-memory service and the database and Vertex AI
+	// backends do. Trimming first could return fewer than NumRecentEvents
+	// events while more at or after req.After exist.
+	if req.NumRecentEvents > 0 {
+		start := max(len(copiedSession.events)-req.NumRecentEvents, 0)
+		copiedSession.events = copiedSession.events[start:]
 	}
 
 	return &GetResponse{
