@@ -62,15 +62,15 @@ func clearGenaiEnv(t *testing.T) {
 	}
 }
 
-type staticToken string
+type fixedToken string
 
-func (s staticToken) Token(context.Context) (*auth.Token, error) {
+func (s fixedToken) Token(context.Context) (*auth.Token, error) {
 	return &auth.Token{Value: string(s), Type: "Bearer"}, nil
 }
 
 func testCredentials() *auth.Credentials {
 	return auth.NewCredentials(&auth.CredentialsOptions{
-		TokenProvider: staticToken("tok"),
+		TokenProvider: fixedToken("tok"),
 		QuotaProjectIDProvider: auth.CredentialsPropertyFunc(func(context.Context) (string, error) {
 			return "quota-project", nil
 		}),
