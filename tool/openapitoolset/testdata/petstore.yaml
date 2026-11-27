@@ -1,0 +1,81 @@
+openapi: 3.0.3
+info:
+  title: Pet service
+  version: 1.0.0
+servers:
+  - url: https://api.example.test/v1
+components:
+  schemas:
+    PetID:
+      type: string
+      pattern: '^[a-z0-9/-]+$'
+    PetInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Pet name
+        age:
+          type: integer
+          minimum: 0
+  parameters:
+    PetID:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/PetID'
+paths:
+  /pets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PetID'
+      - name: limit
+        in: query
+        description: Path-level limit
+        schema:
+          type: integer
+          maximum: 100
+    get:
+      operationId: getPet
+      summary: Get a pet by ID
+      parameters:
+        - name: limit
+          in: query
+          required: true
+          description: Operation-level limit
+          schema:
+            type: integer
+            maximum: 10
+        - name: X-Trace
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: session
+          in: cookie
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pet
+          content:
+            application/json:
+              schema:
+                type: object
+    post:
+      operationId: updatePet
+      summary: Update a pet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PetInput'
+      responses:
+        '200':
+          description: Updated pet
+          content:
+            application/json:
+              schema:
+                type: object
