@@ -141,6 +141,22 @@ func TestParse_Valid(t *testing.T) {
 			wantInstruction: "Markdown Body",
 		},
 		{
+			name:  "closing separator ends the file",
+			input: "---\nname: skill\ndescription: skill\n---",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+		},
+		{
+			name:  "closing separator ends a file with windows line endings",
+			input: "---\r\nname: skill\r\ndescription: skill\r\n---",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+		},
+		{
 			name:  "allowed tools as specification scalar",
 			input: "---\nname: skill\ndescription: skill\nallowed-tools: Bash(git:*) Bash(jq:*) Read\n---\nMarkdown Body",
 			want: &Frontmatter{
@@ -251,6 +267,18 @@ func TestParse_InvalidFormat(t *testing.T) {
 			input: "---\nname: skill\ndescription: skill\n--- \n# Markdown\nBody",
 		},
 		{
+			name:  "missing closing separator in a file without a final newline",
+			input: "---\nname: skill\ndescription: skill",
+		},
+		{
+			name:  "whitespace after closing separator at end of file",
+			input: "---\nname: skill\ndescription: skill\n--- ",
+		},
+		{
+			name:  "text after closing separator at end of file",
+			input: "---\nname: skill\ndescription: skill\n---# Markdown",
+		},
+		{
 			name:  "invalid yaml",
 			input: "---\n_ : invalid : _\n---\n# Markdown\nBody",
 		},
@@ -310,6 +338,11 @@ func TestParse_FailingReader(t *testing.T) {
 		{
 			name:    "timeout error",
 			reader:  iotest.TimeoutReader(strings.NewReader("---")),
+			wantErr: iotest.ErrTimeout,
+		},
+		{
+			name:    "timeout error in frontmatter",
+			reader:  iotest.TimeoutReader(strings.NewReader("---\nname: skill\n")),
 			wantErr: iotest.ErrTimeout,
 		},
 	}
