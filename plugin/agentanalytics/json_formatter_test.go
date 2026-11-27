@@ -2871,6 +2871,26 @@ func TestSanitizeRawText(t *testing.T) {
 		if got, want := scrubErrorText(`{"msg":"password=SECRET123"}`), `{"msg":"password=[REDACTED]}`; got != want {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
+		// Scrubbing the text of the valid JSON value takes its closing quote
+		// with the redacted value. sanitizeRawText and SmartTruncate return
+		// that malformed text, as main did. A second call reads it as any
+		// other malformed JSON text: sanitizeRawText keeps it as prose, and
+		// SmartTruncate, which keeps none, fails it closed, as on main.
+		const scrubbedPair = `{"msg":"password=[REDACTED]}`
+		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != scrubbedPair || !lost {
+			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, scrubbedPair)
+		}
+		if got, lost := sanitizeRawText(scrubbedPair); got != scrubbedPair || lost {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", scrubbedPair, got, lost)
+		}
+		wantPair := `"{\"msg\":\"password=[REDACTED]}"`
+		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantPair {
+			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantPair)
+		}
+		wantClosed := `"` + unparseableJSONPlaceholder + `"`
+		if raw, truncated, err := SmartTruncate(scrubbedPair, 4096); err != nil || !truncated || string(raw) != wantClosed {
+			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", scrubbedPair, raw, truncated, err, wantClosed)
+		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,
 			`{"msg":"talk to Ken\ntomorrow"}`,
@@ -2903,8 +2923,10 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
-			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
+		fallback := "token=abc rest"
+		st := newQuoteScanState(len(fallback))
+		if got, want := nestedPairEndWithState(fallback, len("token=abc "), 0, openQuoteState{}, &st), len("token=abc "); got != want {
+			t.Errorf("nestedPairEndWithState fallback = %d, want %d", got, want)
 		}
 	})
 
@@ -3535,6 +3557,91 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 		}
 		if got := row["is_truncated"]; got != true {
 			t.Errorf("rebuilt is_truncated = %v, want true", got)
+		}
+	})
+}
+
+// The language of an executable code part and the outcome of a code execution
+// result part are plain strings, so a summary redacts and bounds them like a
+// function name instead of printing them as they came.
+func TestMessageSummaryCodeLabel(t *testing.T) {
+	atCap := strings.Repeat("n", 256)
+	overCap := strings.Repeat("n", 257)
+	wideAtCap := strings.Repeat("ñ", 256)
+	const secret = "SYNTHETIC_SECRET_0123456789"
+	credential := "py api_key=" + secret
+	redacted := "py api_key=" + redactedValue
+
+	kinds := []struct {
+		name   string
+		prefix string
+		part   func(label string) *genai.Part
+	}{
+		{
+			name:   "language",
+			prefix: "Executable code (",
+			part: func(label string) *genai.Part {
+				return &genai.Part{ExecutableCode: &genai.ExecutableCode{Language: genai.Language(label), Code: "x"}}
+			},
+		},
+		{
+			name:   "outcome",
+			prefix: "Code execution result (",
+			part: func(label string) *genai.Part {
+				return &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.Outcome(label), Output: "x"}}
+			},
+		},
+	}
+	builders := []struct {
+		name   string
+		render func(*genai.Content, int, bool) (string, bool)
+	}{
+		{name: "response summary", render: formatResponseContent},
+		{name: "text summary", render: contentSummary},
+	}
+	tests := []struct {
+		name      string
+		label     string
+		maxLength int
+		noRedact  bool
+		want      string
+		wantTrunc bool
+	}{
+		{name: "documented value is kept", label: "PYTHON", maxLength: 100, want: "PYTHON"},
+		{name: "empty is unknown", label: "", maxLength: 100, want: "unknown"},
+		{name: "credential is redacted", label: credential, maxLength: 100, want: redacted, wantTrunc: true},
+		{name: "credential is redacted under an unlimited maxLength", label: credential, maxLength: -1, want: redacted, wantTrunc: true},
+		{name: "credential is kept when redaction is off", label: credential, maxLength: 100, noRedact: true, want: credential},
+		{name: "at the cap is kept", label: atCap, maxLength: 100000, want: atCap},
+		{name: "over the cap is cut", label: overCap, maxLength: 100000, want: atCap + truncationSuffix, wantTrunc: true},
+		{name: "over the cap is cut when redaction is off", label: overCap, maxLength: 100000, noRedact: true, want: atCap + truncationSuffix, wantTrunc: true},
+		{name: "multi-byte is cut by runes", label: wideAtCap + "ñ", maxLength: 100000, want: wideAtCap + truncationSuffix, wantTrunc: true},
+		{name: "over the cap is kept whole under an unlimited maxLength", label: overCap, maxLength: -1, want: overCap},
+	}
+	for _, b := range builders {
+		for _, k := range kinds {
+			for _, tt := range tests {
+				t.Run(b.name+"/"+k.name+"/"+tt.name, func(t *testing.T) {
+					got, truncated := b.render(&genai.Content{Parts: []*genai.Part{k.part(tt.label)}}, tt.maxLength, !tt.noRedact)
+					if want := k.prefix + tt.want + "): x"; got != want || truncated != tt.wantTrunc {
+						t.Errorf("got (%q, %v), want (%q, %v)", got, truncated, want, tt.wantTrunc)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("LLM_RESPONSE row redacts a credential in both labels", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = 100000 })
+		content := &genai.Content{Role: "model", Parts: []*genai.Part{kinds[0].part(credential), kinds[1].part(credential)}}
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		want := "Executable code (" + redacted + "): x | Code execution result (" + redacted + "): x"
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
 		}
 	})
 }
@@ -6816,5 +6923,27 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 				t.Errorf("smartTruncate(%s, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOff, truncOff, err, tt.wantOff, tt.wantTrunc)
 			}
 		})
+	}
+}
+
+func TestJSONFormatter_DeclaredSensitiveTypeMapKey(t *testing.T) {
+	type SyntaxToken int
+
+	gotMapOn, truncMapOn, err := SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000)
+	if err != nil || string(gotMapOn) != `{"[REDACTED]":"[REDACTED]"}` || !truncMapOn {
+		t.Errorf("SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}) = (%s, %v, %v), want (%s, true, nil)", gotMapOn, truncMapOn, err, `{"[REDACTED]":"[REDACTED]"}`)
+	}
+	gotMapOff, truncMapOff, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, false)
+	if err != nil || string(gotMapOff) != `{"1":12,"2":9}` || truncMapOff {
+		t.Errorf("smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, redact off) = (%s, %v, %v), want (%s, false, nil)", gotMapOff, truncMapOff, err, `{"1":12,"2":9}`)
+	}
+
+	gotValOn, truncValOn, err := SmartTruncate(SyntaxToken(7), 1000)
+	if err != nil || string(gotValOn) != `"[REDACTED]"` || !truncValOn {
+		t.Errorf("SmartTruncate(SyntaxToken(7)) = (%s, %v, %v), want (%s, true, nil)", gotValOn, truncValOn, err, `"[REDACTED]"`)
+	}
+	gotValOff, truncValOff, err := smartTruncate(SyntaxToken(7), 1000, false)
+	if err != nil || string(gotValOff) != `7` || truncValOff {
+		t.Errorf("smartTruncate(SyntaxToken(7), redact off) = (%s, %v, %v), want (7, false, nil)", gotValOff, truncValOff, err)
 	}
 }

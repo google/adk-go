@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -129,8 +130,26 @@ func appendGlobalInstructions(ctx agent.InvocationContext, req *model.LLMRequest
 	return nil
 }
 
+// templateSource is what instruction placeholders resolve against: {key}
+// against ReadonlyState and {artifact.name} against Artifacts. Each is read
+// only when a placeholder needs it.
+type templateSource interface {
+	ReadonlyState() session.ReadonlyState
+	Artifacts() agent.Artifacts
+}
+
+// invocationSource resolves placeholders against the session and artifacts
+// of an invocation.
+type invocationSource struct {
+	agent.InvocationContext
+}
+
+func (s invocationSource) ReadonlyState() session.ReadonlyState {
+	return s.Session().State()
+}
+
 // replaceMatch is the Go equivalent of the _replace_match async function in the Python code.
-func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
+func replaceMatch(ctx context.Context, src templateSource, match string) (string, error) {
 	// Trim curly braces: "{var_name}" -> "var_name"
 	varName := strings.TrimSpace(strings.Trim(match, "{}"))
 	optional := false
@@ -141,10 +160,11 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 
 	if after, ok := strings.CutPrefix(varName, "artifact."); ok {
 		fileName := after
-		if ctx.Artifacts() == nil {
+		artifacts := src.Artifacts()
+		if artifacts == nil {
 			return "", fmt.Errorf("artifact service is not initialized")
 		}
-		resp, err := ctx.Artifacts().Load(ctx, fileName)
+		resp, err := artifacts.Load(ctx, fileName)
 		if err != nil {
 			if optional && errors.Is(err, fs.ErrNotExist) {
 				return "", nil
@@ -158,7 +178,13 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 		return match, nil // Return the original string if not a valid name
 	}
 
-	value, err := ctx.Session().State().Get(varName)
+	// A fake agent.Context, such as one built on agent.ContextMock, can have
+	// no state.
+	state := src.ReadonlyState()
+	if state == nil {
+		return "", fmt.Errorf("session state is not available")
+	}
+	value, err := state.Get(varName)
 	if err != nil {
 		if optional && errors.Is(err, session.ErrStateKeyNotExist) {
 			return "", nil
@@ -252,24 +278,44 @@ func hasTextFileExtension(name string) bool {
 	return false
 }
 
-// isIdentifier checks if a string is a valid Go identifier.
-// This is the equivalent of Python's `str.isidentifier()`.
+// isIdentifier reports whether s is an identifier under the Unicode ID_Start
+// and ID_Continue properties (UAX #31): an underscore or an ID_Start
+// character, followed by ID_Continue characters. ID_Continue adds combining
+// marks, so names written in scripts such as Devanagari or Thai qualify.
+//
+// The one difference from ID_* is that U+309B and U+309C are rejected. They
+// are ID_Start only through Other_ID_Start and are not XID_Start or
+// XID_Continue, so str.isidentifier, which adk-python's _is_valid_state_name
+// calls and which uses the XID_* properties, rejects them as well. A few
+// other compatibility characters that are not stable under NFKC, such as
+// U+037A, are ID_* but not XID_* and are still accepted here.
 func isIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, r := range s {
 		if i == 0 {
-			if !unicode.IsLetter(r) && r != '_' {
+			if r != '_' && !isIDStart(r) {
 				return false
 			}
-		} else {
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-				return false
-			}
+		} else if !isIDContinue(r) {
+			return false
 		}
 	}
 	return true
+}
+
+func isIDStart(r rune) bool {
+	if r == '\u309b' || r == '\u309c' {
+		return false
+	}
+	return unicode.In(r, unicode.L, unicode.Nl, unicode.Other_ID_Start) &&
+		!unicode.Is(unicode.Pattern_Syntax, r)
+}
+
+func isIDContinue(r rune) bool {
+	return isIDStart(r) ||
+		unicode.In(r, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
 }
 
 // isValidStateName checks if the variable name is a valid state name.
@@ -289,8 +335,19 @@ func isValidStateName(varName string) bool {
 	return false
 }
 
-// InjectSessionState populates values in an instruction template from a context.
+// InjectSessionState populates values in an instruction template from the
+// session and artifacts of an invocation.
 func InjectSessionState(ctx agent.InvocationContext, template string) (string, error) {
+	return injectState(ctx, invocationSource{ctx}, template)
+}
+
+// InjectContextState populates values in an instruction template from the
+// state and artifacts of a callback or tool context.
+func InjectContextState(ctx agent.Context, template string) (string, error) {
+	return injectState(ctx, ctx, template)
+}
+
+func injectState(ctx context.Context, src templateSource, template string) (string, error) {
 	// Find all matches, then iterate through them, building the result string.
 	var result strings.Builder
 	lastIndex := 0
@@ -310,7 +367,7 @@ func InjectSessionState(ctx agent.InvocationContext, template string) (string, e
 
 		// Get the replacement for the current match
 		matchStr := template[startIndex:endIndex]
-		replacement, err := replaceMatch(ctx, matchStr)
+		replacement, err := replaceMatch(ctx, src, matchStr)
 		if err != nil {
 			return "", err // Propagate the error
 		}

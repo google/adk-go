@@ -35,6 +35,19 @@ type LLMRequest struct {
 	Config   *genai.GenerateContentConfig
 
 	Tools map[string]any `json:"-"`
+
+	// CacheConfig turns on context caching for this request when non-nil. The
+	// flow sets it from the runner's ContextCache config, and a model that
+	// does not support caching ignores it. See [ContextCacheConfig].
+	CacheConfig *ContextCacheConfig
+	// CacheMetadata is the cache state recorded on the agent's latest model
+	// response, which the model checks before reusing or replacing that
+	// cache. Nil on the agent's first request, or when caching is off.
+	CacheMetadata *CacheMetadata
+	// PreviousPromptTokenCount is the prompt token count the provider
+	// reported for the agent's previous request, which sizes a new cache. Zero
+	// when no earlier count is known, and no cache is created then.
+	PreviousPromptTokenCount int32
 }
 
 // LLMResponse is the raw LLM response.
@@ -65,4 +78,8 @@ type LLMResponse struct {
 	ErrorMessage            string             `json:"errorMessage,omitempty"`
 	FinishReason            genai.FinishReason `json:"finishReason,omitempty"`
 	AvgLogprobs             float64            `json:"avgLogprobs,omitempty"`
+	// CacheMetadata is the context cache state of the request that produced
+	// this response, set when the request had a CacheConfig. Only complete
+	// responses carry it, not partial streaming chunks.
+	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
 }

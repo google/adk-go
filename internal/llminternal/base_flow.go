@@ -97,6 +97,10 @@ var (
 		// appends is reflected in the history assembled for this very request.
 		CompactionRequestProcessor,
 		ContentsRequestProcessor,
+		// The same position as in adk-python's single flow. The model fingerprints
+		// the finished request when it is called, so processors after this one
+		// still count towards the cached prefix.
+		ContextCacheRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
 		nlPlanningRequestProcessor,
@@ -1207,14 +1211,21 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // streamed delta looks final: SSE clients render each delta as a complete
 // turn and the runner persists each one as a separate session event. If it
 // drops TurnComplete, clients never see the turn end. If it drops
-// UsageMetadata, the call disappears from token accounting.
+// UsageMetadata, the call disappears from token accounting, and context
+// caching, which sizes a cache from the previous prompt's token count, never
+// creates one. If it drops CacheMetadata, the session loses track of the cache
+// the call used: the next turn creates another instead of reusing it.
 //
 // Partial and TurnComplete are plain bools, so an unset value cannot be told
 // apart from an explicit false; a delta is never final while the stream
 // continues, so a partial original keeps its replacement partial, and a
 // response that ended the turn keeps its replacement ending it. UsageMetadata
-// set on the replacement is respected. The replacement is copied rather than
-// modified, and returned as is when nothing needs filling.
+// and CacheMetadata set on the replacement are respected. The replacement is
+// copied rather than modified, and returned as is when nothing needs filling.
+//
+// adk-python carries the first three fields but not the cache state
+// (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
+// callback that replaces every reply leaves it caching nothing.
 func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
 	if original == nil {
 		return replacement
@@ -1222,7 +1233,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	inheritPartial := original.Partial && !replacement.Partial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
-	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
+	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage && !inheritCache {
 		return replacement
 	}
 	merged := *replacement
@@ -1234,6 +1246,9 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	if inheritUsage {
 		merged.UsageMetadata = original.UsageMetadata
+	}
+	if inheritCache {
+		merged.CacheMetadata = original.CacheMetadata
 	}
 	return &merged
 }
@@ -1414,6 +1429,18 @@ Suggested fixes:
   - Check for typos in function name`, toolName, joinedTools)
 }
 
+// toolNotFoundResponse is the function response the model gets for a call to
+// toolName when no tool of that name is available and no callback answers
+// it. The text is adk-python's, and it tells the model which tools it can
+// call instead.
+func toolNotFoundResponse(toolName string, availableTools []string) map[string]any {
+	available := strings.Join(availableTools, ", ")
+	if available == "" {
+		available = "none"
+	}
+	return map[string]any{"error": fmt.Sprintf("Invoking `%s()` failed as no tool with that name is available. The tools you can call are: %s. You could retry, but it is IMPORTANT that you only call a tool from that list.", toolName, available)}
+}
+
 type cancelledToolContext struct {
 	agent.Context
 	// Marker: this is one of ADK's own context types, so the identity procedure
@@ -1500,7 +1527,9 @@ func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
 // TODO: check feasibility of running tool.Run concurrently.
 func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
-	toolNames := slices.Collect(maps.Keys(toolsDict))
+	// adk-python lists tools in declaration order; toolsDict is a map, so the
+	// names are sorted to keep the not-found error text deterministic.
+	toolNames := slices.Sorted(maps.Keys(toolsDict))
 
 	// Merged span for parallel tool calls - create only if there is more than one tool call.
 	if len(fnCalls) > 1 {
@@ -1551,10 +1580,25 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				var found bool
 				curTool, found = toolsDict[fnCall.Name]
 				if !found {
-					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
-					if err != nil {
-						result = map[string]any{"error": err.Error()}
+					// Before-tool callbacks may answer a call to a tool that does not
+					// exist. Their answer then goes through the on-tool-error and
+					// after-tool callbacks, as for a tool that exists.
+					missing := &fakeTool{name: fnCall.Name}
+					var err error
+					result, err = f.runBeforeToolCallbacks(toolCtx, missing, args)
+					if result != nil || err != nil {
+						result = f.finishToolCall(toolCtx, missing, args, result, err)
+					} else {
+						// Nothing answered and no tool runs, so the after-tool
+						// callbacks are skipped.
+						lookupErr := newToolNotFoundError(fnCall.Name, toolNames)
+						result, err = f.runOnToolErrorCallbacks(toolCtx, missing, args, lookupErr)
+						switch {
+						case err == lookupErr: // No on-tool-error callback answered.
+							result = toolNotFoundResponse(fnCall.Name, toolNames)
+						case err != nil:
+							result = map[string]any{"error": err.Error()}
+						}
 					}
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
@@ -1719,21 +1763,28 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
-	var response map[string]any
-	var err error
-	pluginManager := pluginManagerFromContext(toolCtx)
-	if pluginManager != nil {
-		response, err = pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs)
+func (f *Flow) runBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
+	if pluginManager := pluginManagerFromContext(toolCtx); pluginManager != nil {
+		if result, err := pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs); result != nil || err != nil {
+			return result, err
+		}
 	}
-	if response == nil && err == nil {
-		response, err = f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
-	}
+	return f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
+}
 
+func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
+	response, err := f.runBeforeToolCallbacks(toolCtx, tool, fArgs)
 	if response == nil && err == nil {
 		response, err = tool.Run(toolCtx, fArgs)
 	}
+	return f.finishToolCall(toolCtx, tool, fArgs, response, err)
+}
 
+// finishToolCall passes the error of a tool call to the on-tool-error
+// callbacks and its outcome to the after-tool callbacks, and returns the
+// function response for the model.
+func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, response map[string]any, err error) map[string]any {
+	pluginManager := pluginManagerFromContext(toolCtx)
 	var errorResponse map[string]any
 	var cbErr error
 	if err != nil && pluginManager != nil {
@@ -1815,7 +1866,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, 
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
