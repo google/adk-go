@@ -51,6 +51,42 @@ type Capabilities struct {
 	AcceptsOutputSchemaAndTools bool
 }
 
+// RunHTTPOptionsFilter is implemented by an LLM that cannot send every field
+// of genai.HTTPOptions. Before the agent flow merges agent.RunConfig.HTTPOptions
+// into a request for such a model, it replaces them with what RunHTTPOptions
+// returns, so that options set for every agent of a run do not make the model
+// refuse the request. HTTP options from the agent's own GenerateContentConfig
+// are not filtered, and the model still validates them.
+//
+// The agent flow looks for RunHTTPOptionsFilter on the agent's model only. A
+// model that wraps another LLM implements it by forwarding to the wrapped model
+// when that model implements it; otherwise the wrapped model receives the
+// run's HTTP options unfiltered.
+//
+// RunHTTPOptions must not modify opts, and returns nil when nothing of opts is
+// left. It may return values that share maps and pointers with opts.
+type RunHTTPOptionsFilter interface {
+	RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions
+}
+
+// RunLabelsFilter is implemented by an LLM that cannot send every request
+// label. Before the agent flow merges agent.RunConfig.Labels into a request for
+// such a model, it replaces them with what RunLabels returns, so that labels
+// set for every agent of a run do not make the model refuse the request. Labels
+// from the agent's own GenerateContentConfig are not filtered, and the model
+// still validates them.
+//
+// The agent flow looks for RunLabelsFilter on the agent's model only. A model
+// that wraps another LLM implements it by forwarding to the wrapped model when
+// that model implements it; otherwise the wrapped model receives the run's
+// labels unfiltered.
+//
+// RunLabels must not modify labels. It may return labels itself, or nil when
+// none is left.
+type RunLabelsFilter interface {
+	RunLabels(labels map[string]string) map[string]string
+}
+
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
 	Model    string
