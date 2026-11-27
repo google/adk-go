@@ -231,6 +231,254 @@ func TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow(t *testing.T) {
 	}
 }
 
+// TestRun_FunctionResponseRerunsNodeWithTriggeringInput checks that a re-entry
+// node with two incoming edges reruns on resume with the input it paused with.
+// The first declared edge comes from a node that finished but routed elsewhere,
+// and its output must not replace the input from the node that triggered the
+// pause. With the wrong input the node asks again under another interrupt ID
+// and the answer never reaches it.
+func TestRun_FunctionResponseRerunsNodeWithTriggeringInput(t *testing.T) {
+	a := workflow.NewEmittingFunctionNode("a", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Routes = []string{"skip"}
+		ev.Output = "A"
+		return nil, emit(ev)
+	}, workflow.NodeConfig{})
+	b := workflow.NewFunctionNode("b", func(agent.Context, string) (string, error) { return "B", nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: a},
+			{From: a, To: ask, Route: workflow.StringRoute("go")},
+			{From: a, To: b, Route: workflow.StringRoute("skip")},
+			{From: b, To: ask},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-B", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"B", "B"}; !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeAfterLoop checks the same for a node
+// reached at the end of a validate and fix loop. The validator routes "retry"
+// on its first visit and nothing on its second, so the second visit takes the
+// Default edge into the re-entry node. The route of the first visit must not
+// count against that edge on resume.
+func TestRun_FunctionResponseRerunsNodeAfterLoop(t *testing.T) {
+	visits := 0
+	validate := workflow.NewEmittingFunctionNode("validate", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		visits++
+		if visits > 1 {
+			return "valid", nil
+		}
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Routes = []string{"retry"}
+		ev.Output = "invalid"
+		return nil, emit(ev)
+	}, workflow.NodeConfig{})
+	fix := workflow.NewFunctionNode("fix", func(agent.Context, string) (string, error) { return "fixed", nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: validate},
+			{From: validate, To: fix, Route: workflow.StringRoute("retry")},
+			{From: fix, To: validate, Route: workflow.Default},
+			{From: fix, To: ask, Route: workflow.StringRoute("give up")},
+			{From: validate, To: ask, Route: workflow.Default},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-valid", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"valid", "valid"}; !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeAfterRetry checks a predecessor that is
+// retried. Its first attempt routes "skip" and fails, and the retry succeeds
+// without a route and takes the Default edge into the re-entry node. The route
+// of the failed attempt must not count against that edge on resume.
+func TestRun_FunctionResponseRerunsNodeAfterRetry(t *testing.T) {
+	attempts := 0
+	check := workflow.NewEmittingFunctionNode("check", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		attempts++
+		if attempts == 1 {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Routes = []string{"skip"}
+			if err := emit(ev); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("scripted failure")
+		}
+		return "checked", nil
+	}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
+	skip := workflow.NewFunctionNode("skip", func(agent.Context, any) (string, error) { return "skipped", nil }, workflow.NodeConfig{})
+	// other has output and comes first among the edges into ask, but its
+	// edge never fires.
+	other := workflow.NewFunctionNode("other", func(agent.Context, any) (string, error) { return "other", nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: other},
+			{From: workflow.Start, To: check},
+			{From: other, To: ask, Route: workflow.StringRoute("never")},
+			{From: check, To: skip, Route: workflow.StringRoute("skip")},
+			{From: skip, To: ask},
+			{From: check, To: ask, Route: workflow.Default},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-checked", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"checked", "checked"}; attempts != 2 || !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("check ran %d times, ask ran with inputs %q and got the answer %v, want 2 runs, inputs %q and the answer yes", attempts, inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeTriggeredOverStart checks a re-entry node
+// that was triggered over its START edge while another predecessor with output
+// routed elsewhere. It must rerun with the workflow input, as adk-python does,
+// not with that predecessor's output.
+func TestRun_FunctionResponseRerunsNodeTriggeredOverStart(t *testing.T) {
+	a := workflow.NewEmittingFunctionNode("a", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Routes = []string{"skip"}
+		ev.Output = "A"
+		return nil, emit(ev)
+	}, workflow.NodeConfig{})
+	b := workflow.NewFunctionNode("b", func(agent.Context, any) (any, error) { return nil, nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: a},
+			{From: a, To: ask, Route: workflow.StringRoute("go")},
+			{From: a, To: b, Route: workflow.StringRoute("skip")},
+			{From: workflow.Start, To: ask},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-start", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"start", "start"}; !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeBesidePausedPredecessor checks that a
+// predecessor waiting on its own interrupt is not taken for the trigger. It
+// emitted output before it paused, but a waiting node schedules no successors.
+func TestRun_FunctionResponseRerunsNodeBesidePausedPredecessor(t *testing.T) {
+	done := workflow.NewFunctionNode("done", func(agent.Context, string) (string, error) { return "done", nil }, workflow.NodeConfig{})
+	waiting := workflow.NewEmittingFunctionNode("waiting", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = "not yet"
+		if err := emit(ev); err != nil {
+			return nil, err
+		}
+		_, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "waiting"})
+		return nil, err
+	}, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: done},
+			{From: workflow.Start, To: waiting},
+			{From: waiting, To: ask, Route: workflow.Default},
+			{From: done, To: ask},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-done", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"done", "done"}; !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
+	}
+}
+
 // TestRun_FunctionResponseSkipsSiblingsOfGraphWorkflow checks that a composite
 // root does not re-run the sub-agents ahead of or beside a graph workflow when
 // a node of the workflow gets its adk_request_input response. The LLM sibling
