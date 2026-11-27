@@ -56,7 +56,9 @@ var IgnoredHTTPOptionFields = []string{"Headers"}
 // support: Timeout, which RequestTimeout extracts. Any other field outside
 // IgnoredHTTPOptionFields is refused, including fields genai adds after this
 // list; those it has today belong to ClientConfig (BaseURL, APIVersion), shape a
-// Gemini body (ExtraBody), or set a retry schedule openai-go already owns.
+// Gemini body (ExtraBody), or set a retry schedule openai-go already owns
+// (RetryOptions; option.WithMaxRetries in ClientConfig.Options sets its retry
+// count).
 var SupportedHTTPOptionFields = []string{"Timeout"}
 
 // ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning
@@ -210,7 +212,11 @@ func rejectUnsupportedFields(prefix string, s any, supported []string) error {
 	for i := range v.NumField() {
 		field := v.Type().Field(i)
 		if field.IsExported() && !slices.Contains(supported, field.Name) && !v.Field(i).IsZero() {
-			return fmt.Errorf("%w: %s%s", ErrUnsupportedConfigField, prefix, field.Name)
+			name := prefix + field.Name
+			if name == "HTTPOptions.RetryOptions" {
+				return fmt.Errorf("%w: %s; set the retry count with option.WithMaxRetries in ClientConfig.Options", ErrUnsupportedConfigField, name)
+			}
+			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, name)
 		}
 	}
 	return nil
