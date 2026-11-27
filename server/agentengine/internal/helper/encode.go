@@ -56,6 +56,14 @@ func convertSnakeValue(path string, v reflect.Value, depth int, active map[snake
 	if !v.IsValid() {
 		return nil, nil
 	}
+	// An interface adds no JSON nesting, so it costs no depth step. The value
+	// inside it is never addressable, so unwrapping it here loses nothing.
+	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil, nil
+		}
+		v = v.Elem()
+	}
 	switch v.Kind() {
 	case reflect.Pointer, reflect.Map, reflect.Slice:
 		if !v.IsNil() {
@@ -187,7 +195,7 @@ func convertSnakeValue(path string, v reflect.Value, depth int, active map[snake
 			return map[string]any{}, nil
 		}
 		return res, nil
-	case reflect.Pointer, reflect.Interface:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return nil, nil
 		}
@@ -227,9 +235,11 @@ func walkableFields(t reflect.Type, seen map[reflect.Type]bool) bool {
 			ft = ft.Elem()
 		}
 		if f.Anonymous && ft.Kind() == reflect.Struct {
-			// An embedded time.Time or marshaled struct is emitted as one key.
+			// An embedded time.Time or exported marshaled struct is emitted as
+			// one key. An unexported marshaled struct cannot be called through
+			// the embedding, so its methods count only on the promoting struct.
 			if walkableFields(ft, seen) || ft == reflect.TypeFor[time.Time]() ||
-				hasMarshaler(ft) || hasMarshaler(reflect.PointerTo(ft)) {
+				f.IsExported() && (hasMarshaler(ft) || hasMarshaler(reflect.PointerTo(ft))) {
 				return true
 			}
 			continue

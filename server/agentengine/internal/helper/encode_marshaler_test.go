@@ -199,3 +199,146 @@ func TestConvertSnakeOpaqueValues(t *testing.T) {
 		})
 	}
 }
+
+type textInner struct{ v string }
+
+func (t textInner) MarshalText() ([]byte, error) { return []byte(t.v), nil }
+
+type embedsTextInner struct{ textInner }
+
+type textInnerWithField struct {
+	textInner
+	X int `json:"x"`
+}
+
+type selfEmbed struct{ *selfEmbed }
+
+type anyChain struct {
+	Next any `json:"next"`
+	V    int `json:"v"`
+}
+
+// TestConvertSnakeGuards checks values that would crash the walk without
+// its guards.
+func TestConvertSnakeGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  map[string]any
+	}{
+		{
+			// The marshaler promoted from an unexported embedding is used, as
+			// encoding/json does.
+			name:  "promoted_value_marshaler_from_unexported_embedding",
+			value: struct{ E embedsTextInner }{embedsTextInner{textInner{v: "x"}}},
+			want:  map[string]any{"e": "x"},
+		},
+		{
+			// The walk reaches textInner through the unexported embedding, where
+			// it is not interfaceable, so its MarshalText cannot be called there.
+			// The outer struct has a walkable field, so it keeps snake_case keys
+			// where encoding/json would use the promoted MarshalText.
+			name:  "unexported_embedded_value_marshaler",
+			value: struct{ E textInnerWithField }{textInnerWithField{textInner{v: "x"}, 1}},
+			want:  map[string]any{"e": map[string]any{"x": int64(1)}},
+		},
+		{
+			name:  "self_embedding_field_type",
+			value: struct{ R selfEmbed }{},
+			want:  map[string]any{"r": map[string]any{}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertSnake("", tc.value)
+			if err != nil {
+				t.Fatalf("convertSnake() failed: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("convertSnake() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestStreamedOutputKeepsDeepValues checks that values nested through
+// interfaces deeper than half of maxSnakeDepth still stream their output, on
+// the snake_case path and on the encoding/json fallback.
+func TestStreamedOutputKeepsDeepValues(t *testing.T) {
+	const depth = 200
+	chain := func(leaf any, wrap func(any) any) any {
+		out := leaf
+		for range depth - 1 {
+			out = wrap(out)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		output any
+		next   func(any) (any, bool)
+	}{
+		{
+			name:   "struct_any_fields",
+			output: chain(anyChain{}, func(n any) any { return anyChain{Next: n} }),
+			next: func(n any) (any, bool) {
+				m, ok := n.(map[string]any)
+				return m["next"], ok
+			},
+		},
+		{
+			name:   "map_values",
+			output: chain(map[string]any{}, func(n any) any { return map[string]any{"next": n} }),
+			next: func(n any) (any, bool) {
+				m, ok := n.(map[string]any)
+				return m["next"], ok
+			},
+		},
+		{
+			name:   "slice_elements",
+			output: chain([]any{}, func(n any) any { return []any{n} }),
+			next: func(n any) (any, bool) {
+				s, ok := n.([]any)
+				if !ok || len(s) == 0 {
+					return nil, ok
+				}
+				return s[0], true
+			},
+		},
+		{
+			// A netip.Addr map key fails the snake_case conversion, so the
+			// output goes through the encoding/json fallback.
+			name: "fallback_after_unsupported_key",
+			output: chain(anyChain{Next: map[netip.Addr]int{netip.MustParseAddr("10.0.0.1"): 1}},
+				func(n any) any { return anyChain{Next: n} }),
+			next: func(n any) (any, bool) {
+				m, ok := n.(map[string]any)
+				if !ok {
+					return nil, false
+				}
+				if v, ok := m["next"]; ok {
+					return v, true
+				}
+				return m["Next"], true
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := session.Event{InvocationID: "inv", Output: tc.output}
+			rw := httptest.NewRecorder()
+			if err := EmitJSON(rw, *EventForStream(&ev)); err != nil {
+				t.Fatalf("EmitJSON() failed: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(rw.Body.Bytes(), &got); err != nil {
+				t.Fatalf("json.Unmarshal(%d-byte body) failed: %v", rw.Body.Len(), err)
+			}
+			n := 0
+			for node, ok := got["output"], got["output"] != nil; ok && node != nil; node, ok = tc.next(node) {
+				n++
+			}
+			if n < depth {
+				t.Errorf("streamed output has %d nested levels, want at least %d", n, depth)
+			}
+		})
+	}
+}
