@@ -32,6 +32,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/clientcert"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/session"
 )
@@ -56,12 +57,16 @@ type client struct {
 }
 
 func newClient(ctx context.Context, cfg Config) (*client, error) {
-	opts := []option.ClientOption{
+	certOpts, mtlsEndpoint, err := clientcert.APIOptions(ctx, cfg.ClientOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("bigquerytoolset: creating the BigQuery HTTP client: %w", err)
+	}
+	opts := append([]option.ClientOption{
 		option.WithScopes(bigqueryScope),
 		internaloption.WithDefaultEndpointTemplate(defaultEndpointTemplate),
 		internaloption.WithDefaultMTLSEndpoint(defaultMTLSEndpoint),
 		internaloption.WithDefaultUniverseDomain(defaultUniverseDomain),
-	}
+	}, certOpts...)
 	if cfg.ExternalAccessTokenKey != "" {
 		// Each call adds the token from the session state, so the shared
 		// client must not authenticate on its own.
@@ -77,6 +82,11 @@ func newClient(ctx context.Context, cfg Config) (*client, error) {
 			return nil, fmt.Errorf("bigquerytoolset: creating the BigQuery HTTP client for Config.ExternalAccessTokenKey, whose ClientOptions must not provide credentials: %w", err)
 		}
 		return nil, fmt.Errorf("bigquerytoolset: creating the BigQuery HTTP client: %w", err)
+	}
+	// Only the default moves. An endpoint from ClientOptions stays, unless it
+	// spells that default, which cannot be told from it.
+	if mtlsEndpoint && endpoint == strings.Replace(defaultEndpointTemplate, "UNIVERSE_DOMAIN", defaultUniverseDomain, 1) {
+		endpoint = defaultMTLSEndpoint
 	}
 	if !strings.HasSuffix(endpoint, "/") {
 		endpoint += "/"

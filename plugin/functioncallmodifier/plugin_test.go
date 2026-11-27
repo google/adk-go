@@ -365,6 +365,8 @@ type contentlessModel struct{}
 
 func (contentlessModel) Name() string { return "contentless" }
 
+func (contentlessModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (contentlessModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{

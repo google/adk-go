@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -349,6 +350,55 @@ func TestExecutor_SessionReuse(t *testing.T) {
 	otherContextMeta := toInvocationMeta(ctx, toInternalRunnerConfig(config.RunnerConfig), reqCtx)
 	if meta.sessionID == otherContextMeta.sessionID {
 		t.Fatal("want sessionID to be different for different contextIDs")
+	}
+}
+
+// recordingSessionService records every Get request it serves.
+type recordingSessionService struct {
+	session.Service
+	mu   sync.Mutex
+	gets []session.GetRequest
+}
+
+func (s *recordingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.mu.Lock()
+	s.gets = append(s.gets, *req)
+	s.mu.Unlock()
+	return s.Service.Get(ctx, req)
+}
+
+// The session check before a run must not read the events, since the runner
+// reads them again. Each turn therefore costs one events read: the first turn
+// creates the session and the second finds it.
+func TestExecutor_ReadsEventsOncePerTurn(t *testing.T) {
+	ctx := t.Context()
+	agent, err := newEventReplayAgent([]*session.Event{}, nil)
+	if err != nil {
+		t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
+	}
+	sessionService := &recordingSessionService{Service: session.InMemoryService()}
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID, Message: a2a.NewMessageForTask(a2a.MessageRoleUser, task)}
+	executor := NewExecutor(ExecutorConfig{RunnerConfig: runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}})
+
+	for turn := range 2 {
+		for _, err := range executor.Execute(ctx, reqCtx) {
+			if err != nil {
+				t.Fatalf("turn %d: executor.Execute() error = %v, want nil", turn, err)
+			}
+		}
+	}
+
+	var full, light int
+	for _, g := range sessionService.gets {
+		if g.ExcludeEvents {
+			light++
+		} else {
+			full++
+		}
+	}
+	if full != 2 || light != 2 {
+		t.Errorf("session reads over 2 turns = %d with events and %d without, want 2 and 2 (requests: %+v)", full, light, sessionService.gets)
 	}
 }
 

@@ -1085,6 +1085,8 @@ func (d *llmStub) Name() string {
 	return d.name
 }
 
+func (*llmStub) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (d *llmStub) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return d.generateContent(ctx, req, stream)
 }

@@ -45,9 +45,9 @@ func TestACompactionCorrectionSortsAfterTheRecordItCorrects(t *testing.T) {
 
 	ctx := context.Background()
 	const appName, userID = "app", "user"
+	svc := emptyService(t)
 
 	for trial := range 20 {
-		svc := emptyService(t)
 		created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID})
 		if err != nil {
 			t.Fatalf("Create() error = %v", err)
