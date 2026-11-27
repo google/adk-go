@@ -312,6 +312,23 @@ func (e *Event) IsFinalResponse() bool {
 	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !e.HasTrailingCodeExecutionResult()
 }
 
+// HasTrailingCodeExecutionResult reports whether the last non-nil part of
+// e.Content holds a CodeExecutionResult. It returns false when e is nil,
+// e.Content is nil, or no non-nil part exists.
+func (e *Event) HasTrailingCodeExecutionResult() bool {
+	if e == nil || e.Content == nil {
+		return false
+	}
+	// A nil entry after a code execution result does not hide it: the
+	// trailing part is the last non-nil one.
+	for _, p := range slices.Backward(e.Content.Parts) {
+		if p != nil {
+			return p.CodeExecutionResult != nil
+		}
+	}
+	return false
+}
+
 // hasAny reports whether seq yields at least one value. It stops seq after the
 // first one.
 func hasAny[T any](seq iter.Seq[T]) bool {

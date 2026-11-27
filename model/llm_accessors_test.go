@@ -42,9 +42,6 @@ func TestLLMResponseAccessorsNoResult(t *testing.T) {
 			if got := slices.Collect(tc.resp.FunctionResponses()); len(got) != 0 {
 				t.Errorf("FunctionResponses() yielded %v, want nothing", got)
 			}
-			if got := tc.resp.HasTrailingCodeExecutionResult(); got {
-				t.Errorf("HasTrailingCodeExecutionResult() = true, want false")
-			}
 		})
 	}
 }
@@ -73,9 +70,6 @@ func TestLLMResponseAccessorsReturnStoredValues(t *testing.T) {
 	responses := slices.Collect(resp.FunctionResponses())
 	if len(responses) != 2 || responses[0] != respA || responses[1] != respB {
 		t.Errorf("FunctionResponses() = %v, want the stored pointers [ra, unnamed]", responses)
-	}
-	if resp.HasTrailingCodeExecutionResult() {
-		t.Errorf("HasTrailingCodeExecutionResult() = true, want false")
 	}
 	if len(resp.Content.Parts) != 6 || resp.Content.Parts[1] != nil {
 		t.Errorf("Content.Parts changed: len %d, Parts[1] nil = %v; want len 6 with Parts[1] nil", len(resp.Content.Parts), len(resp.Content.Parts) > 1 && resp.Content.Parts[1] == nil)
@@ -110,27 +104,5 @@ func TestLLMResponseAccessorsStopWhenTheLoopBreaks(t *testing.T) {
 	}
 	if firstResponse != respA {
 		t.Errorf("first FunctionResponses() value = %v, want the stored response ra", firstResponse)
-	}
-}
-
-// Only the last non-nil part decides HasTrailingCodeExecutionResult; a code
-// execution result earlier in the content does not count.
-func TestLLMResponseAccessorsTrailingCodeExecutionResult(t *testing.T) {
-	tests := []struct {
-		name  string
-		parts []*genai.Part
-		want  bool
-	}{
-		{"code result before text and nil", []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, {Text: "done"}, nil}, false},
-		{"code result after text, before nil", []*genai.Part{{Text: "running"}, {CodeExecutionResult: &genai.CodeExecutionResult{}}, nil}, true},
-		{"executable code after a code result", []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, {ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := &model.LLMResponse{Content: &genai.Content{Parts: tc.parts}}
-			if got := resp.HasTrailingCodeExecutionResult(); got != tc.want {
-				t.Errorf("HasTrailingCodeExecutionResult() = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }

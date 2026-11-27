@@ -18,7 +18,6 @@ package model
 import (
 	"context"
 	"iter"
-	"slices"
 
 	"google.golang.org/genai"
 )
@@ -139,21 +138,4 @@ func partValues[T any](r *LLMResponse, field func(*genai.Part) *T) iter.Seq[*T] 
 			}
 		}
 	}
-}
-
-// HasTrailingCodeExecutionResult reports whether the last non-nil part of
-// r.Content holds a CodeExecutionResult. It returns false when r is nil,
-// r.Content is nil, or no non-nil part exists.
-func (r *LLMResponse) HasTrailingCodeExecutionResult() bool {
-	if r == nil || r.Content == nil {
-		return false
-	}
-	// A nil entry after a code execution result does not hide it: the
-	// trailing part is the last non-nil one.
-	for _, p := range slices.Backward(r.Content.Parts) {
-		if p != nil {
-			return p.CodeExecutionResult != nil
-		}
-	}
-	return false
 }
