@@ -3541,6 +3541,75 @@ func TestFunctionResponseStructSerializationAndEmptyResult(t *testing.T) {
 	}
 }
 
+func TestFunctionResponseIsError(t *testing.T) {
+	cases := []struct {
+		name     string
+		response map[string]any
+		want     bool
+	}{
+		{name: "flow_error_message", response: map[string]any{"error": "Error in tool \"get_weather\": upstream timeout"}, want: true},
+		{name: "mcp_isError", response: map[string]any{"isError": true, "content": []any{}}, want: true},
+		{name: "mcp_is_error", response: map[string]any{"is_error": true}, want: true},
+		{name: "mcp_is_error_number", response: map[string]any{"is_error": 1}, want: true},
+		{name: "measurement_error_number", response: map[string]any{"estimate": 42, "error": 0.125}, want: false},
+		{name: "measurement_error_string", response: map[string]any{"estimate": 42, "error": "+/-0.1"}, want: false},
+		{name: "error_number_alone", response: map[string]any{"error": 0.125}, want: false},
+		{name: "error_object", response: map[string]any{"error": map[string]any{"code": 500}}, want: false},
+		{name: "error_true", response: map[string]any{"error": true}, want: false},
+		{name: "error_empty_string", response: map[string]any{"error": ""}, want: false},
+		{name: "result", response: map[string]any{"result": "sunny"}, want: false},
+		{name: "empty_response", response: map[string]any{}, want: false},
+		{name: "error_nil", response: map[string]any{"error": nil, "result": "sunny"}, want: false},
+		{name: "mcp_isError_false", response: map[string]any{"isError": false, "content": []any{}}, want: false},
+		{name: "mcp_is_error_empty_string", response: map[string]any{"is_error": ""}, want: false},
+	}
+
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		body = nil
+		_ = json.Unmarshal(data, &body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_err","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+
+	// One call and one response per case, so a single request carries them all.
+	calls := &genai.Content{Role: genai.RoleModel}
+	responses := &genai.Content{Role: genai.RoleUser}
+	for i, tc := range cases {
+		id := fmt.Sprintf("toolu_%d", i)
+		calls.Parts = append(calls.Parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "get_weather"}})
+		responses.Parts = append(responses.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "get_weather", Response: tc.response}})
+	}
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("weather?", genai.RoleUser), calls, responses}}
+	for _, err := range m.GenerateContent(t.Context(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent() error = %v", err)
+		}
+	}
+
+	msgs, _ := body["messages"].([]any)
+	blocks, _ := msgs[len(msgs)-1].(map[string]any)["content"].([]any)
+	if len(blocks) != len(cases) {
+		t.Fatalf("len(tool_result blocks) = %d, want %d", len(blocks), len(cases))
+	}
+	for i, tc := range cases {
+		block, _ := blocks[i].(map[string]any)
+		if got := block["is_error"]; got != tc.want {
+			t.Errorf("%s: tool_result is_error = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestThinkingAndEffortOmitSamplingParamsAndDefaultMaxTokens(t *testing.T) {
 	var lastBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
