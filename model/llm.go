@@ -106,3 +106,36 @@ type LLMResponse struct {
 	// responses carry it, not partial streaming chunks.
 	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
 }
+
+// FunctionCalls returns an iterator over the FunctionCall of each part of
+// r.Content that has one, in part order. Nil entries in r.Content.Parts are
+// skipped, and the iterator yields nothing when r or r.Content is nil. It
+// yields the pointers stored in r.Content, not copies.
+func (r *LLMResponse) FunctionCalls() iter.Seq[*genai.FunctionCall] {
+	return func(yield func(*genai.FunctionCall) bool) {
+		if r == nil || r.Content == nil {
+			return
+		}
+		for _, p := range r.Content.Parts {
+			if p != nil && p.FunctionCall != nil && !yield(p.FunctionCall) {
+				return
+			}
+		}
+	}
+}
+
+// FunctionResponses returns an iterator over the FunctionResponse of each part
+// of r.Content that has one, in part order, under the same rules as
+// FunctionCalls.
+func (r *LLMResponse) FunctionResponses() iter.Seq[*genai.FunctionResponse] {
+	return func(yield func(*genai.FunctionResponse) bool) {
+		if r == nil || r.Content == nil {
+			return
+		}
+		for _, p := range r.Content.Parts {
+			if p != nil && p.FunctionResponse != nil && !yield(p.FunctionResponse) {
+				return
+			}
+		}
+	}
+}
