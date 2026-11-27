@@ -36,6 +36,7 @@ import (
 )
 
 func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
+	runInParallel(t)
 	fset := token.NewFileSet()
 	docAST, err := parser.ParseFile(fset, "doc.go", nil, parser.ParseComments)
 	if err != nil {
@@ -169,6 +170,7 @@ func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
 }
 
 func TestDocParity_ErrorTracebackAndUnclosedSpanSyntheticError(t *testing.T) {
+	runInParallel(t)
 	t.Run("recorded error populates content.error_traceback with Error() text on AGENT_ERROR and INVOCATION_ERROR", func(t *testing.T) {
 		p, requests, mCtx := setupTestPlugin(t)
 		var errs callbackErrors
@@ -227,6 +229,7 @@ func TestDocParity_ErrorTracebackAndUnclosedSpanSyntheticError(t *testing.T) {
 }
 
 func TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	toolCtx := withFunctionCall(mCtx, "call-lr-1")
 	deployTool := &fakeTool{name: "deploy_job", longRunning: true}
@@ -297,6 +300,7 @@ func TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows(t *testing.T)
 }
 
 func TestDocParity_AgentResponseExcludesLongRunningToolsAndCompaction(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 
@@ -357,6 +361,7 @@ func TestDocParity_AgentResponseExcludesLongRunningToolsAndCompaction(t *testing
 }
 
 func TestDocParity_OffloadedSingleTextLLMResponseWritesEmptyResponseString(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 		c.MaxInlineTextSize = 20
@@ -392,6 +397,7 @@ func TestDocParity_OffloadedSingleTextLLMResponseWritesEmptyResponseString(t *te
 }
 
 func TestDocParity_StateDeltaTrimsLeadingWhitespaceBeforeTempPrefix(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 
@@ -424,6 +430,7 @@ func TestDocParity_StateDeltaTrimsLeadingWhitespaceBeforeTempPrefix(t *testing.T
 }
 
 func TestDocParity_HITLInputRequestFromRequestedInput(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	if _, err := p.OnEventCallback()(mCtx, &session.Event{
 		ID:     "ev-req-input-only",
@@ -444,6 +451,7 @@ func TestDocParity_HITLInputRequestFromRequestedInput(t *testing.T) {
 }
 
 func TestDocParity_ADKNodeAttributesAndOmissions(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 
@@ -507,6 +515,7 @@ func TestDocParity_ADKNodeAttributesAndOmissions(t *testing.T) {
 }
 
 func TestDocParity_UsageMetadataAndContentUsageShape(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 
@@ -555,6 +564,7 @@ func TestDocParity_UsageMetadataAndContentUsageShape(t *testing.T) {
 }
 
 func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing.T) {
+	runInParallel(t)
 	req := &model.LLMRequest{
 		Tools: map[string]any{
 			"zebra": &declaredTool{
@@ -632,6 +642,7 @@ func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing
 }
 
 func TestDocParity_ContentPartsFunctionCallArgsTruncated(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.MaxContentLen = 30
 	})
@@ -687,6 +698,7 @@ func TestDocParity_ContentPartsFunctionCallArgsTruncated(t *testing.T) {
 }
 
 func TestDocParity_ContentFormatterReceivesTypedModelPayloadsAndSkipsNilContent(t *testing.T) {
+	runInParallel(t)
 	var calls []string
 	var sawReqType, sawRespType bool
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
@@ -740,6 +752,7 @@ func TestDocParity_ContentFormatterReceivesTypedModelPayloadsAndSkipsNilContent(
 }
 
 func TestDocParity_DefaultConfigBatchSizeAndRetryDelay(t *testing.T) {
+	runInParallel(t)
 	cfg := DefaultConfig()
 	if cfg.BatchSize != 100 {
 		t.Errorf("DefaultConfig().BatchSize = %d, want 100", cfg.BatchSize)
@@ -758,6 +771,7 @@ func TestDocParity_DefaultConfigBatchSizeAndRetryDelay(t *testing.T) {
 }
 
 func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
+	runInParallel(t)
 	atCallCap := strings.Repeat("c", 256)
 	atRespCap := strings.Repeat("r", 256)
 	overCapCall := strings.Repeat("c", 257)
