@@ -457,9 +457,18 @@ func redactJSONTextPass(s string, depth int, laterPass bool, budget *nodeBudget)
 			return s, false, false
 		}
 		suffix := trimmed[dec.InputOffset():]
-		if ts := trimBOMAndSpace(suffix); ts != "" && (hasRedactableContainerText(suffix, trimmed, laterPass) ||
-			strings.HasPrefix(ts, `\`) || hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, laterPass, budget)) {
-			return unparseableJSONPlaceholder, true, true
+		if ts := trimBOMAndSpace(suffix); ts != "" {
+			if hasRedactableContainerText(suffix, trimmed, laterPass) ||
+				strings.HasPrefix(ts, `\`) || hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, laterPass, budget) {
+				return unparseableJSONPlaceholder, true, true
+			}
+			if (strings.HasPrefix(ts, ":") || strings.HasPrefix(ts, "=")) && isSensitiveKey(decoded) {
+				valPart := strings.TrimLeft(ts[1:], regexpSpace)
+				tokEnd := matchValueTokenWithCaches(valPart, 0, regexpSpace+",}", nil, nil)
+				if hasUnbalancedEscapedQuote(valPart[:tokEnd]) {
+					return redactedSensitiveTextPlaceholder, true, true
+				}
+			}
 		}
 		trimmedInner := trimBOMAndSpace(decoded)
 		var innerSan string
@@ -817,12 +826,20 @@ func hasCrossFieldRunOnValue(str string) bool {
 		return true
 	}
 	if strings.Contains(str, "%") {
-		if decoded := unescapePercentBytes(str); decoded != str && hasUnclosedBearerQuote(decoded) {
-			return true
-		}
-		escaped := strings.ReplaceAll(strings.ReplaceAll(str, `\`, `\\`), `"`, `\"`)
-		if decoded := unescapePercentBytes(escaped); decoded != escaped && hasUnclosedBearerQuote(decoded) {
-			return true
+		if decoded := unescapePercentBytes(str); decoded != str {
+			if hasUnclosedBearerQuote(decoded) {
+				return true
+			}
+			// Preserve fail-closed behavior when a percent-encoded quote sits
+			// before a JSON-escaped quote with trailing text (such as
+			// `Bearer%20%22x" tail`) while keeping balanced terminal quotes
+			// (such as `Bearer%20%22tok"`).
+			if trimmed := strings.TrimRight(str, regexpSpace); strings.Contains(str, `"`) && !strings.HasSuffix(trimmed, `"`) {
+				escaped := strings.ReplaceAll(strings.ReplaceAll(str, `\`, `\\`), `"`, `\"`)
+				if escDecoded := unescapePercentBytes(escaped); escDecoded != escaped && hasUnclosedBearerQuote(escDecoded) {
+					return true
+				}
+			}
 		}
 	}
 	canon := canonicalizeCredentialMarker(str)
@@ -890,6 +907,9 @@ func keptInOrder(parts []string, s string) bool {
 }
 
 func unescapeCredentialStep(s string, canonFn func(string) string) string {
+	if strings.Contains(s, "%") {
+		s = stripValidIPv6ZoneEscapes(s)
+	}
 	if strings.Contains(s, `\`) {
 		s = unescapeBackslashControls(s)
 	}
@@ -1257,7 +1277,11 @@ func redactJSONPatternPairs(s string) string {
 			}
 			valEnd = ext
 		}
-		if inner, q := unquoteValue(s[valStart:valEnd]); isRedactedValue(inner) {
+		valSpan := s[valStart:valEnd]
+		if hasUnbalancedEscapedQuote(valSpan) {
+			return redactedSensitiveTextPlaceholder
+		}
+		if inner, q := unquoteValue(valSpan); isRedactedValue(inner) {
 			coveredEnd = valEnd
 			continue
 		} else if q != "" && !isBaseSensitiveKey(trimmedKey, false) && hasCrossFieldRunOnValue(inner) {
@@ -1451,6 +1475,11 @@ func matchQuotedKeyCandidate(s string, from, to int) (int, bool) {
 	}
 	if ks := sensitiveKeyStart(s, from, to); ks >= 0 {
 		return ks, true
+	}
+	if colon := strings.LastIndexByte(cand, ':'); colon >= 0 && colon+1 < len(cand) {
+		if ks := sensitiveKeyStart(s, from+colon+1, to); ks >= 0 {
+			return ks, true
+		}
 	}
 	return 0, false
 }
@@ -2302,20 +2331,29 @@ func redactTextPatternPairs(s string) string {
 				}
 			}
 		}
+		var escPos, escDouble, escSingle, escBS int
+		if valQuote == "" {
+			escPos = valStart
+		}
 		for j := jStart; j < len(matches) && matches[j].openStart < end && end < len(s); j++ {
 			if matches[j].start < containerEnd || !valueStartsAt(s, matches[j].end) {
 				continue
 			}
-			// Preserve bare tokens immediately preceding an escaped-quoted key
-			// (such as `token=abc\"password\": SECRET123`) so scrubErrorText
-			// catches the escaped quote boundary fail-closed.
-			if valQuote == "" && matches[j].start > valStart &&
-				(s[matches[j].start-1] == '"' || s[matches[j].start-1] == '\'') {
-				bs := 0
-				for p := matches[j].start - 1; p > valStart && s[p-1] == '\\'; p-- {
-					bs++
+			// Preserve bare tokens that cross an unclosed escaped quote before a
+			// nested key (such as `token=abc\"password\": SECRET123`,
+			// `password=\"'e /temp:'=x" S3CR3T`, or `password=a'temp:\" /password'=x" S3CR3T`)
+			// so scrubErrorText catches the escaped quote boundary fail-closed.
+			// Advance escPos monotonically to openStart (non-decreasing across
+			// matches) and scan only openStart..start locally.
+			if valQuote == "" && matches[j].start > valStart {
+				for ; escPos < matches[j].openStart; escPos++ {
+					escDouble, escSingle, escBS = stepEscapedQuoteState(s[escPos], escDouble, escSingle, escBS)
 				}
-				if bs%2 == 1 {
+				d, sg, b := escDouble, escSingle, escBS
+				for p := max(valStart, matches[j].openStart); p < matches[j].start; p++ {
+					d, sg, b = stepEscapedQuoteState(s[p], d, sg, b)
+				}
+				if d%2 == 1 || sg%2 == 1 {
 					continue
 				}
 			}
@@ -2347,7 +2385,7 @@ func redactTextPatternPairs(s string) string {
 			valSpan = s[valStart:valEnd]
 		}
 		inner, quote := unquoteValue(valSpan)
-		if quote == "" && gluedQuoted {
+		if quote == "" && (gluedQuoted || (valQuote != "" && len(quotedValueRe.FindString(s[valStart:valEnd])) < valEnd-valStart)) {
 			quote = valQuote
 		}
 		if kind != valueEndingInKeyName && isRedactedValue(inner) {
@@ -2600,18 +2638,136 @@ func hasNonEmptyTextValue(s string, stopOnTextStop bool) bool {
 	return false
 }
 
+func stepEscapedQuoteState(c byte, escDouble, escSingle, bs int) (int, int, int) {
+	switch c {
+	case '\\':
+		return escDouble, escSingle, bs + 1
+	case '"':
+		if bs%2 == 1 {
+			escDouble++
+		}
+		return escDouble, escSingle, 0
+	case '\'':
+		if bs%2 == 1 {
+			escSingle++
+		}
+		return escDouble, escSingle, 0
+	default:
+		return escDouble, escSingle, 0
+	}
+}
+
+func hasUnbalancedEscapedQuote(v string) bool {
+	if len(v) < 2 {
+		return false
+	}
+	var quote byte
+	switch {
+	case v[0] == '\\' && (v[1] == '\'' || v[1] == '"'):
+		quote = v[1]
+	case v[0] == '\'' || v[0] == '"':
+		quote = v[0]
+	default:
+		return false
+	}
+	if _, q := unquoteValue(v); q != "" {
+		return false
+	}
+	var esc, bare, bs int
+	for i := range len(v) {
+		switch v[i] {
+		case '\\':
+			bs++
+		case quote:
+			if bs%2 == 1 {
+				esc++
+			} else {
+				bare++
+			}
+			bs = 0
+		default:
+			bs = 0
+		}
+	}
+	return esc >= 1 && bare >= 1 && (esc+bare)%2 == 1
+}
+
+// hasUnclosedOuterQuoteBefore reports whether s[:i] ends an unquoted key token
+// inside an unclosed outer quote matching qDelim (such as `failed: "password=SECRETP-token: `).
+func hasUnclosedOuterQuoteBefore(s string, i int, qDelim string) bool {
+	if len(qDelim) == 0 || i <= 0 {
+		return false
+	}
+	// Walk back to the start of the current whitespace-delimited token.
+	tokenStart := i
+	for tokenStart > 0 && strings.IndexByte(regexpSpace, s[tokenStart-1]) < 0 {
+		tokenStart--
+	}
+	// If the key immediately before ':'/'=' ended in qDelim, the key itself was
+	// quoted in qDelim rather than nested inside an outer unclosed quote.
+	kEnd := i
+	if kEnd > tokenStart && (s[kEnd-1] == ':' || s[kEnd-1] == '=') {
+		kEnd--
+	}
+	for kEnd > tokenStart && strings.IndexByte(delimSpace, s[kEnd-1]) >= 0 {
+		kEnd--
+	}
+	if kEnd-tokenStart >= len(qDelim) && s[kEnd-len(qDelim):kEnd] == qDelim {
+		bs := 0
+		for p := kEnd - len(qDelim); p > tokenStart && s[p-1] == '\\'; p-- {
+			bs++
+		}
+		if bs%2 == 0 {
+			return false
+		}
+	}
+	count := 0
+	for p := tokenStart; p+len(qDelim) <= i; {
+		if s[p:p+len(qDelim)] == qDelim {
+			bs := 0
+			for b := p; b > tokenStart && s[b-1] == '\\'; b-- {
+				bs++
+			}
+			if bs%2 == 0 {
+				count++
+				p += len(qDelim)
+				continue
+			}
+		}
+		p++
+	}
+	return count%2 == 1
+}
+
 // valueStartsAt reports whether a redactable value starts at s[i] (after
 // optional whitespace), containing at least one byte outside delimSpace and
 // closingPunctuation (so "{Password:abc-token: }" and empty quotes return false).
 func valueStartsAt(s string, i int) bool {
 	rest := strings.TrimLeft(s[i:], delimSpace)
-	if rest != "" && strings.IndexByte(`"'\`, rest[0]) >= 0 {
-		if q := quotedValueRe.FindString(rest); q != "" && quotedValueEnds(rest, len(q)) {
-			inner, _ := unquoteValue(q)
-			return hasNonEmptyTextValue(inner, false)
+	pos := 0
+	for pos < len(rest) && (rest[pos] == '"' || rest[pos] == '\'' || (rest[pos] == '\\' && pos+1 < len(rest) && (rest[pos+1] == '"' || rest[pos+1] == '\''))) {
+		q := quotedValueRe.FindString(rest[pos:])
+		if q == "" {
+			break
 		}
+		inner, qDelim := unquoteValue(q)
+		nonEmpty := hasNonEmptyTextValue(inner, false)
+		if quotedValueEnds(rest[pos:], len(q)) {
+			return nonEmpty
+		}
+		if nonEmpty {
+			if pos == 0 && len(inner) > 0 && len(qDelim) > 0 &&
+				strings.IndexByte(delimSpace, inner[len(inner)-1]) >= 0 &&
+				((len(rest) < len(s)-i && strings.IndexByte(delimSpace, inner[0]) >= 0) || strings.IndexByte(",;&", inner[0]) >= 0) &&
+				quotedValueRe.FindString(rest[len(q)-len(qDelim):]) != "" &&
+				hasUnclosedOuterQuoteBefore(s, i, qDelim) {
+				break
+			}
+			return true
+		}
+		pos += len(q)
 	}
-	return hasNonEmptyTextValue(rest, true)
+	return hasNonEmptyTextValue(rest[pos:], true)
 }
 
 func quotedValueEnds(s string, n int) bool {
@@ -2624,7 +2780,10 @@ func quotedValueEnds(s string, n int) bool {
 		return false
 	}
 	_, quote := unquoteValue(s[:n])
-	return !strings.HasPrefix(after, quote)
+	if strings.HasPrefix(after, quote) {
+		return false
+	}
+	return len(quote) != 2 || after[0] != quote[1]
 }
 
 // openBrackets tracks unmatched "{" and "[" depth monotonically across a
@@ -2742,6 +2901,7 @@ func exposesEncodedPattern(msg string, scrub func(string) string) bool {
 		return false
 	}
 	cleaned := strings.ReplaceAll(strings.ReplaceAll(msg, "%5BREDACTED%5D", redactedValue), "%5bredacted%5d", redactedValue)
+	cleaned = stripValidIPv6ZoneEscapes(cleaned)
 	canon := canonicalizeCredentialMarker(cleaned)
 	if canon != cleaned && scrub(canon) != canon {
 		return true

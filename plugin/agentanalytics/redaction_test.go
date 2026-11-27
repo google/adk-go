@@ -400,8 +400,20 @@ func TestSanitizeURIComponents(t *testing.T) {
 			{"URL in a query value", "https://a/b?u=http://c/d?token=SECRET123 e://f", "https://a/b?u=http%3A%2F%2Fc%2Fd%3Ftoken%3D" + r + " e://f"},
 			{"percent-encoded redirect URL with userinfo", "err: https://app.example/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40evil.example%2Fp done", "err: https://app.example/cb?next=%5BREDACTED_SENSITIVE_URI%5D done"},
 			{"percent-encoded IPv6 redirect URL stays untouched across entry points", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A1%5D"},
+			{"percent-encoded IPv6 double-colon redirect URL stays untouched across entry points", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A%5D", "https://example.com/cb?next=https%3A%2F%2F%5B2001%3Adb8%3A%3A%5D"},
 			{"percent-encoded IPv6 redirect URL with userinfo across entry points", "https://example.com/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40%5B2001%3Adb8%3A%3A1%5D", "https://example.com/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
+			{"percent-encoded IPv6 double-colon redirect URL with userinfo across entry points", "https://example.com/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40%5B2001%3Adb8%3A%3A%5D", "https://example.com/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
 			{"bare IPv6 URL in prose stays untouched", "see https://[2001:db8::1].", "see https://[2001:db8::1]."},
+			{"bare IPv6 double-colon URL in prose stays untouched", "see https://[2001:db8::].", "see https://[2001:db8::]."},
+			{"bare IPv6 double-colon URL followed by double bracket stays untouched", "https://[2001:db8::]]", "https://[2001:db8::]]"},
+			{"bare IPv6 double-colon URL followed by double bracket and punctuation stays untouched", "see https://[2001:db8::]]).", "see https://[2001:db8::]])."},
+			{"IPv6 double-colon URL with userinfo and double bracket keeps outer bracket", "https://u:p@[2001:db8::]]", "[REDACTED_SENSITIVE_URI]]"},
+			{"zoned IPv6 URL stays untouched", "https://[fe80::1%25en0]", "https://[fe80::1%25en0]"},
+			{"percent-encoded zoned IPv6 redirect URL stays untouched", "https://example.com/cb?next=https%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D", "https://example.com/cb?next=https%3A%2F%2F%5Bfe80%3A%3A1%2525en0%5D"},
+			{"zoned IPv6 URL with userinfo is redacted", "https://user:S3CR3T@[fe80::1%25en0]", redactedURIPlaceholder},
+			{"percent-encoded zoned IPv6 redirect URL with userinfo is redacted", "https://example.com/cb?next=https%3A%2F%2Fuser%3AS3CR3T%40%5Bfe80%3A%3A1%2525en0%5D", "https://example.com/cb?next=%5BREDACTED_SENSITIVE_URI%5D"},
+			{"zoned IPv6 URL with query credential redacts only query credential", "https://[fe80::1%25en0]/p?token=S3CR3T", "https://[fe80::1%25en0]/p?token=" + r},
+			{"zoned IPv6 URL hiding encoded credential fails closed", "https://[fe80::1%2520token%3DS3CR3T]", redactedSensitiveTextPlaceholder},
 			{"bracketed non-IPv6 URL trims outer closing bracket", "see [https://example.com]", "see [https://example.com]"},
 			{"non-IPv6 host bracket trims closing bracket", "see https://host[a:b] ok", "see [REDACTED_SENSITIVE_URI]] ok"},
 			{"mixed parameters", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=SECRET1", "https://example.com?monkey=1&next_page_token=p2&token_count=3&my_api_key=" + r},
@@ -893,7 +905,38 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{".key name after a slash with a quoted value directly after colon", `/etc/ssl/api.key:"S3CR3T"`, `/etc/ssl/api.key:"[REDACTED]"`},
 			{".key name assigned after a file verb", "open private.key=SECRET123", "open private.key=[REDACTED]"},
 			{"quoted .key path with a value", `"/etc/ssl/private.key": "SECRET123"`, `"/etc/ssl/private.key":"[REDACTED]"`},
+			{"namespaced quoted compound key with trailing space", `"ConnectionStrings:dbPassword "=S3CR3T`, `"ConnectionStrings:dbPassword "=[REDACTED]`},
+			{"prefixed namespaced quoted compound key with trailing space", `log: "ConnectionStrings:dbPassword "=S3CR3T`, `log: "ConnectionStrings:dbPassword "=[REDACTED]`},
+			{"single-quoted namespaced compound key with trailing space", `log: 'ConnectionStrings:dbPassword '=S3CR3T`, `log: 'ConnectionStrings:dbPassword '=[REDACTED]`},
+			{"multi-colon namespaced quoted key with trailing space", `log: "a:b:DB_PASSWORD "=S3CR3T`, `log: "a:b:DB_PASSWORD "=[REDACTED]`},
+			{"slash and colon namespaced quoted key with trailing space", `log: "Application Support/ConnectionStrings:dbPassword "=S3CR3T`, `log: "Application Support/ConnectionStrings:dbPassword "=[REDACTED]`},
+			{"quoted double-colon non-sensitive suffix stays unredacted", `" a.temp::x "=S3CR3T`, `" a.temp::x "=S3CR3T`},
+			{"quoted phrase with space and no slash stays unredacted", `he said "use DB_PASSWORD " = "v"`, `he said "use DB_PASSWORD " = "v"`},
+			{"quoted space inside final path component stays unredacted", `"Application Support/my password "=S3CR3T`, `"Application Support/my password "=S3CR3T`},
+			{"glued empty quotes after single-quoted key redact trailing secret", `password=''' token':' 'S3CR3T`, `password='[REDACTED]'`},
+			{"prefixed glued empty quotes after single-quoted key redact trailing secret", `log: password=''' token':' 'S3CR3T`, `log: password='[REDACTED]'`},
+			{"glued empty quotes with non-empty single-quoted prefix redact trailing secret", `password=''' token':' a'S3CR3T`, `password='[REDACTED]'`},
+			{"glued empty quotes with space-ended single-quoted prefix redact trailing secret", `password=''' token':' a 'S3CR3T`, `password='[REDACTED]'`},
+			{"glued empty quotes with space-padded single-quoted prefix redact trailing secret", `password=''' token': ' a 'S3CR3T`, `password=[REDACTED]`},
+			{"glued empty quotes with space-padded single-quoted prefix and trailing quote redact secret", `password=''' token': ' a 'S3CR3T'`, `password='[REDACTED]'`},
+			{"glued empty quotes with comma-space single-quoted prefix redact trailing secret", `password=''' token':',a 'S3CR3T`, `password='[REDACTED]'`},
+			{"colon followed by space-padded quote and unclosed secret redacts", `password: " a "S3CR3T`, `password:[REDACTED]`},
+			{"colon followed by space-padded quote and closed secret redacts", `password: " a "S3CR3T"`, `password:"[REDACTED]"`},
+			{"equals followed by comma-space quote and secret redacts", `password=",a "S3CR3T`, `password=[REDACTED]`},
+			{"empty space quote not glued to trailing secret leaves unredacted tail", `password=''' token':' ' `, `password='[REDACTED]' ' `},
+			{"quoted greeting with escaped apostrophe stays intact", `"hello" it\'s fine`, `"hello" it\'s fine`},
+			{"JSON key with single escaped single quote does not fail closed", `"password":\' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"JSON key with two escaped single quotes does not fail closed", `"password":\'' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"JSON key with three bare single quotes does not fail closed", `"password":''' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"JSON key with escaped double quote does not fail closed", `"password":\"" S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"prefixed JSON key with escaped double quote does not fail closed", `log: "password":\"" S3CR3T`, `log: "password":"[REDACTED]" S3CR3T`},
 		})
+		if valueStartsAt("password=''' token':' ' ", 20) {
+			t.Errorf("valueStartsAt(%q, 20) = true, want false for unglued empty space quote", "password=''' token':' ' ")
+		}
+		if !valueStartsAt("password=''' token':' 'S3CR3T", 20) {
+			t.Errorf("valueStartsAt(%q, 20) = false, want true for glued secret after empty space quote", "password=''' token':' 'S3CR3T")
+		}
 	})
 
 	// A key, a delimiter or a header that only shows after percent, hex or
@@ -911,9 +954,28 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{name: "Unicode-escaped space after Bearer", in: `Bearer\u0020SECRET123`},
 			{name: "Unicode-escaped quotes after text", in: `upstream error: {\u0022dbPassword\u0022: \u0022SECRET123\u0022}`},
 			{name: "quote that closes only after unescaping", in: `password=\"SECRET\\\ax monkey=ok tail\"`},
+			{name: "escaped quote before nested temp key", in: `password=\"'e /temp:'=x" S3CR3T`},
+			{name: "prefixed escaped quote before nested temp key", in: `log: password=\"'e /temp:'=x" S3CR3T`},
+			{name: "escaped quote with text before nested temp key", in: `password=\"a'e /temp:'=x" S3CR3T`},
+			{name: "escaped quote before nested token key", in: `password=\"'e /token'=x" S3CR3T`},
+			{name: "escaped quote before nested JSON password key", in: `token=abc\"password\": SECRET123`},
+			{name: "escaped quote inside quoted nested temp key before password", in: `password=a'temp:\" /password'=x" S3CR3T`},
+			{name: "JSON key with unbalanced escaped single quote", in: `"password":\''' S3CR3T`},
+			{name: "prefixed JSON key with unbalanced escaped single quote", in: `log: "password":\''' S3CR3T`},
+			{name: "JSON key with unbalanced escaped double quote", in: `"password":\""" S3CR3T`},
+			{name: "prefixed JSON key with unbalanced escaped double quote", in: `log: "password":\""" S3CR3T`},
+			{name: "JSON key with two escaped double quotes and one bare double quote", in: `"password":\"\"" S3CR3T`},
+			{name: "prefixed JSON key with two escaped double quotes and one bare double quote", in: `log: "password":\"\"" S3CR3T`},
+			{name: "JSON key with two escaped single quotes and one bare single quote", in: `"password":\'\'' S3CR3T`},
+			{name: "prefixed JSON key with two escaped single quotes and one bare single quote", in: `log: "password":\'\'' S3CR3T`},
+			{name: "JSON key with two bare single quotes and one escaped single quote", in: `"password":''\' S3CR3T`},
+			{name: "JSON key with two bare double quotes and one escaped double quote", in: `"password":""\" S3CR3T`},
 		}
 		for i := range escaped {
 			escaped[i].want = redactedSensitiveTextPlaceholder
+			if got := scrubErrorText(escaped[i].in); got != redactedSensitiveTextPlaceholder {
+				t.Errorf("scrubErrorText(%q) = %q, want %q", escaped[i].in, got, redactedSensitiveTextPlaceholder)
+			}
 		}
 		checkRedaction(t, escaped)
 	})
@@ -1144,6 +1206,8 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 			{"compound key mentioning double-quoted Bearer keeps siblings", `{"db_password": "use \"Bearer\" auth", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 			{"compound key with apostrophe and Bearer keeps siblings", `{"db_password": "don't mention Bearer", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 			{"compound key with closed Bearer quote keeps siblings", `{"db_password": "Bearer 'tok'", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with percent-encoded space and balanced Bearer quotes keeps siblings", `{"db_password": "Bearer%20%22tok\"", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with literal space and balanced percent-encoded Bearer quote keeps siblings", `{"db_password": "Bearer %22tok\"", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 		})
 	})
 
@@ -1212,6 +1276,18 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 				name:      "double-escaped BOM before URI token in JSON text",
 				in:        `{"s":"https\\ufeff://h/a;Bearer+SECRETZQ+token=x"}`,
 				wantError: `{"s":"https\\ufeff://h/a%3BBearer+SECRETZQ+token=%5BREDACTED%5D"}`,
+				wantText:  redactedSensitiveTextPlaceholder,
+			},
+			{
+				name:      "JSON string with unbalanced escaped single quote inside outer JSON",
+				in:        `{"k":"\"password\":\\''' S3CR3T"}`,
+				wantError: `{"k":"[REDACTED_SENSITIVE_TEXT]"}`,
+				wantText:  redactedSensitiveTextPlaceholder,
+			},
+			{
+				name:      "JSON string with two escaped and one bare single quote inside outer JSON",
+				in:        `{"k":"\"password\":\\'\\'' S3CR3T"}`,
+				wantError: `{"k":"[REDACTED_SENSITIVE_TEXT]"}`,
 				wantText:  redactedSensitiveTextPlaceholder,
 			},
 		} {
@@ -1481,13 +1557,22 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 			return `log: "password": a&` + strings.Repeat("token= 'token=a/b ' ", n/20) + "token=SECRET"
 		}},
 		{"repeated temp: segments inside quoted key ending in double colon", 64 << 10, func(n int) string {
-			return `"` + strings.Repeat("temp:", n/5) + `:: "=x password=SECRET`
+			return `log: "` + strings.Repeat(".temp::", n/7) + ` "=x password=SECRET`
 		}},
 		{"repeated glued quoted tokens in extendOverlappingTextPair", 64 << 10, func(n int) string {
 			return `log: "password": ` + strings.Repeat("'token='a '", n/11) + " password=SECRET"
 		}},
 		{"repeated glued quoted token pairs in extendOverlappingTextPair", 64 << 10, func(n int) string {
 			return `log: "password": ` + strings.Repeat(`'x''token='a''`, n/14) + " password=SECRET"
+		}},
+		{"repeated raw IPv6 scheme prefixes with percent-25 marker", 64 << 10, func(n int) string {
+			return strings.Repeat("http://[", n/8) + "]%25"
+		}},
+		{"repeated percent-encoded IPv6 scheme prefixes with percent-25 marker", 64 << 10, func(n int) string {
+			return strings.Repeat("%3A%2F%2F%5B", n/12) + "%25"
+		}},
+		{"repeated percent-encoded IPv6 hex-scheme prefixes with percent-25 marker", 64 << 10, func(n int) string {
+			return strings.Repeat("a%3A%2F%2F%5B", n/13) + "%25"
 		}},
 		{"bare delimiters", 1 << 20, func(n int) string { return strings.Repeat("=", n) }},
 		{"redacted pairs", 256 << 10, func(n int) string { return strings.Repeat("DB_PASSWORD=SECRET1 dbPassword=SECRET2 ", n/39) }},
