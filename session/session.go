@@ -23,6 +23,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -144,8 +145,11 @@ type Event struct {
 	// Output is the generic data output from a workflow node.
 	Output any `json:"output,omitempty"`
 
-	// NodeInfo carries workflow-node metadata for events emitted
-	// inside a workflow. Nil for non-workflow events.
+	// NodeInfo carries the metadata of the workflow node that emitted the
+	// event. runner.Run runs a root LLM agent as a workflow node, so its
+	// events carry a NodeInfo even when the caller wrote no workflow.
+	// NodeInfo is nil on an event no workflow node emitted, such as the
+	// user's message event, an event of runner.RunLive or one built by hand.
 	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
 }
 
@@ -171,6 +175,69 @@ type NodeInfo struct {
 	// stands in for a whole delegation chain rather than each level
 	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
 	OutputFor []string `json:"outputFor,omitempty"`
+}
+
+// Name returns the node's name: the last segment of n.Path with its
+// "@<run id>" suffix removed. A segment is split at its last "@", so an
+// unsuffixed root-agent path whose agent name contains "@" is split there too.
+// It returns "" when n is nil or n.Path is empty.
+func (n *NodeInfo) Name() string {
+	if n == nil {
+		return ""
+	}
+	leaf, _, _ := splitNodePath(n.Path)
+	name, _, _ := splitRunID(leaf)
+	return name
+}
+
+// RunID returns the text after the last "@" of the last segment of n.Path.
+// It returns "" when n is nil, n.Path is empty or the last segment has no "@".
+func (n *NodeInfo) RunID() string {
+	if n == nil {
+		return ""
+	}
+	leaf, _, _ := splitNodePath(n.Path)
+	_, runID, _ := splitRunID(leaf)
+	return runID
+}
+
+// ParentRunID returns the text after the last "@" of the second-to-last
+// segment of n.Path and true when n.Path has at least two segments and that
+// segment contains an "@". Otherwise it returns "" and false, both when the
+// path has no parent segment and when the parent segment has no run id.
+func (n *NodeInfo) ParentRunID() (runID string, ok bool) {
+	if n == nil {
+		return "", false
+	}
+	_, parent, hasParent := splitNodePath(n.Path)
+	if !hasParent {
+		return "", false
+	}
+	_, runID, ok = splitRunID(parent)
+	return runID, ok
+}
+
+// splitNodePath returns the leaf and parent segments of path and whether a
+// parent segment exists. The leaf is the text after the last "/" and the
+// parent the text after the last "/" before it, so a path without "/" has no
+// parent and the empty path has an empty leaf.
+func splitNodePath(path string) (leaf, parent string, hasParent bool) {
+	i := strings.LastIndex(path, "/")
+	if i < 0 {
+		return path, "", false
+	}
+	rest := path[:i]
+	return path[i+1:], rest[strings.LastIndex(rest, "/")+1:], true
+}
+
+// splitRunID splits a segment at its last "@". Without an "@" the whole
+// segment is the name and hasRunID is false.
+func splitRunID(segment string) (name, runID string, hasRunID bool) {
+	i := strings.LastIndex(segment, "@")
+	if i < 0 {
+		return segment, "", false
+	}
+	return segment[:i], segment[i+1:], true
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
