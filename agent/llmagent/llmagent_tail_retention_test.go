@@ -54,6 +54,8 @@ func (m *recordingModel) GetGoogleLLMVariant() genai.Backend {
 	return googlellm.GetGoogleLLMVariant(m.inner)
 }
 
+func (m *recordingModel) Capabilities() model.Capabilities { return m.inner.Capabilities() }
+
 func (m *recordingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	var sb strings.Builder
 	for _, c := range req.Contents {

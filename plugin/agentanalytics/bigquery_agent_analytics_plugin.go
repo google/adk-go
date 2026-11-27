@@ -582,6 +582,7 @@ func newBigQueryAgentAnalyticsPluginWithTraces(
 		finalResponseTools: newSet(config.FinalResponseToolNames...),
 		customMetadata:     newCustomMetadataFilter(config.CustomMetadataAllowlist),
 		traces:             traces,
+		newUUID:            uuid.New,
 	}
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
@@ -814,6 +815,7 @@ type analyticsPlugin struct {
 	finalResponseTools map[string]struct{}
 	customMetadata     customMetadataFilter
 	traces             *traceManager
+	newUUID            func() uuid.UUID
 }
 
 // eventData carries the event-specific parts of a row.
@@ -2592,7 +2594,7 @@ func runnerAgentOf(ctx agent.InvocationContext) agent.Agent {
 }
 
 func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType string, d *eventData) map[string]any {
-	eventID := newEventID()
+	eventID := p.newEventID()
 	rowTS := time.Now()
 	if !d.timestamp.IsZero() {
 		rowTS = d.timestamp
@@ -2672,8 +2674,12 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType s
 
 // newEventID returns a random UUID as 32 hex digits, the format of
 // adk-python's uuid4().hex.
-func newEventID() string {
-	id := uuid.New()
+func (p *analyticsPlugin) newEventID() string {
+	gen := uuid.New
+	if p != nil && p.newUUID != nil {
+		gen = p.newUUID
+	}
+	id := gen()
 	return hex.EncodeToString(id[:])
 }
 
