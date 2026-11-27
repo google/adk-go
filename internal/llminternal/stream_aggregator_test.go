@@ -1954,3 +1954,75 @@ func BenchmarkStreamingResponseAggregator(b *testing.B) {
 		})
 	}
 }
+
+// A streamed call ends with a chunk that carries neither a name nor partial
+// arguments, only WillContinue false. The call must be complete at that point,
+// so a second streamed call that follows does not overwrite it.
+func TestStreamedFunctionCallsBackToBack(t *testing.T) {
+	calls := []*genai.FunctionCall{
+		{Name: "get_weather", ID: "fc_1", WillContinue: new(true)},
+		{PartialArgs: []*genai.PartialArg{{JsonPath: "$.city", StringValue: "Paris"}}, WillContinue: new(true)},
+		{WillContinue: new(false)},
+		{Name: "get_time", ID: "fc_2", WillContinue: new(true)},
+		{PartialArgs: []*genai.PartialArg{{JsonPath: "$.zone", StringValue: "CET"}}, WillContinue: new(true)},
+		{WillContinue: new(false)},
+	}
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	for i, call := range calls {
+		chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: call}}},
+		}}}
+		if i == len(calls)-1 {
+			chunk.Candidates[0].FinishReason = genai.FinishReasonStop
+		}
+		for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+		}
+	}
+	final := aggregator.Close()
+
+	var got []*genai.FunctionCall
+	for _, p := range final.Content.Parts {
+		if p.FunctionCall != nil {
+			got = append(got, p.FunctionCall)
+		}
+	}
+	want := []*genai.FunctionCall{
+		{Name: "get_weather", ID: "fc_1", Args: map[string]any{"city": "Paris"}},
+		{Name: "get_time", ID: "fc_2", Args: map[string]any{"zone": "CET"}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("assembled function calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Text the model writes after a streamed call has ended must follow the call,
+// as it did in the stream.
+func TestStreamedFunctionCallKeepsOrderWithLaterText(t *testing.T) {
+	parts := []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{Name: "get_weather", ID: "fc_1", WillContinue: new(true)}},
+		{FunctionCall: &genai.FunctionCall{PartialArgs: []*genai.PartialArg{{JsonPath: "$.city", StringValue: "Paris"}}, WillContinue: new(true)}},
+		{FunctionCall: &genai.FunctionCall{WillContinue: new(false)}},
+		{Text: "Checking now."},
+	}
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	for i, part := range parts {
+		chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{part}},
+		}}}
+		for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+			if err != nil {
+				t.Fatalf("chunk %d: %v", i, err)
+			}
+		}
+	}
+	final := aggregator.Close()
+	if n := len(final.Content.Parts); n != 2 {
+		t.Fatalf("got %d parts, want 2: %+v", n, final.Content.Parts)
+	}
+	if final.Content.Parts[0].FunctionCall == nil || final.Content.Parts[1].Text != "Checking now." {
+		t.Errorf("parts out of order: [0]=%+v [1]=%+v, want call then text", final.Content.Parts[0], final.Content.Parts[1])
+	}
+}
