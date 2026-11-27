@@ -1,0 +1,45 @@
+# Opens (or updates) one rolling pull request each night syncing new `main`
+# commits into `v3`, ready for a maintainer to approve and merge in the morning.
+#
+# `v3` is protected with required status checks and required pull request
+# reviews, so the workflow pushes to `sync/main-to-v3` and maintains a single
+# open pull request rather than pushing straight to `v3`.
+#
+# Re-runs when neither `main` nor `v3` changed are no-ops so CI runs and
+# approvals on an open sync pull request are not reset.
+name: Sync main to v3
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 4 AM UTC daily
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-v3
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync main into v3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/sync-v3.sh --pr
