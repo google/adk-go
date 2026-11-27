@@ -41,6 +41,8 @@ type capturingLLM struct{ got *model.LLMRequest }
 
 func (*capturingLLM) Name() string { return "capturing" }
 
+func (*capturingLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (c *capturingLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	if c.got == nil {
 		c.got = r
@@ -429,6 +431,8 @@ type roundTripLLM struct {
 }
 
 func (*roundTripLLM) Name() string { return "scripted" }
+
+func (*roundTripLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *roundTripLLM) GenerateContent(_ context.Context, r *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	var si strings.Builder

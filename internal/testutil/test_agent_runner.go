@@ -240,9 +240,14 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 	}
 }
 
-// Name implements llm.Model.
+// Name implements model.LLM.
 func (m *MockModel) Name() string {
 	return "mock"
+}
+
+// Capabilities implements model.LLM.
+func (m *MockModel) Capabilities() model.Capabilities {
+	return model.Capabilities{}
 }
 
 var _ model.LLM = (*MockModel)(nil)

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/api/option/internaloption"
 	htransport "google.golang.org/api/transport/http"
 
+	"google.golang.org/adk/v2/internal/clientcert"
 	aiplatformutil "google.golang.org/adk/v2/util/aiplatform"
 )
 
@@ -64,12 +65,25 @@ func newVertexRAGClient(ctx context.Context, location string, opts ...option.Cli
 		}
 	}
 
-	defaultEndpoint := "https://" + aiplatformutil.HostURL(location)
-	// The regional endpoint goes first so that an option.WithEndpoint from the
-	// caller replaces it.
+	certOpts, mtlsEndpoint, err := clientcert.APIOptions(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	host := aiplatformutil.HostURL(location)
+	mtlsHost := strings.TrimSuffix(host, "googleapis.com") + "mtls.googleapis.com"
+	defaultEndpoint := "https://" + host
+	if mtlsEndpoint {
+		defaultEndpoint = "https://" + mtlsHost
+	}
+	// The regional endpoints are defaults, so that GOOGLE_API_USE_MTLS_ENDPOINT
+	// chooses between them and an option.WithEndpoint from the caller replaces
+	// both. The template has no universe placeholder: the default host is the
+	// same in every universe, as it was when it was passed as the endpoint.
 	clientOpts := append([]option.ClientOption{
-		option.WithEndpoint(defaultEndpoint),
-	}, opts...)
+		internaloption.WithDefaultEndpointTemplate(defaultEndpoint),
+		internaloption.WithDefaultMTLSEndpoint("https://" + mtlsHost),
+	}, certOpts...)
+	clientOpts = append(clientOpts, opts...)
 
 	ragClient, err := aiplatform.NewVertexRagRESTClient(ctx, clientOpts...)
 	if err != nil {
@@ -81,7 +95,6 @@ func newVertexRAGClient(ctx context.Context, location string, opts ...option.Cli
 		return nil, fmt.Errorf("create VertexRagDataClient: %w", err)
 	}
 	httpOpts := append([]option.ClientOption{
-		internaloption.WithDefaultEndpoint(defaultEndpoint),
 		internaloption.WithDefaultScopes(aiplatform.DefaultAuthScopes()...),
 	}, clientOpts...)
 	httpClient, endpoint, err := htransport.NewClient(ctx, httpOpts...)

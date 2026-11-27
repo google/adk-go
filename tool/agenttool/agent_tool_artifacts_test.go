@@ -159,6 +159,8 @@ type staticJSONModel struct {
 
 func (m staticJSONModel) Name() string { return "static-json" }
 
+func (m staticJSONModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m staticJSONModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(&model.LLMResponse{

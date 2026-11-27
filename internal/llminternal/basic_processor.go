@@ -50,8 +50,8 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// structured output for tasks is collected via the FinishTaskTool's
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
-		if state.Mode != ModeTask && !needOutputSchemaProcessor(state) {
-			if schema := outputSchemaFor(ctx, state); schema != nil {
+		if state.Mode != ModeTask {
+			if schema := outputSchemaFor(ctx, state); schema != nil && !needOutputSchemaProcessor(state) {
 				req.Config.ResponseSchema = schema
 				req.Config.ResponseMIMEType = "application/json"
 			}
