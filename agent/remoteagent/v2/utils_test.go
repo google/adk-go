@@ -31,13 +31,17 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
 
 func newTestInvocationContext(t *testing.T, agentName string, events ...*session.Event) agent.InvocationContext {
+	return newTestInvocationContextWithContext(t, t.Context(), agentName, events...)
+}
+
+func newTestInvocationContextWithContext(t *testing.T, ctx context.Context, agentName string, events ...*session.Event) agent.InvocationContext {
 	t.Helper()
-	ctx := t.Context()
 	store := session.InMemoryService()
 	resp, err := store.Create(ctx, &session.CreateRequest{AppName: "test", UserID: "test-user"})
 	if err != nil {
@@ -796,4 +800,46 @@ func TestConvertParts_NilPartSkipped(t *testing.T) {
 	if !strings.HasPrefix(parts[0].Text(), "Tool local_tool returned:") {
 		t.Fatalf("part text = %q, want rewritten tool text", parts[0].Text())
 	}
+}
+
+func TestNewMessage_UsesConfiguredUUIDProvider(t *testing.T) {
+	t.Run("standard path", func(t *testing.T) {
+		const customUUID = "00000000-0000-4000-8000-000000000001"
+		ctx := platform.WithUUIDProvider(t.Context(), func() string {
+			return customUUID
+		})
+		events := []*session.Event{
+			newEventFromParts("user", genai.NewPartFromText("hello")),
+		}
+		ictx := newTestInvocationContextWithContext(t, ctx, "remote-agent", events...)
+		msg, err := newMessage(ictx, A2AConfig{})
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if msg.ID != customUUID {
+			t.Errorf("msg.ID = %q, want %q", msg.ID, customUUID)
+		}
+	})
+
+	t.Run("resume path", func(t *testing.T) {
+		const resumeUUID = "00000000-0000-4000-8000-000000000002"
+		ctx := platform.WithUUIDProvider(t.Context(), func() string {
+			return resumeUUID
+		})
+		remoteName := "remote-agent"
+		events := []*session.Event{
+			newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-remote", Name: "peer_tool"}}),
+			newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+				ID: "fc-remote", Name: "peer_tool", Response: map[string]any{"ok": true},
+			}}),
+		}
+		ictx := newTestInvocationContextWithContext(t, ctx, remoteName, events...)
+		msg, err := newMessage(ictx, A2AConfig{})
+		if err != nil {
+			t.Fatalf("newMessage() error = %v", err)
+		}
+		if msg.ID != resumeUUID {
+			t.Errorf("msg.ID = %q, want %q", msg.ID, resumeUUID)
+		}
+	})
 }
