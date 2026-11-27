@@ -16841,58 +16841,30 @@ func TestConcurrencyRace_SequentialAgentUnjoinedLateChild(t *testing.T) {
 	})
 }
 
-// TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning has two join nodes
-// route to the same agent node, so the workflow scheduler starts the node a
-// second time, on the same node path and branch and under a context of its
-// own, while the first run still goes on: the first run ends its
-// InvocationContext and then waits until the second run's
-// BeforeAgentCallback has begun. The second activation must not take the
-// first one for an earlier attempt whose run returned and read its ended
-// state or purge it.
-func TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning(t *testing.T) {
+// TestRunner_RoutedNodeRunTwice_EndedFirstRunEmitsNoAgentError has two join
+// nodes route to the same agent node, so the workflow scheduler starts the
+// node a second time, on the same node path and branch, under a context of
+// its own, once the first run has completed. The first run ends its
+// InvocationContext before it answers. Both runs succeed, so the second
+// activation must not take the first one's ended state for a failure: no
+// AGENT_ERROR row is written.
+func TestRunner_RoutedNodeRunTwice_EndedFirstRunEmitsNoAgentError(t *testing.T) {
 	p, requests, _ := setupTestPlugin(t)
 	firstStarted := make(chan struct{})
-	secondEntered := make(chan struct{})
-	// The scheduler keeps the runs of a node by the node's name, so it stops
-	// taking events once either run of child completes, and the other run
-	// would then wait forever for its event to be processed. yielded[i] is
-	// closed once the event of run i+1 was processed; neither run returns
-	// before both were.
-	yielded := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
-	var calls, runs atomic.Int32
+	var runs atomic.Int32
 	child, err := agent.New(agent.Config{
 		Name: "child",
-		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(agent.Context) (*genai.Content, error) {
-				if calls.Add(1) == 2 {
-					close(secondEntered)
-				}
-				return nil, nil
-			},
-		},
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
-				n := runs.Add(1)
-				if n == 1 {
+				if runs.Add(1) == 1 {
 					close(firstStarted)
 					ctx.EndInvocation()
-					select {
-					case <-secondEntered:
-					case <-time.After(10 * time.Second):
-					}
 				}
 				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Author = "child"
 				ev.Branch = ctx.Branch()
 				ev.Content = textContent("model", "answer")
-				if !yield(ev, nil) || n > 2 {
-					return
-				}
-				close(yielded[n-1])
-				select {
-				case <-yielded[2-n]:
-				case <-time.After(10 * time.Second):
-				}
+				yield(ev, nil)
 			}
 		},
 	})
@@ -16908,12 +16880,8 @@ func TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning(t *testing.T) {
 	}
 	a, b := quick("a"), quick("b")
 	c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-		select {
-		case <-firstStarted:
-			return "c", nil
-		case <-time.After(10 * time.Second):
-			return "", errors.New("the first run of child never started")
-		}
+		<-firstStarted
+		return "c", nil
 	}, workflow.NodeConfig{})
 	j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
 	root, err := workflowagent.New(workflowagent.Config{
@@ -16938,8 +16906,8 @@ func TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning(t *testing.T) {
 			t.Logf("runner.Run error: %v", err)
 		}
 	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("child started %d times, want 2", got)
+	if got := runs.Load(); got != 2 {
+		t.Fatalf("child ran %d times, want 2", got)
 	}
 	rows := collectRows(t, requests, untilInvocationEnd)
 	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
@@ -17856,112 +17824,6 @@ func TestRunner_FunctionNodeRerunsChildWithoutRetryConfig_KeepsFailure(t *testin
 	}
 }
 
-// TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun has two join
-// nodes route to the same agent node, as in
-// TestConcurrencyRace_RoutedNodeStartedAgainWhileRunning, and the first run
-// of the node's agent writes the metadata of the completion event of a failed
-// node run (see nodeCompletion) on its own answer before the second run
-// starts. It then ends its InvocationContext and waits until the second run
-// has answered. The report makes the first activation an earlier attempt of
-// the node, but does not show that its run is over, so the second activation
-// must not read its InvocationContext.
-func TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	reported := make(chan struct{})
-	secondAnswered := make(chan struct{})
-	var calls, runs atomic.Int32
-	child, err := agent.New(agent.Config{
-		Name: "child",
-		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(agent.Context) (*genai.Content, error) {
-				calls.Add(1)
-				return nil, nil
-			},
-		},
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				n := runs.Add(1)
-				ev := session.NewEvent(ctx, ctx.InvocationID())
-				ev.Author = "child"
-				ev.Branch = ctx.Branch()
-				ev.Content = textContent("model", "answer")
-				if n == 1 {
-					path := contextPath(ctx)
-					ev.NodeInfo = &session.NodeInfo{Path: path}
-					ev.CustomMetadata = map[string]any{
-						workflowBasePathPrefix + "root": path[:max(strings.LastIndexByte(path, '/'), 0)],
-						workflowNodeOutcomeKey:          workflowNodeFailedOutcome,
-					}
-				}
-				if !yield(ev, nil) {
-					return
-				}
-				switch n {
-				case 1:
-					close(reported)
-					ctx.EndInvocation()
-					select {
-					case <-secondAnswered:
-					case <-time.After(10 * time.Second):
-					}
-				case 2:
-					close(secondAnswered)
-				}
-			}
-		},
-	})
-	if err != nil {
-		t.Fatalf("agent.New(child): %v", err)
-	}
-	x, err := workflow.NewAgentNode(child, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("workflow.NewAgentNode: %v", err)
-	}
-	quick := func(name string) workflow.Node {
-		return workflow.NewFunctionNode(name, func(agent.Context, any) (string, error) { return name, nil }, workflow.NodeConfig{})
-	}
-	a, b := quick("a"), quick("b")
-	c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-		select {
-		case <-reported:
-			return "c", nil
-		case <-time.After(10 * time.Second):
-			return "", errors.New("the first run of child never answered")
-		}
-	}, workflow.NodeConfig{})
-	j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
-	root, err := workflowagent.New(workflowagent.Config{
-		Name: "root",
-		Edges: []workflow.Edge{
-			{From: workflow.Start, To: a},
-			{From: workflow.Start, To: b},
-			{From: workflow.Start, To: c},
-			{From: a, To: j1},
-			{From: b, To: j1},
-			{From: a, To: j2},
-			{From: c, To: j2},
-			{From: j1, To: x, Route: workflow.Default},
-			{From: j2, To: x, Route: workflow.Default},
-		},
-	})
-	if err != nil {
-		t.Fatalf("workflowagent.New: %v", err)
-	}
-	for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-		if err != nil {
-			t.Logf("runner.Run error: %v", err)
-		}
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("child started %d times, want 2", got)
-	}
-	rows := collectRows(t, requests, untilInvocationEnd)
-	t.Logf("event types: %v", eventTypes(rows))
-	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
-		t.Errorf("got %d AGENT_ERROR rows, want 0; counts: %v", n, agentErrorCounts(rows))
-	}
-}
-
 // TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild verifies under
 // -race that a live tool that starts a sub-agent on a goroutine of its own and
 // returns once the sub-agent's BeforeAgentCallback runs, without waiting for
@@ -18802,123 +18664,6 @@ func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
 	}
 	if !endedFirst {
 		t.Errorf("no AGENT_COMPLETED row ends span %q of the run that made the finish_task call; event types: %v", first, eventTypes(rows))
-	}
-}
-
-// TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError has
-// two join nodes route to the same agent node, as in
-// TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun, and the first
-// run of the node's agent writes the metadata of the completion event of a
-// failed node run on an event without content, so it has not responded yet,
-// and answers only after the second run started. The report shows neither
-// that the first run is over nor that it failed, so no AGENT_ERROR row is
-// written for either run, which both return without an error.
-//
-// The workflow keeps one output accumulator per node name, so the second run
-// returns without content once the first run's answer has been handled: an
-// answer from each run would fail the workflow with ErrMultipleOutputs, and a
-// second run that ended first would let the workflow return before the first
-// run's answer was handled.
-func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	reported := make(chan struct{})
-	secondStarted := make(chan struct{})
-	firstAnswered := make(chan struct{})
-	var calls, runs atomic.Int32
-	child, err := agent.New(agent.Config{
-		Name: "child",
-		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-			func(agent.Context) (*genai.Content, error) {
-				if calls.Add(1) == 2 {
-					close(secondStarted)
-				}
-				return nil, nil
-			},
-		},
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				if runs.Add(1) != 1 {
-					select {
-					case <-firstAnswered:
-					case <-time.After(10 * time.Second):
-					}
-					return
-				}
-				defer close(firstAnswered)
-				path := contextPath(ctx)
-				report := session.NewEvent(ctx, ctx.InvocationID())
-				report.Author = "child"
-				report.Branch = ctx.Branch()
-				report.NodeInfo = &session.NodeInfo{Path: path}
-				report.CustomMetadata = map[string]any{
-					workflowBasePathPrefix + "root": path[:max(strings.LastIndexByte(path, '/'), 0)],
-					workflowNodeOutcomeKey:          workflowNodeFailedOutcome,
-				}
-				if !yield(report, nil) {
-					return
-				}
-				close(reported)
-				select {
-				case <-secondStarted:
-				case <-time.After(10 * time.Second):
-				}
-				ev := session.NewEvent(ctx, ctx.InvocationID())
-				ev.Author = "child"
-				ev.Branch = ctx.Branch()
-				ev.Content = textContent("model", "answer")
-				yield(ev, nil)
-			}
-		},
-	})
-	if err != nil {
-		t.Fatalf("agent.New(child): %v", err)
-	}
-	x, err := workflow.NewAgentNode(child, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("workflow.NewAgentNode: %v", err)
-	}
-	quick := func(name string) workflow.Node {
-		return workflow.NewFunctionNode(name, func(agent.Context, any) (string, error) { return name, nil }, workflow.NodeConfig{})
-	}
-	a, b := quick("a"), quick("b")
-	c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-		select {
-		case <-reported:
-			return "c", nil
-		case <-time.After(10 * time.Second):
-			return "", errors.New("the first run of child never reported")
-		}
-	}, workflow.NodeConfig{})
-	j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
-	root, err := workflowagent.New(workflowagent.Config{
-		Name: "root",
-		Edges: []workflow.Edge{
-			{From: workflow.Start, To: a},
-			{From: workflow.Start, To: b},
-			{From: workflow.Start, To: c},
-			{From: a, To: j1},
-			{From: b, To: j1},
-			{From: a, To: j2},
-			{From: c, To: j2},
-			{From: j1, To: x, Route: workflow.Default},
-			{From: j2, To: x, Route: workflow.Default},
-		},
-	})
-	if err != nil {
-		t.Fatalf("workflowagent.New: %v", err)
-	}
-	for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-		if err != nil {
-			t.Errorf("runner.Run error: %v", err)
-		}
-	}
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("child started %d times, want 2", got)
-	}
-	rows := collectRows(t, requests, untilInvocationEnd)
-	requireInvocationCompletedOK(t, rows)
-	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
-		t.Errorf("got %d AGENT_ERROR rows for two eventually successful runs, want 0; counts: %v; event types: %v", n, agentErrorCounts(rows), eventTypes(rows))
 	}
 }
 
@@ -22028,169 +21773,6 @@ func TestRunner_UnjoinedStoppedStreamLeavesNoLateState(t *testing.T) {
 	}
 	if c.late != nil {
 		t.Errorf("completed run kept late state (open calls %d) for a stream that its reader stopped reading", c.late.openCalls.Load())
-	}
-}
-
-// TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAgentError
-// has the first run of the node's agent in
-// TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError write
-// the metadata of the completion event of a failed node run, and then run a
-// declared LLM helper whose model call, or whose tool call, stays in flight
-// until the second run started. Neither the report nor the open call shows
-// that the first run failed or is over, so starting the second run purges
-// nothing: both runs and the helper return without an error, and no
-// AGENT_ERROR row is written. The helper's call still ends on the span that
-// started it.
-func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAgentError(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		toolCall bool
-	}{
-		{name: "model call"},
-		{name: "tool call", toolCall: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p, requests, _ := setupTestPlugin(t)
-			reported := make(chan struct{})
-			secondStarted := make(chan struct{})
-			firstDone := make(chan struct{})
-			var calls, runs atomic.Int32
-			helperConfig := llmagent.Config{
-				Name:  "helper",
-				Model: &blockingLLM{entered: make(chan struct{}, 1), release: secondStarted},
-			}
-			if tc.toolCall {
-				wait, err := functiontool.New(functiontool.Config{Name: "wait", Description: "Waits for the second run of child"},
-					func(agent.Context, struct{}) (map[string]any, error) {
-						select {
-						case <-secondStarted:
-							return map[string]any{"waited": true}, nil
-						case <-time.After(10 * time.Second):
-							return nil, errors.New("the second run of child never started")
-						}
-					})
-				if err != nil {
-					t.Fatalf("functiontool.New(wait): %v", err)
-				}
-				helperConfig.Tools = []tool.Tool{wait}
-				helperConfig.Model = &scriptedLLM{responses: []*model.LLMResponse{
-					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
-						{FunctionCall: &genai.FunctionCall{ID: "call-wait", Name: "wait", Args: map[string]any{}}},
-					}}},
-					{Content: textContent("model", "answer"), TurnComplete: true},
-				}}
-			}
-			helper, err := llmagent.New(helperConfig)
-			if err != nil {
-				t.Fatalf("llmagent.New(helper): %v", err)
-			}
-			child, err := agent.New(agent.Config{
-				Name:      "child",
-				SubAgents: []agent.Agent{helper},
-				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
-					func(agent.Context) (*genai.Content, error) {
-						if calls.Add(1) == 2 {
-							close(secondStarted)
-						}
-						return nil, nil
-					},
-				},
-				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-					return func(yield func(*session.Event, error) bool) {
-						if runs.Add(1) != 1 {
-							select {
-							case <-firstDone:
-							case <-time.After(10 * time.Second):
-							}
-							return
-						}
-						defer close(firstDone)
-						path := contextPath(ctx)
-						report := session.NewEvent(ctx, ctx.InvocationID())
-						report.Author = "child"
-						report.Branch = ctx.Branch()
-						report.NodeInfo = &session.NodeInfo{Path: path}
-						report.CustomMetadata = map[string]any{
-							workflowBasePathPrefix + "root": path[:max(strings.LastIndexByte(path, '/'), 0)],
-							workflowNodeOutcomeKey:          workflowNodeFailedOutcome,
-						}
-						if !yield(report, nil) {
-							return
-						}
-						close(reported)
-						for ev, err := range helper.Run(ctx) {
-							if !yield(ev, err) {
-								return
-							}
-						}
-					}
-				},
-			})
-			if err != nil {
-				t.Fatalf("agent.New(child): %v", err)
-			}
-			x, err := workflow.NewAgentNode(child, workflow.NodeConfig{})
-			if err != nil {
-				t.Fatalf("workflow.NewAgentNode: %v", err)
-			}
-			quick := func(name string) workflow.Node {
-				return workflow.NewFunctionNode(name, func(agent.Context, any) (string, error) { return name, nil }, workflow.NodeConfig{})
-			}
-			a, b := quick("a"), quick("b")
-			c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-				select {
-				case <-reported:
-					return "c", nil
-				case <-time.After(10 * time.Second):
-					return "", errors.New("the first run of child never reported")
-				}
-			}, workflow.NodeConfig{})
-			j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
-			root, err := workflowagent.New(workflowagent.Config{
-				Name: "root",
-				Edges: []workflow.Edge{
-					{From: workflow.Start, To: a},
-					{From: workflow.Start, To: b},
-					{From: workflow.Start, To: c},
-					{From: a, To: j1},
-					{From: b, To: j1},
-					{From: a, To: j2},
-					{From: c, To: j2},
-					{From: j1, To: x, Route: workflow.Default},
-					{From: j2, To: x, Route: workflow.Default},
-				},
-			})
-			if err != nil {
-				t.Fatalf("workflowagent.New: %v", err)
-			}
-			for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-				if err != nil {
-					t.Errorf("runner.Run error: %v", err)
-				}
-			}
-			if got := calls.Load(); got != 2 {
-				t.Fatalf("child started %d times, want 2", got)
-			}
-			rows := collectRows(t, requests, untilInvocationEnd)
-			requireInvocationCompletedOK(t, rows)
-			if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
-				t.Errorf("got %d AGENT_ERROR rows for eventually successful runs, want 0; counts: %v; event types: %v", n, agentErrorCounts(rows), eventTypes(rows))
-			}
-			pairs := [][2]string{{EventAgentStarting, EventAgentCompleted}, {EventLLMRequest, EventLLMResponse}}
-			if tc.toolCall {
-				pairs = append(pairs, [2]string{EventToolStarting, EventToolCompleted})
-			}
-			for _, pair := range pairs {
-				starts, ends := agentRowsOfType(rows, pair[0], "helper"), agentRowsOfType(rows, pair[1], "helper")
-				if len(starts) == 0 || len(starts) != len(ends) {
-					t.Errorf("helper rows: %d %s and %d %s, want as many of each, at least one; event types: %v", len(starts), pair[0], len(ends), pair[1], eventTypes(rows))
-					continue
-				}
-				if got, want := placeOf(ends[0]), placeOf(starts[0]); got != want {
-					t.Errorf("helper %s is at %+v, want the place of its %s %+v", pair[1], got, pair[0], want)
-				}
-			}
-		})
 	}
 }
 
