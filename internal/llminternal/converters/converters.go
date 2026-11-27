@@ -20,6 +20,19 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// Genai2LLMResponse turns the first candidate of res into an LLMResponse.
+//
+//   - A candidate with parts, or with finish reason STOP, gives a success
+//     response with its content and grounding metadata.
+//   - Any other candidate gives an error response: ErrorCode is the finish
+//     reason and ErrorMessage the finish message. It carries no content and
+//     no grounding metadata.
+//   - Without candidates, a prompt feedback gives an error response from its
+//     block reason, and no prompt feedback gives empty model content.
+//
+// Every response keeps the usage metadata and model version, and a response
+// built from a candidate keeps its finish reason, citations and log
+// probabilities.
 func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 	usageMetadata := res.UsageMetadata
 	if len(res.Candidates) > 0 && res.Candidates[0] != nil {
@@ -37,15 +50,14 @@ func Genai2LLMResponse(res *genai.GenerateContentResponse) *model.LLMResponse {
 			}
 		}
 		return &model.LLMResponse{
-			ErrorCode:         string(candidate.FinishReason),
-			ErrorMessage:      candidate.FinishMessage,
-			GroundingMetadata: candidate.GroundingMetadata,
-			FinishReason:      candidate.FinishReason,
-			CitationMetadata:  candidate.CitationMetadata,
-			AvgLogprobs:       candidate.AvgLogprobs,
-			LogprobsResult:    candidate.LogprobsResult,
-			UsageMetadata:     usageMetadata,
-			ModelVersion:      res.ModelVersion,
+			ErrorCode:        string(candidate.FinishReason),
+			ErrorMessage:     candidate.FinishMessage,
+			FinishReason:     candidate.FinishReason,
+			CitationMetadata: candidate.CitationMetadata,
+			AvgLogprobs:      candidate.AvgLogprobs,
+			LogprobsResult:   candidate.LogprobsResult,
+			UsageMetadata:    usageMetadata,
+			ModelVersion:     res.ModelVersion,
 		}
 	}
 	if res.PromptFeedback != nil {
