@@ -75,12 +75,12 @@ func TestConvertUsage_ValidBounds(t *testing.T) {
 			n := int32(v)
 			want := &genai.GenerateContentResponseUsageMetadata{
 				PromptTokenCount:        n,
-				CandidatesTokenCount:    n,
+				CandidatesTokenCount:    0, // every output token is reasoning
 				TotalTokenCount:         n,
 				CachedContentTokenCount: n,
 				ThoughtsTokenCount:      n,
 				PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}},
-				CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}},
+				CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 0}},
 			}
 			if diff := cmp.Diff(want, convertUsage(u)); diff != "" {
 				t.Errorf("convertUsage() mismatch (-want +got):\n%s", diff)
@@ -95,12 +95,12 @@ func TestConvertUsage_MapsEachCount(t *testing.T) {
 	u.CompletionTokensDetails.ReasoningTokens = 5
 	want := &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        11,
-		CandidatesTokenCount:    22,
+		CandidatesTokenCount:    17, // output 22 less reasoning 5
 		TotalTokenCount:         33,
 		CachedContentTokenCount: 4,
 		ThoughtsTokenCount:      5,
 		PromptTokensDetails:     []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 11}},
-		CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 22}},
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 17}},
 	}
 	if diff := cmp.Diff(want, convertUsage(u)); diff != "" {
 		t.Errorf("convertUsage() mismatch (-want +got):\n%s", diff)

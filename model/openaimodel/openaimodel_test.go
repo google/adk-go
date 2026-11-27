@@ -234,6 +234,7 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 		output         int32
 		total          int32
 		chatOnly       bool
+		wantUnknown    bool // a negative count makes the whole usage unknown
 		wantCandidates int32
 		wantThoughts   int32
 	}{
@@ -241,11 +242,11 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 		{name: "no_reasoning_details", prompt: 20, output: 50, total: 70, wantCandidates: 50},
 		{name: "all_reasoning", details: `{"reasoning_tokens":50}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
 		{name: "reasoning_exceeds_output", details: `{"reasoning_tokens":60}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
-		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, prompt: 20, output: 50, total: 69, wantCandidates: 50},
-		{name: "negative_output", prompt: 20, output: -1, total: 19},
+		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, prompt: 20, output: 50, total: 69, wantUnknown: true},
+		{name: "negative_output", prompt: 20, output: -1, total: 19, wantUnknown: true},
 		{name: "separate_reasoning_tokens", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, total: 135, chatOnly: true, wantCandidates: 9, wantThoughts: 94},
-		{name: "separate_reasoning_tokens_negative_output", details: `{"reasoning_tokens":94}`, prompt: 32, output: -1, total: 125},
-		{name: "separate_reasoning_tokens_negative_prompt", details: `{"reasoning_tokens":94}`, prompt: -1, output: 9, total: 102, wantThoughts: 9},
+		{name: "separate_reasoning_tokens_negative_output", details: `{"reasoning_tokens":94}`, prompt: 32, output: -1, total: 125, wantUnknown: true},
+		{name: "separate_reasoning_tokens_negative_prompt", details: `{"reasoning_tokens":94}`, prompt: -1, output: 9, total: 102, wantUnknown: true},
 		{name: "separate_reasoning_tokens_zero_total", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, wantThoughts: 9},
 	}
 	for _, api := range []API{APIChatCompletions, APIResponses} {
@@ -286,6 +287,12 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 								t.Fatalf("GenerateContent() err = %v", err)
 							}
 							usage = resp.UsageMetadata
+						}
+						if tt.wantUnknown {
+							if usage != nil {
+								t.Errorf("UsageMetadata = %+v, want nil", usage)
+							}
+							return
 						}
 						if usage == nil {
 							t.Fatal("final response has no usage metadata")
