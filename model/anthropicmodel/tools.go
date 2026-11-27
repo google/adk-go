@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"google.golang.org/genai"
 )
 
@@ -318,7 +319,26 @@ func buildToolInputSchema(decl *genai.FunctionDeclaration) (anthropic.ToolInputS
 		out.ExtraFields[k] = v
 	}
 
-	return out, nil
+	// The SDK writes ExtraFields in map iteration order, so with two or more
+	// keys identical tools would serialize differently from call to call and
+	// miss the prompt cache. Write them after the SDK's own fields in sorted
+	// key order instead. An empty key stays with the SDK, which rejects it.
+	if _, emptyKey := out.ExtraFields[""]; len(out.ExtraFields) < 2 || emptyKey {
+		return out, nil
+	}
+	extras := out.ExtraFields
+	out.ExtraFields = nil
+	raw, err := out.MarshalJSON()
+	if err != nil {
+		return anthropic.ToolInputSchemaParam{}, fmt.Errorf("%w: failed to marshal tool schema for %q", ErrInvalidConfig, decl.Name)
+	}
+	extrasJSON, err := json.Marshal(extras) // encoding/json sorts map keys
+	if err != nil {
+		return anthropic.ToolInputSchemaParam{}, fmt.Errorf("%w: failed to marshal tool schema for %q", ErrInvalidConfig, decl.Name)
+	}
+	raw = append(raw[:len(raw)-1], ',')
+	raw = append(raw, extrasJSON[1:]...)
+	return param.Override[anthropic.ToolInputSchemaParam](json.RawMessage(raw)), nil
 }
 
 // lowercaseSchemaTypes recursively normalizes JSON schema "type" values to
