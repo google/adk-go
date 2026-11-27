@@ -36,19 +36,38 @@ func convertCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentRespo
 		return nil, shared.ErrNoChoices
 	}
 	choice := resp.Choices[0]
-	parts, err := convertMessage(choice.Message)
+	msg := choice.Message
+	// A turn cut off by the token limit can end inside a call's arguments.
+	// Then every call is dropped and the text kept, as adk-python's ApigeeLlm
+	// does: no call runs on arguments the model never finished, and no
+	// complete call runs while another call of the same turn is lost. When
+	// every call is complete they are kept, as there; anthropicmodel instead
+	// drops all calls of a turn the token limit stopped.
+	truncatedCalls := choice.FinishReason == "length" && hasUnfinishedCall(msg)
+	if truncatedCalls {
+		msg.ToolCalls = nil
+	}
+	parts, err := convertMessage(msg)
 	if err != nil {
 		return nil, err
 	}
-	if len(parts) == 0 {
+	if len(parts) == 0 && !truncatedCalls {
 		return nil, shared.ErrNoTextOrToolContent
 	}
+	candidate := &genai.Candidate{
+		Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
+		FinishReason:   finishReason(choice.FinishReason),
+		LogprobsResult: convertLogprobs(choice.Logprobs),
+	}
+	if truncatedCalls && len(parts) == 0 {
+		// Nothing is left to read, so the turn reports MAX_TOKENS as an error,
+		// as anthropicmodel does for a turn the token limit left empty. A turn
+		// that kept its text reports the MAX_TOKENS finish reason alone, as
+		// there, where adk-python also sets the error.
+		candidate.FinishMessage = "tool call arguments were cut off by the token limit"
+	}
 	out := &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{
-			Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
-			FinishReason:   finishReason(choice.FinishReason),
-			LogprobsResult: convertLogprobs(choice.Logprobs),
-		}},
+		Candidates:   []*genai.Candidate{candidate},
 		ModelVersion: resp.Model,
 		ResponseID:   resp.ID,
 	}
@@ -100,6 +119,29 @@ func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 		})
 	}
 	return parts, nil
+}
+
+// hasUnfinishedCall reports whether a function call in msg has arguments that
+// are empty or do not decode, which in a turn cut off by the token limit means
+// they were cut off. A call of another type reports false, so that the turn
+// still fails in convertMessage, as adk-python leaves such a turn to its
+// existing error handling. JSON null still means no arguments, where
+// adk-python counts it as unfinished.
+func hasUnfinishedCall(msg openai.ChatCompletionMessage) bool {
+	unfinished := false
+	for _, call := range msg.ToolCalls {
+		if call.Type != "" && call.Type != "function" {
+			return false
+		}
+		fn := call.Function
+		if call.ID == "" && fn.Name == "" && fn.Arguments == "" {
+			continue // Accumulator padding, not a call; see convertMessage.
+		}
+		if _, err := functionCallArgs(fn.Arguments); fn.Arguments == "" || err != nil {
+			unfinished = true
+		}
+	}
+	return unfinished
 }
 
 // functionCallArgs decodes a tool call's arguments, reading an empty payload as
