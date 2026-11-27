@@ -1,0 +1,239 @@
+httprr trace v1
+1985 759
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1798
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the front desk of a small writing studio.\n- If the user asks for a paragraph, article or any text to be written\n  about a topic, transfer to writer_critics.\n- For anything else (questions, reactions, remarks), transfer to llm_router.\nDo not answer yourself.\n\n\nYou are an agent. Your internal name is \"studio\". The description about you is \"Front desk that hands writing work and casual chat to specialists.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: writer_critics\nAgent description: Drafts a paragraph on a topic and revises it with three critics, at most 5 turns.\n\n\nAgent name: llm_router\nAgent description: Classifies a message as question, exclamation or statement and replies accordingly.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`llm_router`, `writer_critics`.\n","role":"system"},{"content":"Write a short paragraph about the history of the bicycle.","role":"user"}],"model":"test-model","tools":[{"function":{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer_critics","llm_router"],"type":"string"}},"required":["agent_name"],"type":"object"}},"type":"function"}]}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+29c
+{"id":"chatcmpl-265","object":"chat.completion","created":1794655488,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"The user is asking for a paragraph to be written about a topic (history of the bicycle). According to my instructions, I should transfer to writer_critics.","tool_calls":[{"id":"call_acre0eww","index":0,"type":"function","function":{"name":"transfer_to_agent","arguments":"{\"agent_name\":\"writer_critics\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":471,"completion_tokens":48,"total_tokens":519,"prompt_tokens_details":{"cached_tokens":256}}}
+
+0
+
+554 2216
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 368
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the Writer. Given a topic, write one paragraph of 60 to 120 words:\nno headings, no bullets. Given a DRAFT and CRITIC FEEDBACK, rewrite the\ndraft so it addresses every point. Reply with only the paragraph.\n","role":"system"},{"content":"Write a short paragraph about the history of the bicycle.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+84d
+{"id":"chatcmpl-642","object":"chat.completion","created":1794655490,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet. French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety. The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort. These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.","reasoning":"The user wants a short paragraph about the history of the bicycle. This is the initial request — no draft or critic feedback given, so I just write one paragraph of 60–120 words. No headings, no bullets, only the paragraph.\n\nLet me recall bicycle history accurately: The bicycle's earliest predecessor was the \"draisine\" (Laufmaschine) invented by Karl von Drais in 1817 — a two-wheeler pushed by feet. Kirkpatrick Macmillan may have created a pedal-driven bicycle in 1839 (some dispute). Pedal-powered velocipedes (\"boneshakers\") appeared in the 1860s, attributed to Pierre Michaux and Pierre Lallement in France. The penny-farthing (high-wheeler) came in the 1870s, designed by James Starley. The \"safety bicycle\" with equal-sized wheels and chain drive emerged in the 1880s (John Kemp Starley's Rover, 1885). John Boyd Dunlop's pneumatic tires came in 1888. These innovations made the modern bicycle.\n\nWrite 60–120 words, one paragraph, no headings or bullets."},"finish_reason":"stop"}],"usage":{"prompt_tokens":78,"completion_tokens":416,"total_tokens":494,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1310 3881
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1123
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the Style critic. The paragraph should be 60 to 120 words, one\nparagraph, no headings or bullets. Answer `APPROVE` if the style is\ngood, otherwise `REVISE: ` and what to change. Your first word must be\nAPPROVE or REVISE.\n","role":"system"},{"content":"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet. French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety. The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort. These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+ece
+{"id":"chatcmpl-871","object":"chat.completion","created":1794655493,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"APPROVE\n\nThe paragraph reads smoothly and sits at roughly 112 words, comfortably within the required range. The chronological structure gives it natural momentum, moving from the draisine through the boneshaker and penny-farthing to the safety bicycle, with each sentence adding a distinct stage. Sentence lengths vary appropriately, and the prose balances technical detail—chain drives, pneumatic tires—with vivid, memorable phrasing like \"boneshaker,\" \"eccentric contraption,\" and \"global cycling craze.\" Transitions are handled well, and the closing sentence lands with a satisfying sense of synthesis rather than tacked-on commentary. No headings, bullets, or structural issues. The style is clear, engaging, and consistent throughout.","reasoning":"The Style critic needs to evaluate this paragraph. Requirements: 60 to 120 words, one paragraph, no headings or bullets.\n\nLet me count the words:\n\n\"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet.\" (1) The (2) bicycle's (3) history (4) began (5) in (6) 1817 (7) when (8) Karl (9) von (10) Drais (11) introduced (12) the (13) draisine (14) a (15) steerable (16) two-wheeled (17) machine (18) riders (19) propelled (20) with (21) their (22) feet.\n\nSentence 2: \"French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety.\" French (23) inventors (24) added (25) cranks (26) and (27) pedals (28) in (29) the (30) 1860s (31) producing (32) the (33) heavy (34) boneshaker (35) velocipede (36) followed (37) by (38) the (39) iconic (40) high-wheeled (41) penny-farthing (42) of (43) the (44) 1870s (45) whose (46) huge (47) front (48) wheel (49) offered (50) speed (51) but (52) little (53) safety.\n\nSentence 3: \"The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort.\" The (54) modern (55) bicycle (56) emerged (57) in (58) 1885 (59) with (60) John (61) Kemp (62) Starley's (63) Rover (64) the (65) safety (66) bicycle (67) which (68) featured (69) equal-sized (70) wheels (71) and (72) a (73) chain (74) drive (75) and (76) John (77) Boyd (78) Dunlop's (79) pneumatic (80) tires (81) in (82) 1888 (83) greatly (84) improved (85) comfort.\n\nSentence 4: \"These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.\" These (86) innovations (87) transformed (88) the (89) bicycle (90) from (91) an (92) eccentric (93) contraption (94) into (95) a (96) reliable (97) affordable (98) machine (99) that (100) revolutionized (101) personal (102) transportation (103) and (104) by (105) the (106) 1890s (107) sparked (108) a (109) global (110) cycling (111) craze.\n\nTotal: 112 words. Within 60-120 range. One paragraph, no headings or bullets. Good.\n\nStyle assessment: The paragraph flows chronologically, uses varied sentence structures, engaging language (\"eccentric contraption,\" \"boneshaker,\" \"cycling craze\"). Clear transitions. This is well-written. APPROVE.\n\nFirst word must be APPROVE or REVISE."},"finish_reason":"stop"}],"usage":{"prompt_tokens":254,"completion_tokens":945,"total_tokens":1199,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1289 3476
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1102
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the Clarity critic. Review the paragraph for clarity only.\nAnswer `APPROVE` if it is clear, otherwise `REVISE: ` and one or two\nsentences saying what to fix. Your first word must be APPROVE or REVISE.\n","role":"system"},{"content":"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet. French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety. The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort. These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+d39
+{"id":"chatcmpl-667","object":"chat.completion","created":1794655493,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"APPROVE","reasoning":"The task: I'm the Clarity critic, reviewing the paragraph for clarity only. Answer APPROVE if clear, otherwise REVISE with one or two sentences.\n\nLet me read the paragraph:\n\n\"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet. French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety. The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort. These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.\"\n\nClarity assessment:\n1. First sentence - clear. Chronological start, defines draisine.\n2. Second sentence - clear chronology. \"whose huge front wheel offered speed but little safety\" - clear.\n3. Third sentence - a bit long, has \"which featured equal-sized wheels and a chain drive\" then shifts to Dunlop tires. Slightly complex but still parseable. \"the modern bicycle emerged in 1885 with Starley's Rover... and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort.\" Two clauses joined by \"and\" - it's a run-on-ish structure but grammatically fine (compound predicate with two different subjects: \"emerged\" and \"tires... improved\"). Actually, \"The modern bicycle emerged in 1885 with Starley's Rover, the 'safety bicycle,' which featured..., and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort.\" The \"and\" connects two independent clauses—fine grammatically. Clarity: the reader might momentarily attach \"and John Boyd Dunlop's pneumatic tires\" to the Rover, but the \"greatly improved comfort\" clarifies. It's understandable.\n\n4. Fourth sentence - clear summary. \"These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.\" The \"by the 1890s\" placement—did the transformation spark the craze, or did it happen by the 1890s? Slight ambiguity but minor.\n\nOverall, the paragraph is clear, chronological, with defined terms. As a clarity critic, I'd say APPROVE. There may be minor points (third sentence packs two developments), but is that a clarity failure? It's readable. I think APPROVE is the right call.\n\nThe instruction: \"Your first word must be APPROVE or REVISE.\" So just \"APPROVE\" possibly with a brief note? The instruction says answer APPROVE if clear, otherwise REVISE: and one or two sentences. So if approving, just \"APPROVE\". Maybe I can add a short sentence, but safest is just \"APPROVE.\" I'll answer APPROVE."},"finish_reason":"stop"}],"usage":{"prompt_tokens":245,"completion_tokens":682,"total_tokens":927,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1294 3721
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1107
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the Accuracy critic. Flag any claim that is wrong, overstated\nor unsupported. Answer `APPROVE` if every claim is sound, otherwise\n`REVISE: ` and the claim to fix. Your first word must be APPROVE or REVISE.\n","role":"system"},{"content":"The bicycle's history began in 1817, when Karl von Drais introduced the \"draisine,\" a steerable, two-wheeled machine riders propelled with their feet. French inventors added cranks and pedals in the 1860s, producing the heavy \"boneshaker\" velocipede, followed by the iconic high-wheeled penny-farthing of the 1870s, whose huge front wheel offered speed but little safety. The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the \"safety bicycle,\" which featured equal-sized wheels and a chain drive, and John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort. These innovations transformed the bicycle from an eccentric contraption into a reliable, affordable machine that revolutionized personal transportation and, by the 1890s, sparked a global cycling craze.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+e2e
+{"id":"chatcmpl-76","object":"chat.completion","created":1794655494,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"APPROVE\n\nThe passage is historically sound. Karl von Drais's 1817 steerable, foot-propelled draisine is correctly dated and described. The attribution of pedal-crank velocipedes (\"boneshakers\") to French inventors in the 1860s matches the standard account (Michaux/Lallement). The penny-farthing of the 1870s is accurately characterized as fast but unsafe. John Kemp Starley's 1885 Rover safety bicycle did feature equal-sized wheels and chain drive, and Dunlop's 1888 pneumatic tires did markedly improve comfort. The 1890s cycling boom is well documented. No overstated or unsupported claims detected.","reasoning":"Let me fact-check this text about bicycle history.\n\n1. \"The bicycle's history began in 1817, when Karl von Drais introduced the 'draisine'\" - Karl von Drais introduced the Laufmaschine (running machine) in 1817, also called the draisine or draisienne. This is correct. It was steerable, two-wheeled, and propelled by feet pushing on the ground. Correct.\n\n2. \"French inventors added cranks and pedals in the 1860s, producing the heavy 'boneshaker' velocipede\" - The velocipede with pedals was developed in the 1860s, often attributed to Pierre Michaux and Pierre Lallement (French). The \"boneshaker\" nickname is accurate. Correct. Note: some historians debate whether cranks/pedals were French or Scottish (Kirkpatrick Macmillan), but the standard account credits French inventors (Michaux) in the 1860s. This is fine.\n\n3. \"followed by the iconic high-wheeled penny-farthing of the 1870s\" - The penny-farthing (ordinary/high-wheeler) emerged in the early 1870s, James Starley's Ariel (1871). Correct.\n\n4. \"whose huge front wheel offered speed but little safety\" - Correct; high wheelers were fast but prone to \"headers\" (forward falls). Accurate.\n\n5. \"The modern bicycle emerged in 1885 with John Kemp Starley's Rover, the 'safety bicycle,' which featured equal-sized wheels and a chain drive\" - Correct. The Rover safety bicycle of 1885 had equal-sized wheels and chain drive to the rear wheel.\n\n6. \"John Boyd Dunlop's pneumatic tires in 1888 greatly improved comfort\" - Dunlop patented pneumatic tires in 1888. Note: Robert William Thomson had earlier patented a pneumatic tire (1845), but Dunlop's 1888 reinvention is the standard story for bicycles. The text says \"Dunlop's pneumatic tires in 1888\" — this is accurate as Dunlop developed it in 1888 (patent). Fine.\n\n7. \"by the 1890s, sparked a global cycling craze\" - The 1890s bicycle boom / cycling craze is a well-documented phenomenon, particularly in the US and Europe. \"Global\" might be a slight overstatement, but the cycling craze did spread internationally. This seems acceptable.\n\nOne possible nitpick: The draisine was called the \"Laufmaschine\" (running machine) or \"draisienne\" (French spelling). \"Draisine\" is an accepted English term. Fine.\n\nAnother: \"cranks and pedals in the 1860s\" — the velocipede added pedals attached to the front wheel. Correct.\n\nThe sentence \"French inventors added cranks and pedals in the 1860s, producing the heavy 'boneshaker' velocipede, followed by the iconic high-wheeled penny-farthing\" — the penny-farthing followed, correct.\n\nEverything checks out. The claims are accurate and standard history. I should APPROVE."},"finish_reason":"stop"}],"usage":{"prompt_tokens":246,"completion_tokens":803,"total_tokens":1049,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1982 836
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1795
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the front desk of a small writing studio.\n- If the user asks for a paragraph, article or any text to be written\n  about a topic, transfer to writer_critics.\n- For anything else (questions, reactions, remarks), transfer to llm_router.\nDo not answer yourself.\n\n\nYou are an agent. Your internal name is \"studio\". The description about you is \"Front desk that hands writing work and casual chat to specialists.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: writer_critics\nAgent description: Drafts a paragraph on a topic and revises it with three critics, at most 5 turns.\n\n\nAgent name: llm_router\nAgent description: Classifies a message as question, exclamation or statement and replies accordingly.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`llm_router`, `writer_critics`.\n","role":"system"},{"content":"Is the Eiffel Tower taller than the Statue of Liberty?","role":"user"}],"model":"test-model","tools":[{"function":{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer_critics","llm_router"],"type":"string"}},"required":["agent_name"],"type":"object"}},"type":"function"}]}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+2e9
+{"id":"chatcmpl-154","object":"chat.completion","created":1794655494,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"The user is asking a question about the Eiffel Tower vs Statue of Liberty. This is a question, not a request to write a paragraph/article/text. According to my instructions, questions should go to llm_router. I should not answer myself.","tool_calls":[{"id":"call_jnz8r8td","index":0,"type":"function","function":{"name":"transfer_to_agent","arguments":"{\"agent_name\":\"llm_router\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":473,"completion_tokens":67,"total_tokens":540,"prompt_tokens_details":{"cached_tokens":256}}}
+
+0
+
+612 605
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 426
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"Classify the user's message:\n- \"question\": ends with '?' or asks for information\n- \"exclamation\": expresses strong emotion, often ends with '!'\n- \"statement\": a neutral declarative sentence\nAnswer with EXACTLY one lowercase word: question, exclamation or statement.\n","role":"system"},{"content":"Is the Eiffel Tower taller than the Statue of Liberty?","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+202
+{"id":"chatcmpl-496","object":"chat.completion","created":1794655495,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"question","reasoning":"The user's message is: \"Is the Eiffel Tower taller than the Statue of Liberty?\"\n\nThis ends with a question mark and asks for information. It's a question."},"finish_reason":"stop"}],"usage":{"prompt_tokens":85,"completion_tokens":39,"total_tokens":124,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+459 911
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 273
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"The user asked a question. Answer it directly in at most three\nsentences. If you do not know, say so instead of guessing.\n","role":"system"},{"content":"Is the Eiffel Tower taller than the Statue of Liberty?","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+334
+{"id":"chatcmpl-372","object":"chat.completion","created":1794655496,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"Yes, the Eiffel Tower is significantly taller. The Eiffel Tower stands about 330 meters (1,083 feet), while the Statue of Liberty is roughly 93 meters (305 feet) including its pedestal. The Eiffel Tower is more than three times taller.","reasoning":"The Eiffel Tower is about 330 meters (1,083 feet) tall. The Statue of Liberty is about 93 meters (305 feet) tall including the pedestal. So yes, the Eiffel Tower is much taller.\n\nThe constraint is to answer in at most three sentences."},"finish_reason":"stop"}],"usage":{"prompt_tokens":55,"completion_tokens":120,"total_tokens":175,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1952 794
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1765
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the front desk of a small writing studio.\n- If the user asks for a paragraph, article or any text to be written\n  about a topic, transfer to writer_critics.\n- For anything else (questions, reactions, remarks), transfer to llm_router.\nDo not answer yourself.\n\n\nYou are an agent. Your internal name is \"studio\". The description about you is \"Front desk that hands writing work and casual chat to specialists.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: writer_critics\nAgent description: Drafts a paragraph on a topic and revises it with three critics, at most 5 turns.\n\n\nAgent name: llm_router\nAgent description: Classifies a message as question, exclamation or statement and replies accordingly.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`llm_router`, `writer_critics`.\n","role":"system"},{"content":"I just won the marathon!","role":"user"}],"model":"test-model","tools":[{"function":{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer_critics","llm_router"],"type":"string"}},"required":["agent_name"],"type":"object"}},"type":"function"}]}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+2bf
+{"id":"chatcmpl-269","object":"chat.completion","created":1794655497,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"The user says \"I just won the marathon!\" - this is not a request to write a paragraph, article, or any text about a topic. It's a casual remark/exclamation. So I should transfer to llm_router.","tool_calls":[{"id":"call_qoqurmmw","index":0,"type":"function","function":{"name":"transfer_to_agent","arguments":"{\"agent_name\":\"llm_router\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":466,"completion_tokens":63,"total_tokens":529,"prompt_tokens_details":{"cached_tokens":256}}}
+
+0
+
+582 659
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 396
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"Classify the user's message:\n- \"question\": ends with '?' or asks for information\n- \"exclamation\": expresses strong emotion, often ends with '!'\n- \"statement\": a neutral declarative sentence\nAnswer with EXACTLY one lowercase word: question, exclamation or statement.\n","role":"system"},{"content":"I just won the marathon!","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+238
+{"id":"chatcmpl-10","object":"chat.completion","created":1794655497,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"exclamation","reasoning":"The user's message: \"I just won the marathon!\"\n\nThis expresses strong emotion (excitement about winning) and ends with '!'. So it's an \"exclamation\".\n\nAnswer with exactly one lowercase word: exclamation"},"finish_reason":"stop"}],"usage":{"prompt_tokens":78,"completion_tokens":48,"total_tokens":126,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+423 974
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 237
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"The user expressed strong emotion. Reply in one short sentence that\nacknowledges the feeling. Do not ask questions.\n","role":"system"},{"content":"I just won the marathon!","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+373
+{"id":"chatcmpl-21","object":"chat.completion","created":1794655498,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"Congratulations — you must be absolutely thrilled after such an incredible achievement!","reasoning":"The user just won a marathon and expressed strong emotion (excitement, joy, triumph). My instructions are to:\n1. Reply in one short sentence\n2. Acknowledge the feeling\n3. Do not ask questions\n\nSo I should respond with something celebratory that acknowledges their excitement/pride, in one short sentence, without asking any questions.\n\nSomething like: \"Congratulations—that's an incredible achievement and you must be feeling amazing!\""},"finish_reason":"stop"}],"usage":{"prompt_tokens":43,"completion_tokens":102,"total_tokens":145,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+1959 744
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 1772
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"You are the front desk of a small writing studio.\n- If the user asks for a paragraph, article or any text to be written\n  about a topic, transfer to writer_critics.\n- For anything else (questions, reactions, remarks), transfer to llm_router.\nDo not answer yourself.\n\n\nYou are an agent. Your internal name is \"studio\". The description about you is \"Front desk that hands writing work and casual chat to specialists.\".\n\n\nYou have a list of other agents to transfer to:\n\n\nAgent name: writer_critics\nAgent description: Drafts a paragraph on a topic and revises it with three critics, at most 5 turns.\n\n\nAgent name: llm_router\nAgent description: Classifies a message as question, exclamation or statement and replies accordingly.\n\n\nIf you are the best to answer the question according to your description,\nyou can answer it.\n\nIf another agent is better for answering the question according to its\ndescription, call `transfer_to_agent` function to transfer the question to that\nagent. When transferring, do not generate any text other than the function\ncall.\n\n**NOTE**: the only available agents for `transfer_to_agent` function are\n`llm_router`, `writer_critics`.\n","role":"system"},{"content":"Paris is the capital of France.","role":"user"}],"model":"test-model","tools":[{"function":{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["writer_critics","llm_router"],"type":"string"}},"required":["agent_name"],"type":"object"}},"type":"function"}]}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+28d
+{"id":"chatcmpl-24","object":"chat.completion","created":1794655499,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"This is a statement, not a request for writing. According to my instructions, I should transfer statements, questions, and remarks to llm_router.","tool_calls":[{"id":"call_3csq4nj7","index":0,"type":"function","function":{"name":"transfer_to_agent","arguments":"{\"agent_name\":\"llm_router\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":467,"completion_tokens":46,"total_tokens":513,"prompt_tokens_details":{"cached_tokens":256}}}
+
+0
+
+589 666
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 403
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"Classify the user's message:\n- \"question\": ends with '?' or asks for information\n- \"exclamation\": expresses strong emotion, often ends with '!'\n- \"statement\": a neutral declarative sentence\nAnswer with EXACTLY one lowercase word: question, exclamation or statement.\n","role":"system"},{"content":"Paris is the capital of France.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+23f
+{"id":"chatcmpl-649","object":"chat.completion","created":1794655500,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"statement","reasoning":"The user's message is \"Paris is the capital of France.\" This is a declarative sentence, not a question (doesn't ask for information), not an exclamation (no strong emotion, doesn't end with '!'). So it's a statement."},"finish_reason":"stop"}],"usage":{"prompt_tokens":79,"completion_tokens":54,"total_tokens":133,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+
+440 1649
+POST http://openai.test/v1/chat/completions HTTP/1.1
+Host: openai.test
+User-Agent: Go-http-client/1.1
+Content-Length: 254
+Accept: application/json
+Content-Type: application/json
+
+{"messages":[{"content":"The user made a neutral statement. Reply with one short sentence that\nadds a relevant, accurate remark. Do not ask questions.\n","role":"system"},{"content":"Paris is the capital of France.","role":"user"}],"model":"test-model"}HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+Content-Type: application/json
+
+616
+{"id":"chatcmpl-415","object":"chat.completion","created":1794655501,"model":"glm-5.3-flash","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"It's also the country's largest city, situated along the Seine River.","reasoning":"The user made a statement: \"Paris is the capital of France.\" According to the system prompt, I should reply with one short sentence that adds a relevant, accurate remark, and I should not ask questions.\n\nSo I need to add something factual and relevant about Paris or France. Something like \"Paris has been France's capital for centuries\" or something about its population, landmarks, etc.\n\nOne short sentence. Let me think of accurate facts:\n- Paris is also known as the \"City of Light.\"\n- It's located on the Seine River.\n- It's the largest city in France.\n- The Eiffel Tower is there.\n- France's metro area population is around 2 million (city proper) or over 10 million metro.\n\nSomething like: \"It's also the country's largest city, sitting along the Seine River.\" That's accurate and relevant, one sentence, no question.\n\nOr: \"The city is also home to famous landmarks like the Eiffel Tower and the Louvre.\" That's one sentence.\n\nKeep it short: \"It's also France's largest city, located on the Seine River.\" That's accurate — Paris is both the capital and largest city, and it's situated on the Seine River."},"finish_reason":"stop"}],"usage":{"prompt_tokens":46,"completion_tokens":266,"total_tokens":312,"prompt_tokens_details":{"cached_tokens":0}}}
+
+0
+

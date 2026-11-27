@@ -1,0 +1,206 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A root agent with two workflow sub-agents. Routing, loop control and data
+# shaping are CEL expressions; of what the Go host registers, this document
+# uses only the `default` model.
+apiVersion: adk/v1alpha1
+kind: AgentSystem
+
+agents:
+  # ---------------------------------------------------------------------------
+  # Root agent: the first agent in the document. Its sub_agents are transfer
+  # targets.
+  # ---------------------------------------------------------------------------
+  - name: studio
+    agent_class: LlmAgent
+    model: default
+    description: Front desk that hands writing work and casual chat to specialists.
+    instruction: |
+      You are the front desk of a small writing studio.
+      - If the user asks for a paragraph, article or any text to be written
+        about a topic, transfer to writer_critics.
+      - For anything else (questions, reactions, remarks), transfer to llm_router.
+      Do not answer yourself.
+    sub_agents: [writer_critics, llm_router]
+
+  # ---------------------------------------------------------------------------
+  # Sub-agent 1: a writer and three critics in a bounded revision loop.
+  #
+  #   START -> write -+-> critic_clarity -+
+  #             ^     +-> critic_accuracy-+-> gather -> decide -+- DONE -> publish
+  #             |     +-> critic_style ---+                     |
+  #             +---------------------------------------- REVISE
+  # ---------------------------------------------------------------------------
+  - name: writer_critics
+    agent_class: Workflow
+    description: Drafts a paragraph on a topic and revises it with three critics, at most 5 turns.
+    nodes:
+      # An agent node is named after the agent it runs, so node `write` runs
+      # agent `writer`: the two names must differ.
+      - { id: write, type: agent, agent: writer }
+
+      - id: critic_clarity
+        type: llm
+        model: default
+        instruction: |
+          You are the Clarity critic. Review the paragraph for clarity only.
+          Answer `APPROVE` if it is clear, otherwise `REVISE: ` and one or two
+          sentences saying what to fix. Your first word must be APPROVE or REVISE.
+
+      - id: critic_accuracy
+        type: llm
+        model: default
+        instruction: |
+          You are the Accuracy critic. Flag any claim that is wrong, overstated
+          or unsupported. Answer `APPROVE` if every claim is sound, otherwise
+          `REVISE: ` and the claim to fix. Your first word must be APPROVE or REVISE.
+
+      - id: critic_style
+        type: llm
+        model: default
+        instruction: |
+          You are the Style critic. The paragraph should be 60 to 120 words, one
+          paragraph, no headings or bullets. Answer `APPROVE` if the style is
+          good, otherwise `REVISE: ` and what to change. Your first word must be
+          APPROVE or REVISE.
+
+      # Output: {critic_clarity: "...", critic_accuracy: "...", critic_style: "..."}
+      - { id: gather, type: join }
+
+      - id: decide
+        type: cel
+        vars:                               # evaluated in order
+          # Session state outlives the request, so the count restarts when
+          # the invocation that last wrote it is not this one.
+          - name: turn
+            expr: "state.?turn_invocation.orValue('') == invocation.id ? state.turn + 1 : 1"
+          - name: approved
+            expr: |
+              ['critic_clarity', 'critic_accuracy', 'critic_style']
+                .filter(k, input[k].trim().upperAscii().startsWith('APPROVE'))
+                .size()
+          - name: done
+            expr: "vars.approved == 3 || vars.turn >= 5"
+        routes:                             # first match wins
+          - { route: DONE,   when: "vars.done" }
+          - { route: REVISE, when: "true" } # named, so both outcomes read alike
+        # DONE forwards the final draft to `publish`; REVISE sends the writer
+        # the draft plus every critic's feedback.
+        output: |
+          vars.done ? state.draft :
+          'Revise the DRAFT below. Address every point in the CRITIC FEEDBACK. ' +
+          'Reply with only the revised paragraph.\n\n' +
+          'DRAFT:\n' + state.draft + '\n\n' +
+          'CRITIC FEEDBACK:\n' +
+          '- Clarity: '  + input.critic_clarity  + '\n' +
+          '- Accuracy: ' + input.critic_accuracy + '\n' +
+          '- Style: '    + input.critic_style
+        state_delta:                        # evaluated against the state before this node
+          turn: vars.turn
+          turn_invocation: invocation.id
+          approved: vars.approved
+
+      - id: publish
+        type: cel
+        output: |
+          'Final draft after ' + string(state.turn) + ' turn(s), ' +
+          string(state.approved) + '/3 approvals:\n\n' + input
+
+    edges:
+      - { from_node: START,           to_node: write }
+      - { from_node: write,           to_node: critic_clarity }
+      - { from_node: write,           to_node: critic_accuracy }
+      - { from_node: write,           to_node: critic_style }
+      - { from_node: critic_clarity,  to_node: gather }
+      - { from_node: critic_accuracy, to_node: gather }
+      - { from_node: critic_style,    to_node: gather }
+      - { from_node: gather,          to_node: decide }
+      - { from_node: decide,          to_node: publish, route: DONE }
+      - { from_node: decide,          to_node: write,   route: REVISE }
+
+  # Run by writer_critics through the `write` agent node.
+  - name: writer
+    agent_class: LlmAgent
+    model: default
+    mode: single_turn
+    output_key: draft                       # read back as state.draft
+    instruction: |
+      You are the Writer. Given a topic, write one paragraph of 60 to 120 words:
+      no headings, no bullets. Given a DRAFT and CRITIC FEEDBACK, rewrite the
+      draft so it addresses every point. Reply with only the paragraph.
+
+  # ---------------------------------------------------------------------------
+  # Sub-agent 2: LLM classification and CEL routing. The same graph written in
+  # Go is examples/workflow/routing/llm, which needs a custom node to set
+  # Routes.
+  #
+  #   START -> classify (llm) -> route (cel) -+- QUESTION    -> answer_question
+  #                                           +- EXCLAMATION -> react_exclamation
+  #                                           +- DEFAULT     -> comment_statement
+  # ---------------------------------------------------------------------------
+  - name: llm_router
+    agent_class: Workflow
+    description: Classifies a message as question, exclamation or statement and replies accordingly.
+    nodes:
+      - id: classify
+        type: llm
+        model: default
+        instruction: |
+          Classify the user's message:
+          - "question": ends with '?' or asks for information
+          - "exclamation": expresses strong emotion, often ends with '!'
+          - "statement": a neutral declarative sentence
+          Answer with EXACTLY one lowercase word: question, exclamation or statement.
+
+      - id: route
+        type: cel
+        vars:
+          - { name: label, expr: "input.trim().lowerAscii()" }
+        routes:                             # an off-script label matches nothing -> DEFAULT
+          - { route: QUESTION,    when: "vars.label.startsWith('question')" }
+          - { route: EXCLAMATION, when: "vars.label.startsWith('exclamation')" }
+        # An llm node sees only its input, so forward the user's message rather
+        # than the label. The label is kept in state.
+        output: user.content
+        state_delta:
+          label: vars.label
+
+      - id: answer_question
+        type: llm
+        model: default
+        instruction: |
+          The user asked a question. Answer it directly in at most three
+          sentences. If you do not know, say so instead of guessing.
+
+      - id: react_exclamation
+        type: llm
+        model: default
+        instruction: |
+          The user expressed strong emotion. Reply in one short sentence that
+          acknowledges the feeling. Do not ask questions.
+
+      - id: comment_statement
+        type: llm
+        model: default
+        instruction: |
+          The user made a neutral statement. Reply with one short sentence that
+          adds a relevant, accurate remark. Do not ask questions.
+
+    edges:
+      - { from_node: START,    to_node: classify }
+      - { from_node: classify, to_node: route }
+      - { from_node: route,    to_node: answer_question,   route: QUESTION }
+      - { from_node: route,    to_node: react_exclamation, route: EXCLAMATION }
+      - { from_node: route,    to_node: comment_statement, route: DEFAULT }
