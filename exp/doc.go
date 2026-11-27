@@ -30,6 +30,8 @@
 //     typed questions with probability distributions
 //   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
 //     by TypeSafe's Jev decision models
+//   - [google.golang.org/adk/v2/exp/fallbackmodel]: a model that tries a list
+//     of models in order, moving on when one fails with a retriable status
 //   - [google.golang.org/adk/v2/exp/vertexairagtool]: a tool that grounds responses
 //     on a Vertex AI RAG corpus
 package exp
