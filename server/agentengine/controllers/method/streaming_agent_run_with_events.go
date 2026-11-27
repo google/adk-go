@@ -170,10 +170,12 @@ func (s *streamingAgentRunWithEventsHandler) ensureBackendSession(ctx context.Co
 		return fmt.Errorf("session service is required for backend session handling")
 	}
 
+	// The runner reads the events when the run starts, so this read skips them.
 	getResp, err := s.config.SessionService.Get(ctx, &session.GetRequest{
-		AppName:   s.agentEngineID,
-		UserID:    req.UserID,
-		SessionID: requestedSessionID,
+		AppName:       s.agentEngineID,
+		UserID:        req.UserID,
+		SessionID:     requestedSessionID,
+		ExcludeEvents: true,
 	})
 	if err == nil && getResp.Session != nil {
 		req.SessionID = getResp.Session.ID()

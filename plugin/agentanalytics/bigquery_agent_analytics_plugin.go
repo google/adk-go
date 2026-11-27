@@ -582,6 +582,7 @@ func newBigQueryAgentAnalyticsPluginWithTraces(
 		finalResponseTools: newSet(config.FinalResponseToolNames...),
 		customMetadata:     newCustomMetadataFilter(config.CustomMetadataAllowlist),
 		traces:             traces,
+		newUUID:            uuid.New,
 	}
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
@@ -814,6 +815,7 @@ type analyticsPlugin struct {
 	finalResponseTools map[string]struct{}
 	customMetadata     customMetadataFilter
 	traces             *traceManager
+	newUUID            func() uuid.UUID
 }
 
 // eventData carries the event-specific parts of a row.
@@ -2498,8 +2500,10 @@ type visitedContextStruct struct {
 // contextPath returns the execution node path carried by ctx, or "".
 // ADK's callbackContextWrapper.Path logs an error and returns "", and
 // NewCallbackContext wraps the inner InvocationContext without copying its
-// path onto the outer commonContext, so contextPath inspects the wrapped
-// context chain directly before falling back to Path() on non-wrapper types.
+// path onto the outer commonContext, so contextPath inspects allowlisted
+// standard library and ADK context wrappers via an iterative LIFO stack
+// (exploring the entire invocationContext subtree before falling back to a
+// replacement Context) before falling back to Path() on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2509,11 +2513,11 @@ func contextPath(ctx context.Context) (path string) {
 	if ctx == nil {
 		return ""
 	}
-	var q contextStructQueue
-	q.push(reflect.ValueOf(ctx))
+	var stack contextStructStack
+	stack.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
-	for steps := range 512 {
-		item, ok := q.pop()
+	for steps := range maxContextWalkDepth {
+		item, ok := stack.pop()
 		if !ok {
 			break
 		}
@@ -2545,8 +2549,21 @@ func contextPath(ctx context.Context) (path string) {
 			}
 		}
 		c1, c2 := adkContextChildren(v)
-		q.push(c1)
-		q.push(c2)
+		if c2.IsValid() {
+			// Push the secondary/replacement child first so LIFO explores the
+			// authoritative ADK subtree (including any nested fallbacks) before
+			// returning to replacement or secondary contexts.
+			if (vt.PkgPath() == agentPkgPath && vt.Name() == "commonContext") ||
+				(vt.PkgPath() == internalContextPkgPath && vt.Name() == "ReadonlyContext") {
+				stack.push(c1)
+				stack.push(c2)
+			} else {
+				stack.push(c2)
+				stack.push(c1)
+			}
+			continue
+		}
+		stack.push(c1)
 	}
 	type pathCarrier interface {
 		Path() string
@@ -2577,7 +2594,7 @@ func runnerAgentOf(ctx agent.InvocationContext) agent.Agent {
 }
 
 func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType string, d *eventData) map[string]any {
-	eventID := newEventID()
+	eventID := p.newEventID()
 	rowTS := time.Now()
 	if !d.timestamp.IsZero() {
 		rowTS = d.timestamp
@@ -2657,8 +2674,12 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType s
 
 // newEventID returns a random UUID as 32 hex digits, the format of
 // adk-python's uuid4().hex.
-func newEventID() string {
-	id := uuid.New()
+func (p *analyticsPlugin) newEventID() string {
+	gen := uuid.New
+	if p != nil && p.newUUID != nil {
+		gen = p.newUUID
+	}
+	id := gen()
 	return hex.EncodeToString(id[:])
 }
 

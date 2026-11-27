@@ -23,6 +23,7 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -33,6 +34,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -45,8 +48,10 @@ var cacheTestNow = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 // generateContent endpoints, and records what each received, in order.
 type fakeCacheAPI struct {
 	// createStatus and generateStatus, when non-zero, are the error status
-	// every cache creation or generation gets.
+	// every cache creation or generation gets. createMessage overrides the
+	// default error message for cache creation failures when non-empty.
 	createStatus   int
+	createMessage  string
 	generateStatus int
 	// deleteStatus, when non-zero, is the error status every deletion gets.
 	deleteStatus int
@@ -87,9 +92,12 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	fail := func(status int) {
+	fail := func(status int, message string) {
+		if message == "" {
+			message = "refused"
+		}
 		w.WriteHeader(status)
-		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "INVALID_ARGUMENT"}}`, status)
+		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": %q, "status": "INVALID_ARGUMENT"}}`, status, message)
 	}
 	// failGone answers a generation that names a cache the provider no longer
 	// holds, and reports whether it did.
@@ -116,7 +124,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.creates = append(f.creates, decoded)
 		f.createHeaders = append(f.createHeaders, r.Header.Clone())
 		if f.createStatus != 0 {
-			fail(f.createStatus)
+			fail(f.createStatus, f.createMessage)
 			return
 		}
 		resp := map[string]any{"name": fmt.Sprintf("cachedContents/%d", len(f.creates))}
@@ -136,7 +144,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if f.deleteStatus != 0 {
-			fail(f.deleteStatus)
+			fail(f.deleteStatus, "")
 			return
 		}
 		_, _ = fmt.Fprint(w, `{}`)
@@ -144,7 +152,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.calls = append(f.calls, "generate")
 		f.generates = append(f.generates, decoded)
 		if f.generateStatus != 0 {
-			fail(f.generateStatus)
+			fail(f.generateStatus, "")
 			return
 		}
 		if name, _ := decoded["cachedContent"].(string); f.goneAfterChunk && f.gone[name] {
@@ -175,7 +183,7 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.calls = append(f.calls, "generate")
 		f.generates = append(f.generates, decoded)
 		if f.generateStatus != 0 {
-			fail(f.generateStatus)
+			fail(f.generateStatus, "")
 			return
 		}
 		if failGone() {
@@ -192,6 +200,13 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (f *fakeCacheAPI) setCreateError(status int, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createStatus = status
+	f.createMessage = message
+}
+
 // newCacheTestModel returns a model named modelName that talks to api.
 func newCacheTestModel(t *testing.T, api *fakeCacheAPI, modelName string) *geminiModel {
 	t.Helper()
@@ -204,10 +219,17 @@ func newCacheTestModelWithProvider(t *testing.T, api *fakeCacheAPI, modelName st
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(srv.Close)
+	return newCacheTestModelAt(t, srv.URL, modelName, provider)
+}
+
+// newCacheTestModelAt returns a model named modelName wired to baseURL.
+func newCacheTestModelAt(t *testing.T, baseURL, modelName string, provider genai.ExtrasRequestProvider) *geminiModel {
+	t.Helper()
+	t.Cleanup(modelsWithoutExplicitCaching.Clear)
 	m, err := NewModel(t.Context(), modelName, &genai.ClientConfig{
 		APIKey:      "key",
 		Backend:     genai.BackendGeminiAPI,
-		HTTPOptions: genai.HTTPOptions{BaseURL: srv.URL, ExtrasRequestProvider: provider},
+		HTTPOptions: genai.HTTPOptions{BaseURL: baseURL, ExtrasRequestProvider: provider},
 	})
 	if err != nil {
 		t.Fatalf("NewModel: %v", err)
@@ -689,8 +711,8 @@ func TestGenerateContent_ContextCacheRequestShape(t *testing.T) {
 		t.Errorf("CreateHTTPOptions header on the create call = %q, want %q", got, "yes")
 	}
 	// genai appends its own identifier after ADK's, as on model calls.
-	if got := headers.Get("x-goog-api-client"); !strings.HasPrefix(got, m.versionHeaderValue) {
-		t.Errorf("x-goog-api-client on the create call = %q, want it to start with ADK's %q", got, m.versionHeaderValue)
+	if got := headers.Get("x-goog-api-client"); !strings.HasPrefix(got, m.trackingHeader(nil)) {
+		t.Errorf("x-goog-api-client on the create call = %q, want it to start with ADK's %q", got, m.trackingHeader(nil))
 	}
 
 	sent := api.generates[0]
@@ -883,8 +905,8 @@ func TestGenerateContent_ContextCacheConsumerStops(t *testing.T) {
 		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
 	}
 	if len(api.deleteHeaders) == 1 {
-		if got := api.deleteHeaders[0].Get("x-goog-api-client"); !strings.HasPrefix(got, m.versionHeaderValue) {
-			t.Errorf("x-goog-api-client on the delete call = %q, want it to start with ADK's %q", got, m.versionHeaderValue)
+		if got := api.deleteHeaders[0].Get("x-goog-api-client"); !strings.HasPrefix(got, m.trackingHeader(nil)) {
+			t.Errorf("x-goog-api-client on the delete call = %q, want it to start with ADK's %q", got, m.trackingHeader(nil))
 		}
 	}
 }
@@ -1482,4 +1504,421 @@ func contentTexts(v any) []string {
 		out = append(out, text.String())
 	}
 	return out
+}
+
+// Cache calls follow the same rule as model calls: the hosting runtime is
+// named only when the base URL in effect is a Google API endpoint.
+func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	const google, proxy = "https://generativelanguage.googleapis.com/", "https://proxy.example.com/"
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+k8s ", 1)
+
+	for _, tt := range []struct {
+		name          string
+		clientBaseURL string
+		opts          *genai.HTTPOptions
+		want          string
+	}{
+		{name: "Google client, no options", clientBaseURL: google, want: tagged},
+		{name: "Google client, options without a base URL", clientBaseURL: google, opts: &genai.HTTPOptions{}, want: tagged},
+		{name: "Google client, options with a proxy", clientBaseURL: google, opts: &genai.HTTPOptions{BaseURL: proxy}, want: plain},
+		{name: "proxy client, no options", clientBaseURL: proxy, want: plain},
+		{name: "proxy client, options with Google", clientBaseURL: proxy, opts: &genai.HTTPOptions{BaseURL: google}, want: tagged},
+	} {
+		baseURL, err := url.Parse(tt.clientBaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := &geminiModel{baseURL: baseURL}
+		c := &contextCache{trackingHeader: m.trackingHeader}
+		headers := c.httpOptions(tt.opts).Headers
+		for _, name := range []string{"x-goog-api-client", "user-agent"} {
+			if got := headers.Get(name); got != tt.want {
+				t.Errorf("%s: %s = %q, want %q", tt.name, name, got, tt.want)
+			}
+		}
+	}
+}
+
+// TestGenerateContent_ContextCacheRuntimeSuffix checks the labels on the calls
+// that create and delete a cache, as the provider receives them.
+func TestGenerateContent_ContextCacheRuntimeSuffix(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	for _, name := range []string{"GOOGLE_GEMINI_BASE_URL"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	const (
+		googleHost = "generativelanguage.googleapis.com"
+		proxyHost  = "proxy.example.com"
+		tagged     = "google-adk/" + version.Version + "+k8s"
+		plain      = "google-adk/" + version.Version
+	)
+
+	tests := []struct {
+		name string
+		// clientBaseURL and createBaseURL are the base URLs of the client and
+		// of the call that creates a cache, when not the default.
+		clientBaseURL, createBaseURL string
+		wantHosts                    []string
+		wantCreate, wantDelete       string
+	}{
+		{
+			name:       "Google client",
+			wantHosts:  []string{"POST " + googleHost, "POST " + googleHost, "DELETE " + googleHost},
+			wantCreate: tagged,
+			wantDelete: tagged,
+		},
+		{
+			name:          "Google client, cache created through a proxy",
+			createBaseURL: "https://" + proxyHost + "/",
+			wantHosts:     []string{"POST " + proxyHost, "POST " + googleHost, "DELETE " + googleHost},
+			wantCreate:    plain,
+			wantDelete:    tagged,
+		},
+		{
+			name:          "proxy client",
+			clientBaseURL: "https://" + proxyHost + "/",
+			wantHosts:     []string{"POST " + proxyHost, "POST " + proxyHost, "DELETE " + proxyHost},
+			wantCreate:    plain,
+			wantDelete:    plain,
+		},
+		{
+			name:          "proxy client, cache created at Google",
+			clientBaseURL: "https://" + proxyHost + "/",
+			createBaseURL: "https://" + googleHost + "/",
+			wantHosts:     []string{"POST " + googleHost, "POST " + proxyHost, "DELETE " + proxyHost},
+			wantCreate:    tagged,
+			wantDelete:    plain,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The failed generation makes the model delete the cache it created.
+			api := &fakeCacheAPI{generateStatus: http.StatusInternalServerError, expireTime: cacheTestNow.Add(time.Hour)}
+			var hosts []string
+			llm, err := NewModel(t.Context(), "test-model", &genai.ClientConfig{
+				APIKey:      "key",
+				Backend:     genai.BackendGeminiAPI,
+				HTTPOptions: genai.HTTPOptions{BaseURL: tt.clientBaseURL},
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					hosts = append(hosts, r.Method+" "+r.URL.Hostname())
+					if r.Body == nil {
+						r.Body = http.NoBody
+					}
+					rec := httptest.NewRecorder()
+					api.serve(rec, r)
+					return rec.Result(), nil
+				})},
+			})
+			if err != nil {
+				t.Fatalf("NewModel: %v", err)
+			}
+			m := llm.(*geminiModel)
+			cfg := &model.ContextCacheConfig{}
+			if tt.createBaseURL != "" {
+				cfg.CreateHTTPOptions = &genai.HTTPOptions{BaseURL: tt.createBaseURL}
+			}
+			req := cacheTestRequest(cfg)
+			req.PreviousPromptTokenCount = 5000
+			req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+
+			if _, err := generate(cacheTestContext(t), m, req); err == nil {
+				t.Fatal("GenerateContent() error = nil, want the model's error")
+			}
+			if diff := cmp.Diff([]string{"create", "generate", "delete cachedContents/1"}, api.calls); diff != "" {
+				t.Fatalf("API calls mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantHosts, hosts); diff != "" {
+				t.Fatalf("hosts called mismatch (-want +got):\n%s", diff)
+			}
+			for _, call := range []struct {
+				name    string
+				headers http.Header
+				want    string
+			}{
+				{name: "create", headers: api.createHeaders[0], want: tt.wantCreate},
+				{name: "delete", headers: api.deleteHeaders[0], want: tt.wantDelete},
+			} {
+				for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+					got := call.headers.Values(name)
+					if len(got) != 1 {
+						t.Fatalf("%s call: %s = %q, want one value", call.name, name, got)
+					}
+					if diff := cmp.Diff([]string{call.want}, adkLabels(got[0])); diff != "" {
+						t.Errorf("%s call: %s = %q: ADK labels mismatch (-want +got):\n%s", call.name, name, got[0], diff)
+					}
+				}
+			}
+		})
+	}
+}
+
+func cacheTestRequestAtTurn(cfg *model.ContextCacheConfig, extraTurns int) *model.LLMRequest {
+	req := cacheTestRequest(cfg)
+	for i := range extraTurns {
+		req.Contents = append(req.Contents,
+			genai.NewContentFromText(fmt.Sprintf("answer %d", i+2), genai.RoleModel),
+			genai.NewContentFromText(fmt.Sprintf("question %d", i+3), genai.RoleUser),
+		)
+	}
+	return req
+}
+
+func runCacheTurns(
+	t *testing.T,
+	ctx context.Context,
+	m *geminiModel,
+	initialMeta *model.CacheMetadata,
+	startTurn int,
+	promptTokens ...int32,
+) ([]*model.LLMRequest, []*model.LLMResponse) {
+	t.Helper()
+	meta := initialMeta
+	reqs := make([]*model.LLMRequest, len(promptTokens))
+	resps := make([]*model.LLMResponse, len(promptTokens))
+	for i, tokens := range promptTokens {
+		req := cacheTestRequestAtTurn(&model.ContextCacheConfig{}, startTurn+i)
+		req.PreviousPromptTokenCount = tokens
+		req.CacheMetadata = meta
+		resp := generateOnce(t, ctx, m, req)
+		reqs[i] = req
+		resps[i] = resp
+		meta = resp.CacheMetadata
+	}
+	return reqs, resps
+}
+
+func TestGenerateContent_ContextCacheExplicitCachingRefusalRemembered(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   string
+		message string
+	}{
+		{
+			name:    "does not support explicit context caching",
+			model:   "gemini-4-hydrogen",
+			message: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		},
+		{
+			name:    "explicit caching is not supported for",
+			model:   "gemini-4-hydrogen",
+			message: "Explicit caching is not supported for models/gemini-4-hydrogen.",
+		},
+		{
+			name:    "is not supported for context caching",
+			model:   "gemma-4",
+			message: "Model `gemma-4` is not supported for context caching. Please use Gemini or OpenMaaS models that are enabled for context caching.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{
+				createStatus:  http.StatusBadRequest,
+				createMessage: tt.message,
+				expireTime:    cacheTestNow.Add(time.Hour),
+			}
+			m := newCacheTestModel(t, api, tt.model)
+			reqs, resps := runCacheTurns(t, cacheTestContext(t), m, nil, 0, 5000, 10000, 15000)
+
+			wantCalls := []string{"generate", "create", "generate", "generate"}
+			if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+				t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+			}
+
+			for i, wantContents := range []int{3, 5, 7} {
+				if _, ok := api.generates[i]["cachedContent"]; ok {
+					t.Errorf("generate[%d] unexpectedly set cachedContent", i)
+				}
+				if api.generates[i]["systemInstruction"] == nil {
+					t.Errorf("generate[%d] dropped systemInstruction", i)
+				}
+				gotContents, _ := api.generates[i]["contents"].([]any)
+				if len(gotContents) != wantContents {
+					t.Errorf("generate[%d] contents len = %d, want %d", i, len(gotContents), wantContents)
+				}
+			}
+
+			wantMeta2 := &model.CacheMetadata{Fingerprint: fingerprintOf(m, reqs[1], 4), ContentsCount: 4}
+			if diff := cmp.Diff(wantMeta2, resps[1].CacheMetadata); diff != "" {
+				t.Errorf("turn 2 CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+			wantMeta3 := &model.CacheMetadata{Fingerprint: fingerprintOf(m, reqs[2], 6), ContentsCount: 6}
+			if diff := cmp.Diff(wantMeta3, resps[2].CacheMetadata); diff != "" {
+				t.Errorf("turn 3 CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGenerateContent_ContextCacheSubMinimumErrorRetried(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "minimum token count error",
+			message: "The cached content is of 507 tokens. The minimum token count to start explicit caching is 4096.",
+		},
+		{
+			name:    "total token count error",
+			message: "Cached content is too small. total_token_count=509, min_total_token_count=1024",
+		},
+		{
+			name:    "generic bad request",
+			message: "refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{
+				createStatus:  http.StatusBadRequest,
+				createMessage: tt.message,
+				expireTime:    cacheTestNow.Add(time.Hour),
+			}
+			m := newCacheTestModel(t, api, "projects/test/locations/us-central1/endpoints/tuned-model")
+			ctx := cacheTestContext(t)
+
+			_, resps := runCacheTurns(t, ctx, m, nil, 0, 600, 600)
+			if resps[1].CacheMetadata.CacheName != "" {
+				t.Fatalf("turn 2 CacheName = %q, want empty after failed create", resps[1].CacheMetadata.CacheName)
+			}
+
+			api.setCreateError(0, "")
+
+			_, resps3 := runCacheTurns(t, ctx, m, resps[1].CacheMetadata, 2, 8000)
+
+			wantCalls := []string{"generate", "create", "generate", "create", "generate"}
+			if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+				t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+			}
+			if got := resps3[0].CacheMetadata.CacheName; got != "cachedContents/2" {
+				t.Errorf("turn 3 CacheName = %q, want %q", got, "cachedContents/2")
+			}
+		})
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalDoesNotAffectOtherModels(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	g4 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	ctx := cacheTestContext(t)
+	runCacheTurns(t, ctx, g4, nil, 0, 5000, 10000, 12000)
+
+	api.setCreateError(0, "")
+
+	flash := newCacheTestModelAt(t, srv.URL, "gemini-2.5-flash", nil)
+	_, flashResps := runCacheTurns(t, ctx, flash, nil, 0, 5000, 10000)
+
+	wantCalls := []string{"generate", "create", "generate", "generate", "generate", "create", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	if got := flashResps[1].CacheMetadata.CacheName; got != "cachedContents/2" {
+		t.Errorf("flash turn 2 CacheName = %q, want %q", got, "cachedContents/2")
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalSharedAcrossModelInstances(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	ctx := cacheTestContext(t)
+	m1 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	_, resps := runCacheTurns(t, ctx, m1, nil, 0, 5000, 10000)
+
+	m2 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	_, resps3 := runCacheTurns(t, ctx, m2, resps[1].CacheMetadata, 2, 15000)
+
+	wantCalls := []string{"generate", "create", "generate", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	if _, ok := api.generates[2]["cachedContent"]; ok {
+		t.Error("turn 3 on new model instance unexpectedly set cachedContent")
+	}
+	if got := resps3[0].CacheMetadata.CacheName; got != "" {
+		t.Errorf("turn 3 CacheName = %q, want empty", got)
+	}
+}
+
+func TestGenerateContent_ContextCacheRefusalScopedToBackend(t *testing.T) {
+	ctx := cacheTestContext(t)
+
+	api1 := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Explicit caching is not supported for models/gemini-4-hydrogen.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	m1 := newCacheTestModel(t, api1, "gemini-4-hydrogen")
+	runCacheTurns(t, ctx, m1, nil, 0, 5000, 10000, 15000)
+
+	api2 := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m2 := newCacheTestModel(t, api2, "gemini-4-hydrogen")
+	_, m2Resps := runCacheTurns(t, ctx, m2, nil, 0, 5000, 10000)
+
+	if diff := cmp.Diff([]string{"generate", "create", "generate", "generate"}, api1.calls); diff != "" {
+		t.Errorf("backend 1 calls mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"generate", "create", "generate"}, api2.calls); diff != "" {
+		t.Errorf("backend 2 calls mismatch (-want +got):\n%s", diff)
+	}
+	if got := m2Resps[1].CacheMetadata.CacheName; got != "cachedContents/1" {
+		t.Errorf("backend 2 CacheName = %q, want %q", got, "cachedContents/1")
+	}
+}
+
+func TestGenerateContent_ContextCacheSwitchFromActiveCacheToRefusingModel(t *testing.T) {
+	api := &fakeCacheAPI{
+		createStatus:  http.StatusBadRequest,
+		createMessage: "Model `gemini-4-hydrogen` does not support explicit context caching.",
+		expireTime:    cacheTestNow.Add(time.Hour),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(api.serve))
+	t.Cleanup(srv.Close)
+
+	flash := newCacheTestModelAt(t, srv.URL, "gemini-2.5-flash", nil)
+	activeFlashCache := &model.CacheMetadata{
+		CacheName:       "cachedContents/flash-cache",
+		ExpireTime:      cacheTestNow.Add(30 * time.Minute),
+		InvocationsUsed: 1,
+		CreatedAt:       cacheTestNow,
+		Fingerprint:     fingerprintOf(flash, cacheTestRequest(nil), 2),
+		ContentsCount:   2,
+	}
+
+	g4 := newCacheTestModelAt(t, srv.URL, "gemini-4-hydrogen", nil)
+	_, resps := runCacheTurns(t, cacheTestContext(t), g4, activeFlashCache, 0, 10000, 12000, 14000)
+	if resps[0].CacheMetadata.CacheName != "" {
+		t.Fatalf("turn 1 CacheName = %q, want empty", resps[0].CacheMetadata.CacheName)
+	}
+
+	wantCalls := []string{"generate", "delete cachedContents/flash-cache", "create", "generate", "generate"}
+	if diff := cmp.Diff(wantCalls, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+	for i := range api.generates {
+		if _, ok := api.generates[i]["cachedContent"]; ok {
+			t.Errorf("generate[%d] unexpectedly set cachedContent", i)
+		}
+	}
+	if got := resps[2].CacheMetadata.CacheName; got != "" {
+		t.Errorf("turn 3 CacheName = %q, want empty", got)
+	}
 }

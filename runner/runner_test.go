@@ -367,6 +367,8 @@ type recordingModel struct{ reqs []*model.LLMRequest }
 
 func (*recordingModel) Name() string { return "recording" }
 
+func (*recordingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *recordingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.reqs = append(m.reqs, req)
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -860,6 +862,8 @@ func TestBuildRunnerNode_NilAgent(t *testing.T) {
 type noopModel struct{}
 
 func (noopModel) Name() string { return "noop" }
+
+func (noopModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (noopModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {}

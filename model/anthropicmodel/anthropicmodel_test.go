@@ -47,6 +47,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/anthropicmodel"
 	"google.golang.org/adk/v2/session"
@@ -4039,4 +4040,190 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"MCPServers":            true,
 		"ExaAISearch":           true,
 	})
+}
+
+// Claude on Vertex AI names the hosting runtime in its tracking headers only
+// on a request that goes to a Google API endpoint, whichever option decided
+// where the request goes.
+func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	t.Setenv("CLOUD_RUN_JOB", "job")
+	const (
+		proxy      = "https://proxy.example.com"
+		regional   = "us-east5-aiplatform.googleapis.com"
+		mtls       = "us-east5-aiplatform.mtls.googleapis.com"
+		proxyHost  = "proxy.example.com"
+		noSuffix   = ""
+		withSuffix = "cloud_run"
+	)
+	// toHost stands for a caller's middleware that sends requests elsewhere.
+	toHost := func(host string) option.RequestOption {
+		return option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+			r.URL.Host = host
+			return next(r)
+		})
+	}
+
+	tests := []struct {
+		name       string
+		location   string
+		baseURL    string
+		reqOpts    []option.RequestOption
+		wantHost   string
+		wantSuffix string
+	}{
+		{name: "regional endpoint", location: "us-east5", wantHost: regional, wantSuffix: withSuffix},
+		{name: "global endpoint", location: "global", wantHost: "aiplatform.googleapis.com", wantSuffix: withSuffix},
+		{name: "multi-region endpoint", location: "eu", wantHost: "aiplatform.eu.rep.googleapis.com", wantSuffix: withSuffix},
+		{name: "Google base URL", location: "us-east5", baseURL: "https://" + mtls, wantHost: mtls, wantSuffix: withSuffix},
+		{name: "other base URL", location: "us-east5", baseURL: proxy, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "other base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "Google base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL("https://" + mtls)}, wantHost: mtls, wantSuffix: withSuffix},
+		{name: "request options replace a Google base URL", location: "us-east5", baseURL: "https://" + regional, reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		// WithConfig sets a base URL only when none is set, and Vertex sets one.
+		{name: "config base URL that Vertex overrides", location: "us-east5", reqOpts: []option.RequestOption{option.WithConfigQuiet(&config.Config{BaseURL: proxy}), option.WithAPIKey("unused")}, wantHost: regional, wantSuffix: withSuffix},
+		{name: "middleware that leaves the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
+		{name: "middleware that changes the host", location: "us-east5", reqOpts: []option.RequestOption{toHost(proxyHost)}, wantHost: proxyHost, wantSuffix: noSuffix},
+		{name: "middleware that changes the host back", location: "us-east5", baseURL: proxy, reqOpts: []option.RequestOption{toHost(regional)}, wantHost: regional, wantSuffix: withSuffix},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sent []*http.Request
+			m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+				Backend:        anthropicmodel.BackendVertex,
+				Project:        "proj",
+				Location:       tt.location,
+				TokenSource:    staticTokenSource{token: "vertex-token"},
+				BaseURL:        tt.baseURL,
+				RequestOptions: tt.reqOpts,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					sent = append(sent, r)
+					// The first attempt fails, so the retry is checked too.
+					if len(sent) == 1 {
+						return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Retry-After-Ms": {"1"}}, Body: http.NoBody, Request: r}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"msg_v","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":4,"output_tokens":1}}`)),
+						Request:    r,
+					}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("ping")}, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if len(sent) != 2 {
+				t.Fatalf("%d requests were sent, want a failed attempt and its retry", len(sent))
+			}
+			for i, r := range sent {
+				if got := r.URL.Hostname(); got != tt.wantHost {
+					t.Fatalf("attempt %d went to %q, want %q", i, got, tt.wantHost)
+				}
+				for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+					got := r.Header.Values(name)
+					if len(got) != 1 {
+						t.Fatalf("attempt %d: %s = %q, want one value", i, name, got)
+					}
+					adk, rest, _ := strings.Cut(got[0], " ")
+					label, suffix, _ := strings.Cut(adk, "+")
+					if !strings.HasPrefix(label, "google-adk/") || !strings.HasPrefix(rest, "gl-go/") {
+						t.Errorf("attempt %d: %s = %q, want the google-adk and gl-go labels", i, name, got[0])
+					}
+					if suffix != tt.wantSuffix {
+						t.Errorf("attempt %d: %s = %q, want runtime suffix %q", i, name, got[0], tt.wantSuffix)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A tracking header that RequestOptions replaced, extended or removed is the
+// caller's: it is sent as the caller left it, and the other one still names
+// the hosting runtime.
+func TestNewModel_VertexRuntimeSuffixKeepsCallerHeaders(t *testing.T) {
+	versiontest.ClearRuntimeEnv(t)
+	t.Setenv("K_SERVICE", "svc")
+
+	// send returns the headers of a request made with reqOpts.
+	send := func(t *testing.T, reqOpts ...option.RequestOption) http.Header {
+		t.Helper()
+		var sent *http.Request
+		m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+			Backend:        anthropicmodel.BackendVertex,
+			Project:        "proj",
+			Location:       "us-east5",
+			TokenSource:    staticTokenSource{token: "vertex-token"},
+			RequestOptions: reqOpts,
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				sent = r
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"msg_v","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":4,"output_tokens":1}}`)),
+					Request:    r,
+				}, nil
+			})},
+		})
+		if err != nil {
+			t.Fatalf("NewModel() error = %v", err)
+		}
+		for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("ping")}, false) {
+			if err != nil {
+				t.Fatalf("GenerateContent() error = %v", err)
+			}
+		}
+		if sent == nil {
+			t.Fatal("no request was sent")
+		}
+		return sent.Header
+	}
+	// The labels with and without the runtime suffix, read off a request no
+	// option touched.
+	tagged := send(t).Get("X-Goog-Api-Client")
+	if !strings.Contains(tagged, "+cloud_run ") {
+		t.Fatalf("X-Goog-Api-Client = %q, want the runtime suffix when no option touches it", tagged)
+	}
+	plain := strings.Replace(tagged, "+cloud_run", "", 1)
+
+	tests := []struct {
+		name    string
+		reqOpt  option.RequestOption
+		wantUA  []string
+		wantAPI []string
+	}{
+		{name: "replaced", reqOpt: option.WithHeader("User-Agent", "caller-app/1.0"), wantUA: []string{"caller-app/1.0"}, wantAPI: []string{tagged}},
+		{name: "extended", reqOpt: option.WithHeaderAdd("X-Goog-Api-Client", "caller-lib/2.0"), wantUA: []string{tagged}, wantAPI: []string{plain, "caller-lib/2.0"}},
+		{name: "removed", reqOpt: option.WithHeaderDel("User-Agent"), wantUA: nil, wantAPI: []string{tagged}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := send(t, tt.reqOpt)
+			if diff := cmp.Diff(tt.wantUA, got.Values("User-Agent")); diff != "" {
+				t.Errorf("User-Agent mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantAPI, got.Values("X-Goog-Api-Client")); diff != "" {
+				t.Errorf("X-Goog-Api-Client mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestNewModel_Capabilities(t *testing.T) {
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-3-7-sonnet-latest", anthropicmodel.ClientConfig{
+		Backend: anthropicmodel.BackendAnthropic,
+		APIKey:  "test-anthropic-key",
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if !m.Capabilities().AcceptsOutputSchemaAndTools {
+		t.Error("Capabilities().AcceptsOutputSchemaAndTools = false, want true")
+	}
 }

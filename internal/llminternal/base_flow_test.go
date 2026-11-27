@@ -650,10 +650,16 @@ func checkPanicCallbackErrs(errs map[string]error, kinds ...string) func(t *test
 }
 
 // panickingPluginManager is a plugin manager whose tool callback of the kind
-// named by panicIn panics. Its other tool callbacks do nothing.
+// named by panicIn panics. Its other tool callbacks record the error they were
+// handed and do nothing else.
 type panickingPluginManager struct {
 	pluginManager
 	panicIn string
+	// seen holds, for each callback kind that ran and returned, the error that
+	// kind was handed. A plugin is how a deployment logs or reports a failed
+	// call, so it is handed the error itself, panic value and stack included;
+	// only the function response the model reads gets the generic message.
+	seen map[string]error
 }
 
 func (m panickingPluginManager) RunBeforeToolCallback(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
@@ -663,16 +669,22 @@ func (m panickingPluginManager) RunBeforeToolCallback(agent.Context, tool.Tool, 
 	return nil, nil
 }
 
-func (m panickingPluginManager) RunOnToolErrorCallback(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+func (m panickingPluginManager) RunOnToolErrorCallback(_ agent.Context, _ tool.Tool, _ map[string]any, err error) (map[string]any, error) {
 	if m.panicIn == "OnToolError" {
 		panic("boom")
+	}
+	if m.seen != nil {
+		m.seen["OnToolError"] = err
 	}
 	return nil, nil
 }
 
-func (m panickingPluginManager) RunAfterToolCallback(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+func (m panickingPluginManager) RunAfterToolCallback(_ agent.Context, _ tool.Tool, _, _ map[string]any, err error) (map[string]any, error) {
 	if m.panicIn == "AfterTool" {
 		panic("boom")
+	}
+	if m.seen != nil {
+		m.seen["AfterTool"] = err
 	}
 	return nil, nil
 }
@@ -683,6 +695,20 @@ func (m panickingPluginManager) RunAfterToolCallback(agent.Context, tool.Tool, m
 func TestCallToolPanics(t *testing.T) {
 	spans := tracetest.NewInMemoryExporter()
 	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans)))
+
+	// How the panic error of each step starts. The agent's callbacks and the
+	// tool panic with a runtime error, the plugin's callbacks with a string.
+	const (
+		agentBeforePanic   = `panic in BeforeTool callback of tool "testTool": interface conversion: interface {} is float64, not string`
+		pluginBeforePanic  = `panic in BeforeTool callback of tool "testTool": boom`
+		runPanic           = `panic in tool "testTool": interface conversion: interface {} is float64, not string`
+		agentOnErrorPanic  = `panic in OnToolError callback of tool "testTool": interface conversion: interface {} is float64, not string`
+		pluginOnErrorPanic = `panic in OnToolError callback of tool "testTool": boom`
+		agentAfterPanic    = `panic in AfterTool callback of tool "testTool": interface conversion: interface {} is float64, not string`
+		pluginAfterPanic   = `panic in AfterTool callback of tool "testTool": boom`
+		// noError marks a plugin callback that ran and was handed no error.
+		noError = ""
+	)
 
 	for _, tc := range []struct {
 		name string
@@ -696,58 +722,74 @@ func TestCallToolPanics(t *testing.T) {
 		noCapture bool
 		// wantErr is how the panic error starts.
 		wantErr string
-		// wantSeen lists the callbacks that are handed the panic error.
+		// wantSeen lists the agent callbacks that are handed the panic error.
 		wantSeen []string
+		// wantPluginErrs is how the error handed to each plugin callback that
+		// ran and returned starts, or noError when it was handed none. A kind
+		// absent from the map never ran, or panicked itself and so was handed
+		// nothing it could record.
+		wantPluginErrs map[string]string
 	}{
 		{
-			name:     "before tool callback",
-			step:     "BeforeTool",
-			wantErr:  `panic in BeforeTool callback of tool "testTool": interface conversion: interface {} is float64, not string`,
-			wantSeen: []string{"OnToolError", "AfterTool"},
+			name:           "before tool callback",
+			step:           "BeforeTool",
+			wantErr:        agentBeforePanic,
+			wantSeen:       []string{"OnToolError", "AfterTool"},
+			wantPluginErrs: map[string]string{"OnToolError": agentBeforePanic, "AfterTool": agentBeforePanic},
 		},
 		{
-			name:     "plugin before tool callback",
-			step:     "BeforeTool",
-			plugin:   true,
-			wantErr:  `panic in BeforeTool callback of tool "testTool": boom`,
-			wantSeen: []string{"OnToolError", "AfterTool"},
+			name:           "plugin before tool callback",
+			step:           "BeforeTool",
+			plugin:         true,
+			wantErr:        pluginBeforePanic,
+			wantSeen:       []string{"OnToolError", "AfterTool"},
+			wantPluginErrs: map[string]string{"OnToolError": pluginBeforePanic, "AfterTool": pluginBeforePanic},
 		},
 		{
-			name:     "tool not built with functiontool",
-			step:     "Run",
-			wantErr:  `panic in tool "testTool": interface conversion: interface {} is float64, not string`,
-			wantSeen: []string{"OnToolError", "AfterTool"},
+			name:           "tool not built with functiontool",
+			step:           "Run",
+			wantErr:        runPanic,
+			wantSeen:       []string{"OnToolError", "AfterTool"},
+			wantPluginErrs: map[string]string{"OnToolError": runPanic, "AfterTool": runPanic},
 		},
 		{
-			name:      "tool not built with functiontool, without content capture",
-			step:      "Run",
-			noCapture: true,
-			wantErr:   `panic in tool "testTool": interface conversion: interface {} is float64, not string`,
-			wantSeen:  []string{"OnToolError", "AfterTool"},
+			name:           "tool not built with functiontool, without content capture",
+			step:           "Run",
+			noCapture:      true,
+			wantErr:        runPanic,
+			wantSeen:       []string{"OnToolError", "AfterTool"},
+			wantPluginErrs: map[string]string{"OnToolError": runPanic, "AfterTool": runPanic},
 		},
 		{
 			name:     "on tool error callback",
 			step:     "OnToolError",
-			wantErr:  `panic in OnToolError callback of tool "testTool": interface conversion: interface {} is float64, not string`,
+			wantErr:  agentOnErrorPanic,
 			wantSeen: []string{"AfterTool"},
+			// The plugin's OnToolError runs before the agent's, so it is
+			// handed the error the tool returned, not the later panic.
+			wantPluginErrs: map[string]string{"OnToolError": "tool error", "AfterTool": agentOnErrorPanic},
 		},
 		{
-			name:     "plugin on tool error callback",
-			step:     "OnToolError",
-			plugin:   true,
-			wantErr:  `panic in OnToolError callback of tool "testTool": boom`,
-			wantSeen: []string{"AfterTool"},
+			name:           "plugin on tool error callback",
+			step:           "OnToolError",
+			plugin:         true,
+			wantErr:        pluginOnErrorPanic,
+			wantSeen:       []string{"AfterTool"},
+			wantPluginErrs: map[string]string{"AfterTool": pluginOnErrorPanic},
 		},
 		{
 			name:    "after tool callback",
 			step:    "AfterTool",
-			wantErr: `panic in AfterTool callback of tool "testTool": interface conversion: interface {} is float64, not string`,
+			wantErr: agentAfterPanic,
+			// The plugin's AfterTool runs before the agent's, which is where
+			// this case panics, so the call has not failed yet.
+			wantPluginErrs: map[string]string{"AfterTool": noError},
 		},
 		{
 			name:    "plugin after tool callback",
 			step:    "AfterTool",
 			plugin:  true,
-			wantErr: `panic in AfterTool callback of tool "testTool": boom`,
+			wantErr: pluginAfterPanic,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -801,7 +843,7 @@ func TestCallToolPanics(t *testing.T) {
 				},
 			}
 			spanCtx, span := telemetry.StartTrace(t.Context(), "execute_tool testTool")
-			plugins := panickingPluginManager{}
+			plugins := panickingPluginManager{seen: map[string]error{}}
 			if tc.plugin {
 				plugins.panicIn = tc.step
 			}
@@ -814,8 +856,12 @@ func TestCallToolPanics(t *testing.T) {
 			if diff := cmp.Diff(want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
-			isPanicError := func(text string) bool {
-				return strings.HasPrefix(text, tc.wantErr) && strings.Contains(text, "\nstack: ") && strings.Contains(text, "runtime/debug.Stack")
+			// hasPanicShape is whether text is a panic error's: the prefix the
+			// step that panicked produces, then the goroutine stack. The
+			// prefix is a parameter because the callbacks of one call are not
+			// all handed the same error.
+			hasPanicShape := func(text, prefix string) bool {
+				return strings.HasPrefix(text, prefix) && strings.Contains(text, "\nstack: ") && strings.Contains(text, "runtime/debug.Stack")
 			}
 			var gotSeen []string
 			for _, kind := range []string{"OnToolError", "AfterTool"} {
@@ -824,18 +870,55 @@ func TestCallToolPanics(t *testing.T) {
 					continue
 				}
 				gotSeen = append(gotSeen, kind)
-				if _, ok := err.(*toolinternal.PanicError); !ok || !isPanicError(err.Error()) {
+				if _, ok := err.(*toolinternal.PanicError); !ok || !hasPanicShape(err.Error(), tc.wantErr) {
 					t.Errorf("%s callback was not handed the panic error", kind)
 				}
 			}
 			if diff := cmp.Diff(tc.wantSeen, gotSeen); diff != "" {
 				t.Errorf("callbacks run after the panic mismatch (-want +got):\n%s", diff)
 			}
+			// A plugin is how a deployment logs or reports a failed call, so
+			// its callbacks are handed the error itself, panic value and stack
+			// included. Only the function response the model reads gets the
+			// generic message.
+			var gotPluginSeen, wantPluginSeen []string
+			for _, kind := range []string{"OnToolError", "AfterTool"} {
+				if _, ok := plugins.seen[kind]; ok {
+					gotPluginSeen = append(gotPluginSeen, kind)
+				}
+				if _, ok := tc.wantPluginErrs[kind]; ok {
+					wantPluginSeen = append(wantPluginSeen, kind)
+				}
+			}
+			if diff := cmp.Diff(wantPluginSeen, gotPluginSeen); diff != "" {
+				t.Errorf("plugin callbacks that ran mismatch (-want +got):\n%s", diff)
+			}
+			for kind, want := range tc.wantPluginErrs {
+				err, ok := plugins.seen[kind]
+				if !ok {
+					continue
+				}
+				if want == noError {
+					if err != nil {
+						t.Errorf("the plugin's %s callback was handed %v, want no error", kind, err)
+					}
+					continue
+				}
+				if err == nil || !strings.HasPrefix(err.Error(), want) {
+					t.Errorf("the plugin's %s callback was handed %v, want an error starting %q", kind, err, want)
+					continue
+				}
+				if strings.HasPrefix(want, "panic in ") {
+					if _, isPanic := err.(*toolinternal.PanicError); !isPanic || !hasPanicShape(err.Error(), want) {
+						t.Errorf("the plugin's %s callback was not handed the panic error with its stack: %v", kind, err)
+					}
+				}
+			}
 			var recorded bool
 			for _, s := range spans.GetSpans() {
 				for _, ev := range s.Events {
 					for _, attr := range ev.Attributes {
-						if attr.Key == "exception.message" && isPanicError(attr.Value.AsString()) {
+						if attr.Key == "exception.message" && hasPanicShape(attr.Value.AsString(), tc.wantErr) {
 							recorded = true
 						}
 					}
@@ -1452,6 +1535,8 @@ type alwaysThinkingModel struct{ calls int }
 
 func (m *alwaysThinkingModel) Name() string { return "always-thinking" }
 
+func (*alwaysThinkingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
@@ -1594,6 +1679,8 @@ type scriptedThinkingModel struct {
 }
 
 func (m *scriptedThinkingModel) Name() string { return "scripted-thinking" }
+
+func (*scriptedThinkingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *scriptedThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {

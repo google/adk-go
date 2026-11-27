@@ -46,6 +46,8 @@ func (m *mockModelForTest) Name() string {
 	return m.name
 }
 
+func (*mockModelForTest) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *mockModelForTest) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	if m.generateContent != nil {
 		return m.generateContent(ctx, req, stream)
