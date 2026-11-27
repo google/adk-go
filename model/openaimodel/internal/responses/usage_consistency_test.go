@@ -1,0 +1,148 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package responses
+
+import (
+	"fmt"
+	"testing"
+
+	"google.golang.org/adk/v2/model"
+)
+
+// usageBody builds a completed Responses body that carries the given usage
+// counts and a one-word answer. A negative total omits total_tokens from the
+// JSON.
+func usageBody(input, output, total, reasoning int64) string {
+	totalField := ""
+	if total >= 0 {
+		totalField = fmt.Sprintf(`"total_tokens":%d,`, total)
+	}
+	return fmt.Sprintf(`{"id":"resp_1","model":"stream-model","status":"completed",`+
+		`"usage":{"input_tokens":%d,"output_tokens":%d,%s`+
+		`"output_tokens_details":{"reasoning_tokens":%d}},`+
+		`"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}`,
+		input, output, totalField, reasoning)
+}
+
+// TestModel_ImpossibleUsageIsUnknown pins that usage which cannot be true is
+// reported as unknown rather than stored as is, in blocking and streaming mode.
+// The test treats total_tokens as counting at least the input and output
+// tokens, so a total below their sum contradicts its own parts.
+// reasoning_tokens is a subset of output_tokens, so reasoning above output is
+// a contradiction in the same way. Unknown (nil) says that the provider's
+// numbers cannot be trusted. The turn itself still succeeds.
+//
+// A total above the sum, reasoning equal to output, and an omitted total are
+// not contradictions. An omitted total decodes to 0 and means not reported, so
+// it must not be treated as a total below the sum. Those rows keep the
+// provider's counts unchanged. The test does not assert CandidatesTokenCount,
+// which depends on how reasoning maps onto candidates.
+func TestModel_ImpossibleUsageIsUnknown(t *testing.T) {
+	tests := []struct {
+		name                            string
+		input, output, total, reasoning int64
+		wantUsage                       bool
+		why                             string
+	}{
+		{
+			name:  "consistent counts are kept",
+			input: 100, output: 50, total: 150, reasoning: 0,
+			wantUsage: true,
+		},
+		{
+			name:  "consistent counts with reasoning are kept",
+			input: 100, output: 50, total: 150, reasoning: 20,
+			wantUsage: true,
+		},
+		{
+			name:  "total above input plus output is kept",
+			input: 100, output: 50, total: 180, reasoning: 20,
+			wantUsage: true,
+		},
+		{
+			name:  "reasoning equal to output is kept",
+			input: 100, output: 50, total: 150, reasoning: 50,
+			wantUsage: true,
+		},
+		{
+			name:  "omitted total is kept",
+			input: 100, output: 50, total: -1, reasoning: 20,
+			wantUsage: true,
+		},
+		{
+			name:  "total below input plus output",
+			input: 100, output: 50, total: 120, reasoning: 0,
+			why: "total_tokens 120 is below input_tokens 100 + output_tokens 50",
+		},
+		{
+			name:  "reasoning above output",
+			input: 100, output: 10, total: 110, reasoning: 50,
+			why: "reasoning_tokens 50 is above output_tokens 10",
+		},
+		{
+			name:  "reasoning above output with total omitted",
+			input: 100, output: 10, total: -1, reasoning: 50,
+			why: "reasoning_tokens 50 is above output_tokens 10, with total_tokens omitted",
+		},
+	}
+	for _, tt := range tests {
+		body := usageBody(tt.input, tt.output, tt.total, tt.reasoning)
+		for _, stream := range []bool{false, true} {
+			name := tt.name + "/blocking"
+			if stream {
+				name = tt.name + "/stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				var (
+					got []*model.LLMResponse
+					err error
+				)
+				if stream {
+					got, err = runStream(t, evCreated, evDelta1, evDelta2,
+						`{"type":"response.completed","response":`+body+`}`)
+				} else {
+					got, err = runBlocking(t, body)
+				}
+				if err != nil {
+					t.Fatalf("GenerateContent() err = %v, want the turn to succeed", err)
+				}
+				if len(got) == 0 {
+					t.Fatal("GenerateContent() returned no responses")
+				}
+				final := got[len(got)-1]
+				if text := allText(final.Content); text != "hello" {
+					t.Errorf("final text = %q, want %q", text, "hello")
+				}
+				switch {
+				case tt.wantUsage && final.UsageMetadata == nil:
+					t.Error("UsageMetadata = nil, want the provider's usage kept: the counts are not contradictory")
+				case tt.wantUsage:
+					u := final.UsageMetadata
+					wantTotal := max(tt.total, 0) // an omitted total decodes to 0
+					if u.PromptTokenCount != int32(tt.input) || u.TotalTokenCount != int32(wantTotal) ||
+						u.ThoughtsTokenCount != int32(tt.reasoning) {
+						t.Errorf("UsageMetadata = {Prompt: %d, Thoughts: %d, Total: %d}, want {Prompt: %d, Thoughts: %d, Total: %d}: kept counts are unchanged",
+							u.PromptTokenCount, u.ThoughtsTokenCount, u.TotalTokenCount, tt.input, tt.reasoning, wantTotal)
+					}
+				case !tt.wantUsage && final.UsageMetadata != nil:
+					u := final.UsageMetadata
+					t.Errorf("UsageMetadata = {Prompt: %d, Candidates: %d, Thoughts: %d, Total: %d}, "+
+						"want nil: usage that cannot be true is unknown (%s)",
+						u.PromptTokenCount, u.CandidatesTokenCount, u.ThoughtsTokenCount, u.TotalTokenCount, tt.why)
+				}
+			})
+		}
+	}
+}
