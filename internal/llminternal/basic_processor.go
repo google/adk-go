@@ -56,9 +56,6 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 				req.Config.ResponseMIMEType = "application/json"
 			}
 		}
-
-		// TODO: missing features
-		//  populate LLMRequest LiveConnectConfig setting
 	}
 }
 

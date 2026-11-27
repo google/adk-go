@@ -897,6 +897,7 @@ func TestEveryRequestFieldIsAccountedFor(t *testing.T) {
 		"CacheConfig",              // Set by the flow, read by models.
 		"CacheMetadata",            // Set by the flow, read by models.
 		"PreviousPromptTokenCount", // Set by the flow, read by models.
+		"LiveConnectConfig",        // Live only; nil in GenerateContent requests.
 	}
 
 	var fields []string

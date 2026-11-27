@@ -210,7 +210,7 @@ type activeTask struct {
 
 type liveSessionImpl struct {
 	inputCh     chan agent.LiveRequest
-	outputCh    chan eventOrError
+	outputCh    chan *session.Event
 	done        chan struct{}
 	closeOnce   sync.Once
 	audioMgr    *AudioCacheManager
@@ -283,15 +283,10 @@ func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
 	return true
 }
 
-type eventOrError struct {
-	event *session.Event
-	err   error
-}
-
 func newLiveSessionImpl() *liveSessionImpl {
 	return &liveSessionImpl{
 		inputCh:  make(chan agent.LiveRequest),
-		outputCh: make(chan eventOrError),
+		outputCh: make(chan *session.Event),
 		done:     make(chan struct{}),
 		audioMgr: NewAudioCacheManager(),
 	}
@@ -315,8 +310,8 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 				return
 			}
 			select {
-			case res := <-s.outputCh:
-				if !yield(res.event, res.err) {
+			case ev := <-s.outputCh:
+				if !yield(ev, nil) {
 					return
 				}
 			case <-s.done:
@@ -341,16 +336,7 @@ func (s *liveSessionImpl) Close() error {
 
 func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
 	select {
-	case s.outputCh <- eventOrError{event: ev}:
-		return true
-	case <-s.done:
-		return false
-	}
-}
-
-func (s *liveSessionImpl) pushError(err error) bool {
-	select {
-	case s.outputCh <- eventOrError{err: err}:
+	case s.outputCh <- ev:
 		return true
 	case <-s.done:
 		return false
@@ -470,13 +456,18 @@ func isEmptyLiveResponse(r *model.LLMResponse) bool {
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	clientProvider, ok := f.Model.(interface {
-		Client() *genai.Client
-	})
-	if !ok {
+	var connect func(context.Context, *model.LLMRequest) (model.LiveConnection, error)
+	if connector, ok := f.Model.(model.LiveConnector); ok {
+		connect = connector.Connect
+	} else if legacy, ok := f.Model.(interface{ Client() *genai.Client }); ok {
+		// Keep supporting existing wrappers that expose the Gemini client.
+		client := legacy.Client()
+		connect = func(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+			return googlellm.ConnectLive(ctx, client, f.Model.Name(), req)
+		}
+	} else {
 		return nil, nil, fmt.Errorf("model does not support live connection")
 	}
-	client := clientProvider.Client()
 
 	runCfg := runconfig.FromContext(ctx)
 	if runCfg == nil || runCfg.Live == nil {
@@ -484,8 +475,17 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 	}
 
 	sess := newLiveSessionImpl()
+	liveCtx, cancelLive := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-sess.done:
+			cancelLive()
+		case <-liveCtx.Done():
+		}
+	}()
 
 	go func() {
+		defer cancelLive()
 		defer func() {
 			_ = sess.Close()
 		}()
@@ -495,7 +495,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		}
 		for ev, err := range f.preprocess(ctx, nreq) {
 			if err != nil {
-				sess.pushError(err)
+				sess.setFinalError(err)
 				return
 			}
 			if ev != nil {
@@ -505,19 +505,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 		}
 
-		// The reconnect loop writes the resumption handle into this config, so
-		// it needs its own copy: the caller may reuse its LiveRunConfig.
-		sessionResumption := runCfg.Live.SessionResumption
-		if sessionResumption != nil {
-			sessionResumption = new(*sessionResumption)
-		}
-
-		liveConnectConfig := &genai.LiveConnectConfig{
+		liveConnectConfig := genai.LiveConnectConfig{
 			ResponseModalities:       runCfg.Live.ResponseModalities,
 			SpeechConfig:             runCfg.Live.SpeechConfig,
-			SystemInstruction:        nreq.Config.SystemInstruction,
-			Tools:                    nreq.Config.Tools,
-			SessionResumption:        sessionResumption,
+			SessionResumption:        runCfg.Live.SessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
 			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
@@ -570,12 +561,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if reconnectAttempts > policy.maxAttempts {
 					// Resumable errors are swallowed while retrying, so
 					// without this the caller's stream just goes quiet.
-					sess.pushError(liveReconnectGaveUpError(
+					sess.setFinalError(liveReconnectGaveUpError(
 						fmt.Sprintf("%d consecutive attempts delivered no content", policy.maxAttempts), lastErr))
 					return
 				}
 				if shortLivedReconnects > policy.maxTotal {
-					sess.pushError(liveReconnectGaveUpError(
+					sess.setFinalError(liveReconnectGaveUpError(
 						fmt.Sprintf("%d short-lived connections in one invocation", policy.maxTotal), lastErr))
 					return
 				}
@@ -588,53 +579,72 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					// Cancellation reports itself, matching the consumer
 					// loop's ctx.Done arm; Close is a clean teardown.
 					if err := ctx.Err(); err != nil {
-						sess.pushError(err)
+						sess.setFinalError(err)
 					}
 					return
 				}
 			}
+			// Give each connection its own resumption settings so a redial
+			// cannot modify the caller's config or a previous request.
+			connectConfig := liveConnectConfig
+			if connectConfig.SessionResumption != nil {
+				connectConfig.SessionResumption = new(*connectConfig.SessionResumption)
+			}
 			if isIContext {
 				handle := iCtx.LiveSessionResumptionHandle()
 				if handle != "" {
-					if liveConnectConfig.SessionResumption == nil {
-						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
+					if connectConfig.SessionResumption == nil {
+						connectConfig.SessionResumption = &genai.SessionResumptionConfig{}
 					}
-					liveConnectConfig.SessionResumption.Handle = handle
+					connectConfig.SessionResumption.Handle = handle
 					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
-						liveConnectConfig.SessionResumption.Transparent = true
+						connectConfig.SessionResumption.Transparent = true
 					}
 				}
 			}
-			// TODO(kdroste): refactor underlying context
-			connCtx, cancelConn := context.WithCancel(ctx)
+			connectReq := *nreq
+			connectReq.LiveConnectConfig = &connectConfig
 
-			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle) //nolint:forbidigo // pre-slog call site
+			connCtx, cancelConn := context.WithCancel(liveCtx)
+			liveConn, err := connect(connCtx, &connectReq)
+			if err == nil && liveConn == nil {
+				err = errors.New("connector returned a nil live connection")
 			}
-			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
-				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
+				if tornDown(liveCtx, sess) {
+					sess.setFinalError(ctx.Err())
+					return
+				}
 				if isReconnect {
-					// genai returns without closing the socket it dialed when
-					// the setup write fails, and it dials with a context-less
-					// dialer, so cancelConn cannot release it either. Each
-					// budgeted redial against such an endpoint strands one fd
-					// until the process exits; the bounds above cap how many.
 					lastErr = err
 					lastConnWasBrief = true
 					continue
 				}
-				sess.pushError(fmt.Errorf("failed to connect live session: %w", err))
+				sess.setFinalError(fmt.Errorf("failed to connect live session: %w", err))
 				return
 			}
 
 			connectedAt := time.Now()
-			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name())
 
+			var handleMu sync.Mutex
+			var latestHandle string
+			// Closing the session must also release a provider blocked in
+			// SendHistory, before the connection's main loop starts.
+			closeConn := sync.OnceFunc(func() { _ = liveConn.Close() })
+			stopClose := context.AfterFunc(connCtx, closeConn)
 			cleanup := func() {
+				stopClose()
 				cancelConn()
-				_ = liveConn.Close()
+				closeConn()
+				// Snapshot this connection's handle on the flow goroutine.
+				// The next dial reads the invocation's handle; the old
+				// reader cannot overwrite it after a reconnect.
+				handleMu.Lock()
+				if latestHandle != "" {
+					iCtx.SetLiveSessionResumptionHandle(latestHandle)
+				}
+				handleMu.Unlock()
 			}
 
 			eventsChan := make(chan *session.Event)
@@ -650,16 +660,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// on a user turn, have the model answer that turn again. This
 			// matches adk-python, which skips send_history while it holds a
 			// resumption handle (live/_live_llm_flow.py).
-			resuming := liveConnectConfig.SessionResumption != nil && liveConnectConfig.SessionResumption.Handle != ""
+			resuming := connectConfig.SessionResumption != nil && connectConfig.SessionResumption.Handle != ""
 			if len(nreq.Contents) > 0 && !resuming {
-				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
-					sess.pushError(err)
-					// cleanup, not a bare return: genai dials the live socket
-					// with a context-less websocket.DefaultDialer.Dial, and
-					// nothing in the SDK watches a context, so only an explicit
-					// Close releases it. Returning without cleanup strands the
-					// connection for the life of the process.
+				if err := liveConn.SendHistory(connCtx, nreq.Contents); err != nil {
+					if !tornDown(liveCtx, sess) {
+						sess.setFinalError(err)
+					} else {
+						sess.setFinalError(ctx.Err())
+					}
 					cleanup()
 					return
 				}
@@ -667,8 +675,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 			// Reading from model loop
 			go func() {
-				for {
-					resp, err := liveConn.Recv(connCtx)
+				for resp, err := range liveConn.Receive(connCtx) {
 					if err != nil {
 						select {
 						case errChan <- liveConnError{err: err, at: time.Now()}:
@@ -677,11 +684,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						return
 					}
 					if resp != nil {
-						if resp.SessionResumptionHandle != "" {
-							if isIContext {
-								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle) //nolint:forbidigo // pre-slog call site
-								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
-							}
+						if isIContext && resp.SessionResumptionHandle != "" {
+							// Save the handle before forwarding: a send
+							// failure can reconnect while the event is still
+							// waiting behind a pending tool response.
+							handleMu.Lock()
+							latestHandle = resp.SessionResumptionHandle
+							handleMu.Unlock()
 						}
 						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
 							for _, part := range resp.Content.Parts {
@@ -702,6 +711,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							return
 						}
 					}
+				}
+				// A provider can finish its stream without a transport error.
+				select {
+				case errChan <- liveConnError{err: ctx.Err()}:
+				case <-connCtx.Done():
 				}
 			}()
 
@@ -800,7 +814,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						if flushUser || flushModel {
 							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
 							if err != nil {
-								sess.pushError(err)
+								sess.setFinalError(err)
 								cleanup()
 								return
 							}
@@ -815,7 +829,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if len(fnCalls) > 0 {
 						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
 						if err != nil {
-							sess.pushError(err)
+							sess.setFinalError(err)
 							cleanup()
 							return
 						}
@@ -847,8 +861,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				case inputCase <- inputReq:
 					pendingSend = nil
 				case ce := <-errChan:
+					if tornDown(liveCtx, sess) {
+						sess.setFinalError(ctx.Err())
+						cleanup()
+						return
+					}
 					if isResumable(ce.err) {
-						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
 						lastErr = ce.err
 						// Score the connection's life from where the error was
 						// produced, not from here: this loop also runs tools
@@ -868,11 +886,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						reconnect = true
 						break // Break the select
 					}
-					// pushError would park here until the consumer pulls from
-					// outputCh, but the consumer may already be blocked in Send,
-					// which only Close can release. Buffer the terminal error so
-					// the iterator can deliver it; the deferred Close above ends
-					// waits in Send and recvIter when this goroutine returns.
 					sess.setFinalError(ce.err)
 					cleanup()
 					return
@@ -880,7 +893,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					cleanup()
 					return
 				case <-ctx.Done():
-					sess.pushError(ctx.Err())
+					sess.setFinalError(ctx.Err())
 					cleanup()
 					return
 				}

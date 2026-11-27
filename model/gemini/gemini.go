@@ -496,6 +496,10 @@ func (m *geminiModel) GetGoogleLLMVariant() genai.Backend {
 	return m.client.ClientConfig().Backend
 }
 
+func (m *geminiModel) Connect(ctx context.Context, req *model.LLMRequest) (model.LiveConnection, error) {
+	return googlellm.ConnectLive(ctx, m.client, m.name, req)
+}
+
 func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
@@ -513,4 +517,5 @@ func (m *geminiModel) Capabilities() model.Capabilities {
 var (
 	_ googlellm.GoogleLLM = &geminiModel{}
 	_ model.LLM           = &geminiModel{}
+	_ model.LiveConnector = &geminiModel{}
 )
