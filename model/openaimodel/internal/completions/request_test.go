@@ -717,6 +717,33 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 			t.Error("strict rewriting did not run on the schema")
 		}
 	})
+
+	t.Run("recursive root ref response json schema", func(t *testing.T) {
+		wire := requestWire(t, &model.LLMRequest{
+			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+			Config: &genai.GenerateContentConfig{ResponseJsonSchema: map[string]any{
+				"$ref": "#/$defs/Node",
+				"$defs": map[string]any{
+					"Node": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"name": map[string]any{"type": "string"},
+							"next": map[string]any{"$ref": "#/$defs/Node"},
+						},
+					},
+				},
+			}},
+		})
+		format := wire["response_format"].(map[string]any)
+		schema := format["json_schema"].(map[string]any)
+		body := schema["schema"].(map[string]any)
+		if body["type"] != "object" || body["additionalProperties"] != false {
+			t.Errorf("root schema = %#v, want inlined strict object", body)
+		}
+		if _, hasDefs := body["$defs"]; !hasDefs {
+			t.Errorf("root schema = %#v, want $defs preserved", body)
+		}
+	})
 }
 
 func TestApplyThinkingConfig(t *testing.T) {
