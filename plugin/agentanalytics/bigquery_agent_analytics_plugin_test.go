@@ -7497,14 +7497,18 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 			t.Fatalf("beforeRun(keep) error = %v", err)
 		}
 
-		uuid.SetRand(panickingRandReader{})
-		defer uuid.SetRand(nil)
-		t.Cleanup(func() { uuid.SetRand(nil) })
+		tm.newUUID = panickingUUID
+		ap.newUUID = panickingUUID
+		defer func() {
+			tm.newUUID = uuid.New
+			ap.newUUID = uuid.New
+		}()
 		tm.now = func() time.Time { panic("clock down during evicted afterRun") }
 
 		ap.afterRun(evictedCtx)
 
-		uuid.SetRand(nil)
+		tm.newUUID = uuid.New
+		ap.newUUID = uuid.New
 		tm.now = time.Now
 
 		tm.mu.Lock()

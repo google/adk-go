@@ -3544,6 +3544,9 @@ type invocationTrace struct {
 	// lateLocked). noteUUIDProviderLocked sets it with mu held, and it is read
 	// without mu (see traceManager.eventUUIDProvider).
 	uuidProviders atomic.Pointer[uuidProviderLedger]
+	// newUUID generates UUIDs for spans created under this invocation trace;
+	// nil falls back to uuid.New.
+	newUUID func() uuid.UUID
 	// agentStack holds the invocation span, followed by the spans of the
 	// running agents in the order they started. Agents that run
 	// concurrently, such as the sub-agents of a parallel agent or
@@ -3559,9 +3562,11 @@ type invocationTrace struct {
 	// changes, keep them up to date and set lookalikesLen to the length of
 	// agentStack. A stack whose length differs from lookalikesLen was built
 	// some other way, and is counted afresh (see syncLookalikesLocked).
-	lookalikes    map[lookalikeKey]int
-	lookalikeDups int
-	lookalikesLen int
+	lookalikes                map[lookalikeKey]int
+	lookalikeDups             int
+	lookalikesLen             int
+	lastLookalikeInspections  int
+	lastLauncherExcludeVisits int
 	// llmSpans holds the running model calls, by llmKey.
 	llmSpans map[string]*spanRecord
 	// completedModels holds the model calls that OnModelErrorCallback
@@ -3679,15 +3684,31 @@ type recordedError struct {
 }
 
 func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
-	return newInvocationTraceWithKnownSpan(sc, traceID, "", now)
+	return newInvocationTraceWithKnownSpanAndUUID(sc, traceID, "", now, nil)
 }
 
-func newInvocationTraceWithKnownSpan(sc trace.SpanContext, traceID, spanID string, now time.Time) *invocationTrace {
+func (tm *traceManager) newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
+	var gen func() uuid.UUID
+	if tm != nil {
+		gen = tm.newUUID
+	}
+	return newInvocationTraceWithKnownSpanAndUUID(sc, traceID, "", now, gen)
+}
+
+func (tm *traceManager) newInvocationTraceWithKnownSpan(sc trace.SpanContext, traceID, spanID string, now time.Time) *invocationTrace {
+	var gen func() uuid.UUID
+	if tm != nil {
+		gen = tm.newUUID
+	}
+	return newInvocationTraceWithKnownSpanAndUUID(sc, traceID, spanID, now, gen)
+}
+
+func newInvocationTraceWithKnownSpanAndUUID(sc trace.SpanContext, traceID, spanID string, now time.Time, newUUID func() uuid.UUID) *invocationTrace {
 	if spanID == "" {
-		spanID = newSpanID()
+		spanID = newSpanIDWith(newUUID)
 	}
 	if traceID == "" && !sc.IsValid() {
-		traceID = newTraceID()
+		traceID = newTraceIDWith(newUUID)
 	}
 	root := &spanRecord{spanID: spanID, kind: spanKindInvocation, start: now}
 	inv := &invocationTrace{
@@ -3703,6 +3724,7 @@ func newInvocationTraceWithKnownSpan(sc trace.SpanContext, traceID, spanID strin
 		toolSpans:         map[string]*spanRecord{},
 		completedTools:    map[string]*spanRecord{},
 		unrecoveredErrors: map[string]recordedError{},
+		newUUID:           newUUID,
 	}
 	// Continue the caller's OpenTelemetry trace, if any, with an invocation
 	// span that is a child of the caller's span. adk-python reuses the ambient
@@ -4720,18 +4742,51 @@ func (inv *invocationTrace) launcherLockedCounted(act any, excluded []bool) (int
 //     keeping the winning member, its ancestors, and any earlier activations
 //     on its goroutine unexcluded.
 //
-// When no open activation is on the chain and the resolved parent itself (or
-// any ancestor of it) belongs to an unmatched multi-member concurrent
-// lookalike group (no member or descendant matches goid or origin.parent), it
-// moves up to the nearest open span enclosing the members of that group that
-// could hold the child (see appendPossibleOwnersLocked), so a helper-goroutine
-// activation cannot land inside one peer lookalike's open child span while the
-// child's branch and node path still pick out the only member that holds a
-// span they fit. Non-concurrent lookalike chains (nested re-entry,
+// When no open activation is on the context chain and the resolved parent (or
+// any ancestor of it) belongs to an unmatched multi-member concurrent lookalike
+// group, each encountered group moves parent up to the nearest open span
+// enclosing the witnesses returned by appendPossibleOwnersWithIndexLocked:
+//   - When an outer peer matched goid or origin.parent through a descendant
+//     witness bm on a different goroutine, only the inner peers inside bm
+//     remain in unmatched (keptInsideBm), so ambiguity demotion stays inside bm.
+//   - When nested descendant members match on their own without an enclosing
+//     ancestor peer matching directly or via its own non-peer child spans (e.g.
+//     root -> worker-outer -> mid -> {worker-a -> sel-a, worker-b -> sel-b}),
+//     the returned witnesses are [worker-a, worker-b] and tree.enclosing stops
+//     at mid rather than demoting above worker-outer to root.
+//   - When selected has a non-empty node path containing id.path, only spans
+//     at or below selected's branch and path qualify, except that when id.path
+//     equals selected.path and selected inherited selected.path rather than
+//     opening a branch-scoped node there (either not a workflow agent, or its
+//     parent agent shares selected.path), branch-compatible peers on the exact
+//     same selected.path remain eligible. Once id enters a deeper node path
+//     below selected.path, peers left at selected.path on another branch no
+//     longer qualify.
+//   - When selected is a workflow activation (at empty or non-empty caller path
+//     selected.path) and insideWorkflowNode(id.path, selected) matches an exact
+//     "<selected.name>@1" path segment right below selected.path, only spans
+//     at or below selected.path that either satisfy insideWorkflowNode(id.path,
+//     rec) (such as competing activations of the same workflow on any branch,
+//     including default) or sit on a strictly deeper enclosing path
+//     (rec.path != selected.path && atOrBelowPath(id.path, rec.path)) qualify,
+//     keeping competing workflow activations eligible while excluding
+//     unrelated peers on selected.path (including default-branch peers).
+//   - Otherwise (for example, a detached leaf on a non-empty branch whose node
+//     path is empty or names a different workflow), any open member whose own
+//     branch and path can hold id counts as a possible launcher so a detached
+//     child cannot falsely attach to another peer's branch subtree.
+//   - When an unmatched lookalike group shares id's own (agentName, branch,
+//     path), its live members are treated as peers of id even if nested across
+//     intermediate spans, and parent is further walked up past any agent span
+//     that violates withinBranch or withinPath(..., parent.name == id.agentName).
+//
+// Non-concurrent lookalike chains of a different agent (nested re-entry,
 // same-goroutine stale spans, or suspended iterators) are left to parentFor
 // without exclusion or ambiguity demotion unless a cross-goroutine nested
 // ancestor directly matches goid or origin.parent.
 func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin, activation any) *spanRecord {
+	inv.lastLookalikeInspections = 0
+	inv.lastLauncherExcludeVisits = 0
 	callerExcluded := exclude
 	var clonedExclude bool
 	ensureExcludeMutable := func() {
@@ -4779,8 +4834,8 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	var unmatched map[lookalikeKey][]*spanRecord
 	var unmatchedByRec map[*spanRecord][]*spanRecord
 	var tree *openSpanTree
-	if goid != 0 {
-		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin, activation)
+	if goid != 0 || activation != nil {
+		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(id, exclude, &clonedExclude, goid, origin, activation)
 	}
 	var parent *spanRecord
 	if len(exclude) > 0 {
@@ -4791,6 +4846,8 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	selected := parent
 	var seenAmbiguous map[*spanRecord]bool
 	var ambiguous []*spanRecord
+	var qual qualifyingIndex
+	var hasQual bool
 	for parent != nil && parent.kind == spanKindAgent && len(unmatched) > 0 {
 		ambiguous = ambiguous[:0]
 		for cur := parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
@@ -4799,54 +4856,361 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 					seenAmbiguous = make(map[*spanRecord]bool)
 				}
 				seenAmbiguous[recs[0]] = true
-				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected)
+				if !hasQual {
+					qual = inv.buildQualifyingIndexLocked(tree, exclude, id, selected)
+					inv.lastLookalikeInspections += qual.inspections
+					hasQual = true
+				}
+				var steps int
+				ambiguous, steps = inv.appendPossibleOwnersWithIndexLocked(ambiguous, tree, exclude, &qual, recs, id)
+				inv.lastLookalikeInspections += steps
 			}
 		}
 		if len(ambiguous) == 0 {
 			break
 		}
 		parent = tree.enclosing(inv, ambiguous)
+		if u, ok := tree.stackIdx[parent]; ok {
+			for u > 0 {
+				cand := inv.agentStack[u]
+				if withinBranch(id.branch, cand.branch) && withinPath(id.path, cand.path, cand.name == id.agentName) {
+					break
+				}
+				u = tree.openParent[u]
+			}
+			parent = inv.agentStack[u]
+		}
 	}
 	return parent
 }
 
-// appendPossibleOwnersLocked appends to dst the members of the unmatched
-// lookalike group recs that could hold a child agent starting with id whose
-// parent would otherwise be selected: the members with an open span, not
-// excluded, in their subtree (themselves included) that id's branch and node
-// path fit as they fit a parent (see parentFor) at or below selected's branch
-// and node path. A child cannot run under a member without such a span, so
-// when fewer than two members have one, their branch and node path already
-// tell which member holds the child, and nothing is appended. inv.mu must be
-// held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
-	start := len(dst)
-	for _, m := range recs {
-		mIdx, ok := tree.stackIdx[m]
-		if !ok {
+func isPeerLookalikeGroup(recs []*spanRecord, id identity) bool {
+	if len(recs) == 0 {
+		return false
+	}
+	r0 := recs[0]
+	return r0.name == id.agentName && r0.branch == id.branch && r0.path == id.path
+}
+
+func spanQualifiesForOwner(rec *spanRecord, exclude map[string]bool, id identity, selected *spanRecord, requireSelected, requireWorkflowNode bool) bool {
+	if exclude[rec.spanID] ||
+		!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) {
+		return false
+	}
+	// When id.path equals selected.path and selected inherited selected.path
+	// rather than opening a branch-scoped node there (not a workflow agent, or
+	// its parent agent shares selected.path, such as a workflowagent pushed at
+	// its caller's path), peers sharing exact selected.path on an ancestor
+	// branch stay eligible.
+	inheritedPath := selected != nil && id.path == selected.path && (!selected.isWorkflow ||
+		(selected.parent != nil && selected.parent.kind == spanKindAgent && selected.parent.path == selected.path))
+	if requireSelected && (!atOrBelowPath(rec.path, selected.path) ||
+		(!withinBranch(rec.branch, selected.branch) && !(inheritedPath && rec.path == selected.path))) {
+		return false
+	}
+	if requireWorkflowNode {
+		selectedPath := ""
+		if selected != nil {
+			selectedPath = selected.path
+		}
+		if selectedPath != "" && !atOrBelowPath(rec.path, selectedPath) {
+			return false
+		}
+		if !insideWorkflowNode(id.path, rec) && !(rec.path != selectedPath && atOrBelowPath(id.path, rec.path)) {
+			return false
+		}
+	}
+	return true
+}
+
+func appendMatchedOwnerWitnesses(dst []*spanRecord, tree *openSpanTree, stack []*spanRecord, mIdxs []int, first, last []*spanRecord) []*spanRecord {
+	for k, mIdx := range mIdxs {
+		if first[k] == nil {
 			continue
 		}
-		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
-			rec := inv.agentStack[u]
-			if exclude[rec.spanID] ||
-				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
-				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
-				continue
+		if k+1 < len(mIdxs) && tree.tin[mIdxs[k+1]] <= tree.tout[mIdx] {
+			dst = append(dst, first[k])
+			if last[k] != first[k] {
+				dst = append(dst, last[k])
 			}
-			dst = append(dst, m)
+		} else {
+			dst = append(dst, stack[mIdx])
+		}
+	}
+	return dst
+}
+
+// qualifyingIndex precomputes in O(N) time which open spans in tree qualify
+// under (exclude, id, selected) together with next/prev qualifying Euler-tour
+// positions, allowing appendPossibleOwnersWithIndexLocked to evaluate each
+// lookalike group in O(k) time (for k = len(recs) DFS-ordered members, or
+// O(k log k) when unsorted via in-place heapsort) without re-scanning
+// overlapping subtrees.
+type qualifyingIndex struct {
+	qualifies   []bool
+	nextQual    []int
+	prevQual    []int
+	inspections int
+}
+
+func (q *qualifyingIndex) isQualifying(u int) bool {
+	q.inspections++
+	return q.qualifies[u]
+}
+
+func (q *qualifyingIndex) firstQualifyingInRange(l, r int) (int, bool) {
+	q.inspections++
+	qFirst := q.nextQual[l]
+	return qFirst, qFirst <= r
+}
+
+func (q *qualifyingIndex) lastQualifyingInRange(r int) int {
+	q.inspections++
+	return q.prevQual[r]
+}
+
+// insideWorkflowNode reports whether node path path lies inside a node of the
+// workflow activation wf.
+func insideWorkflowNode(path string, wf *spanRecord) bool {
+	if wf == nil || !wf.isWorkflow || wf.name == "" {
+		return false
+	}
+	rest := path
+	if wf.path != "" {
+		if !hasPathSegmentPrefix(path, wf.path) {
+			return false
+		}
+		rest = path[len(wf.path)+1:]
+	}
+	if !strings.HasPrefix(rest, wf.name) {
+		return false
+	}
+	tail := rest[len(wf.name):]
+	return tail == "@1" || strings.HasPrefix(tail, "@1/")
+}
+
+func (inv *invocationTrace) buildQualifyingIndexLocked(tree *openSpanTree, exclude map[string]bool, id identity, selected *spanRecord) qualifyingIndex {
+	m := len(tree.dfsSeq)
+	qualifies := make([]bool, len(inv.agentStack))
+	requireWorkflowNode := selected != nil && insideWorkflowNode(id.path, selected)
+	requireSelected := selected != nil && !requireWorkflowNode && selected.path != "" && atOrBelowPath(id.path, selected.path)
+	inspections := 0
+	for _, u := range tree.dfsSeq[1:] {
+		inspections++
+		if spanQualifiesForOwner(inv.agentStack[u], exclude, id, selected, requireSelected, requireWorkflowNode) {
+			qualifies[u] = true
+		}
+	}
+	nextQual := make([]int, m+1)
+	nextQual[m] = m
+	for p := m - 1; p >= 0; p-- {
+		inspections++
+		if p > 0 && qualifies[tree.dfsSeq[p]] {
+			nextQual[p] = p
+		} else {
+			nextQual[p] = nextQual[p+1]
+		}
+	}
+	prevQual := make([]int, m)
+	prev := -1
+	for p := range m {
+		inspections++
+		if p > 0 && qualifies[tree.dfsSeq[p]] {
+			prev = p
+		}
+		prevQual[p] = prev
+	}
+	return qualifyingIndex{
+		qualifies:   qualifies,
+		nextQual:    nextQual,
+		prevQual:    prevQual,
+		inspections: inspections,
+	}
+}
+
+func siftDownIdxsByTin(dst, tin []int, root, end int) int {
+	steps := 0
+	for {
+		child := 2*root + 1
+		if child >= end {
+			return steps
+		}
+		if right := child + 1; right < end {
+			steps++
+			if tin[dst[right]] > tin[dst[child]] {
+				child = right
+			}
+		}
+		steps++
+		if tin[dst[root]] >= tin[dst[child]] {
+			return steps
+		}
+		dst[root], dst[child] = dst[child], dst[root]
+		root = child
+	}
+}
+
+func collectSortedGroupMemberIdxs(dst []int, tree *openSpanTree, recs []*spanRecord) ([]int, int) {
+	steps := 0
+	for _, m := range recs {
+		steps++
+		if mIdx, ok := tree.stackIdx[m]; ok {
+			dst = append(dst, mIdx)
+		}
+	}
+	if len(dst) < 2 {
+		return dst, steps
+	}
+	sorted := true
+	for i := 1; i < len(dst); i++ {
+		steps++
+		if tree.tin[dst[i-1]] > tree.tin[dst[i]] {
+			sorted = false
 			break
 		}
 	}
-	if len(dst)-start < 2 {
-		return dst[:start]
+	if !sorted {
+		// In-place heapsort keeps the O(k log k) unsorted path closure-free and
+		// non-allocating while preserving O(k) for already DFS-ordered inputs.
+		n := len(dst)
+		for i := n/2 - 1; i >= 0; i-- {
+			steps += siftDownIdxsByTin(dst, tree.tin, i, n)
+		}
+		for end := n - 1; end > 0; end-- {
+			dst[0], dst[end] = dst[end], dst[0]
+			steps += siftDownIdxsByTin(dst, tree.tin, 0, end)
+		}
 	}
-	return dst
+	w := 1
+	for i := 1; i < len(dst); i++ {
+		steps++
+		if dst[i] != dst[w-1] {
+			dst[w] = dst[i]
+			w++
+		}
+	}
+	return dst[:w], steps
+}
+
+func checkQualifyingGap(tree *openSpanTree, stack []*spanRecord, qual *qualifyingIndex, mIdxs []int, first, last []*spanRecord, k, l, r int) int {
+	if l > r || first[k] == stack[mIdxs[k]] {
+		return 0
+	}
+	if qFirst, ok := qual.firstQualifyingInRange(l, r); ok {
+		added := 0
+		if first[k] == nil {
+			first[k] = stack[tree.dfsSeq[qFirst]]
+			added = 1
+		}
+		last[k] = stack[tree.dfsSeq[qual.lastQualifyingInRange(r)]]
+		return added
+	}
+	return 0
+}
+
+// appendPossibleOwnersWithIndexLocked assigns each non-excluded qualifying
+// open span in qual to its nearest enclosing member of recs, and appends
+// witnesses to dst together with the exact number of visited positions/member
+// steps only when at least two members match on their own (or when recs shares
+// id's own (agentName, branch, path), in which case all non-excluded members
+// are appended as peers). For each matched member k, when another member
+// follows inside k's subtree (tree.tin[mIdxs[k+1]] <= tree.tout[mIdx]), k
+// appends first[k] and last[k] (omitting last[k] if equal) so tree.enclosing
+// stops at their nearest common ancestor inside k when possible, or above k
+// when k matched itself; otherwise it appends inv.agentStack[mIdx]. Outside
+// -race builds, up to 16 members use stack buffers without allocating given a
+// prebuilt openSpanTree, qualifyingIndex, and sufficient dst capacity.
+// inv.mu must be held.
+func (inv *invocationTrace) appendPossibleOwnersWithIndexLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, qual *qualifyingIndex, recs []*spanRecord, id identity) ([]*spanRecord, int) {
+	beforeQualInsp := qual.inspections
+	var mIdxBuf [16]int
+	mIdxs, steps := collectSortedGroupMemberIdxs(mIdxBuf[:0], tree, recs)
+	if len(mIdxs) < 2 {
+		return dst, steps
+	}
+	if isPeerLookalikeGroup(recs, id) {
+		start := len(dst)
+		for _, mIdx := range mIdxs {
+			steps++
+			if !exclude[inv.agentStack[mIdx].spanID] {
+				dst = append(dst, inv.agentStack[mIdx])
+			}
+		}
+		if len(dst)-start < 2 {
+			return dst[:start], steps
+		}
+		return dst, steps
+	}
+	var firstBuf, lastBuf [16]*spanRecord
+	var first, last []*spanRecord
+	if len(mIdxs) <= len(firstBuf) {
+		first, last = firstBuf[:len(mIdxs)], lastBuf[:len(mIdxs)]
+	} else {
+		first, last = make([]*spanRecord, len(mIdxs)), make([]*spanRecord, len(mIdxs))
+	}
+	type activeMember struct {
+		k      int
+		cursor int
+	}
+	var activeBuf [16]activeMember
+	active := activeBuf[:0]
+	owners := 0
+	for i, mIdx := range mIdxs {
+		steps++
+		l := tree.tin[mIdx] - 1
+		r := tree.tout[mIdx] - 1
+		for len(active) > 0 && tree.tout[mIdxs[active[len(active)-1].k]]-1 < l {
+			steps++
+			top := active[len(active)-1]
+			active = active[:len(active)-1]
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
+		}
+		if len(active) > 0 {
+			steps++
+			top := &active[len(active)-1]
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, l-1)
+			top.cursor = max(top.cursor, r+1)
+		}
+		hasDesc := i+1 < len(mIdxs) && tree.tin[mIdxs[i+1]] <= tree.tout[mIdx]
+		cursor := l + 1
+		if qual.isQualifying(mIdx) {
+			first[i] = inv.agentStack[mIdx]
+			last[i] = first[i]
+			owners++
+			cursor = r + 1
+		} else if !hasDesc {
+			owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, i, l+1, r)
+			cursor = r + 1
+		}
+		active = append(active, activeMember{k: i, cursor: cursor})
+	}
+	for len(active) > 0 {
+		steps++
+		top := active[len(active)-1]
+		active = active[:len(active)-1]
+		owners += checkQualifyingGap(tree, inv.agentStack, qual, mIdxs, first, last, top.k, top.cursor, tree.tout[mIdxs[top.k]]-1)
+	}
+	if owners < 2 {
+		return dst, steps + (qual.inspections - beforeQualInsp)
+	}
+	steps += len(mIdxs)
+	return appendMatchedOwnerWitnesses(dst, tree, inv.agentStack, mIdxs, first, last), steps + (qual.inspections - beforeQualInsp)
+}
+
+// hasSegmentPrefix reports whether s starts with prefix followed immediately by
+// sep, matching strings.HasPrefix(s, prefix+string(sep)) without allocating.
+func hasSegmentPrefix(s, prefix string, sep byte) bool {
+	return len(s) > len(prefix) && s[len(prefix)] == sep && strings.HasPrefix(s, prefix)
+}
+
+func hasPathSegmentPrefix(path, prefix string) bool {
+	return hasSegmentPrefix(path, prefix, '/')
 }
 
 // atOrBelowPath reports whether node path path is ancestor or one of its
 // descendant node paths. An empty ancestor holds every path.
 func atOrBelowPath(path, ancestor string) bool {
-	return ancestor == "" || path == ancestor || strings.HasPrefix(path, ancestor+"/")
+	return ancestor == "" || path == ancestor || hasPathSegmentPrefix(path, ancestor)
 }
 
 // propagateExcludedLocked marks every open agent span in inv.agentStack[1:]
@@ -5186,13 +5550,14 @@ func (s maxSegTree) query(l, r int) int {
 // (countEffectivePeers); when at least two effective concurrent peers remain,
 // all live members within the group's matched scope are returned in unmatched
 // (re-filtered and re-collapsed against final exclusions). inv.mu must be held.
-func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin, activation any) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
-	if goid == 0 || len(inv.agentStack) <= 2 {
+func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin, activation any) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
+	if (goid == 0 && activation == nil) || len(inv.agentStack) <= 2 {
 		return exclude, nil, nil, nil
 	}
 	if inv.syncLookalikesLocked(); inv.lookalikeDups == 0 {
 		return exclude, nil, nil, nil
 	}
+	idKey := lookalikeKey{name: id.agentName, branch: id.branch, path: id.path}
 	n := len(inv.agentStack)
 	firstIdx := make(map[lookalikeKey]int, n-1)
 	var multiKeys []lookalikeKey
@@ -5257,19 +5622,34 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 	}
 
 	if launcher := inv.launcherLocked(activation, excluded); launcher > 0 {
+		var excludeRoot []bool
 		for _, k := range multiKeys {
 			for _, mIdx := range groups[k] {
+				inv.lastLauncherExcludeVisits++
 				if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
 					continue
 				}
-				ensureExcludeMutable()
-				for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
+				if excludeRoot == nil {
+					excludeRoot = make([]bool, n)
+					ensureExcludeMutable()
+				}
+				excludeRoot[mIdx] = true
+			}
+		}
+		if excludeRoot != nil {
+			for _, u := range tree.dfsSeq[1:] {
+				inv.lastLauncherExcludeVisits++
+				if excludeRoot[u] || excludeRoot[tree.openParent[u]] {
+					excludeRoot[u] = true
 					excluded[u] = true
 					exclude[inv.agentStack[u].spanID] = true
 				}
 			}
 		}
 		return exclude, nil, nil, tree
+	}
+	if goid == 0 {
+		return exclude, nil, nil, nil
 	}
 
 	groupsByTin := make([][]int, numGroups)
@@ -5755,7 +6135,10 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 				}
 			}
 			groupsByTin[id] = liveByTin
-			if countEffectivePeers(liveByTin) <= 1 {
+			if k != idKey && countEffectivePeers(liveByTin) <= 1 {
+				continue
+			}
+			if k == idKey && len(liveByTin) <= 1 {
 				continue
 			}
 			if unmatched == nil {
@@ -5783,7 +6166,7 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 		unmatchedByRec = make(map[*spanRecord][]*spanRecord, len(unmatchedRecKey))
 		for k := range unmatched {
 			keptIdxs := keptByTin[k]
-			if countEffectivePeers(keptIdxs) <= 1 {
+			if (k != idKey && countEffectivePeers(keptIdxs) <= 1) || (k == idKey && len(keptIdxs) <= 1) {
 				delete(unmatched, k)
 				continue
 			}
@@ -5816,7 +6199,7 @@ func (inv *invocationTrace) ownerForActivationLocked(act any, id identity) *span
 // branches. ADK names the branch of a sub-agent of a parallel agent after
 // its parent branch: "parent.parallel.sub".
 func withinBranch(branch, ancestor string) bool {
-	return ancestor == "" || branch == ancestor || strings.HasPrefix(branch, ancestor+".")
+	return ancestor == "" || branch == ancestor || hasSegmentPrefix(branch, ancestor, '.')
 }
 
 // withinPath reports whether path runs inside the node activation ancestor.
@@ -5833,7 +6216,7 @@ func withinPath(path, ancestor string, sameAgent bool) bool {
 	if path == "" || ancestor == "" {
 		return true
 	}
-	return strings.HasPrefix(path, ancestor+"/")
+	return hasPathSegmentPrefix(path, ancestor)
 }
 
 // traceManager assigns trace, span and parent span IDs to rows and measures
@@ -5868,10 +6251,11 @@ type traceManager struct {
 	logf            func(string, ...any)
 	selfPlugin      weak.Pointer[baseplugin.Plugin]
 
-	// maxTracked, ttl and now are fields so that tests can change them.
+	// maxTracked, ttl, now and newUUID are fields so that tests can change them.
 	maxTracked int
 	ttl        time.Duration
 	now        func() time.Time
+	newUUID    func() uuid.UUID
 }
 
 // evictedTrace retains the identity of an invocation after active tracking ends.
@@ -5935,16 +6319,32 @@ func (c *completedTrace) waitsForLateCalls() bool {
 }
 
 func newTraceManager() *traceManager {
-	return &traceManager{
+	tm := &traceManager{
 		invocations: map[string]*invocationTrace{},
 		evicted:     map[string]evictedTrace{},
 		completed:   map[string]*completedTrace{},
 		knownParent: map[agent.Agent]agent.Agent{},
-		traceSeed:   newTraceID(),
 		maxTracked:  maxTrackedInvocations,
 		ttl:         invocationTTL,
 		now:         time.Now,
+		newUUID:     uuid.New,
 	}
+	tm.traceSeed = tm.newTraceID()
+	return tm
+}
+
+func (tm *traceManager) newTraceID() string {
+	if tm == nil {
+		return newTraceID()
+	}
+	return newTraceIDWith(tm.newUUID)
+}
+
+func (tm *traceManager) newSpanID() string {
+	if tm == nil {
+		return newSpanID()
+	}
+	return newSpanIDWith(tm.newUUID)
 }
 
 // traceIDFor returns a deterministic 32-hex-digit trace ID for invocationID
@@ -5952,7 +6352,7 @@ func newTraceManager() *traceManager {
 // evicted mid-run and recreated on a later callback keeps its trace_id.
 func (tm *traceManager) traceIDFor(invocationID string) string {
 	if invocationID == "" {
-		return newTraceID()
+		return tm.newTraceID()
 	}
 	sum := sha256.Sum256([]byte(tm.traceSeed + "\x00" + invocationID))
 	return hex.EncodeToString(sum[:16])
@@ -6030,7 +6430,7 @@ func (tm *traceManager) lookupInvocationWithUUID(ctx context.Context, id identit
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
-		inv := newInvocationTraceWithSpan(sc, "", now)
+		inv := tm.newInvocationTraceWithSpan(sc, "", now)
 		if customUUIDs {
 			inv.uuidProviders.Store(&uuidProviderLedger{states: map[uuidProviderKey]uuidProviderState{}})
 		}
@@ -6068,7 +6468,7 @@ func (tm *traceManager) lookupInvocationWithUUID(ctx context.Context, id identit
 				delete(tm.completed, id.invocationID)
 			}
 			ev, wasEvicted := tm.evicted[id.invocationID]
-			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+			inv = tm.newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 			if wasEvicted {
 				inv.restoreEvicted(ev)
 			}
@@ -6302,7 +6702,7 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 					preparedLate.uuidProviders.Store(compactedProviders)
 				}
 			} else {
-				preparedLate = newInvocationTraceWithKnownSpan(trace.SpanContext{}, savedID.traceID, savedID.spanID, now)
+				preparedLate = tm.newInvocationTraceWithKnownSpan(trace.SpanContext{}, savedID.traceID, savedID.spanID, now)
 				preparedLate.isLate = true
 				preparedLate.restoreEvicted(savedID)
 				preparedLate.uuidProviders.Store(compactedProviders)
@@ -6439,7 +6839,7 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		completed.livePending = nil
 	}
 	if completed.late == nil {
-		late := newInvocationTraceWithKnownSpan(sc, cmp.Or(traceID, completed.identity.traceID), completed.identity.spanID, now)
+		late := tm.newInvocationTraceWithKnownSpan(sc, cmp.Or(traceID, completed.identity.traceID), completed.identity.spanID, now)
 		late.isLate = true
 		late.restoreEvicted(completed.identity)
 		// Sharing the run's ledger lets the activations that start after
@@ -6718,16 +7118,16 @@ func (tm *traceManager) endInvocationTarget(ctx context.Context, id identity, ta
 			}
 			if inv == nil {
 				if ev, ok := tm.evicted[id.invocationID]; ok {
-					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(ev.traceID, tm.traceIDFor(id.invocationID)), ev.spanID, now)
+					inv = tm.newInvocationTraceWithKnownSpan(sc, cmp.Or(ev.traceID, tm.traceIDFor(id.invocationID)), ev.spanID, now)
 					inv.restoreEvicted(ev)
 				} else if target != nil && target.hasEvicted {
-					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(target.evicted.traceID, tm.traceIDFor(id.invocationID)), target.evicted.spanID, now)
+					inv = tm.newInvocationTraceWithKnownSpan(sc, cmp.Or(target.evicted.traceID, tm.traceIDFor(id.invocationID)), target.evicted.spanID, now)
 					inv.restoreEvicted(target.evicted)
 				} else if completed := tm.completed[id.invocationID]; completed != nil {
-					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(completed.identity.traceID, tm.traceIDFor(id.invocationID)), completed.identity.spanID, now)
+					inv = tm.newInvocationTraceWithKnownSpan(sc, cmp.Or(completed.identity.traceID, tm.traceIDFor(id.invocationID)), completed.identity.spanID, now)
 					inv.restoreEvicted(completed.identity)
 				} else {
-					inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+					inv = tm.newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 				}
 			}
 			if target != nil {
@@ -6740,7 +7140,7 @@ func (tm *traceManager) endInvocationTarget(ctx context.Context, id identity, ta
 		}()
 	}
 	if inv == nil {
-		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+		inv = tm.newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	var row rowSpan
@@ -7205,6 +7605,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	if didPurge {
 		parent = inv.parentForRunLocked(id, nil, goid, origin, activation)
 	}
+	runtime.KeepAlive(ctx)
 	for _, other := range inv.agentStack[1:] {
 		if other.kind == spanKindAgent &&
 			other.parent == parent && other.name == id.agentName && other.branch == id.branch && other.path == id.path {
@@ -7213,7 +7614,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		}
 	}
 	rec := &spanRecord{
-		spanID:                 newSpanID(),
+		spanID:                 tm.newSpanID(),
 		parentSpanID:           parent.spanID,
 		kind:                   spanKindAgent,
 		path:                   id.path,
@@ -8956,7 +9357,7 @@ func isSubNodePath(path, owner string) bool {
 	if owner == "" {
 		return path != ""
 	}
-	return strings.HasPrefix(path, owner+"/")
+	return hasPathSegmentPrefix(path, owner)
 }
 
 // clearLastPartialLocked records that the caller read past the last partial
@@ -11172,8 +11573,12 @@ func (tm *traceManager) eventSpan(ctx context.Context, id identity, author, bran
 
 // newChild returns a new span under parent. It is not tracked.
 func (inv *invocationTrace) newChild(parent *spanRecord, kind spanKind, now time.Time) *spanRecord {
+	var gen func() uuid.UUID
+	if inv != nil {
+		gen = inv.newUUID
+	}
 	return &spanRecord{
-		spanID:       newSpanID(),
+		spanID:       newSpanIDWith(gen),
 		parentSpanID: parent.spanID,
 		kind:         kind,
 		start:        now,
@@ -12227,13 +12632,27 @@ func (inv *invocationTrace) touchAgentActivityLocked(rec *spanRecord, now time.T
 // newTraceID returns a random trace ID of 32 hex digits, the format of
 // OpenTelemetry trace IDs and of adk-python's uuid4().hex.
 func newTraceID() string {
-	id := uuid.New()
+	return newTraceIDWith(nil)
+}
+
+func newTraceIDWith(newUUID func() uuid.UUID) string {
+	if newUUID == nil {
+		newUUID = uuid.New
+	}
+	id := newUUID()
 	return hex.EncodeToString(id[:])
 }
 
 // newSpanID returns a random span ID of 16 hex digits, the format of
 // OpenTelemetry span IDs and of adk-python's uuid4().hex[:16].
 func newSpanID() string {
-	id := uuid.New()
+	return newSpanIDWith(nil)
+}
+
+func newSpanIDWith(newUUID func() uuid.UUID) string {
+	if newUUID == nil {
+		newUUID = uuid.New
+	}
+	id := newUUID()
 	return hex.EncodeToString(id[:8])
 }
