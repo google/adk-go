@@ -4788,6 +4788,24 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	} else {
 		parent = inv.parentFor(id)
 	}
+	var workflowParent *spanRecord
+	var workflowPrefixLen int
+	if len(unmatched) > 0 && id.path != "" {
+		// Only compare workflow evidence inside peers whose ownership the
+		// launcher and goroutine checks could not resolve.
+		var peers []*spanRecord
+		for cur := parent; cur != nil; cur = cur.parent {
+			if recs := unmatchedByRec[cur]; len(recs) > 1 {
+				peers = recs
+			}
+		}
+		if len(peers) > 0 {
+			workflowParent, workflowPrefixLen = inv.workflowNodeParentLocked(tree, exclude, peers, id, parent)
+			if workflowParent != nil && !tree.isOpenAncestor(tree.stackIdx[workflowParent], tree.stackIdx[parent]) {
+				parent = workflowParent
+			}
+		}
+	}
 	selected := parent
 	var seenAmbiguous map[*spanRecord]bool
 	var ambiguous []*spanRecord
@@ -4799,7 +4817,12 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 					seenAmbiguous = make(map[*spanRecord]bool)
 				}
 				seenAmbiguous[recs[0]] = true
-				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected)
+				prefixLen := 0
+				if workflowParent != nil && (cur == workflowParent ||
+					tree.isOpenAncestor(tree.stackIdx[cur], tree.stackIdx[workflowParent])) {
+					prefixLen = workflowPrefixLen
+				}
+				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected, prefixLen)
 			}
 		}
 		if len(ambiguous) == 0 {
@@ -4810,6 +4833,53 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	return parent
 }
 
+// workflowNodeParentLocked finds the live workflow whose namespace matches the
+// most specific prefix of the child's path. When the selected span is inside
+// that namespace's subtree, keep its workflow on a tie so ordinary parent
+// selection within that subtree is preserved.
+func (inv *invocationTrace) workflowNodeParentLocked(tree *openSpanTree, exclude map[string]bool, peers []*spanRecord, id identity, selected *spanRecord) (*spanRecord, int) {
+	var best *spanRecord
+	var bestLen int
+	selectedIdx := tree.stackIdx[selected]
+	for _, peer := range peers {
+		idx := tree.stackIdx[peer]
+		for _, u := range tree.dfsSeq[tree.tin[idx]-1 : tree.tout[idx]] {
+			rec := inv.agentStack[u]
+			if exclude[rec.spanID] || !withinBranch(id.branch, rec.branch) {
+				continue
+			}
+			n := workflowNodePrefixLen(id.path, rec)
+			if n > bestLen || (n > 0 && n == bestLen && (u == selectedIdx || tree.isOpenAncestor(u, selectedIdx))) {
+				best, bestLen = rec, n
+			}
+		}
+	}
+	return best, bestLen
+}
+
+// workflowNodePrefixLen returns the length of the workflow namespace in path
+// when path continues into a node of rec. Workflow.Run appends the workflow's
+// name and run ID to its caller path after the workflow agent's span starts.
+func workflowNodePrefixLen(path string, rec *spanRecord) int {
+	if !rec.isWorkflow {
+		return 0
+	}
+	suffix := path
+	if rec.path != "" {
+		var ok bool
+		suffix, ok = strings.CutPrefix(path, rec.path)
+		if !ok || !strings.HasPrefix(suffix, "/") {
+			return 0
+		}
+		suffix = suffix[1:]
+	}
+	afterName, ok := strings.CutPrefix(suffix, rec.name)
+	if !ok || !strings.HasPrefix(afterName, "@1/") || len(afterName) == len("@1/") {
+		return 0
+	}
+	return len(path) - len(afterName) + len("@1")
+}
+
 // appendPossibleOwnersLocked appends to dst the members of the unmatched
 // lookalike group recs that could hold a child agent starting with id whose
 // parent would otherwise be selected: the members with an open span, not
@@ -4817,9 +4887,10 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 // path fit as they fit a parent (see parentFor) at or below selected's branch
 // and node path. A child cannot run under a member without such a span, so
 // when fewer than two members have one, their branch and node path already
-// tell which member holds the child, and nothing is appended. inv.mu must be
-// held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
+// tell which member holds the child, and nothing is appended. When a workflow
+// namespace identifies the child's node, require witnesses at that namespace
+// to disambiguate the workflows' owners. inv.mu must be held.
+func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord, workflowPrefixLen int) []*spanRecord {
 	start := len(dst)
 	for _, m := range recs {
 		mIdx, ok := tree.stackIdx[m]
@@ -4828,8 +4899,14 @@ func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *
 		}
 		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
 			rec := inv.agentStack[u]
-			if exclude[rec.spanID] ||
-				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
+			if exclude[rec.spanID] || !withinBranch(id.branch, rec.branch) {
+				continue
+			}
+			if workflowPrefixLen > 0 {
+				if workflowNodePrefixLen(id.path, rec) != workflowPrefixLen {
+					continue
+				}
+			} else if !withinPath(id.path, rec.path, rec.name == id.agentName) ||
 				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
 				continue
 			}

@@ -29148,6 +29148,141 @@ func TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent(t *tes
 	}
 }
 
+func TestRunner_ConcurrentLookalike_DetachedWorkflowNodeParent(t *testing.T) {
+	for _, tc := range []struct {
+		name, callerPath, wantParent                 string
+		openSelectedPeer, sameWorkflow, atCallerPath bool
+	}{
+		{name: "inherited_path_with_open_selected_peer", callerPath: "caller@1", openSelectedPeer: true, wantParent: "source_wf"},
+		{name: "empty_caller_path_with_idle_peer", wantParent: "source_wf"},
+		{name: "two_workflows_with_the_same_namespace", callerPath: "caller@1", sameWorkflow: true, wantParent: "root"},
+		{name: "leaf_still_on_the_caller_path", callerPath: "caller@1", atCallerPath: true, wantParent: "root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+			nodeCtx := make(chan agent.Context, 1)
+			peerOpen := make(chan struct{})
+			leafDone := make(chan struct{})
+			var nodeCalls atomic.Int32
+			inner := workflow.NewFunctionNode("inner_node", func(ctx agent.Context, _ any) (string, error) {
+				if nodeCalls.Add(1) == 1 {
+					nodeCtx <- ctx
+				} else {
+					close(peerOpen)
+				}
+				<-leafDone
+				return "done", nil
+			}, workflow.NodeConfig{})
+			source, err := workflowagent.New(workflowagent.Config{
+				Name: "source_wf", Edges: workflow.Chain(workflow.Start, inner),
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New(source_wf): %v", err)
+			}
+			holdOpen := func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					close(peerOpen)
+					<-leafDone
+				}
+			}
+			selectedAgent, err := agent.New(agent.Config{Name: "selected_agent", Run: holdOpen})
+			if err != nil {
+				t.Fatalf("agent.New(selected_agent): %v", err)
+			}
+			selected := "selected"
+			var calls atomic.Int32
+			worker, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{source, selectedAgent},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					if calls.Add(1) == 1 {
+						if !tc.openSelectedPeer {
+							ctx = ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selected})
+						}
+						return source.Run(ctx)
+					}
+					if tc.openSelectedPeer {
+						return selectedAgent.Run(ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selected}))
+					}
+					if tc.sameWorkflow {
+						return source.Run(ctx)
+					}
+					return holdOpen(ctx)
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{worker},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						workersCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &tc.callerPath})
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						events := make(chan item, 16)
+						forward := func(seq iter.Seq2[*session.Event, error]) {
+							for ev, err := range seq {
+								events <- item{ev, err}
+							}
+						}
+						var wg sync.WaitGroup
+						wg.Go(func() { forward(worker.Run(workersCtx)) })
+						innerCtx := <-nodeCtx
+						wg.Go(func() { forward(worker.Run(workersCtx)) })
+						<-peerOpen
+						// Launch from root's goroutine with the node's path and the
+						// selected branch, but with no walkable worker lineage.
+						wg.Go(func() {
+							defer close(leafDone)
+							ctx := innerCtx.WithICDelta(&agent.InvocationContextDelta{Branch: &selected})
+							if tc.atCallerPath {
+								ctx = agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &tc.callerPath})
+							}
+							forward(leaf.Run(ctx.WithContext(context.WithoutCancel(ctx))))
+						})
+						go func() {
+							wg.Wait()
+							close(events)
+						}()
+						accept := true
+						for it := range events {
+							if accept {
+								accept = yield(it.ev, it.err)
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("runner.Run: %v", err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			want := onlyAgentRow(t, rows, EventAgentStarting, tc.wantParent)["span_id"]
+			got := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"]
+			if got != want {
+				var parent any
+				for _, row := range rows {
+					if row["event_type"] == EventAgentStarting && row["span_id"] == got {
+						parent = row["agent"]
+					}
+				}
+				t.Errorf("leaf AGENT_STARTING parent agent = %v, want %s", parent, tc.wantParent)
+			}
+		})
+	}
+}
+
 // onlyAgentRow returns the only row of eventType that agent wrote.
 func onlyAgentRow(t *testing.T, rows []map[string]any, eventType, agent string) map[string]any {
 	t.Helper()
