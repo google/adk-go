@@ -1611,20 +1611,57 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}
 					}
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
-					if liveSess != nil {
-						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+					// A streaming tool goes through the same callback pipeline as
+					// a plain function tool, in live mode and outside it, as it
+					// does in adk-python. A callback that answers the call or
+					// fails it keeps the stream from starting.
+					response, cbErr := f.runBeforeToolCallbacks(toolCtx, streamTool, args)
+					switch {
+					case response != nil || cbErr != nil:
+						// A callback answered the call, so the tool never runs.
+						result = f.finishToolCall(toolCtx, streamTool, args, response, cbErr)
+					case liveSess != nil:
 						cancelCtx, cancel := toolCtx.WithAgentCancel()
 						cancelToolCtx := &cancelledToolContext{
 							Context:   toolCtx,
 							cancelCtx: cancelCtx,
 						}
-						if impl, ok := liveSess.(*liveSessionImpl); ok {
-							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+						liveImpl, _ := liveSess.(*liveSessionImpl)
+						// Registering before the after-tool callbacks run keeps a
+						// stop_streaming call from the same batch able to find
+						// this one, as it was before the callbacks ran here.
+						if liveImpl != nil {
+							liveImpl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+						}
+						// The after-tool callbacks see the pending-result
+						// placeholder the model gets, and one that fails the call
+						// stops the stream before it starts.
+						pending := map[string]any{"status": "The function is running asynchronously and the results are pending."}
+						response, cbErr := f.finishToolCallResult(toolCtx, streamTool, args, pending, nil)
+						if cbErr != nil {
+							if liveImpl != nil {
+								liveImpl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+							}
+							cancel()
+							errText, _ := toolinternal.ModelErrorText(streamTool.Name(), cbErr)
+							result = map[string]any{"error": errText}
+							break
+						}
+						result = response
+						// A stop_streaming call in the same batch can run while
+						// the after-tool callbacks do. It finds this tool
+						// registered, cancels it and reports success, so the
+						// stream must not start once they return.
+						if cancelCtx.Err() != nil {
+							if liveImpl != nil {
+								liveImpl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+							}
+							break
 						}
 						go func() {
 							defer func() {
-								if impl, ok := liveSess.(*liveSessionImpl); ok {
-									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+								if liveImpl != nil {
+									liveImpl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
 								}
 								cancel()
 							}()
@@ -1652,19 +1689,21 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 							}
 						}()
-					} else {
+					default:
 						var sb strings.Builder
+						var runErr error
 						for chunk, err := range recoverStreamPanic(streamTool, toolCtx, args) {
 							if err != nil {
-								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
-								result = map[string]any{"error": errText}
+								runErr = err
 								break
 							}
 							sb.WriteString(chunk)
 						}
-						if result == nil {
-							result = map[string]any{"result": sb.String()}
+						var streamed map[string]any
+						if runErr == nil {
+							streamed = map[string]any{"result": sb.String()}
 						}
+						result = f.finishToolCall(toolCtx, streamTool, args, streamed, runErr)
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
@@ -1856,6 +1895,18 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 // callbacks and its outcome to the after-tool callbacks, and returns the
 // function response for the model.
 func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, response map[string]any, err error) map[string]any {
+	response, err = f.finishToolCallResult(toolCtx, tool, fArgs, response, err)
+	if err != nil {
+		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
+		return map[string]any{"error": errText}
+	}
+	return response
+}
+
+// finishToolCallResult is finishToolCall without the final step of turning an
+// error into a function response, for a caller that acts on the error itself:
+// a live streaming tool does not start when a callback has failed its call.
+func (f *Flow) finishToolCallResult(toolCtx agent.Context, tool tool.Tool, fArgs, response map[string]any, err error) (map[string]any, error) {
 	pluginManager := pluginManagerFromContext(toolCtx)
 	var errorResponse map[string]any
 	var cbErr error
@@ -1884,11 +1935,7 @@ func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, resp
 		err = alteredErr
 	}
 
-	if err != nil {
-		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
-		return map[string]any{"error": errText}
-	}
-	return response
+	return response, err
 }
 
 // cloneArgs returns a copy of a function call's arguments for the callbacks
