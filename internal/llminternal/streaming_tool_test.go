@@ -270,8 +270,20 @@ func TestHandleFunctionCalls_CustomStreamingToolPanic(t *testing.T) {
 	t.Run("live", func(t *testing.T) {
 		liveSess := newLiveSessionImpl()
 		liveSess.activeTools = make(map[string][]activeTask)
-		if _, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, liveSess); err != nil {
+		pending, err := (&Flow{}).handleFunctionCalls(newInvCtx(t), toolsDict, resp, nil, liveSess)
+		if err != nil {
 			t.Fatal(err)
+		}
+		// Drive the live sender handoff before waiting for the tool to unregister.
+		liveSess.markPendingSent(pending.LLMResponse.Content)
+		select {
+		case req := <-liveSess.inputCh:
+			got := req.Content.Parts[0].FunctionResponse.Response["error"]
+			if got != "Invoking `custom_stream()` failed with an internal error." {
+				t.Fatalf("unexpected tool error: %v", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("missing live tool error")
 		}
 		// Wait for the goroutine that runs the tool to finish. An unrecovered
 		// panic in it ends the test process.

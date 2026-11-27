@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
@@ -148,18 +149,22 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 
 		m, ok := args.(map[string]any)
 		if !ok {
-			yield("", fmt.Errorf("unexpected args type, got: %T", args))
+			yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("unexpected args type, got: %T", args)})
 			return
 		}
-		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+		input, validationFailed, err := typeutil.ConvertWithValidationResult[map[string]any, TArgs](m, f.inputSchema)
 		if err != nil {
-			yield("", err)
+			if validationFailed {
+				yield("", &toolerror.BeforeHandler{Err: err})
+			} else {
+				yield("", &handlerError{err: err})
+			}
 			return
 		}
 
 		if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 			if !confirmation.Confirmed {
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected))
+				yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)})
 				return
 			}
 		} else {
@@ -174,19 +179,29 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 					fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 						f.Name()), nil)
 				if err != nil {
-					yield("", err)
+					yield("", &toolerror.BeforeHandler{Err: err})
 					return
 				}
 				ctx.Actions().SkipSummarization = true
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired))
+				yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)})
 				return
 			}
 		}
 
 		for res, err := range f.handler(ctx, input) {
+			if err != nil {
+				err = &handlerError{err: err}
+			}
 			if !yield(res, err) {
 				return
 			}
 		}
 	}
 }
+
+// handlerError keeps application errors from handlers and JSON conversions opaque
+// to the live model while preserving their text and cause for direct callers.
+type handlerError struct{ err error }
+
+func (e *handlerError) Error() string { return e.err.Error() }
+func (e *handlerError) Unwrap() error { return e.err }

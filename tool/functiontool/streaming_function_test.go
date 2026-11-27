@@ -330,3 +330,85 @@ func TestStreamingFunctionToolRecoversHandlerPanic(t *testing.T) {
 		})
 	}
 }
+
+type customFormattedError struct {
+	text      string
+	formatted string
+}
+
+func (e customFormattedError) Error() string { return e.text }
+
+func (e customFormattedError) Format(s fmt.State, _ rune) {
+	_, _ = s.Write([]byte(e.formatted))
+}
+
+type panickingErrorMethod struct{}
+
+func (panickingErrorMethod) Error() string { panic("boom in Error()") }
+
+func TestStreamingFunctionToolHandlerErrorPreservesUnwrapAndErrorText(t *testing.T) {
+	t.Run("errors.Is matches sentinel", func(t *testing.T) {
+		sentinel := errors.New("sentinel failure")
+		streamingTool := requireStreamingTool(t, functiontool.Config{Name: "streaming_tool"}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				yield("", fmt.Errorf("handler wrap: %w", sentinel))
+			}
+		})
+		ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+		var gotErr error
+		for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			gotErr = err
+		}
+		if !errors.Is(gotErr, sentinel) {
+			t.Fatalf("errors.Is(%v, sentinel) = false, want true", gotErr)
+		}
+	})
+
+	t.Run("Error() text preserved over fmt.Formatter", func(t *testing.T) {
+		handlerErr := customFormattedError{
+			text:      "plain error text",
+			formatted: "custom formatter output",
+		}
+		streamingTool := requireStreamingTool(t, functiontool.Config{Name: "streaming_tool"}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				yield("", handlerErr)
+			}
+		})
+		ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+		var gotErr error
+		for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			gotErr = err
+		}
+		if gotErr == nil {
+			t.Fatal("RunStream() error = nil, want non-nil")
+		}
+		if gotErr.Error() != "plain error text" {
+			t.Errorf("err.Error() = %q, want %q", gotErr.Error(), "plain error text")
+		}
+		if modelText, panicked := toolinternal.ModelErrorText("streaming_tool", gotErr); modelText != "plain error text" || panicked {
+			t.Errorf("ModelErrorText() = (%q, %t), want (%q, false)", modelText, panicked, "plain error text")
+		}
+	})
+
+	t.Run("panicking Error() is not eagerly formatted into fmt panic text", func(t *testing.T) {
+		streamingTool := requireStreamingTool(t, functiontool.Config{Name: "streaming_tool"}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				yield("", panickingErrorMethod{})
+			}
+		})
+		ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+		var gotErr error
+		for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			gotErr = err
+		}
+		if gotErr == nil {
+			t.Fatal("RunStream() error = nil, want non-nil")
+		}
+		panicked := captureStreamingPanic(func() {
+			_ = gotErr.Error()
+		})
+		if panicked != "boom in Error()" {
+			t.Fatalf("err.Error() panic = %v, want %q (not %%!v(PANIC=...) string)", panicked, "boom in Error()")
+		}
+	})
+}

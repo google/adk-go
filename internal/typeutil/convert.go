@@ -26,10 +26,17 @@ import (
 // If non-nil resolvedSchema is provided, validation against the resolvedSchema will run
 // during the conversion.
 func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Resolved) (To, error) {
+	result, _, err := ConvertWithValidationResult[From, To](v, resolvedSchema)
+	return result, err
+}
+
+// ConvertWithValidationResult additionally reports whether the error came from
+// schema validation. JSON encoding and decoding can invoke application code.
+func ConvertWithValidationResult[From, To any](v From, resolvedSchema *jsonschema.Resolved) (To, bool, error) {
 	var zero To
 	rawArgs, err := json.Marshal(v)
 	if err != nil {
-		return zero, err
+		return zero, false, err
 	}
 	if resolvedSchema != nil {
 		// Validate the JSON-decoded form rather than the Go value:
@@ -38,7 +45,7 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		// https://github.com/google/jsonschema-go/issues/23).
 		var decoded any
 		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
-			return zero, err
+			return zero, false, err
 		}
 		// An absent input (e.g. a tool invoked with no arguments)
 		// should satisfy an object schema.
@@ -46,14 +53,14 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 			decoded = map[string]any{}
 		}
 		if err := resolvedSchema.Validate(decoded); err != nil {
-			return zero, err
+			return zero, true, err
 		}
 	}
 	var typed To
 	if err := json.Unmarshal(rawArgs, &typed); err != nil {
-		return zero, err
+		return zero, false, err
 	}
-	return typed, nil
+	return typed, false, nil
 }
 
 // ValidateWithJSONSchema validates a Go value against a resolved schema by
