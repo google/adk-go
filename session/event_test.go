@@ -16,6 +16,7 @@ package session_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -157,6 +158,38 @@ func TestIsFinalResponseErrorEvent(t *testing.T) {
 			}}
 			if got := event.IsFinalResponse(); got != tc.want {
 				t.Errorf("IsFinalResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+var isFinalResponseSink bool
+
+// IsFinalResponse only asks whether the content holds a function call or a
+// function response, so it must not build the list of them: the allocations
+// it makes do not grow with the number of parts.
+func TestIsFinalResponseAllocationsDoNotGrowWithParts(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+	}{
+		{"function calls", &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}},
+		{"function responses", &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			few := &session.Event{LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: slices.Repeat([]*genai.Part{tc.part}, 2)},
+			}}
+			many := &session.Event{LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: slices.Repeat([]*genai.Part{tc.part}, 200)},
+			}}
+
+			fewAllocs := testing.AllocsPerRun(100, func() { isFinalResponseSink = few.IsFinalResponse() })
+			manyAllocs := testing.AllocsPerRun(100, func() { isFinalResponseSink = many.IsFinalResponse() })
+
+			if manyAllocs != fewAllocs {
+				t.Errorf("IsFinalResponse() allocated %v times per call with 200 parts, want %v as with 2 parts", manyAllocs, fewAllocs)
 			}
 		})
 	}

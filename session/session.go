@@ -281,6 +281,17 @@ type RequestInput struct {
 
 // IsFinalResponse returns whether the event is the final response of an agent.
 //
+// The first of these rules that applies decides:
+//   - A compaction event (Actions.Compaction set) is not final.
+//   - An event with Actions.SkipSummarization set or with LongRunningToolIDs
+//     is final.
+//   - An error event is final: ErrorCode is non-empty, Partial is false and
+//     the content holds no function call, whatever else the content holds.
+//     ErrorMessage alone does not make an error event.
+//   - Otherwise the event is final when Partial is false and its content
+//     holds no function call, no function response and does not end with a
+//     code execution result.
+//
 // Note: when multiple agents participate in one invocation, there could be
 // multiple events with IsFinalResponse() as True, for each participating agent.
 func (e *Event) IsFinalResponse() bool {
@@ -294,13 +305,20 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
-	// A complete error event ends the turn even when it carries a function
-	// response or a code execution result; only a function call keeps it open.
-	if e.LLMResponse.ErrorCode != "" && !e.LLMResponse.Partial && !hasFunctionCalls(&e.LLMResponse) {
+	hasCalls := hasAny(e.FunctionCalls())
+	if e.ErrorCode != "" && !e.Partial && !hasCalls {
 		return true
 	}
+	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+}
 
-	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
+// hasAny reports whether seq yields at least one value. It stops seq after the
+// first one.
+func hasAny[T any](seq iter.Seq[T]) bool {
+	for range seq {
+		return true
+	}
+	return false
 }
 
 // NewEvent creates a new event defining now as the timestamp.
@@ -519,34 +537,9 @@ const (
 // ErrStateKeyNotExist is the error thrown when key does not exist.
 var ErrStateKeyNotExist = errors.New("state key does not exist")
 
-func hasFunctionCalls(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part != nil && part.FunctionCall != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasFunctionResponses(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
-		return false
-	}
-	for _, part := range resp.Content.Parts {
-		if part != nil && part.FunctionResponse != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // Returns whether the event has a trailing code execution result. Nil Parts
-// entries are skipped the way hasFunctionCalls and hasFunctionResponses skip
-// them: the trailing part is the last non-nil one, so a stray nil after a
-// code execution result does not change the classification.
+// entries are skipped: the trailing part is the last non-nil one, so a stray
+// nil after a code execution result does not change the classification.
 func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
 		return false
