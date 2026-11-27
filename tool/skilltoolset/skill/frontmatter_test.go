@@ -195,6 +195,165 @@ Body
 			},
 			wantInstruction: "\n# Long\n\nMulti-line\nMarkdown\nBody\n\n",
 		},
+		{
+			name: "keys outside the specification set are ignored",
+			input: `---
+name: shared-skill
+description: A skill shared with another agent runtime.
+user-invocable: true
+argument-hint: "<query>"
+version: 2
+metadata:
+  author: Someone
+---
+# Markdown
+Body`,
+			want: &Frontmatter{
+				Name:        "shared-skill",
+				Description: "A skill shared with another agent runtime.",
+				Metadata:    map[string]string{"author": "Someone"},
+			},
+			wantInstruction: "# Markdown\nBody",
+		},
+		{
+			name: "keys outside the specification set with list and mapping values are ignored",
+			input: `---
+name: shared-skill
+description: A skill shared with another agent runtime.
+tags: [a, b]
+hooks:
+  pre: cmd
+  post:
+    - one
+    - two
+---
+# Markdown
+Body`,
+			want: &Frontmatter{
+				Name:        "shared-skill",
+				Description: "A skill shared with another agent runtime.",
+			},
+			wantInstruction: "# Markdown\nBody",
+		},
+		{
+			name:  "allowed_tools spelling",
+			input: "---\nname: skill\ndescription: skill\nallowed_tools: Read Bash(git:*)\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read", "Bash(git:*)"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools takes precedence over allowed_tools",
+			input: "---\nname: skill\ndescription: skill\nallowed_tools: Write\nallowed-tools: Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "null allowed-tools shadows allowed_tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools:\nallowed_tools: Write\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from a merge key",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read}\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from a merge key takes precedence over allowed_tools",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read}\nallowed_tools: Write\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from a merged anchor",
+			input: "---\nname: skill\ndescription: skill\nbase: &a {allowed-tools: Read}\n<<: *a\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from an alias key",
+			input: "---\nname: skill\ndescription: skill\nk: &k allowed-tools\n*k : Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "explicit allowed-tools overrides a merged one",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Write}\nallowed-tools: Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools integer is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: 42\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools mapping is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: {a: b}\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools sequence of mappings is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: [{name: x}]\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools unclosed parenthesis is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: Bash(git:*\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
 	}
 
 	for _, testcase := range tests {
@@ -217,6 +376,94 @@ Body
 				t.Errorf("expected unread instruction %q, got %q", testcase.wantInstruction, string(bytes))
 			}
 		})
+	}
+}
+
+func TestParse_AllowedToolsAlias(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    []string
+		wantErr string
+	}{
+		{
+			name:  "string",
+			value: "Read Bash(git:*)",
+			want:  []string{"Read", "Bash(git:*)"},
+		},
+		{
+			name:  "sequence",
+			value: "[Read, Bash(git:*)]",
+			want:  []string{"Read", "Bash(git:*)"},
+		},
+		{
+			name:  "sequence with an aliased element",
+			value: "[&tool Read, *tool]",
+			want:  []string{"Read", "Read"},
+		},
+		{
+			name:  "null",
+			value: "null",
+		},
+		{
+			name:    "integer",
+			value:   "42",
+			wantErr: "%s must be a string or a sequence of strings",
+		},
+		{
+			name:    "mapping",
+			value:   "{tool: Read}",
+			wantErr: "%s must be a string or a sequence of strings",
+		},
+		{
+			name:    "unbalanced expression",
+			value:   "Bash(git:*",
+			wantErr: "%s must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unclosed '('",
+		},
+		{
+			name:    "sequence of mappings",
+			value:   "[{tool: Read}]",
+			wantErr: "%s: yaml: unmarshal errors:",
+		},
+		{
+			name:    "recursive sequence",
+			value:   "[*value]",
+			wantErr: "%s: yaml: unmarshal errors:",
+		},
+	}
+	for _, key := range []string{"allowed-tools", "allowed_tools"} {
+		for _, testcase := range tests {
+			t.Run(key+"/"+testcase.name, func(t *testing.T) {
+				t.Parallel()
+				input := fmt.Sprintf("---\nname: skill\ndescription: skill\nvalue: &value %s\n%s: *value\n", testcase.value, key)
+				if key == "allowed-tools" {
+					input += "allowed_tools: Write\n"
+				}
+				input += "---\nMarkdown Body"
+				reader := bufio.NewReader(strings.NewReader(input))
+				got, err := Parse(reader)
+				if testcase.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(testcase.wantErr, key)) {
+						t.Fatalf("Parse: got error %v, want error containing %q", err, fmt.Sprintf(testcase.wantErr, key))
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Parse: expected no error, got: %v", err)
+				}
+				want := &Frontmatter{Name: "skill", Description: "skill", AllowedTools: testcase.want}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("Parse: got %v, want %v", got, want)
+				}
+				instruction, err := io.ReadAll(reader)
+				if err != nil {
+					t.Fatalf("io.ReadAll: expected no error, got: %v", err)
+				}
+				if string(instruction) != "Markdown Body" {
+					t.Errorf("expected unread instruction %q, got %q", "Markdown Body", instruction)
+				}
+			})
+		}
 	}
 }
 
@@ -255,12 +502,37 @@ func TestParse_InvalidFormat(t *testing.T) {
 			input: "---\n_ : invalid : _\n---\n# Markdown\nBody",
 		},
 		{
+			name:  "empty frontmatter",
+			input: "---\n---\n# Markdown\nBody",
+		},
+		{
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
 		},
 		{
-			name:  "unknown fields",
-			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
+			name:    "metadata value is a list",
+			input:   "---\nname: skill\ndescription: skill\nmetadata:\n  tags: [a, b]\n---\n# Markdown\nBody",
+			wantErr: "cannot unmarshal !!seq into string",
+		},
+		{
+			name:    "description is a mapping",
+			input:   "---\nname: skill\ndescription:\n  text: skill\n---\n# Markdown\nBody",
+			wantErr: "cannot unmarshal !!map into string",
+		},
+		{
+			name:    "allowed_tools with unclosed opening parenthesis",
+			input:   "---\nname: skill\ndescription: skill\nallowed_tools: Bash(git:* Read\n---\n# Markdown\nBody",
+			wantErr: "allowed_tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unclosed '('",
+		},
+		{
+			name:    "allowed_tools integer",
+			input:   "---\nname: skill\ndescription: skill\nallowed_tools: 42\n---\n# Markdown\nBody",
+			wantErr: "allowed_tools must be a string or a sequence of strings",
+		},
+		{
+			name:    "allowed-tools from a merge key is validated",
+			input:   "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read)}\nallowed_tools: Write\n---\n# Markdown\nBody",
+			wantErr: "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unexpected ')'",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",
