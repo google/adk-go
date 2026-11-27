@@ -138,6 +138,9 @@ func TestSearchMemoryLikeWildcardsAndDefaultLimit(t *testing.T) {
 	if n := len(searchEntries(t, s, "olong")); n != 0 {
 		t.Errorf("FTS substring query returned %d results, want 0", n)
 	}
+	if entries := searchEntries(t, s, "100%"); len(entries) != 1 || entries[0].CustomMetadata["event_id"] != "literal" {
+		t.Error("FTS query with a LIKE wildcard did not match the literal event")
+	}
 	// Turning FTS off must use LIKE even if the database already has an index.
 	s = newTestStore(t, Config{DB: db, FTS: "off"})
 	for _, query := range []string{"100%", "user_id"} {
