@@ -15,6 +15,7 @@
 package completions
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -35,19 +36,38 @@ func convertCompletion(resp *openai.ChatCompletion) (*genai.GenerateContentRespo
 		return nil, shared.ErrNoChoices
 	}
 	choice := resp.Choices[0]
-	parts, err := convertMessage(choice.Message)
+	msg := choice.Message
+	// A turn cut off by the token limit can end inside a call's arguments.
+	// Then every call is dropped and the text kept, as adk-python's ApigeeLlm
+	// does: no call runs on arguments the model never finished, and no
+	// complete call runs while another call of the same turn is lost. When
+	// every call is complete they are kept, as there; anthropicmodel instead
+	// drops all calls of a turn the token limit stopped.
+	truncatedCalls := choice.FinishReason == "length" && hasUnfinishedCall(msg)
+	if truncatedCalls {
+		msg.ToolCalls = nil
+	}
+	parts, err := convertMessage(msg)
 	if err != nil {
 		return nil, err
 	}
-	if len(parts) == 0 {
+	if len(parts) == 0 && !truncatedCalls {
 		return nil, shared.ErrNoTextOrToolContent
 	}
+	candidate := &genai.Candidate{
+		Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
+		FinishReason:   finishReason(choice.FinishReason),
+		LogprobsResult: convertLogprobs(choice.Logprobs),
+	}
+	if truncatedCalls && len(parts) == 0 {
+		// Nothing is left to read, so the turn reports MAX_TOKENS as an error,
+		// as anthropicmodel does for a turn the token limit left empty. A turn
+		// that kept its text reports the MAX_TOKENS finish reason alone, as
+		// there, where adk-python also sets the error.
+		candidate.FinishMessage = "tool call arguments were cut off by the token limit"
+	}
 	out := &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{
-			Content:        &genai.Content{Role: string(genai.RoleModel), Parts: parts},
-			FinishReason:   finishReason(choice.FinishReason),
-			LogprobsResult: convertLogprobs(choice.Logprobs),
-		}},
+		Candidates:   []*genai.Candidate{candidate},
 		ModelVersion: resp.Model,
 		ResponseID:   resp.ID,
 	}
@@ -101,6 +121,29 @@ func convertMessage(msg openai.ChatCompletionMessage) ([]*genai.Part, error) {
 	return parts, nil
 }
 
+// hasUnfinishedCall reports whether a function call in msg has arguments that
+// are empty or do not decode, which in a turn cut off by the token limit means
+// they were cut off. A call of another type reports false, so that the turn
+// still fails in convertMessage, as adk-python leaves such a turn to its
+// existing error handling. JSON null still means no arguments, where
+// adk-python counts it as unfinished.
+func hasUnfinishedCall(msg openai.ChatCompletionMessage) bool {
+	unfinished := false
+	for _, call := range msg.ToolCalls {
+		if call.Type != "" && call.Type != "function" {
+			return false
+		}
+		fn := call.Function
+		if call.ID == "" && fn.Name == "" && fn.Arguments == "" {
+			continue // Accumulator padding, not a call; see convertMessage.
+		}
+		if _, err := functionCallArgs(fn.Arguments); fn.Arguments == "" || err != nil {
+			unfinished = true
+		}
+	}
+	return unfinished
+}
+
 // functionCallArgs decodes a tool call's arguments, reading an empty payload as
 // a call that takes none.
 func functionCallArgs(raw string) (map[string]any, error) {
@@ -139,21 +182,60 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count.
+// convertUsage maps completion usage to disjoint genai candidate and thought
+// counts. Unlike adk-python's OpenAILlm, it removes any overlap so telemetry
+// can sum the two without counting reasoning twice. It returns nil when any
+// count is invalid (see [shared.InvalidUsage]): usage the server could not
+// have measured is reported as unknown rather than as numbers every reader
+// would trust.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		return nil
+	}
+	// InvalidUsage has bounded every count to [0, math.MaxInt32].
+	prompt, completion, total := usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	reasoning := usage.CompletionTokensDetails.ReasoningTokens
+	output := int32(completion)
+	thoughts := min(int32(reasoning), output)
+	candidates := output - thoughts
+	// xAI reports reasoning outside completion_tokens. Its total includes
+	// all three counts. Subtract instead of summing counts to avoid overflow.
+	if reasoning > 0 && total >= prompt && total-prompt-completion == reasoning {
+		candidates, thoughts = output, int32(reasoning)
+	}
+
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
-		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
+		PromptTokenCount:        int32(usage.PromptTokens),
+		CandidatesTokenCount:    candidates,
+		TotalTokenCount:         int32(usage.TotalTokens),
+		CachedContentTokenCount: int32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: int32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
+	}
+}
+
+// usageCounts lists the counts convertUsage reports, under their Chat
+// Completions names.
+func usageCounts(usage openai.CompletionUsage) []shared.UsageCount {
+	return []shared.UsageCount{
+		{Name: "prompt_tokens", Value: usage.PromptTokens},
+		{Name: "completion_tokens", Value: usage.CompletionTokens},
+		{Name: "total_tokens", Value: usage.TotalTokens},
+		{Name: "prompt_tokens_details.cached_tokens", Value: usage.PromptTokensDetails.CachedTokens},
+		{Name: "completion_tokens_details.reasoning_tokens", Value: usage.CompletionTokensDetails.ReasoningTokens},
+	}
+}
+
+// traceInvalidUsage records on the span in ctx why convertUsage dropped usage,
+// when it did.
+func traceInvalidUsage(ctx context.Context, usage openai.CompletionUsage) {
+	if name, reason := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		shared.TraceInvalidUsage(ctx, name, reason)
 	}
 }
 

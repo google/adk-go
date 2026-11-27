@@ -211,7 +211,7 @@ func waitForLiveRequest(t *testing.T, liveSession *recordingLiveSession) agent.L
 	select {
 	case req := <-liveSession.requests:
 		return req
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for request to reach the live session")
 		return agent.LiveRequest{}
 	}

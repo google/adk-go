@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,6 +83,101 @@ func textPartText(t *testing.T, s string) string {
 	return text
 }
 
+// linearRatio returns the ratio of the shortest of three timed runs of large
+// to the shortest of three of small, with small floored at 100µs, and those
+// times. The runs of small and large alternate, so that a burst of load slows
+// both alike. A ratio above limit is measured again, up to three times in
+// all, and then three times more with the runs timed alone, while no other
+// redaction test runs (see runInParallel), and the smallest ratio is
+// returned: scheduler and garbage collector pauses on a loaded host, and
+// other tests running in parallel, which take more from a long run than from
+// a short one, inflate single measurements, while a quadratic scrub, whose
+// ratio is far above limit, stays above it on every attempt.
+func linearRatio(limit float64, small, large func()) (ratio float64, tSmall, tLarge time.Duration) {
+	ratio, tSmall, tLarge = minRatio(limit, small, large)
+	if ratio <= limit {
+		return ratio, tSmall, tLarge
+	}
+	// The caller holds scalingMu shared via runInParallel.
+	scalingMu.RUnlock()
+	scalingMu.Lock()
+	defer func() {
+		scalingMu.Unlock()
+		scalingMu.RLock()
+	}()
+	return minRatio(limit, small, large)
+}
+
+// minRatio is the smallest ratio of up to three rounds of timed runs (see
+// linearRatio), stopping at the first one at most limit.
+func minRatio(limit float64, small, large func()) (ratio float64, tSmall, tLarge time.Duration) {
+	ratio = math.Inf(1)
+	for range 3 {
+		ts, tl := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+		for range 3 {
+			ts, tl = min(ts, timed(small)), min(tl, timed(large))
+		}
+		if r := float64(tl) / float64(max(ts, 100*time.Microsecond)); r < ratio {
+			ratio, tSmall, tLarge = r, ts, tl
+		}
+		if ratio <= limit {
+			break
+		}
+	}
+	return ratio, tSmall, tLarge
+}
+
+// scalingMu lets a linear-scaling or wall-clock check whose measurement stays
+// above its limit time its runs again alone (see linearRatio and
+// withinWallClock): parallel tests in this package hold it shared while running
+// (see runInParallel), and the check holds it alone while retrying, so other
+// parallel tests do not take CPU from the timed runs.
+var scalingMu sync.RWMutex
+
+// runInParallel runs t in parallel with other package tests and holds
+// scalingMu shared until t and its subtests end. A parent test whose subtests
+// call runInParallel must use bare t.Parallel instead of runInParallel, because
+// a concurrent scalingMu.Lock blocks a child's RLock while waiting on the
+// parent's RLock, deadlocking.
+func runInParallel(t *testing.T) {
+	t.Parallel()
+	scalingMu.RLock()
+	t.Cleanup(scalingMu.RUnlock)
+}
+
+// timed returns how long a run of f takes.
+func timed(f func()) time.Duration {
+	start := time.Now()
+	f()
+	return time.Since(start)
+}
+
+// withinWallClock returns how long the shortest run of f takes: one run timed
+// while other package tests run in parallel (see runInParallel) and, when that
+// run takes longer than limit, up to two more timed alone, as linearRatio times
+// its runs again, so that a scheduler pause on a loaded host or a test
+// running in parallel does not fail a check that a quadratic scan, which
+// takes minutes, fails on every run. The caller holds scalingMu shared via
+// runInParallel; f must give the same result each run.
+func withinWallClock(limit time.Duration, f func()) time.Duration {
+	d := timed(f)
+	if d <= limit {
+		return d
+	}
+	scalingMu.RUnlock()
+	scalingMu.Lock()
+	defer func() {
+		scalingMu.Unlock()
+		scalingMu.RLock()
+	}()
+	for range 2 {
+		if d = min(d, timed(f)); d <= limit {
+			break
+		}
+	}
+	return d
+}
+
 // checkRedaction checks that every text entry point returns want for the in
 // of each row.
 func checkRedaction(t *testing.T, tests []redactionCase) {
@@ -101,6 +197,7 @@ func checkRedaction(t *testing.T, tests []redactionCase) {
 // is read: map keys, struct fields, session state keys, JSON keys, URI
 // parameters and the keys of key=value text.
 func TestIsSensitiveKey(t *testing.T) {
+	runInParallel(t)
 	// The credential names. A key is sensitive when it is one of them in any
 	// case, with "_", "-", "." or nothing between its words, alone or behind
 	// "user:" and "app:" state prefixes.
@@ -249,6 +346,7 @@ func TestIsSensitiveKey(t *testing.T) {
 // ";", query and fragment parameters. sanitizeURI redacts the URIs of file
 // parts, and the URIs found in text follow the same rules.
 func TestSanitizeURIComponents(t *testing.T) {
+	runInParallel(t)
 	const r = "%5BREDACTED%5D" // "[REDACTED]" in a URI component
 
 	tests := []redactionCase{
@@ -433,6 +531,7 @@ func TestSanitizeURIComponents(t *testing.T) {
 // holds for an error message, raw text, a string of structured content and a
 // text part.
 func TestRedactTextAndErrorMessages(t *testing.T) {
+	runInParallel(t)
 	// The value of an Authorization, Proxy-Authorization, X-API-Key or
 	// API-Key header is redacted to the end of its line.
 	t.Run("header", func(t *testing.T) {
@@ -1278,6 +1377,7 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 // TestRedactJSONAndSmartTruncate pins how structured values and JSON text are
 // redacted: by key, with the rest of the document kept.
 func TestRedactJSONAndSmartTruncate(t *testing.T) {
+	runInParallel(t)
 	t.Run("map keys and struct fields", func(t *testing.T) {
 		type config struct {
 			DBPassword        string
@@ -1569,6 +1669,7 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 // already changes nothing, through every text entry point and through
 // scrubErrorText, the pattern pass that they share.
 func TestRedactionIdempotency(t *testing.T) {
+	runInParallel(t)
 	entryPoints := append(slices.Clone(textEntryPoints), struct {
 		name   string
 		redact func(t *testing.T, s string) string
@@ -1654,12 +1755,13 @@ func TestRedactionIdempotency(t *testing.T) {
 	})
 }
 
-// TestRedactionLinearTimeScaling checks that the time to redact a text grows
+// TestRedactionLinearTimeScaling checks that redacting a text scales
 // linearly with its length, on shapes that make a pattern start, a quote
 // search or a nested-key lookup rescan the text when they are written
-// carelessly. It does not run in parallel with other tests, which would take
-// the CPU from the runs that it times.
+// carelessly. If a parallel measurement exceeds the limit, linearRatio retries
+// exclusively under scalingMu.
 func TestRedactionLinearTimeScaling(t *testing.T) {
+	t.Parallel()
 	// Each shape is timed at two lengths 16 times apart. A linear redaction
 	// takes about 16 times longer on the large text, a quadratic one about
 	// 256 times.
@@ -1799,6 +1901,7 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 	}
 	for _, shape := range shapes {
 		t.Run(shape.name, func(t *testing.T) {
+			runInParallel(t)
 			large := shape.text(shape.large / scale)
 			small := shape.text(shape.large / scale / sizeRatio)
 			redact := func(s string) {
@@ -1808,35 +1911,11 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 					}
 				}
 			}
-			// Load on the host only makes a run slower, so the best of
-			// three rounds decides.
-			ratio := math.Inf(1)
-			var tSmall, tLarge time.Duration
-			for range 3 {
-				ts, tl := fastest(func() { redact(small) }), fastest(func() { redact(large) })
-				if r := float64(tl) / float64(max(ts, 50*time.Microsecond)); r < ratio {
-					ratio, tSmall, tLarge = r, ts, tl
-				}
-				if ratio <= maxRatio {
-					break
-				}
-			}
-			if ratio > maxRatio {
+			if ratio, tSmall, tLarge := linearRatio(maxRatio, func() { redact(small) }, func() { redact(large) }); ratio > maxRatio {
 				t.Errorf("%d bytes took %v and %d bytes took %v: ratio %.0f, want at most %d for a linear redaction", len(small), tSmall, len(large), tLarge, ratio, maxRatio)
 			}
 		})
 	}
-}
-
-// fastest returns the shortest of three runs of f.
-func fastest(f func()) time.Duration {
-	best := time.Duration(math.MaxInt64)
-	for range 3 {
-		start := time.Now()
-		f()
-		best = min(best, time.Since(start))
-	}
-	return best
 }
 
 // TestTextKeyPrefixSpansAllocs verifies that delimiter-dense non-sensitive text
@@ -1918,6 +1997,7 @@ func TestQuotePrefixShortFieldsNoTableAlloc(t *testing.T) {
 // sanitizeRawText catch every secret removed by a standalone reference regexp
 // pass over generated multi-pair, quoted, padded, temp:, and joined inputs.
 func TestReferenceRegexDifferential(t *testing.T) {
+	runInParallel(t)
 	fixedParts := make([]string, 0, len(sensitiveKeys))
 	compoundParts := make([]string, 0, len(sensitiveKeys))
 	camelCompoundParts := make([]string, 0, len(sensitiveKeys))

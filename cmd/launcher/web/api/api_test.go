@@ -807,6 +807,7 @@ func TestSetupSubroutersPassesBindHostToRESTServer(t *testing.T) {
 // adkrest.DefaultMaxPayloadSize and reject the raised body below (between the
 // default and the configured limit) with 400.
 func TestAPIServerHonorsConfigMaxPayloadSize(t *testing.T) {
+	t.Parallel()
 	// 20 MiB - twice the adkrest default, clearly above the default limit.
 	const configuredMax = int64(20 << 20)
 

@@ -125,9 +125,14 @@ func (v *vertexAIClient) searchMemory(ctx context.Context, req *memory.SearchReq
 	}
 
 	for _, m := range r.RetrievedMemories {
-		res.Memories = append(res.Memories, memory.Entry{
+		entry := memory.Entry{
 			Content: genai.NewContentFromText(m.Memory.Fact, genai.RoleUser),
-		})
+			Author:  genai.RoleUser,
+		}
+		if updateTime := m.Memory.GetUpdateTime(); updateTime != nil {
+			entry.Timestamp = updateTime.AsTime()
+		}
+		res.Memories = append(res.Memories, entry)
 	}
 
 	return res, nil

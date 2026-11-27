@@ -34,9 +34,11 @@ const maxCacheIntervals = 100
 // With caching on, the system instruction, the tools and the stable prefix of
 // the conversation are stored once as a cache on the model provider, and later
 // requests name that cache instead of resending what it holds. A model that
-// does not support caching ignores the config. The Gemini model in
-// [google.golang.org/adk/v2/model/gemini] supports it, and its package
-// documentation says when a cache is created and reused.
+// does not support caching ignores the config, and a model that refuses
+// explicit context caching (such as Gemini 4) has its requests sent without an
+// explicit cache. The Gemini model in [google.golang.org/adk/v2/model/gemini]
+// supports caching, and its package documentation says when a cache is created
+// and reused.
 //
 // The bookkeeping that carries a cache from one request to the next is the
 // [CacheMetadata] on each model response, which the session stores with the

@@ -47,7 +47,10 @@ func (storageSession) TableName() string {
 
 // Helper to map from internal struct to GORM struct
 func createStorageSession(ctx context.Context, s *localSession) (*storageSession, error) {
-	now := platform.Now(ctx)
+	// Keep only microseconds. MySQL stores no more and by default rounds the
+	// rest, and rounding up would make the row newer than the session Create
+	// returns, so the first AppendEvent on that session would fail as stale.
+	now := platform.Now(ctx).Truncate(time.Microsecond)
 	return &storageSession{
 		UserID:     s.userID,
 		AppName:    s.appName,
@@ -71,10 +74,21 @@ func createSessionFromStorageSession(storage *storageSession) (*localSession, er
 
 // storageEvent corresponds to the 'events' table.
 type storageEvent struct {
-	ID        string `gorm:"primaryKey;"`
-	AppName   string `gorm:"primaryKey;"`
-	UserID    string `gorm:"primaryKey;"`
-	SessionID string `gorm:"primaryKey;"`
+	// On SQLite and PostgreSQL the primary key leads with id, so Get's
+	// per-session read cannot use it and scans the whole table. On MySQL,
+	// InnoDB already indexes (app_name, user_id, session_id) for the foreign
+	// key, so this index removes the filesort. idx_events_app_user_session_ts_id
+	// matches Get's filter and ORDER BY timestamp DESC, id DESC, and uses the
+	// same name and columns as adk-python. The priorities are explicit because
+	// GORM otherwise orders index columns by field position, which would put
+	// id first. On MySQL, InnoDB adopts this index for fk_sessions_events and
+	// drops its own FK index, so rolling back with DROP INDEX fails with
+	// Error 1553 unless another index on (app_name, user_id, session_id) is
+	// created first.
+	ID        string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:5,sort:desc"`
+	AppName   string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:1"`
+	UserID    string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:2"`
+	SessionID string `gorm:"primaryKey;index:idx_events_app_user_session_ts_id,priority:3"`
 
 	InvocationID string
 	Author       string
@@ -88,7 +102,7 @@ type storageEvent struct {
 	RequestedInputJSON     dynamicJSON
 	Branch                 *string
 	IsolationScope         *string
-	Timestamp              time.Time `gorm:"precision:6"`
+	Timestamp              time.Time `gorm:"precision:6;index:idx_events_app_user_session_ts_id,priority:4,sort:desc"`
 
 	// Fields from llm_response
 	Content           dynamicJSON

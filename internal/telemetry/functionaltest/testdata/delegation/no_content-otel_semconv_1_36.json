@@ -24,7 +24,8 @@
               "gen_ai.request.model": "mock",
               "gen_ai.response.finish_reasons": [
                 "tool_call"
-              ]
+              ],
+              "gen_ai.response.model": "mock"
             },
             "status": "UNSET",
             "children": [],
@@ -100,7 +101,8 @@
                           "gen_ai.request.model": "mock",
                           "gen_ai.response.finish_reasons": [
                             "stop"
-                          ]
+                          ],
+                          "gen_ai.response.model": "mock"
                         },
                         "status": "UNSET",
                         "children": [],
@@ -148,7 +150,8 @@
               "gen_ai.request.model": "mock",
               "gen_ai.response.finish_reasons": [
                 "stop"
-              ]
+              ],
+              "gen_ai.response.model": "mock"
             },
             "status": "UNSET",
             "children": [],

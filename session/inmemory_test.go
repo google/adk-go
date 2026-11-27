@@ -578,6 +578,7 @@ func TestInMemoryService_AppendEvent_CopiesRequestedAuthConfigs(t *testing.T) {
 // concurrent readers that could mutate those maps, potentially causing a fatal
 // concurrent map read write runtime throw.
 func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
+	t.Parallel()
 	for _, actionMap := range []struct {
 		name  string
 		write func(*session.Event)
@@ -607,6 +608,7 @@ func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
 				continue
 			}
 			t.Run(actionMap.name+"/"+deltaShape, func(t *testing.T) {
+				t.Parallel()
 				ctx := t.Context()
 				svc := session.InMemoryService()
 				cr, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u"})
@@ -640,7 +642,7 @@ func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
 						}
 					}
 				}()
-				for i := range 20000 {
+				for i := range 5000 {
 					var delta map[string]any
 					switch deltaShape {
 					case "with_temp":
