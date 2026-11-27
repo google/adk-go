@@ -32,6 +32,7 @@ import (
 )
 
 func TestRunner_AfterRunEventKeepsInvocationSpan(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	emitted := false
 	observer, err := baseplugin.New(baseplugin.Config{
@@ -99,6 +100,7 @@ func TestRunner_AfterRunEventKeepsInvocationSpan(t *testing.T) {
 }
 
 func TestTraceManager_LateOperationsKeepTheirSpans(t *testing.T) {
+	runInParallel(t)
 	for _, kind := range []string{"agent", "model", "tool"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := t.Context()
@@ -129,6 +131,7 @@ func TestTraceManager_LateOperationsKeepTheirSpans(t *testing.T) {
 }
 
 func TestTraceManager_EndAdoptsTraceBeforeRetainingIdentity(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	id := identity{invocationID: "completed", agentName: "root"}
@@ -147,6 +150,7 @@ func TestTraceManager_EndAdoptsTraceBeforeRetainingIdentity(t *testing.T) {
 }
 
 func TestTraceManager_LateCallbacksDoNotRestartInvocation(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -174,6 +178,7 @@ func TestTraceManager_LateCallbacksDoNotRestartInvocation(t *testing.T) {
 }
 
 func TestTraceManager_NewRunReusesInvocationID(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	id := identity{invocationID: "resumed", agentName: "root"}
@@ -192,6 +197,7 @@ func TestTraceManager_NewRunReusesInvocationID(t *testing.T) {
 }
 
 func TestTraceManager_StartRestoresEvictedInvocation(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -204,6 +210,7 @@ func TestTraceManager_StartRestoresEvictedInvocation(t *testing.T) {
 }
 
 func TestTraceManager_CompletedTombstonesStayBounded(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -230,6 +237,7 @@ func TestTraceManager_CompletedTombstonesStayBounded(t *testing.T) {
 }
 
 func TestTraceManager_LateCallbackRefreshesRetention(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -254,6 +262,7 @@ func TestTraceManager_LateCallbackRefreshesRetention(t *testing.T) {
 }
 
 func TestTraceManager_RepeatedEndPreservesLateCall(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	id := identity{invocationID: "completed", agentName: "root"}
@@ -277,6 +286,7 @@ func TestTraceManager_RepeatedEndPreservesLateCall(t *testing.T) {
 }
 
 func TestTraceManager_CompletionsPreserveMidRunEviction(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	now := time.Unix(1000, 0)
@@ -311,6 +321,7 @@ func TestTraceManager_CompletionsPreserveMidRunEviction(t *testing.T) {
 }
 
 func TestTraceManager_OpenLateCallSurvivesCompletionPressure(t *testing.T) {
+	runInParallel(t)
 	for _, kind := range []string{"agent", "model", "tool"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := t.Context()
@@ -355,6 +366,7 @@ func TestTraceManager_OpenLateCallSurvivesCompletionPressure(t *testing.T) {
 }
 
 func TestTraceManager_StartingLateSpanSurvivesCompletionPressure(t *testing.T) {
+	runInParallel(t)
 	for _, kind := range []string{"agent", "model", "tool"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx := t.Context()
@@ -419,6 +431,7 @@ func TestTraceManager_StartingLateSpanSurvivesCompletionPressure(t *testing.T) {
 }
 
 func TestTraceManager_ClosedLateStateCanBePruned(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
@@ -438,6 +451,7 @@ func TestTraceManager_ClosedLateStateCanBePruned(t *testing.T) {
 }
 
 func TestTraceManager_FullOpenCompletedCacheStaysBounded(t *testing.T) {
+	runInParallel(t)
 	ctx := t.Context()
 	tm := newTraceManager()
 	tm.maxTracked = 1
