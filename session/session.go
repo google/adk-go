@@ -312,6 +312,39 @@ func (e *Event) IsFinalResponse() bool {
 	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
 
+// FunctionCalls returns an iterator over the FunctionCall of each part of
+// e.Content that has one, in part order. Nil entries in e.Content.Parts are
+// skipped, and the iterator yields nothing when e or e.Content is nil. It
+// yields the pointers stored in e.Content, not copies.
+func (e *Event) FunctionCalls() iter.Seq[*genai.FunctionCall] {
+	return func(yield func(*genai.FunctionCall) bool) {
+		if e == nil || e.Content == nil {
+			return
+		}
+		for _, p := range e.Content.Parts {
+			if p != nil && p.FunctionCall != nil && !yield(p.FunctionCall) {
+				return
+			}
+		}
+	}
+}
+
+// FunctionResponses returns an iterator over the FunctionResponse of each part
+// of e.Content that has one, in part order, under the same rules as
+// FunctionCalls.
+func (e *Event) FunctionResponses() iter.Seq[*genai.FunctionResponse] {
+	return func(yield func(*genai.FunctionResponse) bool) {
+		if e == nil || e.Content == nil {
+			return
+		}
+		for _, p := range e.Content.Parts {
+			if p != nil && p.FunctionResponse != nil && !yield(p.FunctionResponse) {
+				return
+			}
+		}
+	}
+}
+
 // hasAny reports whether seq yields at least one value. It stops seq after the
 // first one.
 func hasAny[T any](seq iter.Seq[T]) bool {

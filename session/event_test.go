@@ -194,3 +194,87 @@ func TestIsFinalResponseAllocationsDoNotGrowWithParts(t *testing.T) {
 		})
 	}
 }
+
+// An event with nothing to report yields nothing, and a nil *Event is valid
+// input.
+func TestEventAccessorsNoResult(t *testing.T) {
+	tests := []struct {
+		name  string
+		event *session.Event
+	}{
+		{"nil receiver", nil},
+		{"zero value", &session.Event{}},
+		{"empty non-nil part list", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{}}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slices.Collect(tc.event.FunctionCalls()); len(got) != 0 {
+				t.Errorf("FunctionCalls() yielded %v, want nothing", got)
+			}
+			if got := slices.Collect(tc.event.FunctionResponses()); len(got) != 0 {
+				t.Errorf("FunctionResponses() yielded %v, want nothing", got)
+			}
+		})
+	}
+}
+
+// The accessors yield the pointers stored in the content, in part order,
+// including unnamed ones, skip text and nil parts, and leave the content
+// unchanged.
+func TestEventAccessorsReturnStoredValues(t *testing.T) {
+	callA := &genai.FunctionCall{Name: "a"}
+	callB := &genai.FunctionCall{}
+	respA := &genai.FunctionResponse{Name: "ra"}
+	respB := &genai.FunctionResponse{}
+	ev := &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+		{Text: "x"},
+		nil,
+		{FunctionCall: callA},
+		{FunctionResponse: respA},
+		{FunctionCall: callB},
+		{FunctionResponse: respB},
+	}}}}
+
+	calls := slices.Collect(ev.FunctionCalls())
+	if len(calls) != 2 || calls[0] != callA || calls[1] != callB {
+		t.Errorf("FunctionCalls() = %v, want the stored pointers [a, unnamed]", calls)
+	}
+	responses := slices.Collect(ev.FunctionResponses())
+	if len(responses) != 2 || responses[0] != respA || responses[1] != respB {
+		t.Errorf("FunctionResponses() = %v, want the stored pointers [ra, unnamed]", responses)
+	}
+	if len(ev.Content.Parts) != 6 || ev.Content.Parts[1] != nil {
+		t.Errorf("Content.Parts changed: len %d, Parts[1] nil = %v; want len 6 with Parts[1] nil", len(ev.Content.Parts), len(ev.Content.Parts) > 1 && ev.Content.Parts[1] == nil)
+	}
+}
+
+// Breaking out of a range over FunctionCalls or FunctionResponses stops the
+// iterator. An iterator that kept yielding would make the range loop panic.
+func TestEventAccessorsStopWhenTheLoopBreaks(t *testing.T) {
+	callA := &genai.FunctionCall{Name: "a"}
+	respA := &genai.FunctionResponse{Name: "ra"}
+	ev := &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+		{FunctionCall: callA},
+		{FunctionCall: &genai.FunctionCall{Name: "b"}},
+		{FunctionResponse: respA},
+		{FunctionResponse: &genai.FunctionResponse{Name: "rb"}},
+	}}}}
+
+	var firstCall *genai.FunctionCall
+	for fc := range ev.FunctionCalls() {
+		firstCall = fc
+		break
+	}
+	var firstResponse *genai.FunctionResponse
+	for fr := range ev.FunctionResponses() {
+		firstResponse = fr
+		break
+	}
+
+	if firstCall != callA {
+		t.Errorf("first FunctionCalls() value = %v, want the stored call a", firstCall)
+	}
+	if firstResponse != respA {
+		t.Errorf("first FunctionResponses() value = %v, want the stored response ra", firstResponse)
+	}
+}
