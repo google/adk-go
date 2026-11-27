@@ -134,6 +134,17 @@ type ExecutorConfig struct {
 	// A2AExecutionCleanupCallback is a callback which will be called after an execution or cancellation has completed or failed.
 	// If not provided, the default behavior is to log the failure cause, if any.
 	A2AExecutionCleanupCallback A2AExecutionCleanupCallback
+
+	// ExposeErrorDetails controls whether raw error details from a failed agent run
+	// are sent to the peer in the final failed task status message.
+	// When false (the default), a generic message ("agent run failed") is sent to
+	// avoid exposing internal details across trust domains. The original error is
+	// logged server-side and passed to AfterExecuteCallback.
+	//
+	// Note that this only applies to task status updates. Errors yielded directly by
+	// Execute (such as a failing RunnerProvider or BeforeExecuteCallback) are delivered
+	// as transport-level JSON-RPC errors; use [a2asrv.NewErrorSanitizer] to sanitize those.
+	ExposeErrorDetails bool
 }
 
 var _ a2asrv.AgentExecutor = (*Executor)(nil)
@@ -218,7 +229,10 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 
 		err = e.prepareSession(ctx, cfg, invocationMeta)
 		if err != nil {
-			statusEvent := toTaskFailedUpdateEvent(execCtx, err, invocationMeta.eventMeta)
+			if !e.config.ExposeErrorDetails {
+				log.Warn(ctx, "agent run failed", "error", err)
+			}
+			statusEvent := toTaskFailedUpdateEvent(execCtx, err, invocationMeta.eventMeta, e.config.ExposeErrorDetails)
 			execCtx := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
 			e.writeFinalTaskStatus(execCtx, yield, nil, statusEvent, err)
 			return
@@ -237,7 +251,7 @@ func (e *Executor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext)
 			artifactTransform = newLegacyArtifactMaker(execCtx)
 		}
 
-		processor := newEventProcessor(execCtx, invocationMeta, e.config.GenAIPartConverter, artifactTransform)
+		processor := newEventProcessor(execCtx, invocationMeta, e.config.GenAIPartConverter, artifactTransform, e.config.ExposeErrorDetails)
 		executorContext := newExecutorContext(ctx, invocationMeta, executorPlugin, content)
 		e.process(executorContext, r, processor, yield)
 	}
@@ -394,7 +408,7 @@ func (e *Executor) process(ctx ExecutorContext, r Runner, processor *eventProces
 	}
 
 	finalStatus := processor.makeFinalStatusUpdate()
-	e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), finalStatus, nil)
+	e.writeFinalTaskStatus(ctx, yield, processor.makeFinalArtifactUpdate(), finalStatus, processor.failedCause)
 }
 
 func (e *Executor) writeFinalTaskStatus(

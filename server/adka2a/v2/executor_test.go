@@ -113,7 +113,7 @@ func TestExecutor_Execute(t *testing.T) {
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
 					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, &a2a.Part{
-						Content:  a2a.Text("failed to create a session: session creation failed"),
+						Content:  a2a.Text("agent run failed"),
 						Metadata: map[string]any{metadataIsErrMessageKey: true},
 					}),
 				),
@@ -174,6 +174,7 @@ func TestExecutor_Execute(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}),
 					map[string]any{ToA2AMetaKey("error_code"): "418"},
+					true,
 				),
 			},
 		},
@@ -190,7 +191,7 @@ func TestExecutor_Execute(t *testing.T) {
 				newFinalStatusUpdate(
 					task, a2a.TaskStateFailed,
 					a2a.NewMessageForTask(a2a.MessageRoleAgent, task, &a2a.Part{
-						Content:  a2a.Text("agent run failed: OOF"),
+						Content:  a2a.Text("agent run failed"),
 						Metadata: map[string]any{metadataIsErrMessageKey: true},
 					}),
 				),
@@ -457,6 +458,23 @@ func TestExecutor_Callbacks(t *testing.T) {
 			},
 		},
 		{
+			name: "intercept llm failure",
+			events: []*session.Event{
+				{LLMResponse: model.LLMResponse{ErrorCode: "418", ErrorMessage: "I'm a teapot"}},
+			},
+			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
+				if err == nil {
+					return fmt.Errorf("expected non-nil error in AfterExecuteCallback")
+				}
+				finalUpdate.Status.Message = a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("intercepted: "+err.Error()))
+				return nil
+			},
+			wantEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
+				newFinalStatusUpdate(task, a2a.TaskStateFailed, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(`intercepted: llm error response (code 418): "I'm a teapot"`))),
+			},
+		},
+		{
 			name:               "intercept session setup failure",
 			createSessionFails: true,
 			afterExecution: func(ctx ExecutorContext, finalUpdate *a2a.TaskStatusUpdateEvent, err error) error {
@@ -517,7 +535,7 @@ func TestExecutor_Callbacks(t *testing.T) {
 			},
 			wantEvents: []a2a.Event{
 				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, nil),
-				toTaskFailedUpdateEvent(task, fmt.Errorf("processor failed: abort execution"), nil),
+				toTaskFailedUpdateEvent(task, fmt.Errorf("processor failed: abort execution"), nil, false),
 			},
 		},
 	}
@@ -1099,4 +1117,118 @@ type testRunner struct {
 
 func (r *testRunner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig) iter.Seq2[*session.Event, error] {
 	return r.runFunc(ctx, userID, sessionID, msg, cfg)
+}
+
+func TestExecutor_ExposeErrorDetails(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	hiMsgForTask := a2a.NewMessageForTask(a2a.MessageRoleUser, task, a2a.NewTextPart("hi"))
+
+	testCases := []struct {
+		name               string
+		events             []*session.Event
+		createSessionFails bool
+		agentRunFails      error
+		afterEvent         AfterEventCallback
+		exposeErrorDetails bool
+		wantErrorText      string
+	}{
+		{
+			name:               "session setup failure exposes details",
+			createSessionFails: true,
+			exposeErrorDetails: true,
+			wantErrorText:      "failed to create a session: session creation failed",
+		},
+		{
+			name:               "session setup failure redacted by default",
+			createSessionFails: true,
+			wantErrorText:      "agent run failed",
+		},
+		{
+			name:               "agent run failure exposes details",
+			agentRunFails:      fmt.Errorf("database connection refused"),
+			exposeErrorDetails: true,
+			wantErrorText:      "agent run failed: database connection refused",
+		},
+		{
+			name:          "agent run failure redacted by default",
+			agentRunFails: fmt.Errorf("database connection refused"),
+			wantErrorText: "agent run failed",
+		},
+		{
+			name: "llm failure always relays error response",
+			events: []*session.Event{
+				{LLMResponse: model.LLMResponse{ErrorCode: "503", ErrorMessage: "model overloaded"}},
+			},
+			wantErrorText: `llm error response (code 503): "model overloaded"`,
+		},
+		{
+			name: "processor failure exposes details",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("plugin aborted execution")
+			},
+			exposeErrorDetails: true,
+			wantErrorText:      "processor failed: plugin aborted execution",
+		},
+		{
+			name: "processor failure redacted by default",
+			events: []*session.Event{
+				{LLMResponse: modelResponseFromParts(genai.NewPartFromText("Hello"))},
+			},
+			afterEvent: func(ctx ExecutorContext, event *session.Event, processed *a2a.TaskArtifactUpdateEvent) error {
+				return fmt.Errorf("plugin aborted execution")
+			},
+			wantErrorText: "agent run failed",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := newEventReplayAgent(tc.events, tc.agentRunFails)
+			if err != nil {
+				t.Fatalf("newEventReplayAgent() error = %v, want nil", err)
+			}
+			sessionService := &testSessionService{Service: session.InMemoryService(), createErr: tc.createSessionFails}
+			runnerConfig := runner.Config{AppName: agent.Name(), Agent: agent, SessionService: sessionService}
+			executor := NewExecutor(ExecutorConfig{
+				RunnerConfig:       runnerConfig,
+				AfterEventCallback: tc.afterEvent,
+				ExposeErrorDetails: tc.exposeErrorDetails,
+			})
+
+			reqCtx := &a2asrv.ExecutorContext{
+				TaskID:     task.ID,
+				ContextID:  task.ContextID,
+				Message:    hiMsgForTask,
+				StoredTask: task,
+			}
+
+			var finalStatus *a2a.TaskStatusUpdateEvent
+			for event, err := range executor.Execute(t.Context(), reqCtx) {
+				if err != nil {
+					t.Fatalf("executor.Execute() error = %v, want nil", err)
+				}
+				if statusEv, ok := event.(*a2a.TaskStatusUpdateEvent); ok && statusEv.Status.State == a2a.TaskStateFailed {
+					finalStatus = statusEv
+				}
+			}
+
+			if finalStatus == nil {
+				t.Fatalf("executor.Execute() did not emit a failed TaskStatusUpdateEvent")
+			}
+			if finalStatus.Status.Message == nil || len(finalStatus.Status.Message.Parts) == 0 {
+				t.Fatalf("failed event has no message parts: %v", finalStatus.Status.Message)
+			}
+			gotText := finalStatus.Status.Message.Parts[0].Text()
+			if gotText != tc.wantErrorText {
+				t.Errorf("error text = %q, want %q", gotText, tc.wantErrorText)
+			}
+			isErr, _ := finalStatus.Status.Message.Parts[0].Metadata[metadataIsErrMessageKey].(bool)
+			if !isErr {
+				t.Errorf("metadataIsErrMessageKey = %v, want true", isErr)
+			}
+		})
+	}
 }

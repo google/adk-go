@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -128,6 +129,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					true,
 				),
 			},
 		},
@@ -141,6 +143,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed 1"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					true,
 				),
 			},
 		},
@@ -159,6 +162,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					true,
 				),
 			},
 		},
@@ -177,6 +181,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1"},
+					true,
 				),
 			},
 		},
@@ -334,6 +339,7 @@ func TestEventProcessor_Process(t *testing.T) {
 				toTaskFailedUpdateEvent(
 					task, errorFromResponse(&model.LLMResponse{ErrorCode: "1", ErrorMessage: "failed"}),
 					map[string]any{ToA2AMetaKey("error_code"): "1", metadataEscalateKey: true, metadataTransferToAgentKey: "a-2"},
+					true,
 				),
 			},
 		},
@@ -408,7 +414,7 @@ func TestEventProcessor_Process(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
-			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
+			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx), false)
 
 			var gotEvents []*a2a.TaskArtifactUpdateEvent
 			for _, event := range tc.events {
@@ -456,7 +462,7 @@ func TestEventProcessor_ArtifactUpdates(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx), false)
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)
@@ -499,7 +505,7 @@ func TestEventProcessor_PartialEventsAreDiscardedAsAnArtifact(t *testing.T) {
 	}
 
 	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
-	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
+	processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx), false)
 	got := make([]*a2a.TaskArtifactUpdateEvent, len(events))
 	for i, event := range events {
 		processed, err := processor.process(t.Context(), event)
@@ -567,4 +573,26 @@ func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
 	}
 	result = append(result, processor.makeFinalStatusUpdate())
 	return result
+}
+
+func TestEventProcessor_MakeTaskFailedEvent(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
+	cause := errors.New("internal db connection refused")
+
+	t.Run("redacted by default", func(t *testing.T) {
+		processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx), false)
+		event := processor.makeTaskFailedEvent(t.Context(), cause, nil)
+		if got := event.Status.Message.Parts[0].Text(); got != "agent run failed" {
+			t.Fatalf("task status message = %q, want %q", got, "agent run failed")
+		}
+	})
+
+	t.Run("exposed when configured", func(t *testing.T) {
+		processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx), true)
+		event := processor.makeTaskFailedEvent(t.Context(), cause, nil)
+		if got := event.Status.Message.Parts[0].Text(); got != cause.Error() {
+			t.Fatalf("task status message = %q, want %q", got, cause.Error())
+		}
+	})
 }
