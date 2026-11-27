@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package sqlitememory handles the SQLite schema and event writes for memory.
+// Package sqlitememory provides a SQLite-backed memory service.
 package sqlitememory
 
 import (
@@ -37,53 +37,78 @@ import (
 
 const (
 	defaultMaxEventBytes = 262144
+	defaultMaxResults    = 50
 	unknownSessionID     = "__unknown_session_id__"
 )
 
-type storeConfig struct {
-	// db is an open SQLite database owned by the caller. Go takes a handle
+// Config configures a SQLite memory service.
+type Config struct {
+	// DB is an open SQLite database owned by the caller. Go takes a handle
 	// in place of Python's db_path so callers can choose their SQLite driver
 	// and avoid linking two drivers that both register the name "sqlite".
-	db *sql.DB
-	// fts controls index creation: "auto" (the default) enables FTS5 when
-	// available, "on" requires it, and "off" skips setup.
-	fts string
-	// maxEventBytes limits the UTF-8 bytes written to the search index. Zero
+	//
+	// A plain ":memory:" database belongs to one connection. Call
+	// SetMaxOpenConns(1) and SetMaxIdleConns(1), and leave connection
+	// lifetime and idle time limits disabled so the pool keeps it open.
+	DB *sql.DB
+	// FTS controls full-text search: "auto" (the default) uses FTS5 when
+	// available, "on" requires it, and "off" uses substring matching.
+	// Reopening a database with an existing FTS index requires an FTS5-capable driver.
+	FTS string
+	// MaxEventBytes limits the UTF-8 bytes used to make each event searchable. Zero
 	// uses 256 KiB. The stored event content is kept in full.
-	maxEventBytes int
+	MaxEventBytes int
+	// MaxResults limits the number of entries per search. Zero uses 50.
+	MaxResults int
 }
 
-// store writes memory events to SQLite.
 type store struct {
 	db            *sql.DB
+	ftsEnabled    bool
 	maxEventBytes int
+	maxResults    int
 }
 
-var _ memory.EventAdder = (*store)(nil)
+var (
+	_ memory.Service    = (*store)(nil)
+	_ memory.EventAdder = (*store)(nil)
+)
 
-// newStore initializes the SQLite memory schema and checks that its version is
-// supported. The caller remains responsible for closing cfg.db.
-func newStore(ctx context.Context, cfg storeConfig) (*store, error) {
-	if cfg.db == nil {
+// New initializes the schema and returns a SQLite memory service. The service
+// supports incremental writes through [memory.AddEventsToMemory]. The caller
+// remains responsible for closing cfg.DB.
+func New(ctx context.Context, cfg Config) (memory.Service, error) {
+	if cfg.DB == nil {
 		return nil, errors.New("sqlitememory: database must not be nil")
 	}
-	switch cfg.fts {
+	switch cfg.FTS {
 	case "", "auto", "on", "off":
 	default:
 		return nil, errors.New("sqlitememory: FTS must be auto, on, or off")
 	}
-	if cfg.maxEventBytes < 0 {
+	if cfg.MaxEventBytes < 0 {
 		return nil, errors.New("sqlitememory: maximum event bytes must not be negative")
 	}
-	if cfg.maxEventBytes == 0 {
-		cfg.maxEventBytes = defaultMaxEventBytes
+	if cfg.MaxEventBytes == 0 {
+		cfg.MaxEventBytes = defaultMaxEventBytes
 	}
-	if err := withTransaction(ctx, cfg.db, func(conn *sql.Conn) error {
-		return initSchema(ctx, conn, cfg.fts)
+	if cfg.MaxResults < 0 {
+		return nil, errors.New("sqlitememory: maximum results must not be negative")
+	}
+	if cfg.MaxResults == 0 {
+		cfg.MaxResults = defaultMaxResults
+	}
+	var ftsEnabled bool
+	if err := withTransaction(ctx, cfg.DB, func(conn *sql.Conn) error {
+		var err error
+		ftsEnabled, err = initSchema(ctx, conn, cfg.FTS)
+		return err
 	}); err != nil {
 		return nil, fmt.Errorf("sqlitememory: initialize schema: %w", err)
 	}
-	return &store{db: cfg.db, maxEventBytes: cfg.maxEventBytes}, nil
+	return &store{
+		db: cfg.DB, ftsEnabled: ftsEnabled, maxEventBytes: cfg.MaxEventBytes, maxResults: cfg.MaxResults,
+	}, nil
 }
 
 // AddSessionToMemory upserts the events in sess. Go does not emit the session

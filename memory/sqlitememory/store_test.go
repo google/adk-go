@@ -38,7 +38,7 @@ import (
 func TestUpsertAndReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory#%.db")
 	db := openDB(t, path)
-	s := newTestStore(t, storeConfig{db: db})
+	s := newTestStore(t, Config{DB: db})
 	first := textEvent("first", "oolong tea")
 	stateOnly := &session.Event{ID: "state-only"}
 	sess := newSession(t, first, textEvent("second", "green tea"), stateOnly)
@@ -69,7 +69,7 @@ func TestUpsertAndReopen(t *testing.T) {
 		t.Fatal("database file does not exist at the supplied path")
 	}
 	reopened := openDB(t, path)
-	newTestStore(t, storeConfig{db: reopened})
+	newTestStore(t, Config{DB: reopened})
 	checkCount(t, reopened, 5, `SELECT count(*) FROM memory_events`)
 	checkCount(t, reopened, 1, `SELECT count(*) FROM memory_events WHERE event_id = 'second'`)
 	checkCount(t, reopened, 0, `SELECT count(*) FROM memory_events WHERE event_id = 'state-only'`)
@@ -99,7 +99,7 @@ func TestMissingEventID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-			s := newTestStore(t, storeConfig{db: db, maxEventBytes: 3})
+			s := newTestStore(t, Config{DB: db, MaxEventBytes: 3})
 			event := textEvent("", tc.text)
 			stamp := event.Timestamp
 			event.Timestamp = time.Time{}
@@ -108,7 +108,7 @@ func TestMissingEventID(t *testing.T) {
 			}
 			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return stamp })
 			for range 2 {
-				if err := s.AddEventsToMemory(ctx, req); err != nil {
+				if err := memory.AddEventsToMemory(ctx, s, req); err != nil {
 					t.Fatalf("AddEventsToMemory: %v", err)
 				}
 			}
@@ -135,7 +135,7 @@ func TestMissingEventID(t *testing.T) {
 
 func TestUpsertUpdatesMetadataWithSameSearchText(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db})
+	s := newTestStore(t, Config{DB: db})
 	first := textEvent("first", "oolong tea")
 	req := &memory.AddEventsRequest{AppName: "app", UserID: "user", SessionID: "session", Events: []*session.Event{first}}
 	addEvents(t, s, req)
@@ -170,7 +170,7 @@ func TestUpsertUpdatesMetadataWithSameSearchText(t *testing.T) {
 
 func TestTruncatedSearchTextCanBeEmpty(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db, maxEventBytes: 1})
+	s := newTestStore(t, Config{DB: db, MaxEventBytes: 1})
 	addEvents(t, s, &memory.AddEventsRequest{
 		AppName: "app", UserID: "user", Events: []*session.Event{textEvent("first", "茶")},
 	})
@@ -179,7 +179,7 @@ func TestTruncatedSearchTextCanBeEmpty(t *testing.T) {
 
 func TestThoughtStoredButNotIndexed(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db, fts: "on"})
+	s := newTestStore(t, Config{DB: db, FTS: "on"})
 	event := textEvent("first", "oolong tea")
 	thought := &genai.Part{Text: "reasoning", Thought: true}
 	event.Content.Parts = append(event.Content.Parts, thought)
@@ -206,12 +206,12 @@ func TestThoughtStoredButNotIndexed(t *testing.T) {
 
 func TestFTSBackfillAndTriggers(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db, fts: "off"})
+	s := newTestStore(t, Config{DB: db, FTS: "off"})
 	checkCount(t, db, 0, `SELECT count(*) FROM sqlite_master WHERE name = 'memory_events_fts'`)
 	req := &memory.AddEventsRequest{AppName: "app", UserID: "user", Events: []*session.Event{textEvent("first", "oolong tea")}}
 	addEvents(t, s, req)
 
-	s = newTestStore(t, storeConfig{db: db, fts: "on"})
+	s = newTestStore(t, Config{DB: db, FTS: "on"})
 	const match = `SELECT count(*) FROM memory_events_fts WHERE search_text MATCH ?`
 	checkCount(t, db, 1, match, "oolong")
 	req.Events = []*session.Event{textEvent("first", "black tea"), textEvent("second", "green tea")}
@@ -240,9 +240,9 @@ func TestConcurrentUpsertAcrossInstances(t *testing.T) {
 			for _, db := range dbs {
 				db.SetMaxOpenConns(1)
 			}
-			stores := []*store{
-				newTestStore(t, storeConfig{db: dbs[0], fts: "on"}),
-				newTestStore(t, storeConfig{db: dbs[1], fts: "on"}),
+			stores := []memory.Service{
+				newTestStore(t, Config{DB: dbs[0], FTS: "on"}),
+				newTestStore(t, Config{DB: dbs[1], FTS: "on"}),
 			}
 			req := &memory.AddEventsRequest{
 				AppName: "app", UserID: "user", SessionID: "session", Events: []*session.Event{textEvent("first", "oolong tea")},
@@ -256,13 +256,13 @@ func TestConcurrentUpsertAcrossInstances(t *testing.T) {
 					s := stores[instance]
 					if tc.initialize {
 						var err error
-						s, err = newStore(t.Context(), storeConfig{db: dbs[instance], fts: "on"})
+						s, err = New(t.Context(), Config{DB: dbs[instance], FTS: "on"})
 						if err != nil {
-							t.Errorf("newStore: %v", err)
+							t.Errorf("New: %v", err)
 							return
 						}
 					}
-					if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+					if err := memory.AddEventsToMemory(t.Context(), s, req); err != nil {
 						t.Errorf("AddEventsToMemory: %v", err)
 					}
 				})
@@ -277,27 +277,27 @@ func TestConcurrentUpsertAcrossInstances(t *testing.T) {
 
 func TestSchemaVersion(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	newTestStore(t, storeConfig{db: db})
+	newTestStore(t, Config{DB: db})
 	checkCount(t, db, 1, `SELECT count(*) FROM adk_memory_metadata WHERE key = 'schema_version' AND value = '1'`)
 	checkCount(t, db, 1, `SELECT count(*) FROM sqlite_master WHERE name = 'memory_events_fts'`)
 	if _, err := db.ExecContext(t.Context(), `UPDATE adk_memory_metadata SET value = '2' WHERE key = 'schema_version'`); err != nil {
 		t.Fatalf("set incompatible schema version: %v", err)
 	}
-	if _, err := newStore(t.Context(), storeConfig{db: db}); err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
-		t.Fatal("newStore did not reject an unsupported schema version")
+	if _, err := New(t.Context(), Config{DB: db}); err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
+		t.Fatal("New did not reject an unsupported schema version")
 	}
 	checkCount(t, db, 1, `SELECT count(*) FROM adk_memory_metadata WHERE key = 'schema_version' AND value = '2'`)
 }
 
 func TestWriteRollback(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
-	s := newTestStore(t, storeConfig{db: db})
+	s := newTestStore(t, Config{DB: db})
 	invalid := textEvent("invalid", "invalid memory")
 	invalid.Content.Parts = append(invalid.Content.Parts, &genai.Part{
 		FunctionCall: &genai.FunctionCall{Args: map[string]any{"unsupported": make(chan struct{})}},
 	})
 	req := &memory.AddEventsRequest{AppName: "app", UserID: "user", Events: []*session.Event{textEvent("first", "green tea"), invalid}}
-	if err := s.AddEventsToMemory(t.Context(), req); err == nil || !strings.Contains(err.Error(), "encode event content") {
+	if err := memory.AddEventsToMemory(t.Context(), s, req); err == nil || !strings.Contains(err.Error(), "encode event content") {
 		t.Fatal("AddEventsToMemory did not report an encoding error")
 	}
 	checkCount(t, db, 0, `SELECT count(*) FROM memory_events`)
@@ -309,7 +309,7 @@ func TestCommitBusyRollsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	db := openDB(t, path)
 	db.SetMaxOpenConns(1)
-	s := newTestStore(t, storeConfig{db: db})
+	s := newTestStore(t, Config{DB: db})
 	reader := openDB(t, path)
 	tx, err := reader.BeginTx(ctx, nil)
 	if err != nil {
@@ -322,7 +322,7 @@ func TestCommitBusyRollsBack(t *testing.T) {
 	}
 
 	req := &memory.AddEventsRequest{AppName: "app", UserID: "user", Events: []*session.Event{textEvent("first", "green tea")}}
-	if err := s.AddEventsToMemory(ctx, req); err == nil || !strings.Contains(err.Error(), "commit transaction") {
+	if err := memory.AddEventsToMemory(ctx, s, req); err == nil || !strings.Contains(err.Error(), "commit transaction") {
 		t.Fatal("write did not fail at COMMIT while the read lock was held")
 	}
 	checkCount(t, db, 0, `SELECT count(*) FROM memory_events`)
@@ -337,15 +337,16 @@ func TestInvalidConfig(t *testing.T) {
 	db := openDB(t, filepath.Join(t.TempDir(), "memory.db"))
 	for _, tc := range []struct {
 		name string
-		cfg  storeConfig
+		cfg  Config
 	}{
-		{name: "missing database", cfg: storeConfig{}},
-		{name: "invalid FTS mode", cfg: storeConfig{db: db, fts: "unknown"}},
-		{name: "negative byte limit", cfg: storeConfig{db: db, maxEventBytes: -1}},
+		{name: "missing database", cfg: Config{}},
+		{name: "invalid FTS mode", cfg: Config{DB: db, FTS: "unknown"}},
+		{name: "negative byte limit", cfg: Config{DB: db, MaxEventBytes: -1}},
+		{name: "negative result limit", cfg: Config{DB: db, MaxResults: -1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := newStore(t.Context(), tc.cfg); err == nil {
-				t.Error("newStore accepted invalid configuration")
+			if _, err := New(t.Context(), tc.cfg); err == nil {
+				t.Error("New accepted invalid configuration")
 			}
 		})
 	}
@@ -371,18 +372,18 @@ func openDBWithBusyTimeout(t *testing.T, path string, timeout time.Duration) *sq
 	return db
 }
 
-func newTestStore(t *testing.T, cfg storeConfig) *store {
+func newTestStore(t *testing.T, cfg Config) memory.Service {
 	t.Helper()
-	s, err := newStore(t.Context(), cfg)
+	s, err := New(t.Context(), cfg)
 	if err != nil {
-		t.Fatalf("newStore: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return s
 }
 
-func addEvents(t *testing.T, s *store, req *memory.AddEventsRequest) {
+func addEvents(t *testing.T, s memory.Service, req *memory.AddEventsRequest) {
 	t.Helper()
-	if err := s.AddEventsToMemory(t.Context(), req); err != nil {
+	if err := memory.AddEventsToMemory(t.Context(), s, req); err != nil {
 		t.Fatalf("AddEventsToMemory: %v", err)
 	}
 }

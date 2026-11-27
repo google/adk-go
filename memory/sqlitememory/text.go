@@ -40,7 +40,7 @@ func eventSearchText(content *genai.Content, maxBytes int) (string, bool) {
 		return "", false
 	}
 	text := norm.NFC.String(strings.Join(parts, " "))
-	// Split before lowercasing, which can introduce a combining mark (e.g. İ).
+	// Split before lowercasing, which can introduce a combining mark (e.g. U+0130).
 	text = cases.Lower(language.Und).String(splitScriptRuns(text))
 	if len(text) <= maxBytes {
 		return text, true
@@ -95,4 +95,38 @@ func isLatin(r rune) bool {
 func isSpace(r rune) bool {
 	// Python also treats the four ASCII separators as whitespace.
 	return unicode.IsSpace(r) || (r >= '\x1c' && r <= '\x1f')
+}
+
+func extractTokens(query string) []string {
+	query = splitScriptRuns(norm.NFC.String(query))
+	words := strings.FieldsFunc(query, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '%' && !unicode.IsMark(r)
+	})
+	var tokens []string
+	seen := make(map[string]bool, len(words))
+	lower := cases.Lower(language.Und)
+	for _, word := range words {
+		token := lower.String(strings.TrimLeftFunc(word, unicode.IsMark))
+		if token != "" && !seen[token] {
+			seen[token] = true
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
+}
+
+func hasUnspacedScript(token string) bool {
+	for _, r := range token {
+		if r < utf8.RuneSelf {
+			continue
+		}
+		name := runenames.Name(r)
+		// runenames gives algorithmic CJK and Hangul names as range labels.
+		if strings.HasPrefix(name, "<CJK Ideograph") || name == "<Hangul Syllable>" ||
+			strings.Contains(name, "CJK COMPATIBILITY IDEOGRAPH") || strings.Contains(name, "HIRAGANA") ||
+			strings.Contains(name, "KATAKANA") || strings.Contains(name, "HANGUL") || strings.Contains(name, "THAI") {
+			return true
+		}
+	}
+	return false
 }

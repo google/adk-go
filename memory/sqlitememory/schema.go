@@ -74,48 +74,48 @@ AFTER UPDATE OF search_text ON memory_events BEGIN
   VALUES (new.id, new.search_text);
 END;`
 
-func initSchema(ctx context.Context, conn *sql.Conn, fts string) error {
+func initSchema(ctx context.Context, conn *sql.Conn, fts string) (bool, error) {
 	if _, err := conn.ExecContext(ctx, metadataSchema); err != nil {
-		return fmt.Errorf("create metadata table: %w", err)
+		return false, fmt.Errorf("create metadata table: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO adk_memory_metadata (key, value) VALUES ('schema_version', ?)`, schemaVersion); err != nil {
-		return fmt.Errorf("record schema version: %w", err)
+		return false, fmt.Errorf("record schema version: %w", err)
 	}
 	var version string
 	if err := conn.QueryRowContext(ctx, `SELECT value FROM adk_memory_metadata WHERE key = 'schema_version'`).Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
+		return false, fmt.Errorf("read schema version: %w", err)
 	}
 	if version != schemaVersion {
-		return errors.New("unsupported schema version")
+		return false, errors.New("unsupported schema version")
 	}
 	if _, err := conn.ExecContext(ctx, eventSchema); err != nil {
-		return fmt.Errorf("create event table and scope index: %w", err)
+		return false, fmt.Errorf("create event table and scope index: %w", err)
 	}
 	if fts == "off" {
-		return nil
+		return false, nil
 	}
 	return initFTS(ctx, conn, fts == "on")
 }
 
-func initFTS(ctx context.Context, conn *sql.Conn, required bool) error {
+func initFTS(ctx context.Context, conn *sql.Conn, required bool) (bool, error) {
 	var exists bool
 	if err := conn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_events_fts')`).Scan(&exists); err != nil {
-		return fmt.Errorf("check FTS index: %w", err)
+		return false, fmt.Errorf("check FTS index: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, ftsTable); err != nil {
 		// SQLite exposes a missing FTS5 module as a generic SQL error.
 		if !required && strings.Contains(err.Error(), "no such module: fts5") {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("create FTS index: %w", err)
+		return false, fmt.Errorf("create FTS index: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, ftsTriggers); err != nil {
-		return fmt.Errorf("create FTS triggers: %w", err)
+		return false, fmt.Errorf("create FTS triggers: %w", err)
 	}
 	if !exists {
 		if _, err := conn.ExecContext(ctx, `INSERT INTO memory_events_fts(memory_events_fts) VALUES ('rebuild')`); err != nil {
-			return fmt.Errorf("index existing memory events: %w", err)
+			return false, fmt.Errorf("index existing memory events: %w", err)
 		}
 	}
-	return nil
+	return true, nil
 }
