@@ -3061,6 +3061,8 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 // reads once more as written and with its keys sorted (see
 // keyRedactionHidesRunOn), scales linearly too.
 func TestNestedJSONTextDepthScaling(t *testing.T) {
+	// Keep t.Parallel (not runInParallel): subtests take scalingMu.RLock(), so
+	// holding a parent RLock until subtests finish deadlocks linearRatio retries.
 	t.Parallel()
 	encode := func(v any) string {
 		var b strings.Builder
@@ -3233,6 +3235,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 	})
 	t.Run("large plain ASCII 15 levels all-levels key-redacted", func(t *testing.T) {
+		// Keep t.Parallel (not runInParallel): child subtests take scalingMu.RLock().
 		t.Parallel()
 		mkAllLevels := func(levels, n int) string {
 			doc := encode(map[string]string{"a": strings.Repeat("a", n), "password": "SECRET1"})

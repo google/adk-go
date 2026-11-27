@@ -736,7 +736,6 @@ func TestResolveUploads_Authorizer(t *testing.T) {
 // entries with [UPLOAD FAILED], and that none of them logs what was to be
 // uploaded.
 func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
-	runInParallel(t)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
@@ -4366,7 +4365,6 @@ func TestGCSOffloading_DeferredTextRetryTruncationFlag(t *testing.T) {
 // depleted caller deadline and deferred), retrying the binary upload preserves
 // the failed text part's fallback summary in content and is_truncated.
 func TestGCSOffloading_BinaryOnlyDeferralKeepsFailedTextSummary(t *testing.T) {
-	runInParallel(t)
 	var stalled atomic.Bool
 	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
 		if req.ContentType == textUploadContentType {
@@ -5246,7 +5244,6 @@ func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testi
 }
 
 func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {
-	runInParallel(t)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		<-ctx.Done()
 		return errors.New("custom offloader failure")
@@ -5392,7 +5389,6 @@ func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
 // once a depleted caller deadline has ended the uploads, defers the upload as a
 // deadline error does, so that a requeued batch retries it.
 func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *testing.T) {
-	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
