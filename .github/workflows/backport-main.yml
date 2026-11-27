@@ -1,0 +1,92 @@
+# Opens the main backport PR for merged `v3` pull requests labelled
+# `feature-parity-main`.
+#
+# `feature-parity-main` drives this queue: it marks a change merged to `v3`
+# that also has to land on `main`. This workflow is the automation around
+# `scripts/backport.sh --target main`.
+#
+# The script replays each merged PR's squash commit onto its own branch cut from
+# `main`, rewriting the module path only when `v3` and `main` declare different
+# root modules in `go.mod`, and opens one pull request per backport. Conflicts
+# are not guessed at: that PR is left alone and the script comments on the
+# original asking for a manual backport. One conflict costs one backport, not
+# the run.
+#
+# Triggering on push rather than pull_request_target is deliberate. This job
+# holds a token that can push and open pull requests, and pull_request_target
+# grants that to a workflow running in the context of a pull request; push only
+# ever fires for something already merged. The work is driven off the label
+# queue rather than the event payload, so nothing here depends on which event
+# woke it up.
+#
+# Both `v3` and `main` need this workflow file: `push` on `v3` runs the copy on
+# `v3`, while `schedule` only runs workflows from the default branch (`main`).
+name: Backport v3 to main
+
+on:
+  push:
+    branches: [v3]
+
+  # Catches a PR labelled after it merged, which no push will follow.
+  schedule:
+    - cron: '0 3 * * *'
+
+  workflow_dispatch:
+    inputs:
+      prs:
+        description: 'PR numbers to backport, space separated, or "all" to drain the queue'
+        required: true
+        default: all
+
+# contents: to push the backport branches. pull-requests: to open them, label
+# them, and comment on an original whose replay conflicted.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize: two pushes in quick succession must not race on the same main base.
+concurrency:
+  group: backport-main
+  cancel-in-progress: false
+
+jobs:
+  backport:
+    # Only the upstream repository has the v3 branch and the labels this reads.
+    if: github.repository == 'google/adk-go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # The full history: the replay needs the merge base of v3 and main.
+          fetch-depth: 0
+          # Kept, rather than the usual false, because the script pushes the
+          # backport branches. No untrusted code is checked out here.
+          persist-credentials: true
+
+      # The bot, not the merging human: it is the bot that pushes these branches
+      # and opens the pull requests, and each replayed commit keeps its original
+      # author regardless.
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Backport
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through the environment rather than interpolated into the
+          # script body, so the value stays data instead of becoming shell.
+          PRS: ${{ inputs.prs }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${PRS:-}" ] && [ "${PRS}" != "all" ]; then
+            if [[ ! "${PRS}" =~ ^[0-9]+([[:blank:]]+[0-9]+)*$ ]]; then
+              echo "::error::prs must be PR numbers separated by spaces, or 'all'"
+              exit 1
+            fi
+            # shellcheck disable=SC2206  # Deliberate split into separate args.
+            args=(${PRS})
+          fi
+          scripts/backport.sh --target main "${args[@]}" --pr
