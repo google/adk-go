@@ -65,7 +65,7 @@ jobs:
         if: env.HAS_RELEASE_PAT != 'true'
         run: echo "::warning title=Release skipped::RELEASE_PAT is not configured, so no release PR was created or updated."
 
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         if: env.HAS_RELEASE_PAT == 'true'
         with:
           token: ${{ secrets.RELEASE_PAT }}

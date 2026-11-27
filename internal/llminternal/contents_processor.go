@@ -19,9 +19,8 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"reflect"
+	"maps"
 	"slices"
-	"sort"
 
 	"google.golang.org/genai"
 
@@ -201,8 +200,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	var accumulatedInputTranscription string
 	var accumulatedOutputTranscription string
 
-	for i := 0; i < len(filtered); i++ {
-		ev := filtered[i]
+	for i, ev := range filtered {
 		content := utils.Content(ev)
 		if content == nil || len(content.Parts) == 0 {
 			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
@@ -264,14 +262,14 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(utils.Content(ev))
+		content := copyContent(utils.Content(ev))
 		if content == nil {
 			continue
 		}
 
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
 			// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
-			if p == nil || reflect.ValueOf(*p).IsZero() {
+			if p == nil || isZeroPart(p) {
 				return true
 			}
 			// The live audio cache records its blobs as artifact:// refs that
@@ -348,7 +346,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
 				cleaned := *part
 				cleaned.FunctionResponse = nil
-				if reflect.ValueOf(cleaned).IsZero() {
+				if isZeroPart(&cleaned) {
 					continue
 				}
 				part = &cleaned
@@ -667,11 +665,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 			// moves to the tail.
 			//
 			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
-			}
-			sort.Ints(sortedIndices)
+			sortedIndices := slices.Sorted(maps.Keys(responseEventIndicesSet))
 
 			// Collect the actual event objects to be merged.
 			eventsToMerge := make([]*session.Event, len(sortedIndices))
@@ -738,7 +732,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 	// 2. Create an index (map) of function_response parts by their ID
 	partIndicesInMergedEvent := make(map[string]int)
 	for idx, part := range partsInMergedEvent {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			functionCallID := part.FunctionResponse.ID
 			partIndicesInMergedEvent[functionCallID] = idx
 		}
@@ -752,7 +746,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 		// 4. Update or Append parts
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
+			if part != nil && part.FunctionResponse != nil {
 				functionCallID := part.FunctionResponse.ID
 				// If we've seen this response ID before, replace it
 				if idx, found := partIndicesInMergedEvent[functionCallID]; found {
@@ -941,8 +935,8 @@ func answersOtherAgentCall(currentAgentName string, ev *session.Event, callAutho
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts and standalone metadata are omitted. A non-empty event with no
-// remaining payload returns nil.
+// Thought parts, nil parts and standalone metadata are omitted. A non-empty
+// event with no remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -954,6 +948,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		if p == nil {
+			continue
+		}
 		// Never replay another agent's private reasoning into the current
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
@@ -1029,6 +1026,12 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		return false
 	}
 	for _, p := range c.Parts {
+		// adk-python rejects a null part when decoding a request or building
+		// Content, but here a nil part can already be in the session, for
+		// example from an SDK caller.
+		if p == nil {
+			continue
+		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
@@ -1145,4 +1148,101 @@ func cloneEvent(e *session.Event) *session.Event {
 	}
 
 	return newEvent
+}
+
+// copyContent returns the same copy as clone(c): pointers, slices (with the
+// same length and capacity) and maps are fresh, while values held in
+// interface-typed fields, such as the entries of FunctionCall.Args, stay
+// shared. It copies Content and Part field by field and byte slices in one
+// block, and leaves the less common nested types to clone.
+func copyContent(c *genai.Content) *genai.Content {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.Parts != nil {
+		out.Parts = make([]*genai.Part, len(c.Parts), cap(c.Parts))
+		for i, p := range c.Parts {
+			out.Parts[i] = copyPart(p)
+		}
+	}
+	return &out
+}
+
+func copyPart(p *genai.Part) *genai.Part {
+	if p == nil {
+		return nil
+	}
+	// Assign every field, then replace each one that refers to memory.
+	// TestCopyPartCoversEveryField fails when genai.Part gains such a field
+	// that is not replaced here.
+	out := *p
+	out.ThoughtSignature = cloneSlice(p.ThoughtSignature)
+	if p.InlineData != nil {
+		blob := *p.InlineData
+		blob.Data = cloneSlice(blob.Data)
+		out.InlineData = &blob
+	}
+	if p.FileData != nil {
+		fd := *p.FileData
+		out.FileData = &fd
+	}
+	if p.FunctionCall != nil {
+		fc := *p.FunctionCall
+		fc.Args = maps.Clone(fc.Args)
+		fc.PartialArgs = clone(fc.PartialArgs)
+		fc.WillContinue = clone(fc.WillContinue)
+		out.FunctionCall = &fc
+	}
+	if p.FunctionResponse != nil {
+		fr := *p.FunctionResponse
+		fr.Response = maps.Clone(fr.Response)
+		fr.Parts = clone(fr.Parts)
+		fr.WillContinue = clone(fr.WillContinue)
+		out.FunctionResponse = &fr
+	}
+	out.MediaResolution = clone(p.MediaResolution)
+	out.CodeExecutionResult = clone(p.CodeExecutionResult)
+	out.ExecutableCode = clone(p.ExecutableCode)
+	out.VideoMetadata = clone(p.VideoMetadata)
+	out.ToolCall = clone(p.ToolCall)
+	out.ToolResponse = clone(p.ToolResponse)
+	out.PartMetadata = maps.Clone(p.PartMetadata)
+	out.AudioTranscription = clone(p.AudioTranscription)
+	out.SpeechMetadata = clone(p.SpeechMetadata)
+	return &out
+}
+
+// cloneSlice copies s into a new slice of the same length and capacity, and
+// keeps nil and empty apart.
+func cloneSlice[S ~[]E, E any](s S) S {
+	if s == nil {
+		return nil
+	}
+	out := make(S, len(s), cap(s))
+	copy(out, s)
+	return out
+}
+
+// isZeroPart reports whether reflect.ValueOf(*p).IsZero() would, without
+// reflection. TestIsZeroPartCoversEveryField fails when genai.Part gains a
+// field this list does not name.
+func isZeroPart(p *genai.Part) bool {
+	return p.Text == "" &&
+		!p.Thought &&
+		p.ThoughtSignature == nil &&
+		p.InlineData == nil &&
+		p.FileData == nil &&
+		p.FunctionCall == nil &&
+		p.FunctionResponse == nil &&
+		p.ToolCall == nil &&
+		p.ToolResponse == nil &&
+		p.ExecutableCode == nil &&
+		p.CodeExecutionResult == nil &&
+		p.VideoMetadata == nil &&
+		p.MediaResolution == nil &&
+		p.AudioTranscription == nil &&
+		p.SpeechMetadata == nil &&
+		p.MediaProcessing == "" &&
+		p.PartMetadata == nil
 }

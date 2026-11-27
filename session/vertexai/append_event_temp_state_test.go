@@ -21,9 +21,11 @@ import (
 	"sync"
 	"testing"
 
+	"google.golang.org/genai"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 
 	aiplatformpb "cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
@@ -85,6 +87,91 @@ func TestAppendEvent_stripsTempKeysBeforePersist(t *testing.T) {
 	}
 	if got, err := sess.State().Get("sk"); err != nil || got != "v2" {
 		t.Errorf("local session state sk = %v, %v; want v2", got, err)
+	}
+}
+
+// TestAppendEvent_stripsNilPartsFromRawEventAndContent guards that an event
+// with nil parts skips them in both the legacy Content column and raw_event,
+// keeping them in agreement and preventing adk-python validation failures on read.
+func TestAppendEvent_stripsNilPartsFromRawEventAndContent(t *testing.T) {
+	fake := &fakeVertexAiSessionService{}
+	client := newFakeVertexAiClient(t, fake)
+	svc := &vertexAiService{client: client}
+
+	sess := &localSession{
+		appName:   "123",
+		userID:    "user1",
+		sessionID: "owned",
+		state:     map[string]any{},
+	}
+	event := &session.Event{
+		ID:           "event-nil-parts",
+		Author:       "user",
+		InvocationID: "inv1",
+		Output:       map[string]any{"node": "out"}, // forces raw_event
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{nil, genai.NewPartFromText("hi")},
+			},
+		},
+	}
+
+	if err := svc.AppendEvent(t.Context(), sess, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if len(event.Content.Parts) != 2 || event.Content.Parts[0] != nil {
+		t.Errorf("AppendEvent mutated caller's event parts: %v", event.Content.Parts)
+	}
+
+	if got := len(fake.events); got != 1 {
+		t.Fatalf("AppendEvent RPCs stored %d events, want 1", got)
+	}
+
+	content := fake.events[0].GetContent()
+	if content == nil || len(content.Parts) != 1 {
+		t.Fatalf("Content column parts = %v, want 1", content.GetParts())
+	}
+	if content.Parts[0].GetText() != "hi" {
+		t.Errorf("Content column part text = %q, want %q", content.Parts[0].GetText(), "hi")
+	}
+
+	raw := fake.events[0].GetRawEvent()
+	if raw == nil {
+		t.Fatal("raw_event is nil; Output must populate it")
+	}
+	blob := raw.AsMap()
+	rawContent, ok := blob["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("raw_event content = %T (%v), want map", blob["content"], blob["content"])
+	}
+	rawParts, ok := rawContent["parts"].([]any)
+	if !ok {
+		t.Fatalf("raw_event content.parts = %T (%v), want []any", rawContent["parts"], rawContent["parts"])
+	}
+	if len(rawParts) != 1 {
+		t.Fatalf("raw_event content.parts len = %d (%v), want 1", len(rawParts), rawParts)
+	}
+
+	getResp, err := svc.Get(t.Context(), &session.GetRequest{
+		AppName:   "123",
+		UserID:    "user1",
+		SessionID: "owned",
+	})
+	if err != nil {
+		t.Fatalf("svc.Get() error = %v", err)
+	}
+	events := getResp.Session.Events()
+	if events.Len() != 1 {
+		t.Fatalf("Get returned %d events, want 1", events.Len())
+	}
+	readEv := events.At(0)
+	if readEv.Content == nil || len(readEv.Content.Parts) != 1 {
+		t.Fatalf("Get returned event with parts = %v, want 1 part", readEv.Content)
+	}
+	if readEv.Content.Parts[0] == nil || readEv.Content.Parts[0].Text != "hi" {
+		t.Errorf("Get returned part = %v, want text 'hi'", readEv.Content.Parts[0])
 	}
 }
 

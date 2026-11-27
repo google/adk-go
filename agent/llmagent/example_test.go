@@ -38,6 +38,8 @@ type scriptedResponses struct {
 
 func (*scriptedResponses) Name() string { return "scripted" }
 
+func (*scriptedResponses) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *scriptedResponses) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	m.calls++
 	return func(yield func(*model.LLMResponse, error) bool) {

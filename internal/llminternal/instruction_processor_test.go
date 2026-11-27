@@ -214,6 +214,80 @@ func TestInjectSessionState(t *testing.T) {
 			state:    map[string]any{"app:user_name": "Foo"},
 			want:     "Hello Foo!",
 		},
+		// Python's str.isidentifier accepts combining marks after the first
+		// character, as in Thai and Devanagari words.
+		{
+			name:     "state name with combining marks is replaced",
+			template: "Hello {ชื่อ} and {नाम}!",
+			state:    map[string]any{"ชื่อ": "Somchai", "नाम": "Asha"},
+			want:     "Hello Somchai and Asha!",
+		},
+		{
+			name:     "prefixed state name with combining marks is replaced",
+			template: "Hello {user:नाम}!",
+			state:    map[string]any{"user:नाम": "Asha"},
+			want:     "Hello Asha!",
+		},
+		{
+			// U+216B ROMAN NUMERAL TWELVE is a letter number, which may start
+			// an identifier; decimal digits may follow the first character.
+			name:     "state names with a letter number and a digit are replaced",
+			template: "Hello {\u216b} and {item1}!",
+			state:    map[string]any{"\u216b": "Foo", "item1": "Bar"},
+			want:     "Hello Foo and Bar!",
+		},
+		{
+			name:       "missing state name with combining marks is an error",
+			template:   "Hello {नाम}!",
+			state:      map[string]any{},
+			wantErr:    true,
+			wantErrMsg: "state key does not exist",
+		},
+		{
+			// U+2E2F VERTICAL TILDE is a modifier letter but also
+			// Pattern_Syntax, so no identifier may contain it.
+			name:     "state name with a pattern syntax character is not replaced",
+			template: "Hello {a\u2e2f}!",
+			state:    map[string]any{"a\u2e2f": "Foo"},
+			want:     "Hello {a\u2e2f}!",
+		},
+		{
+			// U+309B and U+309C are Other_ID_Start but not XID_Continue, so
+			// str.isidentifier rejects them.
+			name:     "state name with a kana voiced sound mark is not replaced",
+			template: "Hello {a\u309b}!",
+			state:    map[string]any{"a\u309b": "Foo"},
+			want:     "Hello {a\u309b}!",
+		},
+		{
+			// U+203F UNDERTIE is connector punctuation (Pc).
+			name:     "state name with connector punctuation is replaced",
+			template: "Hello {a\u203fb}!",
+			state:    map[string]any{"a\u203fb": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+00B7 MIDDLE DOT is Other_ID_Continue.
+			name:     "state name with an other ID_Continue character is replaced",
+			template: "Hello {a\u00b7b}!",
+			state:    map[string]any{"a\u00b7b": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+2118 SCRIPT CAPITAL P is Other_ID_Start.
+			name:     "state name with an other ID_Start character is replaced",
+			template: "Hello {\u2118}!",
+			state:    map[string]any{"\u2118": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+093E DEVANAGARI VOWEL SIGN AA is ID_Continue but not
+			// ID_Start, so it may not be the first character.
+			name:     "state name starting with a combining mark is not replaced",
+			template: "Hello {\u093eb}!",
+			state:    map[string]any{"\u093eb": "Foo"},
+			want:     "Hello {\u093eb}!",
+		},
 		// Corresponds to: test_inject_session_state_with_none_state_value_returns_empty
 		{
 			name:     "state value is nil",
@@ -308,7 +382,7 @@ And another optional artifact:
 			// Setup Artifacts
 			var artifacts agent.Artifacts
 			if !tc.expectNilService {
-				svc := artifact.Service(artifact.InMemoryService())
+				svc := artifact.InMemoryService()
 				if tc.customArtifactService != nil {
 					svc = tc.customArtifactService
 				}
@@ -445,6 +519,20 @@ func (s *errorMockState) All() iter.Seq2[string, any] {
 	return nil
 }
 
+// The session is consulted only when a placeholder names a state key, so an
+// invocation without one can still use an instruction that names none.
+func TestInjectSessionState_NoSessionWithoutStatePlaceholder(t *testing.T) {
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	const template = "Answer briefly. {not a state name}"
+	got, err := InjectSessionState(ctx, template)
+	if err != nil {
+		t.Fatalf("InjectSessionState() failed: %v", err)
+	}
+	if got != template {
+		t.Errorf("InjectSessionState() = %q, want %q", got, template)
+	}
+}
+
 type errorMockSession struct{}
 
 func (s *errorMockSession) ID() string {
@@ -477,7 +565,7 @@ func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
 	})
 
 	t.Run("missing optional key", func(t *testing.T) {
-		val, err := replaceMatch(ctx, "{missing_key?}")
+		val, err := replaceMatch(ctx, invocationSource{ctx}, "{missing_key?}")
 		if err != nil {
 			t.Fatalf("expected no error for missing optional key, got: %v", err)
 		}
@@ -487,14 +575,14 @@ func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
 	})
 
 	t.Run("missing required key", func(t *testing.T) {
-		_, err := replaceMatch(ctx, "{missing_key}")
+		_, err := replaceMatch(ctx, invocationSource{ctx}, "{missing_key}")
 		if err == nil || !errors.Is(err, session.ErrStateKeyNotExist) {
 			t.Fatalf("expected ErrStateKeyNotExist, got: %v", err)
 		}
 	})
 
 	t.Run("systemic error on optional key", func(t *testing.T) {
-		_, err := replaceMatch(ctx, "{systemic_error?}")
+		_, err := replaceMatch(ctx, invocationSource{ctx}, "{systemic_error?}")
 		if err == nil || !errors.Is(err, errDatabaseFailure) {
 			t.Fatalf("expected systemic error to propagate even for optional key, got: %v", err)
 		}

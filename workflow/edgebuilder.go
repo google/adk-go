@@ -85,7 +85,7 @@ func Chain(nodes ...Node) []Edge {
 		return nil
 	}
 	edges := make([]Edge, len(nodes)-1)
-	for i := 0; i < len(nodes)-1; i++ {
+	for i := range len(nodes) - 1 {
 		edges[i] = Edge{From: nodes[i], To: nodes[i+1]}
 	}
 	return edges

@@ -59,7 +59,7 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 		if schema.Items == nil {
 			return false, fmt.Errorf("array schema missing items definition")
 		}
-		for i := 0; i < val.Len(); i++ {
+		for i := range val.Len() {
 			ok, err := matchType(val.Index(i).Interface(), schema.Items, isInput)
 			if err != nil {
 				return false, fmt.Errorf("array item %d: %w", i, err)

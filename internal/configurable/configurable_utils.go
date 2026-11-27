@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -56,6 +57,13 @@ var (
 	toolRegistry     = make(map[string]any)
 	callbackRegistry = make(map[string]any)
 )
+
+const allowConfigStdioServersEnv = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
+
+func allowConfigStdioServers() bool {
+	v := os.Getenv(allowConfigStdioServersEnv)
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 func init() {
 	if err := Register("LlmAgent", newLLMAgent); err != nil {
@@ -198,6 +206,12 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
+		_, hasConnectionParams := args["stdio_connection_params"]
+		_, hasServerParams := args["stdio_server_params"]
+		if (hasConnectionParams || hasServerParams) && !allowConfigStdioServers() {
+			return nil, fmt.Errorf("stdio MCP servers are not allowed in agent configs: set %s=1 only if you trust every config this process loads", allowConfigStdioServersEnv)
+		}
+
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("stdio_connection_params not found in args")

@@ -171,7 +171,7 @@ func calculateTripCost(ctx agent.Context, args CalculateTripCostArgs) (map[strin
 
 	// Add baggage fees
 	baggageCost := 0.0
-	var displayBaggage any = nil
+	var displayBaggage any
 
 	if args.BaggageCount != nil {
 		count := *args.BaggageCount

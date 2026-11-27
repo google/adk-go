@@ -16,6 +16,7 @@ package helper
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -90,7 +91,7 @@ func TestEvent(t *testing.T) {
 			"2",
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Errorf("convertSnake() failed: %v", err)
 	}
@@ -105,7 +106,6 @@ func TestEvent(t *testing.T) {
 					if arr[1] != "2" {
 						t.Errorf("long_running_tool_ids[1] is not 2")
 					}
-
 				} else {
 					t.Errorf("long_running_tool_ids is not an array of length 2")
 				}
@@ -137,7 +137,7 @@ func TestEventLogProbs(t *testing.T) {
 			},
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Errorf("convertSnake() failed: %v", err)
 	}
@@ -152,7 +152,6 @@ func TestEventLogProbs(t *testing.T) {
 					if arr[1] != "2" {
 						t.Errorf("long_running_tool_ids[1] is not 2")
 					}
-
 				} else {
 					t.Errorf("long_running_tool_ids is not an array of length 2")
 				}
@@ -181,7 +180,7 @@ func TestByteSlice(t *testing.T) {
 			},
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -211,7 +210,7 @@ func TestByteSliceOmitEmpty(t *testing.T) {
 	type A struct {
 		Sig []byte `json:"sig,omitempty"`
 	}
-	got, err := convertSnake("", "", A{})
+	got, err := convertSnake("", A{})
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -229,7 +228,7 @@ func TestRawMessage(t *testing.T) {
 		Default json.RawMessage `json:"default,omitempty"`
 	}
 	a := A{Default: json.RawMessage(`{"approved":false}`)}
-	got, err := convertSnake("", "", a)
+	got, err := convertSnake("", a)
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -247,7 +246,7 @@ func TestRawMessageOmitEmpty(t *testing.T) {
 	type A struct {
 		Default json.RawMessage `json:"default,omitempty"`
 	}
-	got, err := convertSnake("", "", A{})
+	got, err := convertSnake("", A{})
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -318,34 +317,161 @@ func TestEmitJSONSchemaSnakeCase(t *testing.T) {
 
 func TestEmbedded(t *testing.T) {
 	type A struct {
-		anInteger int
-		aString   string
+		PublicName  string
+		privateName string
 	}
-	type B struct {
-		A
-		anotherString string
+	input := struct{ A }{A{PublicName: "visible", privateName: "hidden"}}
+	want := map[string]any{"public_name": "visible"}
+	if got, err := convertSnake("", input); err != nil || !cmp.Equal(got, want) {
+		t.Fatal("embedded fields should expose only exported values")
 	}
-	b := B{
-		A: A{
-			anInteger: 1,
-			aString:   "a",
+}
+
+func TestEmbeddedValues(t *testing.T) {
+	type details struct{ DisplayName string }
+	type Details struct{ DisplayName string }
+	type Label string
+	type label string
+	type hiddenTime = time.Time
+	type Unsupported chan int
+	for _, tc := range []struct {
+		name    string
+		value   any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name:  "time",
+			value: struct{ time.Time }{time.UnixMicro(1_234_567)},
+			want:  map[string]any{"time": 1.234567},
 		},
-		anotherString: "b",
+		{
+			name:  "unexported_struct",
+			value: struct{ details }{details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "unexported_pointer",
+			value: struct{ *details }{&details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "exported_pointer",
+			value: struct{ *Details }{&Details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "nil_pointer",
+			value: struct{ *Details }{},
+			want:  map[string]any{},
+		},
+		{
+			name:  "nested_interfaces",
+			value: map[string]any{"values": []any{nil, struct{ details }{details{"synthetic"}}}},
+			want:  map[string]any{"values": []any{nil, map[string]any{"display_name": "synthetic"}}},
+		},
+		{
+			name:  "exported_scalar",
+			value: struct{ Label }{"synthetic"},
+			want:  map[string]any{"label": Label("synthetic")},
+		},
+		{
+			name:  "unexported_scalar",
+			value: struct{ label }{"synthetic"},
+			want:  map[string]any{},
+		},
+		{
+			name:    "unexported_time_alias",
+			value:   struct{ hiddenTime }{time.Unix(1, 0)},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported_embedded_type",
+			value:   struct{ Unsupported }{},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertSnake("", tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("conversion error present = %t, want %t", err != nil, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if !cmp.Equal(got, tc.want) {
+				t.Error("embedded fields were not preserved")
+			}
+		})
 	}
-	got, err := convertSnake("", "", b)
-	if err != nil {
-		t.Errorf("convertSnake() failed: %v", err)
-	}
+}
 
-	want := map[string]any{
-		"an_integer":     int64(1),
-		"a_string":       "a",
-		"another_string": "b",
+func TestConvertSnakeCycles(t *testing.T) {
+	type item struct{ Next *item }
+	type embedded = item
+	p := &struct{ *embedded }{&item{}}
+	p.Next = p.embedded
+	m := map[string]any{}
+	m["self"] = m
+	list := make([]any, 1)
+	list[0] = list
+	for _, tc := range []struct {
+		name  string
+		input any
+	}{
+		{"embedded_pointer", p},
+		{"map", m},
+		{"slice", list},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := convertSnake("", tc.input); !errors.Is(err, errSnakeCycle) {
+				t.Fatal("conversion did not report a cycle")
+			}
+		})
 	}
+}
 
-	diff := cmp.Diff(got, want)
-	if diff != "" {
-		t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, want, diff)
+func TestConvertSnakeSharedReferences(t *testing.T) {
+	shared := &struct{ Ready bool }{true}
+	list := make([]any, 2)
+	list[0] = shared
+	list[1] = list[:1] // Same starting address as list, but a different view.
+	input := []any{shared, list}
+	value := map[string]any{"ready": true}
+	want := []any{value, []any{value, []any{value}}}
+	if got, err := convertSnake("", input); err != nil || !cmp.Equal(got, want) {
+		t.Fatal("conversion did not preserve shared references")
+	}
+}
+
+func TestConvertSnakeDepth(t *testing.T) {
+	var input any = true
+	for range 500 {
+		input = []any{input}
+	}
+	if _, err := convertSnake("", input); !errors.Is(err, errSnakeDepth) {
+		t.Fatal("conversion did not report the nesting limit")
+	}
+	if err := EmitJSON(httptest.NewRecorder(), input); !errors.Is(err, errSnakeDepth) {
+		t.Fatal("encoding bypassed the nesting limit")
+	}
+}
+
+func TestEventForStreamBoundsFallback(t *testing.T) {
+	var nested any = true
+	for range 500 {
+		nested = []any{nested}
+	}
+	output := struct {
+		Value  int `json:"value,string"`
+		Nested any
+	}{Value: 7, Nested: nested}
+	if err := EmitJSON(httptest.NewRecorder(), output); !errors.Is(err, ErrEventEncoding) {
+		t.Fatal("encoding accepted a too-deep fallback value")
+	}
+	event := &session.Event{Output: output}
+	if got := EventForStream(event); got.Output != nil || event.Output == nil {
+		t.Fatal("stream should omit too-deep output without changing the stored event")
 	}
 }
 
@@ -393,7 +519,7 @@ func TestOmitEmpty(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		got, err := convertSnake("", "", tc.a)
+		got, err := convertSnake("", tc.a)
 		if err != nil {
 			t.Errorf("convertSnake() failed: %v", err)
 		}
@@ -401,14 +527,13 @@ func TestOmitEmpty(t *testing.T) {
 		if diff != "" {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
-
 	}
 }
 
 func TestTimeFractionalSeconds(t *testing.T) {
 	// Verify microsecond resolution is preserved (e.g., matching adkrest UnixMicro / 1e6)
 	tm := time.UnixMicro(1733040000123456) // 1733040000.123456
-	got, err := convertSnake("", "", tm)
+	got, err := convertSnake("", tm)
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -425,7 +550,7 @@ func TestTimeFractionalSeconds(t *testing.T) {
 
 	// Verify whole-second timestamps
 	tmWhole := time.Unix(1700000000, 0)
-	gotWhole, err := convertSnake("", "", tmWhole)
+	gotWhole, err := convertSnake("", tmWhole)
 	if err != nil {
 		t.Fatalf("convertSnake() failed for whole second: %v", err)
 	}

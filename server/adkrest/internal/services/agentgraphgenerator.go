@@ -151,7 +151,7 @@ func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][
 }
 
 func nodeCaption(instance any) string {
-	caption := ""
+	var caption string
 	switch i := instance.(type) {
 	case agent.Agent:
 		caption = "🤖 " + i.Name()

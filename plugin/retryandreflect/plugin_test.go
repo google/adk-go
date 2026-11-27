@@ -269,10 +269,12 @@ func TestRetryAndReflect_ToolPanic(t *testing.T) {
 		{name: "reflection response", err: panicErr, calls: 1, wantTopOfGuidance: "failed"},
 		{name: "retry limit exceeded response", err: panicErr, calls: 2, wantTopOfGuidance: "exceeded"},
 		{
-			// An error on its way out of a tool is wrapped more than once:
-			// agenttool wraps what the sub-agent run returned, and an earlier
-			// OnToolError callback is free to wrap it before this plugin sees
-			// it.
+			// A tool error is wrapped once per agent and node it passes
+			// through on its way out: a workflow's ToolNode wraps what the
+			// tool returned, and agenttool wraps what the sub-agent run
+			// returned. No OnToolError callback can wrap it first, because
+			// the plugin manager stops at the plugin that answers and the
+			// agent's own callbacks run only after the plugins.
 			name:              "wrapped panic",
 			err:               fmt.Errorf("lookup failed: %w", panicErr),
 			calls:             1,
@@ -338,6 +340,73 @@ func TestRetryAndReflect_ReturnedErrorReachesTheModel(t *testing.T) {
 	}
 	if guidance, _ := res["reflection_guidance"].(string); !strings.Contains(guidance, "order not found") {
 		t.Errorf("reflection_guidance does not carry the tool's error: %q", guidance)
+	}
+}
+
+// The guidance the model reads names the type of the error and its text, in
+// the reflection response and in the one that reports the retry limit. Pinning
+// only that the guidance mentions the error text would still pass with the
+// type prefix dropped, or with the error block of the retry-limit template
+// left empty.
+func TestRetryAndReflect_GuidanceCarriesErrorTypeAndText(t *testing.T) {
+	panicErr := toolinternal.NewPanicError("test-tool", "secret-user-data-123", []byte("goroutine 28 [running]:\n"))
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		// calls is how many times the tool fails; with maxRetries 1 the first
+		// failure builds the reflection response and the second the
+		// retry-limit-exceeded one.
+		calls int
+		// wantErrorLine is the line both templates render for the error.
+		wantErrorLine string
+	}{
+		{
+			name:          "reflection response",
+			err:           errors.New("order not found"),
+			calls:         1,
+			wantErrorLine: "*errors.errorString: order not found",
+		},
+		{
+			name:          "retry limit exceeded response",
+			err:           errors.New("order not found"),
+			calls:         2,
+			wantErrorLine: "*errors.errorString: order not found",
+		},
+		{
+			// A recovered panic keeps the shape, with the opaque type and the
+			// generic message standing in for the panic value and the stack.
+			name:          "reflection response for a panic",
+			err:           panicErr,
+			calls:         1,
+			wantErrorLine: "panic: Invoking `test-tool()` failed with an internal error.",
+		},
+		{
+			name:          "retry limit exceeded response for a panic",
+			err:           panicErr,
+			calls:         2,
+			wantErrorLine: "panic: Invoking `test-tool()` failed with an internal error.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &retryAndReflect{
+				maxRetries:            1,
+				scope:                 Invocation,
+				scopedFailureCounters: make(map[string]map[string]int),
+			}
+			ctx := &mockContext{invocationID: "inv1"}
+			tl := &mockTool{name: "test-tool"}
+
+			var res map[string]any
+			for range tc.calls {
+				res, _ = r.onToolError(ctx, tl, map[string]any{"order_id": "1"}, tc.err)
+			}
+
+			guidance, _ := res["reflection_guidance"].(string)
+			if !strings.Contains(guidance, tc.wantErrorLine) {
+				t.Errorf("reflection_guidance does not carry %q:\n%s", tc.wantErrorLine, guidance)
+			}
+		})
 	}
 }
 

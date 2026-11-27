@@ -22,9 +22,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// newPeriodicReader returns a reader over a [sdkmetric.PeriodicReader] which
+// newNoFinalExportReader returns a reader over a [sdkmetric.PeriodicReader] which
 // doesn't export on Shutdown, and which exports nothing while no instrument has recorded.
-func newPeriodicReader(exporter sdkmetric.Exporter, opts ...sdkmetric.PeriodicReaderOption) sdkmetric.Reader {
+func newNoFinalExportReader(exporter sdkmetric.Exporter, opts ...sdkmetric.PeriodicReaderOption) sdkmetric.Reader {
 	guarded := &guardedExporter{Exporter: exporter}
 	return &noFinalExportReader{
 		PeriodicReader: sdkmetric.NewPeriodicReader(guarded, opts...),

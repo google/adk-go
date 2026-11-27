@@ -49,13 +49,52 @@ func NewFileSystemSource(filesystem fs.FS) Source {
 	return &fileSystemSource{filesystem: filesystem}
 }
 
+// FileSystemSourceConfig is the configuration for
+// [NewFileSystemSourceWithConfig].
+type FileSystemSourceConfig struct {
+	// FileSystem holds the skills, laid out as [NewFileSystemSource]
+	// describes. Required.
+	FileSystem fs.FS
+
+	// OnListInvalidSkill, when non-nil, is called by ListFrontmatters for each
+	// skill directory that is invalid: its SKILL.md does not parse or
+	// validate, or its name is not the directory's. It receives the name of
+	// the directory and the error. Returning nil skips that skill and
+	// continues listing; returning a non-nil error aborts ListFrontmatters
+	// with that error. When nil, the first invalid skill fails
+	// ListFrontmatters.
+	//
+	// It is called on every listing, and may be called from several
+	// goroutines when ListFrontmatters is.
+	//
+	// A directory without a SKILL.md file is not a skill and is ignored
+	// without a call. A SKILL.md that cannot be opened, for example because
+	// access is denied, says nothing about the skill, so it always aborts
+	// ListFrontmatters and is not offered here.
+	OnListInvalidSkill func(name string, err error) error
+}
+
+// NewFileSystemSourceWithConfig creates a Source backed by config.FileSystem.
+// It is [NewFileSystemSource] with the options of config.
+func NewFileSystemSourceWithConfig(config FileSystemSourceConfig) (Source, error) {
+	if config.FileSystem == nil {
+		return nil, errors.New("FileSystemSourceConfig.FileSystem is required")
+	}
+	return &fileSystemSource{
+		filesystem:         config.FileSystem,
+		onListInvalidSkill: config.OnListInvalidSkill,
+	}, nil
+}
+
 type fileSystemSource struct {
-	filesystem fs.FS
+	filesystem         fs.FS
+	onListInvalidSkill func(name string, err error) error
 }
 
 // ListFrontmatters scans the immediate subdirectories of the root filesystem.
-// It does not traverse recursively. Directories without a valid SKILL.md
-// are silently ignored.
+// It does not traverse recursively. Directories without a SKILL.md file are
+// ignored; an invalid skill fails the listing unless
+// FileSystemSourceConfig.OnListInvalidSkill returns nil.
 func (f *fileSystemSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, error) {
 	var frontmatters []*Frontmatter
 
@@ -70,10 +109,22 @@ func (f *fileSystemSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter
 		}
 		frontmatter, _, closer, err := f.readSkill(entry.Name())
 		if err != nil {
-			if errors.Is(err, ErrSkillNotFound) {
-				continue // Directory doesn't contain SKILL.md - not a skill.
+			switch {
+			case errors.Is(err, ErrSkillNotFound):
+				// Directory doesn't contain SKILL.md - not a skill.
+			case errors.Is(err, ErrInvalidFrontmatter), errors.Is(err, ErrInvalidSkillName):
+				if f.onListInvalidSkill == nil {
+					return nil, err
+				}
+				if err := f.onListInvalidSkill(entry.Name(), err); err != nil {
+					return nil, err
+				}
+			default:
+				// Fail closed: only a skill that was read and found invalid
+				// may be skipped.
+				return nil, err
 			}
-			return nil, err
+			continue
 		}
 		// Avoid holding files open in the loop by closing without defer.
 		_ = closer.Close() // Ignore error as read success is what matters.

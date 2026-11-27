@@ -408,7 +408,11 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// raw_event nothing about it reaches the backend. On reload the session
 		// would hold neither the summary nor any record that compaction ran,
 		// and the same range would be summarized again on every trigger.
-		event.Actions.Compaction != nil
+		event.Actions.Compaction != nil ||
+		// Context cache state has no column either. Without it the next
+		// invocation cannot find the cache the last one created, and creates
+		// another while the first stays on the provider until its TTL runs out.
+		event.CacheMetadata != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
@@ -428,6 +432,15 @@ func eventNeedsRawEvent(event *session.Event) bool {
 // matches the SQL backend, so the lossiness is framework-wide; store
 // values needing exact integer fidelity as strings.
 func eventToRawEvent(event *session.Event) (*structpb.Struct, error) {
+	if event != nil && event.Content != nil && slices.Contains(event.Content.Parts, nil) {
+		shallow := *event
+		content := *event.Content
+		content.Parts = slices.DeleteFunc(slices.Clone(content.Parts), func(p *genai.Part) bool {
+			return p == nil
+		})
+		shallow.Content = &content
+		event = &shallow
+	}
 	b, err := json.Marshal(event)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling event: %w", err)
@@ -741,6 +754,9 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 	if event.Content != nil {
 		parts := make([]*aiplatformpb.Part, 0)
 		for _, part := range event.Content.Parts {
+			if part == nil {
+				continue
+			}
 			aiplatformPart := &aiplatformpb.Part{}
 			aiplatformPart.Thought = part.Thought
 			aiplatformPart.ThoughtSignature = part.ThoughtSignature

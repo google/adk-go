@@ -38,6 +38,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestAiplatformToGenaiContent_FunctionCallMapping(t *testing.T) {
@@ -365,6 +366,40 @@ func TestRawEventNumericContract(t *testing.T) {
 	}
 }
 
+// TestCacheMetadataRoundTripsThroughRawEvent guards that context cache state
+// survives the raw_event blob, in the form adk-python reads from it.
+func TestCacheMetadataRoundTripsThroughRawEvent(t *testing.T) {
+	want := &model.CacheMetadata{
+		CacheName:       "cachedContents/1",
+		ExpireTime:      time.Date(2026, 1, 1, 12, 30, 0, 0, time.UTC),
+		InvocationsUsed: 2,
+		CreatedAt:       time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Fingerprint:     "abc",
+		ContentsCount:   4,
+	}
+	event := &session.Event{Author: "agent", LLMResponse: model.LLMResponse{CacheMetadata: want}}
+
+	raw, err := eventToRawEvent(event)
+	if err != nil {
+		t.Fatalf("eventToRawEvent() error = %v", err)
+	}
+	cache, ok := raw.AsMap()["cacheMetadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("raw_event has no cacheMetadata object: %v", raw.AsMap())
+	}
+	if _, ok := cache["cache_name"]; !ok {
+		t.Errorf("raw_event cacheMetadata = %v, want adk-python's snake_case keys", cache)
+	}
+
+	got, err := eventFromRawEvent(raw)
+	if err != nil {
+		t.Fatalf("eventFromRawEvent() error = %v", err)
+	}
+	if diff := cmp.Diff(want, got.CacheMetadata); diff != "" {
+		t.Errorf("CacheMetadata mismatch after the round trip (-want +got):\n%s", diff)
+	}
+}
+
 // TestEventNeedsRawEvent guards the invariant that plain events keep
 // their legacy wire format (no raw_event) while events carrying state
 // that only raw_event preserves opt into raw_event. Changing
@@ -391,6 +426,9 @@ func TestEventNeedsRawEvent(t *testing.T) {
 		}, want: true},
 		{name: "with output transcription", event: &session.Event{
 			LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "hi"}},
+		}, want: true},
+		{name: "with cache metadata", event: &session.Event{
+			LLMResponse: model.LLMResponse{CacheMetadata: &model.CacheMetadata{Fingerprint: "abc"}},
 		}, want: true},
 	}
 	for _, tc := range tests {
@@ -590,6 +628,8 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 		name        string
 		event       *session.Event
 		expectError bool
+		wantParts   int
+		wantText    string
 	}{
 		{
 			name: "simple function call args",
@@ -697,12 +737,46 @@ func TestCreateAiplatformpbContent(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "nil part skipped",
+			event: &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							nil,
+							genai.NewPartFromText("hi"),
+						},
+						Role: genai.RoleUser,
+					},
+				},
+			},
+			expectError: false,
+			wantParts:   1,
+			wantText:    "hi",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := createAiplatformpbContent(tt.event)
+			got, err := createAiplatformpbContent(tt.event)
 			if (err != nil) != tt.expectError {
-				t.Errorf("createAiplatformpbContent() error = %v, expectError %v", err, tt.expectError)
+				t.Fatalf("createAiplatformpbContent() error = %v, expectError %v", err, tt.expectError)
+			}
+			if tt.wantParts > 0 {
+				if got == nil || len(got.Parts) != tt.wantParts {
+					t.Fatalf("createAiplatformpbContent() got %d parts, want %d", len(got.GetParts()), tt.wantParts)
+				}
+			}
+			if tt.wantText != "" {
+				if got == nil || len(got.Parts) == 0 {
+					t.Fatalf("createAiplatformpbContent() returned no parts")
+				}
+				textPart, ok := got.Parts[0].Data.(*aiplatformpb.Part_Text)
+				if !ok {
+					t.Fatalf("createAiplatformpbContent() part 0 is %T, want *aiplatformpb.Part_Text", got.Parts[0].Data)
+				}
+				if textPart.Text != tt.wantText {
+					t.Errorf("createAiplatformpbContent() part text = %q, want %q", textPart.Text, tt.wantText)
+				}
 			}
 		})
 	}
@@ -1223,6 +1297,14 @@ func TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched
 type fakeVertexAiSessionService struct {
 	aiplatformpb.UnimplementedSessionServiceServer
 	events []*aiplatformpb.SessionEvent
+}
+
+func (s *fakeVertexAiSessionService) GetSession(ctx context.Context, req *aiplatformpb.GetSessionRequest) (*aiplatformpb.Session, error) {
+	return &aiplatformpb.Session{
+		Name:       req.GetName(),
+		UserId:     "user1",
+		UpdateTime: timestamppb.Now(),
+	}, nil
 }
 
 func (s *fakeVertexAiSessionService) AppendEvent(ctx context.Context, req *aiplatformpb.AppendEventRequest) (*aiplatformpb.AppendEventResponse, error) {

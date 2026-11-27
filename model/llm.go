@@ -22,10 +22,33 @@ import (
 	"google.golang.org/genai"
 )
 
-// LLM provides the access to the underlying LLM.
+// LLM provides access to an underlying language model.
 type LLM interface {
 	Name() string
+	// Capabilities reports the resolved capabilities of this model instance.
+	// Implementations must be safe for concurrent use and must not mutate the
+	// model or have observable side effects.
+	Capabilities() Capabilities
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+}
+
+// Capabilities holds the resolved capabilities of an [LLM] instance.
+//
+// Each field reports whether the model supports a specific optional feature.
+// The zero value (Capabilities{}) indicates that none of the optional
+// capabilities are supported. Capabilities is a value type and is safe for
+// concurrent use.
+type Capabilities struct {
+	// AcceptsOutputSchemaAndTools reports whether the model accepts a native
+	// output schema (GenerateContentConfig.ResponseSchema) together with tools
+	// in the same request.
+	//
+	// When false and an agent configures both an output schema and tools (or
+	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
+	// request config and instead instructs the model to return its structured
+	// answer through a synthetic function tool. When an agent has no tools,
+	// ADK still sends the output schema natively.
+	AcceptsOutputSchemaAndTools bool
 }
 
 // LLMRequest is the raw LLM request.
@@ -35,6 +58,19 @@ type LLMRequest struct {
 	Config   *genai.GenerateContentConfig
 
 	Tools map[string]any `json:"-"`
+
+	// CacheConfig turns on context caching for this request when non-nil. The
+	// flow sets it from the runner's ContextCache config, and a model that
+	// does not support caching ignores it. See [ContextCacheConfig].
+	CacheConfig *ContextCacheConfig
+	// CacheMetadata is the cache state recorded on the agent's latest model
+	// response, which the model checks before reusing or replacing that
+	// cache. Nil on the agent's first request, or when caching is off.
+	CacheMetadata *CacheMetadata
+	// PreviousPromptTokenCount is the prompt token count the provider
+	// reported for the agent's previous request, which sizes a new cache. Zero
+	// when no earlier count is known, and no cache is created then.
+	PreviousPromptTokenCount int32
 }
 
 // LLMResponse is the raw LLM response.
@@ -65,4 +101,8 @@ type LLMResponse struct {
 	ErrorMessage            string             `json:"errorMessage,omitempty"`
 	FinishReason            genai.FinishReason `json:"finishReason,omitempty"`
 	AvgLogprobs             float64            `json:"avgLogprobs,omitempty"`
+	// CacheMetadata is the context cache state of the request that produced
+	// this response, set when the request had a CacheConfig. Only complete
+	// responses carry it, not partial streaming chunks.
+	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
 }

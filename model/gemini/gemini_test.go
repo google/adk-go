@@ -15,23 +15,30 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"iter"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/version"
+	"google.golang.org/adk/v2/internal/version/versiontest"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -653,6 +660,119 @@ func TestModel_NoSideEffects(t *testing.T) {
 	}
 }
 
+func TestModel_LiveTrackingHeaders(t *testing.T) {
+	adk := version.TrackingHeader(nil)
+	tests := []struct {
+		name          string
+		clientHeaders http.Header
+		wantUA        string
+		wantAPIClient string
+	}{
+		{
+			name:          "no_client_headers",
+			wantUA:        adk,
+			wantAPIClient: adk,
+		},
+		{
+			name:          "client_headers_follow_adk_labels",
+			clientHeaders: http.Header{"User-Agent": {"my-app/1.0"}, "X-Goog-Api-Client": {"my-lib/2.0"}},
+			wantUA:        adk + " my-app/1.0",
+			wantAPIClient: adk + " my-lib/2.0",
+		},
+		{
+			name:          "lowercase_client_header_keys",
+			clientHeaders: http.Header{"user-agent": {"my-app/1.0"}, "x-goog-api-client": {"my-lib/2.0"}},
+			wantUA:        adk + " my-app/1.0",
+			wantAPIClient: adk + " my-lib/2.0",
+		},
+		{
+			name:          "client_header_with_stale_adk_label",
+			clientHeaders: http.Header{"X-Goog-Api-Client": {"my-lib/2.0 google-adk/0.0.1"}},
+			wantUA:        adk,
+			wantAPIClient: adk + " my-lib/2.0 google-adk/0.0.1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handshakes := make(chan http.Header, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handshakes <- r.Header.Clone()
+				http.Error(w, "no upgrade", http.StatusBadRequest)
+			}))
+			defer server.Close()
+
+			var clientHeaders http.Header
+			if tt.clientHeaders != nil {
+				clientHeaders = tt.clientHeaders.Clone()
+			}
+			cfg := &genai.ClientConfig{
+				Backend: genai.BackendGeminiAPI,
+				APIKey:  "fakekey",
+				HTTPOptions: genai.HTTPOptions{
+					BaseURL:    "ws://" + strings.TrimPrefix(server.URL, "http://"),
+					APIVersion: "v1beta",
+					Headers:    clientHeaders,
+				},
+			}
+			llm, err := NewModel(t.Context(), "gemini-live-test", cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+				t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+			}
+
+			checkLiveHandshake(t, handshakes, tt.wantUA, tt.wantAPIClient)
+			if diff := cmp.Diff(tt.clientHeaders, cfg.HTTPOptions.Headers); diff != "" {
+				t.Errorf("NewModel modified the caller's headers (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A nil config is filled from the environment by genai, and still gets the
+// tracking headers.
+func TestModel_LiveTrackingHeaders_NilConfig(t *testing.T) {
+	handshakes := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes <- r.Header.Clone()
+		http.Error(w, "no upgrade", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+	t.Setenv("GOOGLE_API_KEY", "fakekey")
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws://"+strings.TrimPrefix(server.URL, "http://"))
+
+	llm, err := NewModel(t.Context(), "gemini-live-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+		t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+	}
+	adk := version.TrackingHeader(nil)
+	checkLiveHandshake(t, handshakes, adk, adk)
+}
+
+// checkLiveHandshake checks the headers of the one handshake a test server
+// recorded on handshakes.
+func checkLiveHandshake(t *testing.T, handshakes <-chan http.Header, wantUA, wantAPIClient string) {
+	t.Helper()
+	var handshake http.Header
+	select {
+	case handshake = <-handshakes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Live.Connect() never reached the test server")
+	}
+	if got := handshake.Values("User-Agent"); len(got) != 1 || got[0] != wantUA {
+		t.Errorf("handshake User-Agent = %q, want [%q]", got, wantUA)
+	}
+	if got := handshake.Values("X-Goog-Api-Client"); len(got) != 1 || got[0] != wantAPIClient {
+		t.Errorf("handshake X-Goog-Api-Client = %q, want [%q]", got, wantAPIClient)
+	}
+}
+
 func TestModel_RespectsRequestModel(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -878,4 +998,257 @@ func TestModel_MaybeAppendUserContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The hosting runtime is reported only when the request goes to a Google API
+// endpoint, which for a Gemini model is decided by the base URL in effect: the
+// one genai resolved for the client, or the one a request sets.
+func TestModel_TrackingHeaders_RuntimeSuffix(t *testing.T) {
+	const proxy = "https://proxy.example.com/"
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	tests := []struct {
+		name string
+		cfg  genai.ClientConfig
+		env  map[string]string
+		// reqBaseURL is the base URL the request itself sets, if any.
+		reqBaseURL string
+		wantHost   string
+		// wantClient and wantRequest are the labels on the client, which the
+		// live handshake sends, and on the generate request.
+		wantClient, wantRequest string
+	}{
+		{
+			name:        "Gemini API default endpoint",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			wantHost:    "generativelanguage.googleapis.com",
+			wantClient:  tagged,
+			wantRequest: tagged,
+		},
+		{
+			name:        "Vertex AI default endpoint",
+			cfg:         genai.ClientConfig{Backend: genai.BackendVertexAI, Project: "p", Location: "us-central1"},
+			wantHost:    "us-central1-aiplatform.googleapis.com",
+			wantClient:  tagged,
+			wantRequest: tagged,
+		},
+		{
+			name:        "base URL in the config",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey", HTTPOptions: genai.HTTPOptions{BaseURL: proxy}},
+			wantHost:    "proxy.example.com",
+			wantClient:  plain,
+			wantRequest: plain,
+		},
+		{
+			name:        "base URL from the environment",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			env:         map[string]string{"GOOGLE_GEMINI_BASE_URL": proxy},
+			wantHost:    "proxy.example.com",
+			wantClient:  plain,
+			wantRequest: plain,
+		},
+		{
+			name:        "request overrides a Google base URL",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			reqBaseURL:  proxy,
+			wantHost:    "proxy.example.com",
+			wantClient:  tagged,
+			wantRequest: plain,
+		},
+		{
+			name:        "request overrides with a Google base URL",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey", HTTPOptions: genai.HTTPOptions{BaseURL: proxy}},
+			reqBaseURL:  "https://generativelanguage.googleapis.com/",
+			wantHost:    "generativelanguage.googleapis.com",
+			wantClient:  plain,
+			wantRequest: tagged,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			versiontest.ClearRuntimeEnv(t)
+			for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+				t.Setenv(name, "")
+			}
+			t.Setenv("K_SERVICE", "svc")
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+
+			var sent *http.Request
+			cfg := tt.cfg
+			cfg.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				sent = r
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)),
+					Request:    r,
+				}, nil
+			})}
+			llm, err := NewModel(t.Context(), "gemini-2.0-flash", &cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			clientHeaders := llm.(*geminiModel).Client().ClientConfig().HTTPOptions.Headers
+			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+				if got := clientHeaders.Values(name); len(got) != 1 || got[0] != tt.wantClient {
+					t.Errorf("client %s = %q, want [%q]", name, got, tt.wantClient)
+				}
+			}
+
+			req := &model.LLMRequest{Contents: genai.Text("ping")}
+			if tt.reqBaseURL != "" {
+				req.Config = &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{BaseURL: tt.reqBaseURL}}
+			}
+			for _, err := range llm.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if sent == nil {
+				t.Fatal("no request was sent")
+			}
+			if got := sent.URL.Hostname(); got != tt.wantHost {
+				t.Fatalf("request went to %q, want %q", got, tt.wantHost)
+			}
+			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+				got := sent.Header.Values(name)
+				if len(got) != 1 || !strings.HasPrefix(got[0], tt.wantRequest+" ") {
+					t.Fatalf("request %s = %q, want one value that starts with %q", name, got, tt.wantRequest)
+				}
+				// The label for another destination must not follow, either.
+				wantLabel, _, _ := strings.Cut(tt.wantRequest, " ")
+				if diff := cmp.Diff([]string{wantLabel}, adkLabels(got[0])); diff != "" {
+					t.Errorf("request %s = %q: ADK labels mismatch (-want +got):\n%s", name, got[0], diff)
+				}
+			}
+		})
+	}
+}
+
+// The live handshake names the hosting runtime when it goes to a Google API
+// endpoint. Not parallel: it swaps websocket.DefaultDialer, which genai dials
+// with.
+func TestModel_LiveTrackingHeaders_RuntimeSuffix(t *testing.T) {
+	plain := version.TrackingHeader(nil)
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	handshakes := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes <- r.Header.Clone()
+		http.Error(w, "no upgrade", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	// The dialer stands in for TLS to the host in the URL and connects to the
+	// test server instead, so the handshake of a wss URL can be read.
+	var dialed string
+	dialer := *websocket.DefaultDialer
+	dialer.Proxy = nil
+	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = addr
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	orig := websocket.DefaultDialer
+	t.Cleanup(func() { websocket.DefaultDialer = orig })
+	websocket.DefaultDialer = &dialer
+
+	tests := []struct {
+		name     string
+		baseURL  string
+		wantDial string
+		want     string
+	}{
+		{name: "default endpoint", wantDial: "generativelanguage.googleapis.com:443", want: tagged},
+		{name: "Google base URL", baseURL: "https://generativelanguage.mtls.googleapis.com/", wantDial: "generativelanguage.mtls.googleapis.com:443", want: tagged},
+		{name: "other base URL", baseURL: "https://proxy.example.com/", wantDial: "proxy.example.com:443", want: plain},
+		{name: "address with a zone that ends in the suffix", baseURL: "https://[::1%25.googleapis.com]/", wantDial: "[::1%.googleapis.com]:443", want: plain},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			versiontest.ClearRuntimeEnv(t)
+			for _, name := range []string{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+				t.Setenv(name, "")
+			}
+			t.Setenv("K_SERVICE", "svc")
+			llm, err := NewModel(t.Context(), "gemini-live-test", &genai.ClientConfig{
+				Backend:     genai.BackendGeminiAPI,
+				APIKey:      "fakekey",
+				HTTPOptions: genai.HTTPOptions{BaseURL: tt.baseURL},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dialed = ""
+			if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+				t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+			}
+			if dialed != tt.wantDial {
+				t.Fatalf("Live.Connect() dialed %q, want %q", dialed, tt.wantDial)
+			}
+			checkLiveHandshake(t, handshakes, tt.want, tt.want)
+		})
+	}
+}
+
+// adkLabels returns the tokens of a tracking header value that are ADK's own
+// label, with or without a runtime suffix.
+func adkLabels(header string) []string {
+	var labels []string
+	for token := range strings.FieldsSeq(header) {
+		if strings.HasPrefix(token, "google-adk/") {
+			labels = append(labels, token)
+		}
+	}
+	return labels
+}
+
+func TestGeminiModel_Capabilities(t *testing.T) {
+	vertexCfg := &genai.ClientConfig{
+		Backend:    genai.BackendVertexAI,
+		Project:    "test-project",
+		Location:   "us-central1",
+		HTTPClient: &http.Client{},
+	}
+	geminiAPICfg := &genai.ClientConfig{
+		Backend:    genai.BackendGeminiAPI,
+		APIKey:     "fake-key",
+		HTTPClient: &http.Client{},
+	}
+	tests := []struct {
+		name      string
+		modelName string
+		config    *genai.ClientConfig
+		want      bool
+	}{
+		{name: "gemini_2_0_on_vertex", modelName: "gemini-2.0-flash", config: vertexCfg, want: true},
+		{name: "gemini_2_5_on_vertex", modelName: "gemini-2.5-flash", config: vertexCfg, want: true},
+		{name: "gemini_1_5_on_vertex", modelName: "gemini-1.5-pro", config: vertexCfg, want: false},
+		{name: "gemini_non_numeric_on_vertex", modelName: "gemini-early-exp", config: vertexCfg, want: false},
+		{name: "gemma_on_vertex", modelName: "gemma-3-27b-it", config: vertexCfg, want: true},
+		{name: "tuned_endpoint_on_vertex", modelName: "projects/p/locations/us-central1/endpoints/12345", config: vertexCfg, want: true},
+		{name: "gemini_2_5_on_gemini_api", modelName: "gemini-2.5-flash", config: geminiAPICfg, want: false},
+		{name: "gemini_3_0_on_gemini_api", modelName: "gemini-3.0-pro", config: geminiAPICfg, want: false},
+		{name: "gemma_on_gemini_api", modelName: "gemma-3-27b-it", config: geminiAPICfg, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm, err := NewModel(t.Context(), tt.modelName, tt.config)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			if got := llm.Capabilities().AcceptsOutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().AcceptsOutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+	t.Run("nil_receiver", func(t *testing.T) {
+		var m *geminiModel
+		if got := m.Capabilities(); got != (model.Capabilities{}) {
+			t.Errorf("(*geminiModel)(nil).Capabilities() = %+v, want zero value", got)
+		}
+	})
 }

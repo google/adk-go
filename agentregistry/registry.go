@@ -26,6 +26,8 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/api/option/internaloption"
 	htransport "google.golang.org/api/transport"
+
+	"google.golang.org/adk/v2/internal/clientcert"
 )
 
 // cloudPlatformScope is the OAuth scope used for Application Default Credentials.
@@ -45,9 +47,10 @@ type Config struct {
 	// Required.
 	Location string
 	// HTTPClient is used for registry API calls. If nil, an ADC-authenticated
-	// client is created and the endpoint (incl. mTLS) is resolved from
-	// GOOGLE_API_USE_MTLS_ENDPOINT / GOOGLE_API_USE_CLIENT_CERTIFICATE. A
-	// supplied client manages its own mTLS.
+	// client is created. When the client certificate is on under the rule
+	// [google.golang.org/adk/v2/auth/gcp.NewClient] documents, that client
+	// presents it, and GOOGLE_API_USE_MTLS_ENDPOINT's default, auto, selects
+	// the mTLS endpoint. A supplied client manages its own mTLS.
 	HTTPClient *http.Client
 }
 
@@ -77,19 +80,27 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		}
 		creds = c
 
-		// Resolve the endpoint and client certificate from one source: the
-		// transport honors GOOGLE_API_USE_MTLS_ENDPOINT / _CLIENT_CERTIFICATE and
-		// returns the endpoint it dialed, so endpoint and mTLS can't disagree.
-		client, endpoint, err := htransport.NewHTTPClient(ctx,
+		certOpts, mtlsEndpoint, err := clientcert.APIOptions(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("agentregistry: creating authenticated HTTP client: %w", err)
+		}
+		// The transport honors GOOGLE_API_USE_MTLS_ENDPOINT and returns the
+		// endpoint it chose.
+		client, endpoint, err := htransport.NewHTTPClient(ctx, append([]option.ClientOption{
 			option.WithCredentials(creds),
 			internaloption.WithDefaultEndpoint(baseURLProd),
 			internaloption.WithDefaultMTLSEndpoint(baseURLMTLS),
-		)
+		}, certOpts...)...)
 		if err != nil {
 			return nil, fmt.Errorf("agentregistry: creating authenticated HTTP client: %w", err)
 		}
 		httpClient = client
 		baseURL = endpoint
+		// The transport picks the endpoint by its own certificate rule, which
+		// is on only for GOOGLE_API_USE_CLIENT_CERTIFICATE=true.
+		if mtlsEndpoint {
+			baseURL = baseURLMTLS
+		}
 	} else {
 		baseURL = customClientBaseURL()
 	}

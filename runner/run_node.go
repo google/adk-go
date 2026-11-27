@@ -80,6 +80,8 @@ func (r *Runner) runNode(
 	// processor a different instance from the one this function reads, so the
 	// "already compacted" hand-off between the two strategies never arrived.
 	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+	ctx = r.withContextCache(ctx)
+	defer r.settleContextCaches(ctx, storedSession)
 
 	invocationFailed := false
 	emit := yield
@@ -363,7 +365,7 @@ func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	}
 	answered := map[string]struct{}{}
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		for _, id := range ev.LongRunningToolIDs {
 			open[id] = struct{}{}

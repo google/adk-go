@@ -61,6 +61,7 @@ func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*mo
 	}
 
 	finishReason, rawStopReason := mapStopReason(msg.StopReason)
+	errorCode, errorMessage := emptyResponseError(msg.StopReason, finishReason, parts)
 	usageMeta, cacheCreationTokens := extractUsageMetadata(msg.Usage)
 
 	var customMeta map[string]any
@@ -82,11 +83,36 @@ func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*mo
 		},
 		UsageMetadata:  usageMeta,
 		FinishReason:   finishReason,
-		ModelVersion:   string(msg.Model),
+		ErrorCode:      errorCode,
+		ErrorMessage:   errorMessage,
+		ModelVersion:   msg.Model,
 		Partial:        false,
 		TurnComplete:   true,
 		CustomMetadata: customMeta,
 	}, nil
+}
+
+// emptyResponseError returns the ErrorCode and ErrorMessage for a turn that
+// stopped for a reason other than [genai.FinishReasonStop] without producing
+// anything to act on, such as a refusal or a turn cut off by max_tokens before
+// any output. Only non-thought text and function calls count as content, so a
+// turn holding nothing but thinking is reported too. It returns empty strings
+// when the turn has content or no stop reason, and for a stop reason that maps
+// to [genai.FinishReasonStop].
+//
+// This matches adk-python's _empty_response_error in models/anthropic_llm.py,
+// and model/gemini, which reports a candidate with no parts and a non-STOP
+// finish reason the same way.
+func emptyResponseError(stopReason anthropic.StopReason, finishReason genai.FinishReason, parts []*genai.Part) (code, message string) {
+	if stopReason == "" || finishReason == genai.FinishReasonStop {
+		return "", ""
+	}
+	for _, p := range parts {
+		if !p.Thought && (p.Text != "" || p.FunctionCall != nil) {
+			return "", ""
+		}
+	}
+	return string(finishReason), fmt.Sprintf("Claude stopped with %s (stop_reason %q) and no content", finishReason, stopReason)
 }
 
 func convertContentBlock(block *anthropic.ContentBlockUnion, unwrapOutput bool) (*genai.Part, bool, error) {

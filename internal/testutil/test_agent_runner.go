@@ -217,7 +217,7 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 		if streamResponsesCount == 0 {
 			streamResponsesCount = 1
 		}
-		for i := 0; i < streamResponsesCount; i++ {
+		for i := range streamResponsesCount {
 			if len(m.Responses) == 0 {
 				break
 			}
@@ -240,9 +240,14 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 	}
 }
 
-// Name implements llm.Model.
+// Name implements model.LLM.
 func (m *MockModel) Name() string {
 	return "mock"
+}
+
+// Capabilities implements model.LLM.
+func (m *MockModel) Capabilities() model.Capabilities {
+	return model.Capabilities{}
 }
 
 var _ model.LLM = (*MockModel)(nil)

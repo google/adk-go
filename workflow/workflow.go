@@ -308,7 +308,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 			ancestors = ac.OutputForAncestors()
 		}
 		runID := "1"
-		var subScheduler agent.DynamicSubScheduler = nil
+		var subScheduler agent.DynamicSubScheduler
 		delta := &agent.CommonContextDelta{
 			Path:               &wfPath,
 			RunID:              &runID,

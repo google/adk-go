@@ -33,6 +33,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/internal/credredirect"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -529,25 +531,24 @@ func mintAccessToken(ts oauth2.TokenSource) (string, error) {
 	return tok.AccessToken, nil
 }
 
-// a2aRequestTimeout restates the a2a client's own default. Auth has to build an
-// explicit http.Client to install CheckRedirect, and building one drops the
-// timeout a2aclient would otherwise have applied.
+// a2aRequestTimeout restates the a2a client's own default. NewA2A builds an
+// explicit http.Client, to install CheckRedirect for Auth and the client
+// certificate transport either way, and building one drops the timeout
+// a2aclient would otherwise have applied.
 const a2aRequestTimeout = 3 * time.Minute
-
-// maxRedirects matches net/http's default cap, which a custom CheckRedirect
-// replaces rather than extends.
-const maxRedirects = 10
 
 // authHTTPClient is the HTTP client used when Auth is set. It refuses a
 // redirect that leaves the card's host or downgrades its scheme, because the
 // transport applies the credential again on every hop, so nothing else bounds
 // where the secret travels. adk-python's HTTP client follows no redirects at
-// all by default; this one still follows a same-origin redirect.
+// all by default; this one still follows a same-origin redirect, and one
+// between a Google API host and its mTLS name over https (see
+// credredirect.Check).
 func authHTTPClient(provider auth.CredentialProvider) *http.Client {
 	return &http.Client{
 		Timeout:       a2aRequestTimeout,
 		CheckRedirect: checkRedirect,
-		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: http.DefaultTransport},
+		Transport:     &authTransport{provider: provider, mints: newMintGroup(), applies: newApplyGroup(), base: googlemtls.NewTransport(http.DefaultTransport)},
 	}
 }
 
@@ -567,71 +568,14 @@ func cardFetchHTTPClient(rpc *http.Client) *http.Client {
 // replaces net/http's default rather than extending it, so the hop cap is here
 // too.
 func checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("remoteagent: stopped after %d redirects", maxRedirects)
+	if len(via) >= credredirect.MaxRedirects {
+		return fmt.Errorf("remoteagent: stopped after %d redirects", credredirect.MaxRedirects)
 	}
-	// Check against the original request and against the hop just taken. The
-	// original stops a chain of individually-safe hops laundering the
-	// credential away from the card's host; the previous hop stops a chain
-	// climbing to https and then dropping back to http, which the original
-	// alone would accept.
-	for _, from := range []*url.URL{via[0].URL, via[len(via)-1].URL} {
-		if !sameCredentialTarget(from, req.URL) {
-			return fmt.Errorf("remoteagent: refusing redirect from %s to %s: A2AConfig.Auth is set and the credential would follow",
-				requestOrigin(from), requestOrigin(req.URL))
-		}
+	if err := credredirect.Check(req, via); err != nil {
+		return fmt.Errorf("remoteagent: %w: A2AConfig.Auth is set and the credential would follow", err)
 	}
 	return nil
 }
-
-// sameCredentialTarget reports whether it is safe to replay the credential on a
-// redirect from one URL to the other: the host must be identical, and the
-// scheme may only stay the same or be upgraded from http to https, which
-// strictly improves confidentiality.
-func sameCredentialTarget(from, to *url.URL) bool {
-	if !strings.EqualFold(from.Hostname(), to.Hostname()) {
-		return false
-	}
-	switch {
-	case strings.EqualFold(from.Scheme, to.Scheme):
-		return defaultedPort(from) == defaultedPort(to)
-	case strings.EqualFold(from.Scheme, "http") && strings.EqualFold(to.Scheme, "https"):
-		// The default port differs between the two schemes, so an upgrade
-		// cannot be judged by comparing defaulted ports. It keeps the same
-		// endpoint when both sides use their own scheme's default, or when both
-		// name the same explicit port.
-		return isDefaultPort(from) && isDefaultPort(to) || from.Port() == to.Port()
-	default:
-		return false
-	}
-}
-
-// defaultedPort returns the URL's port with the scheme's default filled in, so
-// that https://example.com and https://example.com:443 compare equal.
-func defaultedPort(u *url.URL) string {
-	if port := u.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	}
-	return ""
-}
-
-// isDefaultPort reports whether the URL leaves its scheme's port implicit or
-// names the default explicitly.
-func isDefaultPort(u *url.URL) bool {
-	port := u.Port()
-	if port == "" {
-		return true
-	}
-	return port == defaultedPort(&url.URL{Scheme: u.Scheme})
-}
-
-func requestOrigin(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
 // redactedError reports msg while keeping cause reachable through errors.Is and
 // errors.As. Wrapping with %w would put the cause's own text back in the

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/gorilla/mux"
@@ -144,12 +145,12 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 	queryParams := req.URL.Query()
 	version := queryParams.Get("version")
 	if version != "" {
-		versionInt, err := strconv.Atoi(version)
+		versionInt, err := strconv.ParseInt(version, 10, 64)
 		if err != nil {
 			http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
 			return
 		}
-		loadReq.Version = int64(versionInt)
+		loadReq.Version = new(versionInt)
 	}
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)
@@ -158,6 +159,43 @@ func (c *ArtifactsAPIController) LoadArtifactHandler(rw http.ResponseWriter, req
 		return
 	}
 	EncodeJSONResponse(resp.Part, http.StatusOK, rw)
+}
+
+// ListArtifactVersionsHandler returns the stored version IDs in ascending order.
+// An artifact with no versions is represented by an empty JSON array.
+func (c *ArtifactsAPIController) ListArtifactVersionsHandler(rw http.ResponseWriter, req *http.Request) {
+	if c.serviceUnavailable(rw) {
+		return
+	}
+	vars := mux.Vars(req)
+	versionsReq := &artifact.VersionsRequest{
+		AppName: vars["app_name"], UserID: vars["user_id"],
+		SessionID: vars["session_id"], FileName: vars["artifact_name"],
+	}
+	if err := versionsReq.Validate(); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), versionsReq.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
+	resp, err := c.artifactService.Versions(req.Context(), versionsReq)
+	versions := []int64{}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The list is empty for a missing artifact, as in adk-python.
+	case err != nil:
+		http.Error(rw, "failed to list artifact versions", http.StatusInternalServerError)
+		return
+	default:
+		versions = append(versions, resp.Versions...)
+		slices.Sort(versions)
+	}
+	EncodeJSONResponse(versions, http.StatusOK, rw)
 }
 
 // LoadArtifactVersionHandler gets an artifact from the artifact service storage with specified version.
@@ -194,7 +232,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		return
 	}
 
-	versionInt, err := strconv.Atoi(version)
+	versionInt, err := strconv.ParseInt(version, 10, 64)
 	if err != nil {
 		http.Error(rw, "version parameter must be an integer", http.StatusBadRequest)
 		return
@@ -205,7 +243,7 @@ func (c *ArtifactsAPIController) LoadArtifactVersionHandler(rw http.ResponseWrit
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
 		FileName:  artifactName,
-		Version:   int64(versionInt),
+		Version:   new(versionInt),
 	}
 
 	resp, err := c.artifactService.Load(req.Context(), loadReq)

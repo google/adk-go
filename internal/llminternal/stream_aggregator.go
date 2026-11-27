@@ -207,7 +207,6 @@ func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.P
 		} else {
 			value = stringChunk
 		}
-
 	} else if partialArg.NumberValue != nil {
 		value = *partialArg.NumberValue
 		hasValue = true

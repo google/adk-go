@@ -120,7 +120,9 @@ type Artifacts interface {
 	Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error)
 	List(context.Context) (*artifact.ListResponse, error)
 	Load(ctx context.Context, name string) (*artifact.LoadResponse, error)
-	LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error)
+	// LoadVersion loads the specified version of name, or the latest version
+	// when version is nil.
+	LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error)
 }
 
 // Memory interface provides methods to access agent memory across the

@@ -15,8 +15,9 @@
 package workflow
 
 import (
+	"maps"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -86,11 +87,7 @@ func TestJoinNode_E2E_FanInThreeBranches(t *testing.T) {
 	drain(t, w.Run(mockCtx))
 
 	m, _ := seen.(map[string]any)
-	var seenKeys []string
-	for k := range m {
-		seenKeys = append(seenKeys, k)
-	}
-	sort.Strings(seenKeys)
+	seenKeys := slices.Sorted(maps.Keys(m))
 	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(seenKeys, want) {
 		t.Errorf("handler input keys = %v, want %v", seenKeys, want)
 	}

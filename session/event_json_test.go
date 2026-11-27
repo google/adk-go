@@ -17,7 +17,8 @@ package session_test
 import (
 	"context"
 	"encoding/json"
-	"sort"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -78,11 +79,7 @@ func TestEventJSONKeys(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("Unmarshal() failed: %v", err)
 	}
-	got := make([]string, 0, len(m))
-	for k := range m {
-		got = append(got, k)
-	}
-	sort.Strings(got)
+	got := slices.Sorted(maps.Keys(m))
 
 	want := []string{
 		"actions", "author", "avgLogprobs", "branch", "content", "errorCode",
@@ -106,11 +103,7 @@ func TestEventJSONOmitsEmpty(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("Unmarshal() failed: %v", err)
 	}
-	got := make([]string, 0, len(m))
-	for k := range m {
-		got = append(got, k)
-	}
-	sort.Strings(got)
+	got := slices.Sorted(maps.Keys(m))
 
 	want := []string{"actions", "author", "id", "invocationId", "timestamp"}
 	if diff := cmp.Diff(want, got); diff != "" {

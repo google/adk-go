@@ -156,9 +156,13 @@ func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 	// stalled Google Search call degrades to its fallback instead of
 	// hanging the pipeline. Search runs inside the Gemini model.
 	researcher := func(name, instruction, fallback string) (agent.Agent, error) {
+		rm, err := newResilientModel(m, callTimeout, callAttempts, fallback)
+		if err != nil {
+			return nil, err
+		}
 		return llmagent.New(llmagent.Config{
 			Name:        name,
-			Model:       newResilientModel(m, callTimeout, callAttempts, fallback),
+			Model:       rm,
 			Description: "researches one topic and returns a short summary",
 			Instruction: instruction,
 			Tools:       []tool.Tool{geminitool.GoogleSearch{}},
@@ -183,9 +187,13 @@ func newResearchPipeline(m model.LLM) (agent.Agent, error) {
 
 	// Synthesis does no Google Search, but is still wrapped so a stalled
 	// call fails open to a minimal report rather than hanging the run.
+	synthModel, err := newResilientModel(m, callTimeout, callAttempts, synthesisFallback)
+	if err != nil {
+		return nil, fmt.Errorf("creating synthesis model: %w", err)
+	}
 	synthAgent, err := llmagent.New(llmagent.Config{
 		Name:        synthesisAgent,
-		Model:       newResilientModel(m, callTimeout, callAttempts, synthesisFallback),
+		Model:       synthModel,
 		Description: "merges the research summaries into one structured report",
 		Instruction: synthesisInstruction,
 	})

@@ -241,7 +241,7 @@ func dumpSession(t *testing.T, sess session.Session) {
 	t.Helper()
 	events := sess.Events()
 	dump := make([]eventDump, 0, events.Len())
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		dump = append(dump, eventToDump(events.At(i)))
 	}
 	out, err := yaml.Marshal(dump)
@@ -1226,7 +1226,7 @@ func sessionEventsSnapshot(dr *delegationRunner) []*session.Event {
 	}
 	events := dr.sess.Events()
 	out := make([]*session.Event, 0, events.Len())
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		out = append(out, events.At(i))
 	}
 	return out

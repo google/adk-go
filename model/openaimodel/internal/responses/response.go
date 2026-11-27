@@ -40,7 +40,7 @@ func convertResponse(resp *oairesponses.Response) (*genai.GenerateContentRespons
 	}
 	return &genai.GenerateContentResponse{
 		Candidates:    []*genai.Candidate{candidate},
-		ModelVersion:  string(resp.Model),
+		ModelVersion:  resp.Model,
 		ResponseID:    resp.ID,
 		UsageMetadata: convertUsage(resp.Usage),
 	}, nil
@@ -303,19 +303,26 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	return ""
 }
 
+// convertUsage splits inclusive Responses output into disjoint genai candidate
+// and thought counts. Unlike adk-python's OpenAIResponsesLlm, it removes the
+// overlap so telemetry can sum the two without counting reasoning twice.
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
+	output := shared.SafeInt32(max(usage.OutputTokens, 0))
+	thoughts := min(shared.SafeInt32(max(usage.OutputTokensDetails.ReasoningTokens, 0)), output)
+	candidates := output - thoughts
+
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.InputTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.OutputTokens),
+		CandidatesTokenCount:    candidates,
 		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
 		CachedContentTokenCount: shared.SafeInt32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
 	}
 }
 

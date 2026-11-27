@@ -69,24 +69,41 @@ func TestArtifacts_WithLoadVersion(t *testing.T) {
 		SessionID: "testSession",
 	}
 
-	part := genai.NewPartFromText("test data")
-	_, err := a.Save(t.Context(), "testArtifact", part)
+	part0 := genai.NewPartFromText("test data")
+	saved0, err := a.Save(t.Context(), "testArtifact", part0)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-	part2 := genai.NewPartFromText("test data 2")
-	_, err = a.Save(t.Context(), "testArtifact", part2)
+	if saved0.Version != 0 {
+		t.Fatalf("first Save().Version = %d, want 0", saved0.Version)
+	}
+	part1 := genai.NewPartFromText("test data 2")
+	saved1, err := a.Save(t.Context(), "testArtifact", part1)
 	if err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
-
-	loadResp, err := a.LoadVersion(t.Context(), "testArtifact", 0)
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
+	if saved1.Version != 1 {
+		t.Fatalf("second Save().Version = %d, want 1", saved1.Version)
 	}
 
-	if diff := cmp.Diff(part2, loadResp.Part); diff != "" {
-		t.Errorf("Loaded part differs from saved part (-want +got):\n%s", diff)
+	for _, tc := range []struct {
+		name    string
+		version *int64
+		want    *genai.Part
+	}{
+		{name: "nil loads latest", version: nil, want: part1},
+		{name: "version 0 loads first save", version: new(int64(0)), want: part0},
+		{name: "version 1 loads second save", version: new(int64(1)), want: part1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loadResp, err := a.LoadVersion(t.Context(), "testArtifact", tc.version)
+			if err != nil {
+				t.Fatalf("LoadVersion() failed: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, loadResp.Part); diff != "" {
+				t.Errorf("Loaded part differs from saved part (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -104,21 +121,22 @@ func TestArtifacts_Errors(t *testing.T) {
 		t.Errorf("Load(\"nonExistentArtifact\") succeeded, want error")
 	}
 
-	// Attempt to LoadVersion non-existent artifact
-	_, err = a.LoadVersion(t.Context(), "nonExistentArtifact", 0)
-	if err == nil {
-		t.Errorf("LoadVersion(\"nonExistentArtifact\", 0) succeeded, want error")
+	// Attempt to LoadVersion non-existent artifact (latest and explicit version 0)
+	for _, version := range []*int64{nil, new(int64(0))} {
+		if _, err := a.LoadVersion(t.Context(), "nonExistentArtifact", version); err == nil {
+			t.Errorf("LoadVersion(\"nonExistentArtifact\", %v) succeeded, want error", version)
+		}
 	}
 
-	// Save an artifact to test LoadVersion with an invalid version
+	// Save an artifact once (version 0) to test out-of-range versions
 	part := genai.NewPartFromText("test data")
 	if _, err := a.Save(t.Context(), "existsArtifact", part); err != nil {
 		t.Fatalf("Save(\"existsArtifact\") failed: %v", err)
 	}
 
-	// Attempt to LoadVersion with a version number that doesn't exist
-	_, err = a.LoadVersion(t.Context(), "existsArtifact", 99)
-	if err == nil {
-		t.Errorf("LoadVersion(\"existsArtifact\", 99) succeeded, want error")
+	for _, invalidVer := range []int64{-1, 1, 99} {
+		if _, err := a.LoadVersion(t.Context(), "existsArtifact", new(invalidVer)); err == nil {
+			t.Errorf("LoadVersion(\"existsArtifact\", %d) succeeded, want error", invalidVer)
+		}
 	}
 }

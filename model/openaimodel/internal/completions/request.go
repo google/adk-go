@@ -48,9 +48,9 @@ func buildParams(modelName string, req *model.LLMRequest) (openai.ChatCompletion
 		return openai.ChatCompletionNewParams{}, shared.ErrRequestNil
 	}
 
-	params := openai.ChatCompletionNewParams{Model: oaishared.ChatModel(modelName)}
+	params := openai.ChatCompletionNewParams{Model: modelName}
 	if req.Model != "" {
-		params.Model = oaishared.ChatModel(req.Model)
+		params.Model = req.Model
 	}
 
 	messages, err := convertContents(req.Contents)

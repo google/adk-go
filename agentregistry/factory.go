@@ -92,8 +92,8 @@ func WithA2AHeaders(h map[string]string) RemoteAgentOption {
 
 // WithMCPHTTPClient sets the HTTP client used to reach the MCP server. It
 // overrides the default (an Application Default Credentials client for
-// *.googleapis.com endpoints, else [http.DefaultClient]). The default has no
-// timeout; bound egress on the client's Transport rather than via
+// https://*.googleapis.com endpoints, else [http.DefaultClient]). The default
+// has no timeout; bound egress on the client's Transport rather than via
 // http.Client.Timeout, which is a deadline over the whole request and would
 // truncate streaming responses.
 func WithMCPHTTPClient(c *http.Client) MCPToolsetOption {
@@ -122,15 +122,26 @@ func (c *Client) egressClient(rawURL string, ec egressConfig) *http.Client {
 	return clientWithHeaders(base, ec.headers)
 }
 
-// isGoogleAPI reports whether rawURL points at a Google API endpoint. It mirrors
-// adk-python's _is_google_api.
+// isGoogleAPI reports whether a request to rawURL goes, over TLS, to a DNS name
+// under googleapis.com. It follows adk-python's is_googleapis_url and is
+// stricter in one way: the host may hold only the characters of a DNS name.
+// That leaves out an IP address, whose IPv6 zone can end in the suffix while
+// the address is anyone's. A URL with userinfo is rejected, because HTTP
+// clients disagree on which host it names.
 func isGoogleAPI(rawURL string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || u.Scheme != "https" || u.User != nil {
 		return false
 	}
+	const suffix = ".googleapis.com"
 	host := u.Hostname()
-	return host == "googleapis.com" || strings.HasSuffix(host, ".googleapis.com")
+	for i := range len(host) {
+		if c := host[i]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	i := len(host) - len(suffix)
+	return i >= 0 && strings.EqualFold(host[i:], suffix)
 }
 
 // clientWithHeaders returns a client that adds or overwrites the given static
@@ -300,9 +311,9 @@ func toA2ASkills(skills []Skill) []a2a.AgentSkill {
 // streamable-HTTP MCP connection. name is the full MCP server resource name.
 //
 // The endpoint is resolved preferring the JSONRPC binding, then HTTP_JSON. By
-// default, requests to *.googleapis.com endpoints are authenticated with the
-// registry's Application Default Credentials; use [WithMCPHTTPClient] and/or
-// [WithMCPHeaders] to override or augment egress.
+// default, requests to https://*.googleapis.com endpoints are authenticated
+// with the registry's Application Default Credentials; use [WithMCPHTTPClient]
+// and/or [WithMCPHeaders] to override or augment egress.
 //
 // Callers must close the returned toolset as described in [mcptoolset.New].
 func (c *Client) MCPToolset(ctx context.Context, name string, opts ...MCPToolsetOption) (tool.Toolset, error) {

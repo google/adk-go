@@ -100,7 +100,7 @@ func (c *connectionRefresher) Close() error {
 		c.unlock()
 
 		if session != nil {
-			c.closeErr = session.Close()
+			c.closeErr = redactRedirectTarget(session.Close())
 		}
 	})
 	return c.closeErr
@@ -174,7 +174,10 @@ func (c *connectionRefresher) ListTools(ctx context.Context) ([]*mcp.Tool, error
 
 // withRetry executes fn with the current session, and if it fails, attempts to refresh
 // the connection and retry once. Returns the result, whether a reconnection occurred, and any error.
-func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.ClientSession) (T, error)) (T, bool, error) {
+func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.ClientSession) (T, error)) (_ T, _ bool, err error) {
+	// Every error of a call leaves through here, so a refused redirect's
+	// Location is stripped once, whichever step failed.
+	defer func() { err = redactRedirectTarget(err) }()
 	var zero T
 
 	session, err := c.getSession(ctx)
@@ -189,7 +192,9 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 		}
 		session, refreshErr := c.refreshConnection(ctx)
 		if refreshErr != nil {
-			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
+			// refreshErr is formatted, not wrapped, so the exit above cannot
+			// reach into it.
+			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, redactRedirectTarget(refreshErr))
 		}
 		result, err = fn(session)
 		return result, true, err
@@ -247,7 +252,7 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 			return c.session, nil
 		}
 		if err := c.session.Close(); err != nil {
-			log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
+			log.Printf("failed to close MCP session: %v", redactRedirectTarget(err)) //nolint:forbidigo // pre-slog call site
 		}
 		c.session = nil
 	}

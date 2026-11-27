@@ -70,6 +70,12 @@ func main() {
 		RAGResources: []*genai.VertexRAGStoreRAGResource{
 			{RAGCorpus: corpus},
 		},
+		RAGRetrievalConfig: &genai.RAGRetrievalConfig{
+			TopK: new(int32(3)),
+			HybridSearch: &genai.RAGRetrievalConfigHybridSearch{
+				Alpha: new(float32(0.1)),
+			},
+		},
 	})
 	if err != nil {
 		log.Fatalf("Failed to create RAG tool: %v", err)

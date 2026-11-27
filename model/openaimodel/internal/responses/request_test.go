@@ -52,7 +52,7 @@ func TestBuildParams_Text(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildParams() err = %v", err)
 	}
-	if got, want := string(params.Model), "gpt-4o-mini"; got != want {
+	if got, want := params.Model, "gpt-4o-mini"; got != want {
 		t.Fatalf("Model mismatch got=%q want=%q", got, want)
 	}
 	items := params.Input.OfInputItemList
@@ -1641,7 +1641,7 @@ func TestApplyGenerationConfig(t *testing.T) {
 				Temperature:     param.NewOpt(float64(float32(temp))),
 				TopP:            param.NewOpt(float64(float32(topP))),
 				MaxOutputTokens: param.NewOpt(int64(100)),
-				TopLogprobs:     param.NewOpt(int64(int32(logprobs))),
+				TopLogprobs:     param.NewOpt(int64(logprobs)),
 				Include:         []oairesponses.ResponseIncludable{oairesponses.ResponseIncludableMessageOutputTextLogprobs},
 				Instructions:    param.NewOpt("sys"),
 				Text: oairesponses.ResponseTextConfigParam{
@@ -2695,21 +2695,41 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 			},
 		},
 		{
-			// Sibling stripping runs before the object rewrite, so a $ref does
-			// not collect the three keys on the way past.
+			// Sibling stripping runs before the object rewrite, so a nested
+			// $ref does not collect the three keys on the way past.
 			name: "a $ref keeps no siblings even when it declares type object",
 			cfg: &genai.GenerateContentConfig{
 				ResponseJsonSchema: map[string]any{
 					"$defs": map[string]any{"x": map[string]any{"type": "object"}},
-					"$ref":  "#/$defs/x",
 					"type":  "object",
+					"properties": map[string]any{
+						"p": map[string]any{
+							"$ref": "#/$defs/x",
+							"type": "object",
+						},
+					},
 				},
 			},
 			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
 				Name:   "adk_response",
 				Strict: param.NewOpt(true),
 				Type:   constant.JSONSchema("json_schema"),
-				Schema: map[string]any{"$ref": "#/$defs/x"},
+				Schema: map[string]any{
+					"$defs": map[string]any{
+						"x": map[string]any{
+							"type":                 "object",
+							"properties":           map[string]any{},
+							"additionalProperties": false,
+							"required":             []string{},
+						},
+					},
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"p"},
+					"properties": map[string]any{
+						"p": map[string]any{"$ref": "#/$defs/x"},
+					},
+				},
 			},
 		},
 		{
@@ -2865,6 +2885,48 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 							"required":             []string{"g_string"},
 							"properties": map[string]any{
 								"g_string": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "with recursive root ref and defs",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"$ref": "#/$defs/Node",
+					"$defs": map[string]any{
+						"Node": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name": map[string]any{"type": "string"},
+								"next": map[string]any{"$ref": "#/$defs/Node"},
+							},
+						},
+					},
+				},
+			},
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "adk_response",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"name", "next"},
+					"properties": map[string]any{
+						"name": map[string]any{"type": "string"},
+						"next": map[string]any{"$ref": "#/$defs/Node"},
+					},
+					"$defs": map[string]any{
+						"Node": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"name", "next"},
+							"properties": map[string]any{
+								"name": map[string]any{"type": "string"},
+								"next": map[string]any{"$ref": "#/$defs/Node"},
 							},
 						},
 					},

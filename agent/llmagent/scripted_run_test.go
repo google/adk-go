@@ -41,6 +41,8 @@ type scriptedModel struct {
 
 func (m *scriptedModel) Name() string { return "scripted" }
 
+func (*scriptedModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *scriptedModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.mu.Lock()
