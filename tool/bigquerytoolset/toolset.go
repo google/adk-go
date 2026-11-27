@@ -48,11 +48,13 @@ var (
 	getJobInfoDescription string
 	//go:embed descriptions/execute_sql.txt
 	executeSQLDescription string
+	//go:embed descriptions/execute_sql_write_mode.txt
+	executeSQLWriteModeDescription string
 )
 
 // New returns a toolset with the BigQuery metadata tools, list_dataset_ids,
 // get_dataset_info, list_table_ids, get_table_info and get_job_info, and
-// execute_sql, which runs read-only queries.
+// execute_sql, which runs queries as [Config.WriteMode] allows.
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
@@ -81,6 +83,12 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 		maxRows:          maxRows,
 		maxBytesBilled:   cfg.MaximumBytesBilled,
 		labels:           maps.Clone(cfg.JobLabels),
+		writeMode:        cfg.WriteMode,
+		kmsKeyName:       cfg.KMSKeyName,
+	}
+	sqlDescription := executeSQLDescription
+	if cfg.WriteMode == WriteModeAllowed {
+		sqlDescription = executeSQLWriteModeDescription
 	}
 
 	var errs []error
@@ -89,7 +97,7 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 		return t
 	}
 	tools := []tool.Tool{
-		add(newTool(b, executeSQLName, executeSQLDescription, b.executeSQL)),
+		add(newTool(b, executeSQLName, sqlDescription, b.executeSQL)),
 		add(newTool(b, "get_dataset_info", getDatasetInfoDescription, b.getDatasetInfo)),
 		add(newTool(b, "get_job_info", getJobInfoDescription, b.getJobInfo)),
 		add(newTool(b, "get_table_info", getTableInfoDescription, b.getTableInfo)),
@@ -125,6 +133,8 @@ type bigQuery struct {
 	maxRows          int
 	maxBytesBilled   int64
 	labels           map[string]string
+	writeMode        WriteMode
+	kmsKeyName       string
 }
 
 func (b *bigQuery) project(id string) string { return orDefault(id, b.defaultProjectID) }
