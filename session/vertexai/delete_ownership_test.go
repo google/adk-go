@@ -46,6 +46,9 @@ type fakeSessions struct {
 	// appends counts AppendEvent RPCs, so a test can tell a backend error
 	// apart from a local short-circuit that never reached the server.
 	appends atomic.Int32
+	// listEvents counts ListEvents RPCs, so a test can tell whether Get read
+	// the session's events.
+	listEvents atomic.Int32
 }
 
 func (f *fakeSessions) GetSession(_ context.Context, req *aiplatformpb.GetSessionRequest) (*aiplatformpb.Session, error) {
@@ -62,6 +65,7 @@ func (f *fakeSessions) GetSession(_ context.Context, req *aiplatformpb.GetSessio
 }
 
 func (f *fakeSessions) ListEvents(_ context.Context, req *aiplatformpb.ListEventsRequest) (*aiplatformpb.ListEventsResponse, error) {
+	f.listEvents.Add(1)
 	// Get fetches the session and its events concurrently, so this has to agree
 	// with GetSession about which sessions exist. Leaving it unimplemented lets
 	// a gRPC Unimplemented error win the race and mask the real not-found.

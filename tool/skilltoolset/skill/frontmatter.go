@@ -32,6 +32,10 @@ import (
 var (
 	frontmatterSeparator    = []byte("---\n")
 	frontmatterSeparatorWin = []byte("---\r\n")
+	// frontmatterSeparatorAtEOF is the closing separator as the last line of
+	// a file without a final newline: ReadBytes returns a line without '\n'
+	// only at the end of the input.
+	frontmatterSeparatorAtEOF = []byte("---")
 )
 
 // Frontmatter represents the YAML metadata at the top of a SKILL.md file.
@@ -153,14 +157,20 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 	yamlBytes := bytes.Buffer{}
 	for {
 		line, err := r.ReadBytes('\n')
-		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("missing closing frontmatter separator line: must be '---' followed by a new line")
-		}
-		if err != nil {
+		atEOF := errors.Is(err, io.EOF)
+		if err != nil && !atEOF {
 			return nil, fmt.Errorf("read a line of frontmatter: %w", err)
 		}
-		if bytes.Equal(line, frontmatterSeparator) || bytes.Equal(line, frontmatterSeparatorWin) {
+		// The closing separator may also be the last line of a file that has
+		// no final newline, as adk-python accepts; the skill then has no
+		// instructions. Unlike adk-python, whitespace after it is still
+		// rejected.
+		if bytes.Equal(line, frontmatterSeparator) || bytes.Equal(line, frontmatterSeparatorWin) ||
+			bytes.Equal(line, frontmatterSeparatorAtEOF) {
 			break
+		}
+		if atEOF {
+			return nil, fmt.Errorf("missing closing frontmatter separator line: must be '---' on a line of its own")
 		}
 		yamlBytes.Write(line)
 	}

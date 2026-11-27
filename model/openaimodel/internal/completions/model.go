@@ -44,6 +44,21 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+func (m *Model) Capabilities() model.Capabilities {
+	return model.Capabilities{AcceptsOutputSchemaAndTools: true}
+}
+
+// RunHTTPOptions returns the fields of a run's HTTP options the Chat Completions
+// endpoint accepts; see shared.RunHTTPOptions.
+func (m *Model) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	return shared.RunHTTPOptions(opts)
+}
+
+// RunLabels returns no labels, because the Chat Completions API has no request
+// labels. The agent flow therefore merges none of a run's labels into a
+// request (see agent.RunConfig.Labels).
+func (m *Model) RunLabels(map[string]string) map[string]string { return nil }
+
 // GenerateContent converts a generic LLMRequest into a Chat Completions request
 // and calls the API, streaming or not.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -83,6 +98,7 @@ func (m *Model) generate(ctx context.Context, params openai.ChatCompletionNewPar
 			yield(nil, err)
 			return
 		}
+		traceInvalidUsage(ctx, resp.Usage)
 		llmResp := converters.Genai2LLMResponse(genaiResp)
 		attachMetadata(llmResp, resp)
 		yield(llmResp, nil)
@@ -168,7 +184,7 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 		if final == nil {
 			return
 		}
-		finalizeStreamResponse(final, completion, translator.usage)
+		finalizeStreamResponse(ctx, final, completion, translator.usage)
 		yield(final, nil)
 	}
 }
@@ -188,7 +204,7 @@ func functionCallParts(content *genai.Content) []*genai.Part {
 // reason or usage, so this is the one response that reports them: the finish
 // reason from the accumulated snapshot, and usage from the latest report, if
 // any arrived.
-func finalizeStreamResponse(final *model.LLMResponse, completion *openai.ChatCompletion, usage *openai.CompletionUsage) {
+func finalizeStreamResponse(ctx context.Context, final *model.LLMResponse, completion *openai.ChatCompletion, usage *openai.CompletionUsage) {
 	final.TurnComplete = true
 	// A provider that ignores stream_options reports no usage, and zeros would
 	// say a turn that did real work cost nothing; the Responses path leaves
@@ -196,6 +212,7 @@ func finalizeStreamResponse(final *model.LLMResponse, completion *openai.ChatCom
 	final.UsageMetadata = nil
 	if usage != nil {
 		final.UsageMetadata = convertUsage(*usage)
+		traceInvalidUsage(ctx, *usage)
 	}
 	if completion == nil {
 		return

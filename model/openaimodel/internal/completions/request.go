@@ -469,7 +469,7 @@ func applyGenerationConfig(params *openai.ChatCompletionNewParams, cfg *genai.Ge
 		}
 		params.ResponseFormat = *format
 	}
-	if cfg.Labels != nil {
+	if shared.HasUnsupportedLabels(cfg.Labels) {
 		return shared.ErrLabelsNotSupported
 	}
 	if cfg.SafetySettings != nil {

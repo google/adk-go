@@ -85,10 +85,10 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 	return func(yield func(T, error) bool) {
 		ctx, span := startGenerateContentSpan(ctx, params)
 		logRequest(ctx, params.Request, params.Backend)
-		details := operationDetails{span: span}
+		details := newOperationDetails(ctx, span)
 		details.noteLLMRequest(params.Request)
 
-		var result generateContentResult
+		result := generateContentResult{RequestModel: params.ModelName}
 		ended := false
 		end := func() {
 			if ended {
@@ -106,7 +106,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 			resp, eventID := response(v)
 			switch {
 			case legacy:
-				result = generateContentResult{Response: resp, EventID: eventID, Error: err}
+				result = generateContentResult{Response: resp, EventID: eventID, Error: err, RequestModel: params.ModelName}
 				if err != nil {
 					end()
 				} else if !resp.Partial {

@@ -15,8 +15,10 @@
 package agentregistry
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -24,7 +26,17 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/api/option/internaloption"
 	htransport "google.golang.org/api/transport"
+
+	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
 )
+
+// New builds its default client through the Google auth library, which loads
+// a client certificate when the shell running the tests turns one on, and
+// that can run a certificate helper installed on the machine.
+func TestMain(m *testing.M) {
+	clientcerttest.PinOff()
+	os.Exit(m.Run())
+}
 
 func TestNew_Validation(t *testing.T) {
 	tests := []struct {
@@ -88,6 +100,83 @@ func TestNew_WiresRestRequester(t *testing.T) {
 				t.Errorf("userProject = %q, want %q", rt.userProject, tc.wantUserProject)
 			}
 		})
+	}
+}
+
+// TestNewFollowsTheCertificateRule builds the ADC-backed client with a workload
+// client certificate configured. See [clientcerttest.Isolate] for why it runs
+// in a child process, and TestAPIOptions in internal/clientcert for why no
+// case sets GOOGLE_API_USE_CLIENT_CERTIFICATE to true.
+func TestNewFollowsTheCertificateRule(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	workload, der := clientcerttest.Workload(t)
+	srv, peers := clientcerttest.Server(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	clientcerttest.ADC(t)
+
+	unset := clientcerttest.Unset
+	for _, tc := range []struct {
+		name        string
+		useCert     string // GOOGLE_API_USE_CLIENT_CERTIFICATE
+		gcloud      string // CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE
+		mode        string
+		wantBaseURL string
+		wantCert    bool
+	}{
+		{name: "workload config", useCert: unset, gcloud: unset, wantBaseURL: "https://agentregistry.mtls.googleapis.com/v1", wantCert: true},
+		{name: "gcloud's variable", useCert: unset, gcloud: "true", wantBaseURL: baseURLMTLS, wantCert: true},
+		{name: "never keeps the standard endpoint and the certificate", useCert: unset, gcloud: unset, mode: "never", wantBaseURL: baseURLProd, wantCert: true},
+		{name: "false", useCert: "false", gcloud: unset, wantBaseURL: baseURLProd},
+		{name: "gcloud's variable false", useCert: unset, gcloud: "false", wantBaseURL: baseURLProd},
+		{name: "always without a certificate", useCert: "false", gcloud: unset, mode: "always", wantBaseURL: baseURLMTLS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", tc.useCert)
+			clientcerttest.Setenv(t, "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", tc.gcloud)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", tc.mode)
+
+			c, err := New(t.Context(), Config{ProjectID: "my-project", Location: "us-central1"})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if got := c.requester.(*restRequester).baseURL; got != tc.wantBaseURL {
+				t.Errorf("baseURL = %q, want %q", got, tc.wantBaseURL)
+			}
+
+			before := len(peers())
+			resp, err := c.httpClient.Get(srv.URL)
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			_ = resp.Body.Close()
+			got := peers()[before:]
+			if !tc.wantCert {
+				if len(got) != 0 {
+					t.Errorf("server saw %d client certificates, want none", len(got))
+				}
+				return
+			}
+			if len(got) != 1 || !bytes.Equal(got[0], der) {
+				t.Errorf("server saw %d client certificates, want exactly the configured one", len(got))
+			}
+		})
+	}
+}
+
+// TestNewReportsABrokenCertificateConfig runs in a child process so that a
+// New that went on past the error would find only the test's files.
+func TestNewReportsABrokenCertificateConfig(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	clientcerttest.ADC(t)
+	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+	t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", clientcerttest.BrokenWorkload(t))
+
+	if c, err := New(t.Context(), Config{ProjectID: "my-project", Location: "us-central1"}); err == nil {
+		t.Fatalf("New() = %+v, nil error; want an error for a workload section without paths", c)
 	}
 }
 

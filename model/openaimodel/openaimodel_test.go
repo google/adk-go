@@ -15,18 +15,25 @@
 package openaimodel
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3/option"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -220,6 +227,132 @@ var completedBodies = map[API]string{
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`,
 }
 
+func TestGenerateContentReasoningUsage(t *testing.T) {
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	tests := []struct {
+		name           string
+		details        string
+		prompt         int32
+		output         int32
+		total          int32
+		chatOnly       bool
+		wantUnknown    bool // a negative count makes the whole usage unknown
+		wantCandidates int32
+		wantThoughts   int32
+	}{
+		{name: "reasoning", details: `{"reasoning_tokens":38}`, prompt: 20, output: 50, total: 70, wantCandidates: 12, wantThoughts: 38},
+		{name: "no_reasoning_details", prompt: 20, output: 50, total: 70, wantCandidates: 50},
+		{name: "all_reasoning", details: `{"reasoning_tokens":50}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
+		{name: "reasoning_exceeds_output", details: `{"reasoning_tokens":60}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
+		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, prompt: 20, output: 50, total: 69, wantUnknown: true},
+		{name: "negative_output", prompt: 20, output: -1, total: 19, wantUnknown: true},
+		{name: "separate_reasoning_tokens", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, total: 135, chatOnly: true, wantCandidates: 9, wantThoughts: 94},
+		{name: "separate_reasoning_tokens_negative_output", details: `{"reasoning_tokens":94}`, prompt: 32, output: -1, total: 125, wantUnknown: true},
+		{name: "separate_reasoning_tokens_negative_prompt", details: `{"reasoning_tokens":94}`, prompt: -1, output: 9, total: 102, wantUnknown: true},
+		{name: "separate_reasoning_tokens_zero_total", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, wantThoughts: 9},
+	}
+	for _, api := range []API{APIChatCompletions, APIResponses} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", api, stream), func(t *testing.T) {
+				for _, tt := range tests {
+					if tt.chatOnly && api != APIChatCompletions {
+						continue
+					}
+					t.Run(tt.name, func(t *testing.T) {
+						body, contentType := reasoningUsageResponse(api, stream, tt.prompt, tt.output, tt.total, tt.details)
+						client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"Content-Type": []string{contentType}},
+								Body:       io.NopCloser(strings.NewReader(body)),
+								Request:    r,
+							}, nil
+						})}
+						llm, err := NewModel(t.Context(), "o4-mini", &ClientConfig{
+							APIKey: "test", API: api, HTTPClient: client,
+						})
+						if err != nil {
+							t.Fatalf("NewModel() err = %v", err)
+						}
+						req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+						spans := tracetest.NewSpanRecorder()
+						telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+						params := telemetry.GenerateContentParams{ModelName: llm.Name(), Request: req, Stream: stream}
+						call := telemetry.InstrumentGenerateContent(t.Context(), params,
+							func(resp *model.LLMResponse) (*model.LLMResponse, string) { return resp, "" },
+							func(ctx context.Context) iter.Seq2[*model.LLMResponse, error] {
+								return llm.GenerateContent(ctx, req, stream)
+							})
+						var usage *genai.GenerateContentResponseUsageMetadata
+						for resp, err := range call {
+							if err != nil {
+								t.Fatalf("GenerateContent() err = %v", err)
+							}
+							usage = resp.UsageMetadata
+						}
+						if tt.wantUnknown {
+							if usage != nil {
+								t.Errorf("UsageMetadata = %+v, want nil", usage)
+							}
+							return
+						}
+						if usage == nil {
+							t.Fatal("final response has no usage metadata")
+						}
+						if usage.CandidatesTokenCount != tt.wantCandidates || usage.ThoughtsTokenCount != tt.wantThoughts {
+							t.Errorf("candidate and thought tokens = (%d, %d), want (%d, %d)", usage.CandidatesTokenCount, usage.ThoughtsTokenCount, tt.wantCandidates, tt.wantThoughts)
+						}
+						details := usage.CandidatesTokensDetails
+						if len(details) != 1 || details[0] == nil || details[0].Modality != genai.MediaModalityText || details[0].TokenCount != tt.wantCandidates {
+							t.Errorf("want one text candidate detail with %d tokens", tt.wantCandidates)
+						}
+						if usage.PromptTokenCount != tt.prompt || usage.CachedContentTokenCount != 5 || usage.TotalTokenCount != tt.total {
+							t.Errorf("prompt, cached and total tokens = (%d, %d, %d), want (%d, 5, %d)", usage.PromptTokenCount, usage.CachedContentTokenCount, usage.TotalTokenCount, tt.prompt, tt.total)
+						}
+						ended := spans.Ended()
+						if len(ended) != 1 {
+							t.Fatalf("ended spans = %d, want 1", len(ended))
+						}
+						for _, attr := range ended[0].Attributes() {
+							if attr.Key == "gen_ai.usage.output_tokens" {
+								want := int64(tt.wantCandidates + tt.wantThoughts)
+								if got := attr.Value.AsInt64(); got != want {
+									t.Errorf("gen_ai.usage.output_tokens = %d, want %d", got, want)
+								}
+								return
+							}
+						}
+						t.Error("span has no gen_ai.usage.output_tokens attribute")
+					})
+				}
+			})
+		}
+	}
+}
+
+func reasoningUsageResponse(api API, stream bool, inputTokens, outputTokens, totalTokens int32, details string) (body, contentType string) {
+	input, output := "input", "output"
+	if api == APIChatCompletions {
+		input, output = "prompt", "completion"
+	}
+	usage := fmt.Sprintf(`"usage":{"%s_tokens":%d,"%s_tokens":%d,"total_tokens":%d,"%s_tokens_details":{"cached_tokens":5}`, input, inputTokens, output, outputTokens, totalTokens, input)
+	if details != "" {
+		usage += fmt.Sprintf(`,"%s_tokens_details":%s`, output, details)
+	}
+	usage += "}"
+	completed := strings.TrimSuffix(completedBodies[api], "}") + "," + usage + "}"
+	if !stream {
+		return completed, "application/json"
+	}
+	if api == APIResponses {
+		return `data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+			`data: {"type":"response.completed","response":` + completed + "}\n\n", "text/event-stream"
+	}
+	return `data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}` + "\n\n" +
+		`data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+		`data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[],` + usage + "}\n\ndata: [DONE]\n\n", "text/event-stream"
+}
+
 // TestNewModel_UsesTheConfiguredClient pins that NewModel hands
 // ClientConfig.HTTPClient and ClientConfig.Options to the SDK. The configured
 // client answers in memory, while BaseURL points at a server that fails every
@@ -269,6 +402,93 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 	}
 }
 
+func TestNewModel_Capabilities(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			if !llm.Capabilities().AcceptsOutputSchemaAndTools {
+				t.Error("Capabilities().AcceptsOutputSchemaAndTools = false, want true")
+			}
+		})
+	}
+}
+
+// TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly checks, on both APIs, that
+// the adk_agent_name label the flow adds to every request is accepted and never
+// sent, while a label the caller set, or an empty labels map, is still refused
+// before any request leaves.
+func TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		labels  map[string]string
+		wantErr error
+	}{
+		{name: "adk_label_only", labels: map[string]string{"adk_agent_name": "my_agent"}},
+		{name: "adk_and_user_label", labels: map[string]string{"adk_agent_name": "my_agent", "env": "prod"}, wantErr: ErrLabelsNotSupported},
+		{name: "empty_map", labels: map[string]string{}, wantErr: ErrLabelsNotSupported},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/%s", api, tt.name), func(t *testing.T) {
+				var requestBody []byte
+				server := newLoopbackServer(t, func(w http.ResponseWriter, r *http.Request) {
+					var err error
+					if requestBody, err = io.ReadAll(r.Body); err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, completedBodies[api])
+				})
+				llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+					APIKey:     "test",
+					BaseURL:    server.URL + "/v1",
+					HTTPClient: server.Client(),
+					API:        api,
+				})
+				if err != nil {
+					t.Fatalf("NewModel() err = %v", err)
+				}
+				req := &model.LLMRequest{
+					Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+					Config:   &genai.GenerateContentConfig{Labels: tt.labels},
+				}
+				var gotErr error
+				for _, err := range llm.GenerateContent(t.Context(), req, false) {
+					if err != nil {
+						gotErr = err
+					}
+				}
+				if tt.wantErr != nil {
+					if !errors.Is(gotErr, tt.wantErr) {
+						t.Errorf("GenerateContent() err = %v, want %v", gotErr, tt.wantErr)
+					}
+					if requestBody != nil {
+						t.Error("a request reached the server, want it refused before sending")
+					}
+					return
+				}
+				if gotErr != nil {
+					t.Fatalf("GenerateContent() err = %v", gotErr)
+				}
+				if requestBody == nil {
+					t.Fatal("no request reached the server")
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(requestBody, &payload); err != nil {
+					t.Fatalf("json.Unmarshal(request body) err = %v", err)
+				}
+				if v, ok := payload["labels"]; ok {
+					t.Errorf("request body carries labels %v, want none", v)
+				}
+			})
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -289,4 +509,66 @@ func redact(v string) string {
 		return "empty"
 	}
 	return fmt.Sprintf("<%d-byte value>", len(v))
+}
+
+// TestRunHTTPOptions_KeepsTimeoutAndHeaders checks, on both APIs, that the
+// agent flow is given only the fields of a run's HTTP options these models
+// accept, so that RetryOptions, ExtraBody or a zero Timeout set for every
+// agent of a run do not make an OpenAI request fail.
+func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
+	opts := &genai.HTTPOptions{
+		Timeout:      genai.Ptr(2 * time.Second),
+		Headers:      http.Header{"X-Run": {"run"}},
+		BaseURL:      "https://proxy.example",
+		RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)},
+		ExtraBody:    map[string]any{"k": "v"},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(model.RunHTTPOptionsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.RunHTTPOptionsFilter", llm)
+			}
+			want := &genai.HTTPOptions{Timeout: genai.Ptr(2 * time.Second), Headers: http.Header{"X-Run": {"run"}}}
+			if diff := cmp.Diff(want, filter.RunHTTPOptions(opts)); diff != "" {
+				t.Errorf("RunHTTPOptions() mismatch (-want +got):\n%s", diff)
+			}
+			if got := filter.RunHTTPOptions(&genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}); got != nil {
+				t.Errorf("RunHTTPOptions(ExtraBody only) = %+v, want nil", got)
+			}
+			zeroTimeout := &genai.HTTPOptions{Timeout: genai.Ptr(time.Duration(0)), Headers: http.Header{"X-Run": {"run"}}}
+			if diff := cmp.Diff(&genai.HTTPOptions{Headers: http.Header{"X-Run": {"run"}}}, filter.RunHTTPOptions(zeroTimeout)); diff != "" {
+				t.Errorf("RunHTTPOptions(zero Timeout) mismatch (-want +got):\n%s", diff)
+			}
+			if got := filter.RunHTTPOptions(&genai.HTTPOptions{Timeout: genai.Ptr(time.Duration(0))}); got != nil {
+				t.Errorf("RunHTTPOptions(zero Timeout only) = %+v, want nil", got)
+			}
+		})
+	}
+}
+
+// TestRunLabels_DropsAll checks, on both APIs, that the agent flow is given
+// none of a run's labels for an OpenAI agent, so labels set for every agent of
+// a run do not make an OpenAI request fail, as adk-python's OpenAI models
+// ignore labels.
+func TestRunLabels_DropsAll(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(model.RunLabelsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.RunLabelsFilter", llm)
+			}
+			if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
+				t.Errorf("RunLabels() = %v, want nil", got)
+			}
+		})
+	}
 }

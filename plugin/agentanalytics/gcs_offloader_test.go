@@ -335,6 +335,7 @@ func TestGCSOffloader_CanceledContext(t *testing.T) {
 }
 
 func TestIsPreconditionFailed(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		err  error
@@ -357,6 +358,7 @@ func TestIsPreconditionFailed(t *testing.T) {
 }
 
 func TestGCSObjectPath(t *testing.T) {
+	runInParallel(t)
 	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	eastern := time.FixedZone("UTC-5", -5*60*60)
 	tests := []struct {
@@ -635,6 +637,7 @@ func (b *barrier) wait() error {
 }
 
 func TestResolveUploads_RewritesTheEntries(t *testing.T) {
+	runInParallel(t)
 	text := "SECRET-TEXT-MARKER" + strings.Repeat("-", 100)
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50},
 		&genai.Content{Role: "user", Parts: []*genai.Part{
@@ -689,6 +692,7 @@ func TestResolveUploads_RewritesTheEntries(t *testing.T) {
 }
 
 func TestResolveUploads_Authorizer(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name         string
 		connectionID string
@@ -838,6 +842,7 @@ func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
 }
 
 func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
+	runInParallel(t)
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(1), imageContent(2), imageContent(3))
 	off := &fakeOffloader{hook: func(_ context.Context, req GCSUploadRequest) error {
 		if strings.Contains(req.Path, "_c1_") {
@@ -859,6 +864,7 @@ func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
 }
 
 func TestResolveUploads_UploadsHaveADeadline(t *testing.T) {
+	runInParallel(t)
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(1))
 	off := &fakeOffloader{}
 	bp := &batchProcessor{config: Config{GCSOffloader: off}}
@@ -878,6 +884,7 @@ func TestResolveUploads_UploadsHaveADeadline(t *testing.T) {
 }
 
 func TestResolveUploads_ConcurrencyIsBounded(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name  string
 		limit int
@@ -925,6 +932,7 @@ func TestResolveUploads_ConcurrencyIsBounded(t *testing.T) {
 }
 
 func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
+	runInParallel(t)
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(1))
 	opts := partsOptions{maxLen: 1000}
 	want := queuedRow(opts, imageContent(1))[columnContentParts]
@@ -952,6 +960,7 @@ func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
 }
 
 func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
+	runInParallel(t)
 	plain := map[string]any{"event_type": "X", columnContentParts: []map[string]any{{"part_index": 0}}}
 	// Pending uploads that name an entry which is not there are skipped.
 	outOfRange := map[string]any{
@@ -978,6 +987,7 @@ func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
 }
 
 func TestBatchProcessor_ObjectPath(t *testing.T) {
+	runInParallel(t)
 	bp := &batchProcessor{config: Config{GCSPathPrefix: "p"}}
 	u := pendingUpload{contentOrd: 2, partIdx: 3, mimeType: "image/jpeg"}
 
@@ -1061,6 +1071,7 @@ func inlineImagePart(index int64) map[string]any {
 var ignoreDeadlines = cmpopts.IgnoreFields(uploadAttempt{}, "HasDeadline", "Remaining")
 
 func TestGCSOffloading_HybridInlineAndGCSReference(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 		c.GCSPathPrefix = "logs/"
@@ -1139,6 +1150,7 @@ func TestGCSOffloading_HybridInlineAndGCSReference(t *testing.T) {
 }
 
 func TestGCSOffloading_WithoutAnOffloaderEverythingStaysInline(t *testing.T) {
+	runInParallel(t)
 	// A small MaxInlineTextSize alone does not turn offloading on.
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxInlineTextSize = 10 })
 	longText := strings.Repeat("x", 100)
@@ -1161,6 +1173,7 @@ func TestGCSOffloading_WithoutAnOffloaderEverythingStaysInline(t *testing.T) {
 }
 
 func TestGCSOffloading_ContentFormatterRunsBeforeTheUpload(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 		c.MaxInlineTextSize = 20
@@ -1198,6 +1211,7 @@ func TestGCSOffloading_ContentFormatterRunsBeforeTheUpload(t *testing.T) {
 }
 
 func TestGCSOffloading_UploadFailureKeepsThePartsInline(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error {
 		return errors.New("storage unavailable: SECRET-ERR-MARKER")
 	}}
@@ -1234,6 +1248,7 @@ func TestGCSOffloading_UploadFailureKeepsThePartsInline(t *testing.T) {
 }
 
 func TestGCSOffloading_FailedUploadOfCutTextKeepsTheCut(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error { return errors.New("storage unavailable") }}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 		c.MaxContentLen = 50
@@ -1253,6 +1268,7 @@ func TestGCSOffloading_FailedUploadOfCutTextKeepsTheCut(t *testing.T) {
 }
 
 func TestGCSOffloading_TextCutByMaxContentLenIsOffloadedInFull(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	// The text is within the inline limit, but a row cannot keep all of it
 	// inline: MaxContentLen would cut it.
@@ -1275,6 +1291,7 @@ func TestGCSOffloading_TextCutByMaxContentLenIsOffloadedInFull(t *testing.T) {
 }
 
 func TestGCSOffloading_RowsWithoutContentUploadNothing(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, nil)
 	// An LLM_ERROR row has no content, although the request holds an image.
@@ -1302,6 +1319,7 @@ func TestGCSOffloading_RowsWithoutContentUploadNothing(t *testing.T) {
 }
 
 func TestGCSOffloading_PanickingOffloaderLosesNoRows(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error { panic("PANIC-MARKER") }}
 	logger := &recordingLogger{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) { c.Logger = logger })
@@ -1322,6 +1340,7 @@ func TestGCSOffloading_PanickingOffloaderLosesNoRows(t *testing.T) {
 }
 
 func TestGCSOffloading_ObjectNamesTellTheMessagesApart(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, nil)
 	// Every message has its image at part index 0. A nil message keeps its
@@ -1354,6 +1373,7 @@ func TestGCSOffloading_ObjectNamesTellTheMessagesApart(t *testing.T) {
 // on another goroutine. Run with -race, the test fails if the row, or the
 // payload queued with it, still shares memory with the caller.
 func TestGCSOffloading_CallerChangesItsMessagesWhileRowsAreWritten(t *testing.T) {
+	runInParallel(t)
 	var passes atomic.Int64
 	off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error {
 		// Hold the upload until the caller has been at work on its messages
@@ -1433,6 +1453,7 @@ func TestGCSOffloading_CallerChangesItsMessagesWhileRowsAreWritten(t *testing.T)
 }
 
 func TestGCSOffloading_ManyCallersAndFlushes(t *testing.T) {
+	runInParallel(t)
 	const goroutines, perGoroutine = 6, 20
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
@@ -1631,6 +1652,7 @@ func TestGCSOffloading_OffloaderCreationFailureClosesTheWriteClient(t *testing.T
 }
 
 func TestExtensionForMIME(t *testing.T) {
+	runInParallel(t)
 	// What the MIME tables of the host say is up to the host, so these types
 	// are made up. One has an extension that is unsafe in an object name,
 	// which sorts first, and one that is safe; the other has only an unsafe
@@ -1687,6 +1709,7 @@ func TestExtensionForMIME(t *testing.T) {
 }
 
 func TestIsSafeExtension(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		ext  string
 		want bool
@@ -1730,6 +1753,7 @@ func TestIsSafeExtension(t *testing.T) {
 }
 
 func TestPathSegment(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name, id, want string
 	}{
@@ -1765,6 +1789,7 @@ func TestPathSegment(t *testing.T) {
 }
 
 func TestCleanGCSPrefix(t *testing.T) {
+	runInParallel(t)
 	// "aa" and 260 three-byte runes (782 bytes): the cut at 402 bytes falls
 	// inside the 134th rune and backs up to 401 bytes.
 	cjk := "aa" + strings.Repeat("日", 260)
@@ -1850,6 +1875,7 @@ func TestCleanGCSPrefix(t *testing.T) {
 }
 
 func TestTextPreview(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name, text, want string
 	}{
@@ -1880,6 +1906,7 @@ func TestTextPreview(t *testing.T) {
 }
 
 func TestObjectRef(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name       string
 		authorizer string
@@ -1906,6 +1933,7 @@ func TestObjectRef(t *testing.T) {
 }
 
 func TestGCSMetadataDetails(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		contentType string
 		size        int
@@ -1957,6 +1985,7 @@ func newAddContentPlugin(t *testing.T, mutate func(*Config)) *analyticsPlugin {
 // the property that the race test checks with one: once addContent has
 // returned, nothing in the row shares memory with the caller's message.
 func TestAddContent_QueuedPayloadsAreCopies(t *testing.T) {
+	runInParallel(t)
 	p := newAddContentPlugin(t, func(c *Config) {
 		c.GCSOffloader = &fakeOffloader{}
 		c.MaxInlineTextSize = 10
@@ -1988,6 +2017,7 @@ func TestAddContent_QueuedPayloadsAreCopies(t *testing.T) {
 }
 
 func TestAddContent_QueuesOnlyWhenOffloading(t *testing.T) {
+	runInParallel(t)
 	longText := strings.Repeat("x", 50)
 	long := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: longText}, {InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}}}
 	short := textContent("user", "short")
@@ -2055,6 +2085,7 @@ func TestAddContent_QueuesOnlyWhenOffloading(t *testing.T) {
 // TestLLMRequestContent_ContentOrdinals checks the numbers that tell apart the
 // objects of the messages of a request.
 func TestLLMRequestContent_ContentOrdinals(t *testing.T) {
+	runInParallel(t)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{imageContent(1), nil, imageContent(3)},
 		Config:   &genai.GenerateContentConfig{SystemInstruction: imageContent(4)},
@@ -2078,6 +2109,7 @@ func TestLLMRequestContent_ContentOrdinals(t *testing.T) {
 // TestLLMRequestContent_Redaction checks that the summaries are redacted
 // whenever the caller asks for it, with or without a parts collector.
 func TestLLMRequestContent_Redaction(t *testing.T) {
+	runInParallel(t)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "call it with api_key=SECRET123"}}}},
 		Config: &genai.GenerateContentConfig{
@@ -2163,6 +2195,7 @@ func TestGCSOffloading_CloseReportsTheCloseErrors(t *testing.T) {
 // content_parts of a row are redacted exactly when the plugin is configured to
 // redact: the collector of the parts is given the setting of the plugin.
 func TestAddContent_PartAttributesFollowTheRedactionSetting(t *testing.T) {
+	runInParallel(t)
 	const secret = "sk-test-secret-value"
 	tests := []struct {
 		name       string
@@ -2207,6 +2240,7 @@ func TestAddContent_PartAttributesFollowTheRedactionSetting(t *testing.T) {
 // truncated when nothing but its content_parts lost content. The content
 // column of these messages is a short summary that is never cut.
 func TestAddContent_TruncatedPartsMarkTheRow(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name string
 		part *genai.Part
@@ -2250,6 +2284,7 @@ func TestAddContent_TruncatedPartsMarkTheRow(t *testing.T) {
 // expects for that case from the constant, so it cannot notice the constant
 // changing.
 func TestResolveUploads_DefaultConcurrencyIsEight(t *testing.T) {
+	runInParallel(t)
 	const want = 8
 	contents := make([]*genai.Content, 12)
 	for i := range contents {
@@ -2289,6 +2324,7 @@ func TestResolveUploads_DefaultConcurrencyIsEight(t *testing.T) {
 // when MaxInlineTextSize is not set: text of 32 KiB stays in the row, and one
 // byte more is queued for upload.
 func TestAddContent_DefaultInlineLimitIs32KiB(t *testing.T) {
+	runInParallel(t)
 	tests := []struct {
 		name       string
 		size       int
@@ -2318,6 +2354,7 @@ func TestAddContent_DefaultInlineLimitIs32KiB(t *testing.T) {
 // of the offloading, and which values select them: any value that is not
 // positive does.
 func TestApplyDefaults_GCSLimits(t *testing.T) {
+	runInParallel(t)
 	const (
 		wantInline  = 32 * 1024
 		wantUploads = 8
@@ -2375,6 +2412,7 @@ func TestApplyDefaults_GCSLimits(t *testing.T) {
 }
 
 func TestGCSOffloading_RedactsSensitiveJSONBeforeUpload(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{}
 	p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 		c.MaxInlineTextSize = 20
@@ -2397,7 +2435,9 @@ func TestGCSOffloading_RedactsSensitiveJSONBeforeUpload(t *testing.T) {
 }
 
 func TestGCSOffloading_OmitsOffloadedTextFromContentSummary(t *testing.T) {
+	t.Parallel()
 	t.Run("successful upload omits offloaded text from USER_MESSAGE_RECEIVED and LLM_REQUEST summaries", func(t *testing.T) {
+		runInParallel(t)
 		off := &fakeOffloader{}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 			c.MaxInlineTextSize = 40
@@ -2444,6 +2484,7 @@ func TestGCSOffloading_OmitsOffloadedTextFromContentSummary(t *testing.T) {
 	})
 
 	t.Run("successful upload omits offloaded text from LLM_RESPONSE while keeping non-text parts and usage", func(t *testing.T) {
+		runInParallel(t)
 		off := &fakeOffloader{}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 			c.MaxInlineTextSize = 40
@@ -2482,6 +2523,7 @@ func TestGCSOffloading_OmitsOffloadedTextFromContentSummary(t *testing.T) {
 	})
 
 	t.Run("failed upload retains truncated inline text in summary and marks row truncated", func(t *testing.T) {
+		runInParallel(t)
 		off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error { return errors.New("boom") }}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 			c.MaxInlineTextSize = 40
@@ -2524,6 +2566,7 @@ func TestGCSOffloading_OmitsOffloadedTextFromContentSummary(t *testing.T) {
 	})
 
 	t.Run("batch of large offloaded texts keeps AppendRows request small", func(t *testing.T) {
+		runInParallel(t)
 		off := &fakeOffloader{}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 			c.MaxInlineTextSize = 1024
@@ -2553,6 +2596,7 @@ func TestGCSOffloading_OmitsOffloadedTextFromContentSummary(t *testing.T) {
 	})
 
 	t.Run("batch of 100 LLM_RESPONSE rows with 300 KiB offloaded text stays well below 20 MB", func(t *testing.T) {
+		runInParallel(t)
 		off := &fakeOffloader{}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
 			c.BatchSize = 100
@@ -2678,6 +2722,7 @@ func TestResolveUploads_BatchLevelUploadTimeout(t *testing.T) {
 }
 
 func TestGCSOffloading_PendingUploadBytesCap(t *testing.T) {
+	runInParallel(t)
 	logger := &recordingLogger{}
 	bp := &batchProcessor{
 		config:                Config{GCSOffloader: &fakeOffloader{}, BatchSize: 100, Logger: logger},
@@ -2849,6 +2894,7 @@ func TestGCSOffloading_RunEndsStopWaitingOnceStorageTimesOut(t *testing.T) {
 }
 
 func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
+	runInParallel(t)
 	for _, tt := range []struct {
 		name           string
 		stalledBatch   int
@@ -2933,6 +2979,7 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 // an upload succeeded, so the uploads are not paused, and the next batch,
 // which a later run-end flush writes, uploads its part.
 func TestGCSOffloading_RunEndOwnDeadlineErrorBeforeTheDeadlineDoesNotPause(t *testing.T) {
+	runInParallel(t)
 	synctest.Test(t, func(t *testing.T) {
 		off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
 			switch req.Data[0] {
@@ -3073,6 +3120,7 @@ func TestGCSOffloading_CloseDuringStorageStallKeepsRows(t *testing.T) {
 }
 
 func TestGCSOffloading_FailedUploadPreservesJSONPrefixInSummary(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(context.Context, GCSUploadRequest) error {
 		return errors.New("boom")
 	}}
@@ -3103,6 +3151,7 @@ func TestGCSOffloading_FailedUploadPreservesJSONPrefixInSummary(t *testing.T) {
 }
 
 func TestGCSOffloading_PreservesBracketLedProse(t *testing.T) {
+	runInParallel(t)
 	t.Run("non-sensitive bracket-led prose is offloaded intact", func(t *testing.T) {
 		off := &fakeOffloader{}
 		p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
@@ -3735,6 +3784,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 }
 
 func TestGCSOffloading_ConfigurablePendingUploadBytesCap(t *testing.T) {
+	runInParallel(t)
 	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             &fakeOffloader{},
@@ -3777,6 +3827,7 @@ func (l *panicOnBudgetLogger) Printf(format string, v ...any) {
 }
 
 func TestGCSOffloading_BuildRowPanicReleasesReservedBytes(t *testing.T) {
+	runInParallel(t)
 	logger := &panicOnBudgetLogger{}
 	bp := &batchProcessor{
 		config: applyDefaults(Config{
@@ -4273,6 +4324,7 @@ func probeRowWithOptions(t *testing.T, opts partsOptions, contents ...*genai.Con
 // deferred via requeueDeferredUploads, and then uploads successfully on retry,
 // the row's final is_truncated and content match a one-pass successful upload.
 func TestGCSOffloading_DeferredTextRetryTruncationFlag(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		if stalled.Load() {
@@ -4405,6 +4457,7 @@ func TestResolveUploads_PartialOutageBrownoutPausesUploads(t *testing.T) {
 }
 
 func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
@@ -4557,6 +4610,7 @@ func TestResolveUploads_ConcurrencyLimitedBrownoutPausesUploads(t *testing.T) {
 }
 
 func TestGCSOffloading_FailedMultiAttributeUploadTruncatedFlag(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		return errors.New("gcs failure")
 	}}
@@ -4667,6 +4721,7 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 // the rotation-cooldown early-drop branch, uses an always-panicking Logger,
 // calls Close, recovers the panic, and asserts that pendingUploadBytes is 0.
 func TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes(t *testing.T) {
+	runInParallel(t)
 	ctx := context.Background()
 	off := &fakeOffloader{}
 	quietLogger := &recordingLogger{}
@@ -4722,6 +4777,7 @@ func TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes(t *testing.T
 }
 
 func TestGCSOffloading_CloseLogsFinalFailureOfBackgroundFlushUploadItCancels(t *testing.T) {
+	runInParallel(t)
 	requests := make(chan *storagepb.AppendRowsRequest, 8)
 	wc := newScriptedWriteClient(t, &fakeBigQueryWriteServer{requests: requests})
 
@@ -4896,6 +4952,7 @@ func (reproPanicLogger) Printf(format string, _ ...any) {
 func (reproPanicLogger) Println(...any) {}
 
 func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T) {
+	runInParallel(t)
 	newProcessor := func(off GCSContentOffloader, capBytes int64) *batchProcessor {
 		return &batchProcessor{
 			config: applyDefaults(Config{
@@ -4997,6 +5054,7 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 }
 
 func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	bp := &batchProcessor{
@@ -5040,6 +5098,7 @@ func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 }
 
 func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
+	runInParallel(t)
 	// resolveUploads consumed rawPartsKey (releasing the queued payload
 	// reservations) but the deferred upload (deferredUploadsKey) still holds
 	// its 64-byte reservation per row. releaseRowUploads drops a row via
@@ -5096,6 +5155,7 @@ func (l *callbackRaceLogger) Printf(string, ...any) { l.n.Add(1) }
 func (l *callbackRaceLogger) Println(...any)        { l.n.Add(1) }
 
 func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -5145,6 +5205,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 }
 
 func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testing.T) {
+	runInParallel(t)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -5283,6 +5344,7 @@ func uploadFailureLines(l *recordingLogger) []string {
 // retry if the upload is requeued for the next flush, and as final if it is
 // dropped.
 func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
+	runInParallel(t)
 	const failure = "agentanalytics: GCS upload failed for event ev-deferred part 0 (3 bytes): context deadline exceeded; keeping the part inline"
 	tests := []struct {
 		name    string
@@ -5373,6 +5435,7 @@ func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *tes
 // before any of their failures is logged, so that a Logger that panics on the
 // first of them leaks none.
 func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
@@ -5400,6 +5463,7 @@ func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 // the failures of the deferred uploads are logged, so that a Logger that
 // panics on the first of them leaves no row without its uploads.
 func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
@@ -5439,6 +5503,7 @@ func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
 // and of its deferred uploads, before the failures of the deferred uploads are
 // logged, so that a Logger that panics on the first of them leaks nothing.
 func TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
@@ -5632,6 +5697,7 @@ func (s *scriptedWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRo
 // flushes is deferred, as one that a depleted deadline cuts short is, so that
 // a requeued batch retries it.
 func TestResolveUploads_CanceledCallerContextDefersUploads(t *testing.T) {
+	runInParallel(t)
 	started := make(chan struct{})
 	var calls atomic.Int32
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
@@ -5859,6 +5925,7 @@ func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *
 // the batch, so that a Logger that panics on their failures leaves every
 // reservation with a row that holds it.
 func TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics(t *testing.T) {
+	runInParallel(t)
 	var stalled atomic.Bool
 	stalled.Store(true)
 	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
@@ -6559,6 +6626,7 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 }
 
 func TestGCSPathPrefix_RewriteWarningAndDisjointNamespace(t *testing.T) {
+	runInParallel(t)
 	countWarnings := func(l *recordingLogger) int {
 		l.mu.Lock()
 		defer l.mu.Unlock()
@@ -6874,6 +6942,7 @@ func TestBatchProcessor_ObjectPathCachesEffectivePrefix(t *testing.T) {
 }
 
 func TestGCSOffload_RewrittenPrefixFitsHierarchicalNamespaceFolderLimit(t *testing.T) {
+	runInParallel(t)
 	for _, n := range []int{402, 403, 467} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
 			prefix := strings.Repeat("a", n-1) + "~"

@@ -45,6 +45,8 @@ type slowModel struct {
 
 func (m *slowModel) Name() string { return "slow-mock" }
 
+func (*slowModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *slowModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++

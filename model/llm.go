@@ -22,10 +22,69 @@ import (
 	"google.golang.org/genai"
 )
 
-// LLM provides the access to the underlying LLM.
+// LLM provides access to an underlying language model.
 type LLM interface {
 	Name() string
+	// Capabilities reports the resolved capabilities of this model instance.
+	// Implementations must be safe for concurrent use and must not mutate the
+	// model or have observable side effects.
+	Capabilities() Capabilities
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
+}
+
+// Capabilities holds the resolved capabilities of an [LLM] instance.
+//
+// Each field reports whether the model supports a specific optional feature.
+// The zero value (Capabilities{}) indicates that none of the optional
+// capabilities are supported. Capabilities is a value type and is safe for
+// concurrent use.
+type Capabilities struct {
+	// AcceptsOutputSchemaAndTools reports whether the model accepts a native
+	// output schema (GenerateContentConfig.ResponseSchema) together with tools
+	// in the same request.
+	//
+	// When false and an agent configures both an output schema and tools (or
+	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
+	// request config and instead instructs the model to return its structured
+	// answer through a synthetic function tool. When an agent has no tools,
+	// ADK still sends the output schema natively.
+	AcceptsOutputSchemaAndTools bool
+}
+
+// RunHTTPOptionsFilter is implemented by an LLM that cannot send every field
+// of genai.HTTPOptions. Before the agent flow merges agent.RunConfig.HTTPOptions
+// into a request for such a model, it replaces them with what RunHTTPOptions
+// returns, so that options set for every agent of a run do not make the model
+// refuse the request. HTTP options from the agent's own GenerateContentConfig
+// are not filtered, and the model still validates them.
+//
+// The agent flow looks for RunHTTPOptionsFilter on the agent's model only. A
+// model that wraps another LLM implements it by forwarding to the wrapped model
+// when that model implements it; otherwise the wrapped model receives the
+// run's HTTP options unfiltered.
+//
+// RunHTTPOptions must not modify opts, and returns nil when nothing of opts is
+// left. It may return values that share maps and pointers with opts.
+type RunHTTPOptionsFilter interface {
+	RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions
+}
+
+// RunLabelsFilter is implemented by an LLM that cannot send every request
+// label. Before the agent flow merges agent.RunConfig.Labels into a request for
+// such a model, it replaces them with what RunLabels returns, so that labels
+// set for every agent of a run do not make the model refuse the request. Labels
+// from the agent's own GenerateContentConfig are not filtered, and the model
+// still validates them.
+//
+// The agent flow looks for RunLabelsFilter on the agent's model only. A model
+// that wraps another LLM implements it by forwarding to the wrapped model when
+// that model implements it; otherwise the wrapped model receives the run's
+// labels unfiltered.
+//
+// RunLabels must not modify labels. It may return labels itself, or nil when
+// none is left.
+type RunLabelsFilter interface {
+	RunLabels(labels map[string]string) map[string]string
 }
 
 // LLMRequest is the raw LLM request.
@@ -53,8 +112,13 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content                              `json:"content,omitempty"`
-	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	Content          *genai.Content          `json:"content,omitempty"`
+	CitationMetadata *genai.CitationMetadata `json:"citationMetadata,omitempty"`
+	// GroundingMetadata is the grounding metadata of the model's first
+	// candidate. The Gemini model leaves it nil on a candidate that has no
+	// content parts and a finish reason other than STOP, including no finish
+	// reason. When streaming, the final non-partial response carries the last
+	// grounding metadata kept from the stream's chunks.
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`
@@ -82,4 +146,37 @@ type LLMResponse struct {
 	// this response, set when the request had a CacheConfig. Only complete
 	// responses carry it, not partial streaming chunks.
 	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
+}
+
+// FunctionCalls returns an iterator over the FunctionCall of each part of
+// r.Content that has one, in part order. Nil entries in r.Content.Parts are
+// skipped, and the iterator yields nothing when r or r.Content is nil. It
+// yields the pointers stored in r.Content, not copies.
+func (r *LLMResponse) FunctionCalls() iter.Seq[*genai.FunctionCall] {
+	return func(yield func(*genai.FunctionCall) bool) {
+		if r == nil || r.Content == nil {
+			return
+		}
+		for _, p := range r.Content.Parts {
+			if p != nil && p.FunctionCall != nil && !yield(p.FunctionCall) {
+				return
+			}
+		}
+	}
+}
+
+// FunctionResponses returns an iterator over the FunctionResponse of each part
+// of r.Content that has one, in part order, under the same rules as
+// FunctionCalls.
+func (r *LLMResponse) FunctionResponses() iter.Seq[*genai.FunctionResponse] {
+	return func(yield func(*genai.FunctionResponse) bool) {
+		if r == nil || r.Content == nil {
+			return
+		}
+		for _, p := range r.Content.Parts {
+			if p != nil && p.FunctionResponse != nil && !yield(p.FunctionResponse) {
+				return
+			}
+		}
+	}
 }

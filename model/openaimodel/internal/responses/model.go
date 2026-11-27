@@ -45,6 +45,21 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+func (m *Model) Capabilities() model.Capabilities {
+	return model.Capabilities{AcceptsOutputSchemaAndTools: true}
+}
+
+// RunHTTPOptions returns the fields of a run's HTTP options the Responses
+// endpoint accepts; see shared.RunHTTPOptions.
+func (m *Model) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	return shared.RunHTTPOptions(opts)
+}
+
+// RunLabels returns no labels, because the Responses API has no request
+// labels. The agent flow therefore merges none of a run's labels into a
+// request (see agent.RunConfig.Labels).
+func (m *Model) RunLabels(map[string]string) map[string]string { return nil }
+
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -85,6 +100,7 @@ func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewPar
 			yield(nil, err)
 			return
 		}
+		traceInvalidUsage(ctx, resp.Usage)
 		llmResp := converters.Genai2LLMResponse(genaiResp)
 		attachMetadata(llmResp, resp)
 		attachFinishSignal(llmResp, resp, false)
@@ -239,7 +255,7 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			trace.SpanFromContext(ctx).AddEvent("openai.terminal_response_conversion_failed",
 				trace.WithAttributes(attribute.String("error.type", errorType)))
 		}
-		finalizeStreamResponse(final, term)
+		finalizeStreamResponse(ctx, final, term)
 		yield(final, nil)
 	}
 }
@@ -497,7 +513,7 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 // OpenAI response is in reach — hence the fields copied here, which are what
 // let a streamed turn report what the same turn reports unstreamed. An erroring
 // stream never arrives: the error ends the turn in place of TurnComplete.
-func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
+func finalizeStreamResponse(ctx context.Context, final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
@@ -513,6 +529,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	}
 	// term.seen implies term.resp != nil.
 	final.UsageMetadata = convertUsage(term.resp.Usage)
+	traceInvalidUsage(ctx, term.resp.Usage)
 	final.FinishReason = finishReason(term.resp, term.incomplete)
 	final.LogprobsResult = logprobsFor(term.resp, shared.AnswerText(final.Content))
 	attachFinishSignal(final, term.resp, term.incomplete)

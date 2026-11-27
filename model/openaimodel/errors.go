@@ -40,7 +40,9 @@ var (
 	ErrMultipleCandidatesNotSupported = shared.ErrMultipleCandidatesNotSupported
 	// ErrPenaltiesNotSupported is returned when frequency/presence penalties are used with the Responses API, which does not support them.
 	ErrPenaltiesNotSupported = shared.ErrPenaltiesNotSupported
-	// ErrLabelsNotSupported is returned when request labels are used, which is not supported.
+	// ErrLabelsNotSupported is returned when the request carries a label other than
+	// the ADK agent-name label (adk_agent_name), which is ignored, or an empty
+	// non-nil labels map. Neither OpenAI API has request labels.
 	ErrLabelsNotSupported = shared.ErrLabelsNotSupported
 	// ErrSafetySettingsNotSupported is returned when Gemini safety settings are used, which is not supported.
 	ErrSafetySettingsNotSupported = shared.ErrSafetySettingsNotSupported

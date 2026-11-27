@@ -17,7 +17,10 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"maps"
+	"net/http"
 	"reflect"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -43,6 +46,18 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 			req.Config = &genai.GenerateContentConfig{}
 		}
 
+		if rc := ctx.RunConfig(); rc != nil {
+			if runHTTP := runHTTPOptionsFor(state.Model, rc.HTTPOptions); runHTTP != nil {
+				mergeRunConfigHTTPOptions(req.Config, runHTTP)
+			}
+			if labels := runLabelsFor(state.Model, rc.Labels); len(labels) > 0 {
+				if req.Config.Labels == nil {
+					req.Config.Labels = make(map[string]string, len(labels))
+				}
+				maps.Copy(req.Config.Labels, labels)
+			}
+		}
+
 		// Set OutputSchema directly if no tools are present or native combo support exists.
 		// Otherwise, OutputSchemaRequestProcessor will be used to provide a tool-based workaround.
 		//
@@ -50,8 +65,8 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// structured output for tasks is collected via the FinishTaskTool's
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
-		if state.Mode != ModeTask && !needOutputSchemaProcessor(state) {
-			if schema := outputSchemaFor(ctx, state); schema != nil {
+		if state.Mode != ModeTask {
+			if schema := outputSchemaFor(ctx, state); schema != nil && !needOutputSchemaProcessor(state) {
 				req.Config.ResponseSchema = schema
 				req.Config.ResponseMIMEType = "application/json"
 			}
@@ -60,6 +75,82 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// TODO: missing features
 		//  populate LLMRequest LiveConnectConfig setting
 	}
+}
+
+// runHTTPOptionsFor returns the part of the run's HTTP options opts to merge
+// into a request for llm: all of opts, or what llm keeps of them as a
+// model.RunHTTPOptionsFilter.
+func runHTTPOptionsFor(llm model.LLM, opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts == nil {
+		return nil
+	}
+	if f, ok := llm.(model.RunHTTPOptionsFilter); ok {
+		return f.RunHTTPOptions(opts)
+	}
+	return opts
+}
+
+// runLabelsFor returns the run's labels to merge into a request for llm: all
+// of *labels, or what llm keeps of them as a model.RunLabelsFilter. It returns
+// nil for nil labels.
+func runLabelsFor(llm model.LLM, labels *map[string]string) map[string]string {
+	if labels == nil {
+		return nil
+	}
+	if f, ok := llm.(model.RunLabelsFilter); ok {
+		return f.RunLabels(*labels)
+	}
+	return *labels
+}
+
+// mergeRunConfigHTTPOptions merges the invocation's RunConfig.HTTPOptions into
+// cfg.HTTPOptions, following adk-python's _merge_run_config_http_options
+// (flows/llm_flows/basic.py:36-60). cfg must be a per-request copy; runHTTP is
+// never written, and nothing mutable from it is shared with cfg.
+//
+// When the agent sets no HTTPOptions, the request gets a copy of runHTTP,
+// BaseURL and APIVersion included. Otherwise only the request-time fields
+// (Headers, Timeout, RetryOptions, ExtraBody) are merged, and the agent's
+// BaseURL and APIVersion stay: adk-python drops runHTTP's BaseURL and
+// APIVersion in that case, and ADK keeps that behavior.
+func mergeRunConfigHTTPOptions(cfg *genai.GenerateContentConfig, runHTTP *genai.HTTPOptions) {
+	if cfg.HTTPOptions == nil {
+		cfg.HTTPOptions = clone(runHTTP)
+		cfg.HTTPOptions.Headers = canonicalizeHeaders(cfg.HTTPOptions.Headers)
+		return
+	}
+	cfg.HTTPOptions.Headers = canonicalizeHeaders(cfg.HTTPOptions.Headers)
+	if len(runHTTP.Headers) > 0 {
+		if cfg.HTTPOptions.Headers == nil {
+			cfg.HTTPOptions.Headers = make(http.Header, len(runHTTP.Headers))
+		}
+		for k, vals := range runHTTP.Headers {
+			cfg.HTTPOptions.Headers[http.CanonicalHeaderKey(k)] = slices.Clone(vals)
+		}
+	}
+	if runHTTP.Timeout != nil {
+		cfg.HTTPOptions.Timeout = clone(runHTTP.Timeout)
+	}
+	if runHTTP.RetryOptions != nil {
+		cfg.HTTPOptions.RetryOptions = clone(runHTTP.RetryOptions)
+	}
+	if runHTTP.ExtraBody != nil {
+		cfg.HTTPOptions.ExtraBody = clone(runHTTP.ExtraBody)
+	}
+}
+
+// canonicalizeHeaders returns a copy of h with every name in
+// http.CanonicalHeaderKey form, so names that differ only in case collapse to
+// one header. It returns nil for nil.
+func canonicalizeHeaders(h http.Header) http.Header {
+	if h == nil {
+		return nil
+	}
+	out := make(http.Header, len(h))
+	for k, vals := range h {
+		out[http.CanonicalHeaderKey(k)] = slices.Clone(vals)
+	}
+	return out
 }
 
 // CloneGenerateContentConfig returns a copy of cfg, or nil for nil, so callers
@@ -104,44 +195,73 @@ func clone[M any](src M) M {
 	return newVal.Interface().(M)
 }
 
-// deepCopy copies src to dst using reflect.
+// deepCopy copies src to dst using reflect. dst must be settable and hold
+// either the zero value of src's type or a shallow copy of src. Structs,
+// pointers, slices and maps are copied recursively; values of every other
+// kind, including interfaces and arrays, are assigned, so what an interface
+// holds stays shared.
+//
+// It writes into dst in place and copies slices of assigned kinds, such as
+// []byte, with one reflect.Copy, so it allocates only the pointers, slices
+// and maps of the copy, not a temporary per field, element or byte.
 func deepCopy(src, dst reflect.Value) {
 	switch src.Kind() {
 	case reflect.Struct:
-		t := src.Type()
+		// Assign every field, then replace the ones that need a deep copy.
+		dst.Set(src)
 		for i := range src.NumField() {
-			if !t.Field(i).IsExported() {
+			// dst is settable, so its field is settable exactly when the
+			// field is exported.
+			field := dst.Field(i)
+			if !field.CanSet() {
+				t := src.Type()
 				panic(fmt.Sprintf("deepCopy: unexported field %q in type %q", t.Field(i).Name, t.Name()))
 			}
-			// Create a copy of the field and set it on the destination struct
-			fieldCopy := reflect.New(src.Field(i).Type()).Elem()
-			deepCopy(src.Field(i), fieldCopy)
-			dst.Field(i).Set(fieldCopy)
+			if !assignedKind(field.Kind()) {
+				deepCopy(src.Field(i), field)
+			}
 		}
 	case reflect.Slice:
 		if src.IsNil() {
 			return
 		}
-		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
-		for i := range src.Len() {
-			// Create a copy of each element and set it in the new slice
-			elemCopy := reflect.New(src.Index(i).Type()).Elem()
-			deepCopy(src.Index(i), elemCopy)
-			dst.Index(i).Set(elemCopy)
+		s := reflect.MakeSlice(src.Type(), src.Len(), src.Cap())
+		if assignedKind(src.Type().Elem().Kind()) {
+			reflect.Copy(s, src)
+		} else {
+			for i := range src.Len() {
+				deepCopy(src.Index(i), s.Index(i))
+			}
 		}
+		dst.Set(s)
 	case reflect.Map:
 		if src.IsNil() {
 			return
 		}
-		dst.Set(reflect.MakeMap(src.Type()))
-		for _, key := range src.MapKeys() {
-			// Create copies of the key and value and set them in the new map
-			keyCopy := reflect.New(key.Type()).Elem()
-			deepCopy(key, keyCopy)
-			valCopy := reflect.New(src.MapIndex(key).Type()).Elem()
-			deepCopy(src.MapIndex(key), valCopy)
-			dst.SetMapIndex(keyCopy, valCopy)
+		t := src.Type()
+		m := reflect.MakeMapWithSize(t, src.Len())
+		// Copies of the key and value of each entry; SetMapIndex stores
+		// its own copies of them, so they are reused.
+		key, val := reflect.New(t.Key()).Elem(), reflect.New(t.Elem()).Elem()
+		deepKey, deepVal := !assignedKind(t.Key().Kind()), !assignedKind(t.Elem().Kind())
+		var iter reflect.MapIter
+		iter.Reset(src)
+		for iter.Next() {
+			if deepKey {
+				key.SetZero()
+				deepCopy(iter.Key(), key)
+			} else {
+				key.SetIterKey(&iter)
+			}
+			if deepVal {
+				val.SetZero()
+				deepCopy(iter.Value(), val)
+			} else {
+				val.SetIterValue(&iter)
+			}
+			m.SetMapIndex(key, val)
 		}
+		dst.Set(m)
 	case reflect.Pointer:
 		if src.IsNil() {
 			return
@@ -154,4 +274,14 @@ func deepCopy(src, dst reflect.Value) {
 		// For basic types, direct assignment is sufficient
 		dst.Set(src)
 	}
+}
+
+// assignedKind reports whether deepCopy copies values of kind k by plain
+// assignment.
+func assignedKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Struct, reflect.Slice, reflect.Map, reflect.Pointer:
+		return false
+	}
+	return true
 }

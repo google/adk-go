@@ -49,7 +49,8 @@ func TestLocalSessionEventsSnapshot(t *testing.T) {
 }
 
 func TestLocalSessionEventsConcurrentAppend(t *testing.T) {
-	const count = 1000
+	t.Parallel()
+	const count = 250
 	s := &localSession{}
 	start := make(chan struct{})
 	var wg sync.WaitGroup

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -56,11 +57,23 @@ var (
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
-var tracerProvider = otel.GetTracerProvider()
+var defaultTracerProvider = otel.GetTracerProvider()
+
+// tracerOverride is atomic because goroutines a test leaves behind, such as a
+// live session's tool calls, can still be starting spans when the next test
+// swaps the provider.
+var tracerOverride atomic.Pointer[trace.TracerProvider]
+
+func tracerProvider() trace.TracerProvider {
+	if tp := tracerOverride.Load(); tp != nil {
+		return *tp
+	}
+	return defaultTracerProvider
+}
 
 // tracer is looked up per use, since the schema URL follows the env.
 func tracer() trace.Tracer {
-	return tracerProvider.Tracer(
+	return tracerProvider().Tracer(
 		systemName,
 		trace.WithInstrumentationVersion(version.Version),
 		trace.WithSchemaURL(schemaURL()),
@@ -77,9 +90,8 @@ func schemaURL() string {
 
 // OverrideTracerForTesting makes tracing use tp until the test ends.
 func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
-	original := tracerProvider
-	tracerProvider = tp
-	t.Cleanup(func() { tracerProvider = original })
+	original := tracerOverride.Swap(&tp)
+	t.Cleanup(func() { tracerOverride.Store(original) })
 }
 
 type TraceAgentResultParams struct {
@@ -141,6 +153,9 @@ type generateContentResult struct {
 	// Responses are every response of the call, in order, ending with
 	// Response. Nil means Response alone. The legacy schema reads only Response.
 	Responses []*model.LLMResponse
+	// RequestModel is the model name requested for the call, used as a
+	// fallback for gen_ai.response.model when no response reports ModelVersion.
+	RequestModel string
 }
 
 func (r generateContentResult) responses() []*model.LLMResponse {
@@ -148,6 +163,24 @@ func (r generateContentResult) responses() []*model.LLMResponse {
 		return []*model.LLMResponse{r.Response}
 	}
 	return r.Responses
+}
+
+// responseModel returns the latest non-empty ModelVersion reported by the
+// response(s), falling back to RequestModel when none is reported, matching
+// adk-python's _response_model.
+func (r generateContentResult) responseModel() string {
+	if useLegacySchema() {
+		if r.Response != nil && r.Response.ModelVersion != "" {
+			return r.Response.ModelVersion
+		}
+		return r.RequestModel
+	}
+	for _, response := range slices.Backward(r.responses()) {
+		if response.ModelVersion != "" {
+			return response.ModelVersion
+		}
+	}
+	return r.RequestModel
 }
 
 // usage is the token usage of the latest response that reports any, as a
@@ -167,6 +200,9 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 
 // traceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func traceGenerateContentResult(span trace.Span, params generateContentResult) {
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, params.Error)
 	span.SetAttributes(generateContentResultAttributes(params)...)
 	if captureContentOnSpans() {
@@ -194,6 +230,9 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 		return attrs
 	}
 	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
+	if model := params.responseModel(); model != "" {
+		attrs = append(attrs, semconv.GenAIResponseModel(model))
+	}
 	if u := params.usage(); u != nil {
 		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
@@ -247,6 +286,11 @@ type TraceToolResultParams struct {
 
 // TraceToolResult records the tool execution events.
 func TraceToolResult(span trace.Span, params TraceToolResultParams) {
+	// A span that does not record drops all of it, the serialized response
+	// included.
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, params.Error)
 
 	attributes := []attribute.KeyValue{
@@ -358,6 +402,11 @@ func StartTrace(ctx context.Context, traceName string) (context.Context, trace.S
 
 // TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
 func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event, err error) {
+	// A span that does not record drops all of it, the serialized event
+	// included.
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, err)
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),
