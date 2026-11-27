@@ -1,5 +1,95 @@
 # Changelog
 
+## [2.9.0](https://github.com/google/adk-go/compare/v2.8.0...v2.9.0) (2026-11-27)
+
+
+### Features
+
+* **adkrest:** list artifact versions over REST ([#2473](https://github.com/google/adk-go/issues/2473)) ([fea9549](https://github.com/google/adk-go/commit/fea95495a9f55d13536e03e0230f247c63e10adb))
+* **agent:** merge RunConfig HTTP options and labels into model requests, and label requests with the agent name ([#2475](https://github.com/google/adk-go/issues/2475)) ([02368df](https://github.com/google/adk-go/commit/02368df10c8e85a7de6b5e6502fff7dbe5c0e4f0))
+* **auth/gcp:** follow adk-python's client certificate rule and select the mTLS endpoints ([#2408](https://github.com/google/adk-go/issues/2408)) ([8ce0838](https://github.com/google/adk-go/commit/8ce0838cdc58387e8725238ac091c4b4c6882c7f))
+* **exp:** add fallbackmodel, a port of adk-python's FallbackModel ([#2553](https://github.com/google/adk-go/issues/2553)) ([084b0c3](https://github.com/google/adk-go/commit/084b0c3fd1b716cbb2701157805dffef90a7775c))
+* **llmagent,loadartifactstool:** add OutputArtifact and versioned artifact loading ([#1688](https://github.com/google/adk-go/issues/1688)) ([4de6a96](https://github.com/google/adk-go/commit/4de6a9667904f8fbc885950098525cd306f39e51))
+* **mcptoolset,remoteagent:** present the client certificate to Google API hosts ([#2418](https://github.com/google/adk-go/issues/2418)) ([7abba56](https://github.com/google/adk-go/commit/7abba5655551d344b8ec4c56a92f3578631bcf4c))
+* **model/gemini:** add context cache lifecycle management for agent sessions ([#1951](https://github.com/google/adk-go/issues/1951)) ([3156d7b](https://github.com/google/adk-go/commit/3156d7b86a40deaba0af3d60c4f084accda936a3))
+* **model/gemini:** trace context cache actions and failures ([#2419](https://github.com/google/adk-go/issues/2419)) ([29465f6](https://github.com/google/adk-go/commit/29465f6d392a6775079447b66f0c11cc03f890a6))
+* **model:** add Capabilities() to model.LLM for output schema with tools ([#2492](https://github.com/google/adk-go/issues/2492)) ([eb2f354](https://github.com/google/adk-go/commit/eb2f3543f45debd5d8fb4b1e6ce2ae32824bb720))
+* **model:** add function call, function response and code result accessors to LLMResponse ([#2479](https://github.com/google/adk-go/issues/2479)) ([ca6c64e](https://github.com/google/adk-go/commit/ca6c64e922b5f093a8177ea9adf4b7e49528c9eb))
+* **session:** add NodeInfo.Name, RunID and ParentRunID ([#2480](https://github.com/google/adk-go/issues/2480)) ([90450b1](https://github.com/google/adk-go/commit/90450b1874de4f9462680ab2bacfd3f5a8ce03b7))
+* **skill_registy:** Skill registry support ([#1732](https://github.com/google/adk-go/issues/1732)) ([6b4c6d5](https://github.com/google/adk-go/commit/6b4c6d558c3794da5a7ff2a1423a6263405ddd53))
+* **sqlitememory:** add SQLite event storage ([#2564](https://github.com/google/adk-go/issues/2564)) ([3d10eb6](https://github.com/google/adk-go/commit/3d10eb629b3a470d055ee6e45aa9e675ada1d924))
+* **sqlitememory:** add SQLite memory search ([#2579](https://github.com/google/adk-go/issues/2579)) ([573d448](https://github.com/google/adk-go/commit/573d448ba281711f985b3dfb3e6a05205d1782bd))
+* **tool/bigquerytoolset:** add execute_sql in read-only mode ([#2209](https://github.com/google/adk-go/issues/2209)) ([f2b4f99](https://github.com/google/adk-go/commit/f2b4f99ba02110a8de39f81db60b3ed9a14baf2a))
+* **tool/skilltoolset/skill/gcsskill:** add Cloud Storage skill source ([#2384](https://github.com/google/adk-go/issues/2384)) ([012af4d](https://github.com/google/adk-go/commit/012af4d94fb0ad67713180a4233d63c5fd520d1c))
+* **tool/skilltoolset/skill:** add an in-memory skill source ([#2395](https://github.com/google/adk-go/issues/2395)) ([3559cd8](https://github.com/google/adk-go/commit/3559cd80a15608605f9113a89c9826ac899e53dd))
+* **tool/skilltoolset/skill:** let a file-system listing skip invalid skills ([#2390](https://github.com/google/adk-go/issues/2390)) ([0b6973c](https://github.com/google/adk-go/commit/0b6973ca52816e887f0f4a5e3adc7060996deb2f))
+* **toolcallintegrityplugin:** added support for ToolCallIntegrityPlugin ([#2280](https://github.com/google/adk-go/issues/2280)) ([bfb63ad](https://github.com/google/adk-go/commit/bfb63ada27c1cb546a2ff48861d45a60b9f4b76a))
+* **version:** report the hosting runtime in tracking headers ([#2457](https://github.com/google/adk-go/issues/2457)) ([3a53b39](https://github.com/google/adk-go/commit/3a53b396b622cb4e3768957d1b9d8f93c801136b))
+* **vertexairagtool:** expose RAG retrieval configuration ([#2324](https://github.com/google/adk-go/issues/2324)) ([b289e33](https://github.com/google/adk-go/commit/b289e334241085f59f76b096e8f0682f16f6e76b))
+
+
+### Bug Fixes
+
+* **adka2a:** order task history chronologically for input-required tasks ([#2407](https://github.com/google/adk-go/issues/2407)) ([4a56d9f](https://github.com/google/adk-go/commit/4a56d9f2addcf9896a4104538119f561c59eedeb))
+* **adkrest:** reject runtime-only fields in create-session events ([#1995](https://github.com/google/adk-go/issues/1995)) ([57c6bd8](https://github.com/google/adk-go/commit/57c6bd80dc6a981e2db426fecb33adc139e509ac))
+* **agentengine:** preserve events without content ([#2140](https://github.com/google/adk-go/issues/2140)) ([7cb18f2](https://github.com/google/adk-go/commit/7cb18f28d5a21054e08deb43d8cfb4404586f353))
+* **agentregistry:** authenticate MCP egress only to Google API hosts ([#2476](https://github.com/google/adk-go/issues/2476)) ([754138b](https://github.com/google/adk-go/commit/754138be96daa9a6d51d6e152e99ba56c889f7cf))
+* **agenttool:** keep code artifacts out of structured replies ([#2468](https://github.com/google/adk-go/issues/2468)) ([df0eec1](https://github.com/google/adk-go/commit/df0eec19d3c58812e7efa41531f193b72e4279b6))
+* **anthropicmodel:** serialize tool schemas with a stable key order ([#2556](https://github.com/google/adk-go/issues/2556)) ([505e487](https://github.com/google/adk-go/commit/505e4873efa52540329f4f942fe9e2cb7ed54a5b))
+* **anthropic:** update default model configuration ([#2486](https://github.com/google/adk-go/issues/2486)) ([ed17582](https://github.com/google/adk-go/commit/ed1758224eea3315507619446f3fc79e6d5ac25a))
+* **artifact:** number artifact versions from 0 and use *int64 for optional versions ([#2411](https://github.com/google/adk-go/issues/2411)) ([8cacb10](https://github.com/google/adk-go/commit/8cacb10e0feec3f7f086f8b34d23838f9d86ba00))
+* **auth:** keep the ID token exchange out of SDK debug logs ([#2396](https://github.com/google/adk-go/issues/2396)) ([f01ccf8](https://github.com/google/adk-go/commit/f01ccf8724d45c25e6d0a0edac01a04945f3d147))
+* **configurable:** require opt-in for stdio MCP configs ([#2497](https://github.com/google/adk-go/issues/2497)) ([97864da](https://github.com/google/adk-go/commit/97864da015410867e1cbc8a981123077066aec41))
+* **deps:** bump gorilla/websocket past GO-2026-6278 ([#2567](https://github.com/google/adk-go/issues/2567)) ([881ee33](https://github.com/google/adk-go/commit/881ee33ad2c8edf91987f2268dcddd240b3059bc))
+* drop null parts from REST requests and skip nil parts on read ([#1769](https://github.com/google/adk-go/issues/1769)) ([dcb7ad9](https://github.com/google/adk-go/commit/dcb7ad905225ff7027fa97b0156073dfd6770d74))
+* **instructionutil:** resolve placeholders from callback and tool contexts ([#2401](https://github.com/google/adk-go/issues/2401)) ([4a734d2](https://github.com/google/adk-go/commit/4a734d2b0167600c5c5ec675611ec0c3269543a5)), closes [#2399](https://github.com/google/adk-go/issues/2399)
+* **live:** send tracking headers on live connections ([#2369](https://github.com/google/adk-go/issues/2369)) ([126ad4e](https://github.com/google/adk-go/commit/126ad4e816ca9ef1b6deb53adb766f30cb7c6303)), closes [#2365](https://github.com/google/adk-go/issues/2365)
+* **llminternal:** accept Unicode identifier characters in instruction state names ([#2334](https://github.com/google/adk-go/issues/2334)) ([534f30b](https://github.com/google/adk-go/commit/534f30b654787ac6fff386adac223be83c686eca))
+* **llminternal:** don't replay history into a resumed live session ([#2370](https://github.com/google/adk-go/issues/2370)) ([aed66ba](https://github.com/google/adk-go/commit/aed66baf489976de2dc1eb9726efb38a6d124689)), closes [#2183](https://github.com/google/adk-go/issues/2183)
+* **llminternal:** leave grounding metadata out of Gemini error responses ([#2481](https://github.com/google/adk-go/issues/2481)) ([d8c996c](https://github.com/google/adk-go/commit/d8c996c4ac0d0fb7eaa31d285cb21c7b010cd566))
+* **llminternal:** recover panics in tool callbacks and in tools not built with functiontool ([#2393](https://github.com/google/adk-go/issues/2393)) ([26f36ba](https://github.com/google/adk-go/commit/26f36ba47fd168d949d9dd656d10c6a473dd6bc3))
+* **loadartifactstool:** attach artifacts from every parallel call ([#2417](https://github.com/google/adk-go/issues/2417)) ([8b338c2](https://github.com/google/adk-go/commit/8b338c2e7569be4d3a07f544efe0597cd6f43a59))
+* **loggingplugin:** truncate text by character, not byte ([#2342](https://github.com/google/adk-go/issues/2342)) ([b388580](https://github.com/google/adk-go/commit/b388580ea8fd9562c8311a64bb7a61c8f67bcb85)), closes [#2341](https://github.com/google/adk-go/issues/2341)
+* **mcptoolset:** keep the Config.Auth credential on the endpoint's origin across redirects ([#1986](https://github.com/google/adk-go/issues/1986)) ([b9a5db9](https://github.com/google/adk-go/commit/b9a5db9c924cdf8220d09059814172f43ce4db01))
+* **memory:** preserve Vertex AI Memory Bank result metadata ([#2577](https://github.com/google/adk-go/issues/2577)) ([b265a12](https://github.com/google/adk-go/commit/b265a12730ff55e1597d4ba62f9f55fd6af549ef))
+* **memory:** split mixed-script search queries like stored text ([#2400](https://github.com/google/adk-go/issues/2400)) ([10a4650](https://github.com/google/adk-go/commit/10a4650e82b3d8f46685b30eee9c963aca5848af))
+* **model/anthropicmodel:** report a content-less refusal or truncation as a model error ([#2434](https://github.com/google/adk-go/issues/2434)) ([aa80163](https://github.com/google/adk-go/commit/aa801636b8c6bcfea0330f92e24d64f394ccfdd8)), closes [#2433](https://github.com/google/adk-go/issues/2433)
+* **model/gemini:** stop retrying context cache creation on models that refuse it ([#2539](https://github.com/google/adk-go/issues/2539)) ([a0cca55](https://github.com/google/adk-go/commit/a0cca55aa423da09036b610565d21c835c71c1d3))
+* one client certificate rule for the registry, BigQuery and RAG clients ([#2420](https://github.com/google/adk-go/issues/2420)) ([6a35a67](https://github.com/google/adk-go/commit/6a35a67a5b5c8653e8e1a7b096dd4c0d805b5e2c))
+* **openaimodel:** drop tool calls cut off by the token limit ([#2580](https://github.com/google/adk-go/issues/2580)) ([436de10](https://github.com/google/adk-go/commit/436de10a60293dba5389cbe06d4101779fb55732)), closes [#2574](https://github.com/google/adk-go/issues/2574)
+* **openaimodel:** keep $defs when enforcing strict schema on root $ref ([#2503](https://github.com/google/adk-go/issues/2503)) ([1ae6b19](https://github.com/google/adk-go/commit/1ae6b19998b4f29d831d5cac438a7d5248dd1795))
+* **openaimodel:** reject streamed function call events without item_id ([#2483](https://github.com/google/adk-go/issues/2483)) ([0697df1](https://github.com/google/adk-go/commit/0697df183ce239b8f21e4253e220b4a454a40c72))
+* **openaimodel:** split reasoning from candidate token usage ([#2511](https://github.com/google/adk-go/issues/2511)) ([8d66559](https://github.com/google/adk-go/commit/8d665595da656eb40ae0653eafe3026ef7b1673b))
+* **openaimodel:** treat out-of-range token usage as unknown ([#2549](https://github.com/google/adk-go/issues/2549)) ([d8bedf4](https://github.com/google/adk-go/commit/d8bedf43026d03b441f02fc7765596f6dbc495a3))
+* **parallelagent:** stop sibling branches when a sub-agent escalates ([#1781](https://github.com/google/adk-go/issues/1781)) ([3277eb6](https://github.com/google/adk-go/commit/3277eb6b835c3c466544f34f36edbb0dd0f56712))
+* **preloadmemorytool:** exclude thought parts from memory queries ([#1852](https://github.com/google/adk-go/issues/1852)) ([366f608](https://github.com/google/adk-go/commit/366f608bfb7b88bd4eba232be0d87ee7c82c03c5))
+* **runner:** skip nil parts in response events and input blob extraction ([#2322](https://github.com/google/adk-go/issues/2322)) ([e374e9e](https://github.com/google/adk-go/commit/e374e9e5f4468adcbd3804a24f967fa4b4a498a8))
+* **runner:** start invocation spans before plugin callbacks ([#1898](https://github.com/google/adk-go/issues/1898)) ([3f5d74d](https://github.com/google/adk-go/commit/3f5d74d36e3f5c734904516bc83fd1b8556722dc))
+* **sequentialagent:** complete live-session shutdown ([#1770](https://github.com/google/adk-go/issues/1770)) ([75163c6](https://github.com/google/adk-go/commit/75163c68a51cf435ad24070b109d1a80ba08315f))
+* **session/vertexai:** skip nil parts when converting events for storage ([#2394](https://github.com/google/adk-go/issues/2394)) ([cfc650b](https://github.com/google/adk-go/commit/cfc650b00f63c989a2a5f5fb03c28a8cd60ceb2e)), closes [#2391](https://github.com/google/adk-go/issues/2391)
+* **session:** apply persistent changes only after database commit ([#2305](https://github.com/google/adk-go/issues/2305)) ([f887982](https://github.com/google/adk-go/commit/f8879822a83fdbe07ef323e7d6eeb1de0f31637d))
+* **skilltoolset:** accept a closing frontmatter separator at end of file ([#2581](https://github.com/google/adk-go/issues/2581)) ([5ed0f57](https://github.com/google/adk-go/commit/5ed0f57e987a03209febccf80575f3c768de261b)), closes [#2575](https://github.com/google/adk-go/issues/2575)
+* **telemetry:** export OTLP metrics on explicit shutdown ([#2200](https://github.com/google/adk-go/issues/2200)) ([bd7f179](https://github.com/google/adk-go/commit/bd7f1798e965ec194770e78262afc77bf7111d41))
+* **telemetry:** leave no span processor running when New fails ([#2318](https://github.com/google/adk-go/issues/2318)) ([aacc2fa](https://github.com/google/adk-go/commit/aacc2fa46f06651dcf561eed94123f9d460a96dd)), closes [#2317](https://github.com/google/adk-go/issues/2317)
+* **telemetry:** set gen_ai.response.model on LLM spans ([#2519](https://github.com/google/adk-go/issues/2519)) ([364c298](https://github.com/google/adk-go/commit/364c298874008f84e7d57790371e657546c3fa34))
+* **telemetry:** synchronize the test overrides and capture mode ([#2547](https://github.com/google/adk-go/issues/2547)) ([74d683f](https://github.com/google/adk-go/commit/74d683f8354e37084ddcecf30a074b5253b8ca5d))
+* **workflow:** do not carry a consumed answer over to a node's next pause ([#2330](https://github.com/google/adk-go/issues/2330)) ([faab8f1](https://github.com/google/adk-go/commit/faab8f18001c35b8b4728bf0940e24114946ee5a))
+* **workflow:** preserve array order in schema literal values ([#2465](https://github.com/google/adk-go/issues/2465)) ([e52983b](https://github.com/google/adk-go/commit/e52983b4b9d29d873e061e52e10ff391135feced)), closes [#2464](https://github.com/google/adk-go/issues/2464)
+
+
+### Performance Improvements
+
+* **gemini:** encode function tool schemas once instead of on every model call ([#2557](https://github.com/google/adk-go/issues/2557)) ([3514cc5](https://github.com/google/adk-go/commit/3514cc5fdd995dd52112ad03bcc175f6abfde4d9))
+* **llminternal:** copy request contents and config in place instead of through reflection ([#2558](https://github.com/google/adk-go/issues/2558)) ([703d393](https://github.com/google/adk-go/commit/703d39324d50c790e11294312be32ce1084572c1))
+* **session,server:** read the session's events once per turn ([#2542](https://github.com/google/adk-go/issues/2542)) ([38c66bd](https://github.com/google/adk-go/commit/38c66bd87525fb2a290cd0f4700ae0aab66a7f6a))
+* **session/database:** index events by session in Get's read order ([#2531](https://github.com/google/adk-go/issues/2531)) ([e9f4dbf](https://github.com/google/adk-go/commit/e9f4dbf4ae0cf457f1b06c80d44c2af2db5591ce))
+* **telemetry:** convert prompt content only for a listening logger or recording span ([#2559](https://github.com/google/adk-go/issues/2559)) ([43be03c](https://github.com/google/adk-go/commit/43be03cae29f0096ca3f4d8f494ab57d76cc6a09))
+
+
+### Documentation
+
+* where the quota project header comes from, the token endpoint a certificate moves user credentials to, the per-process certificate source cache, and the SecureConnect helper among the calls that ignore cancellation. Tests: debug-log and span pins, the token error type, an explicit-scope ADC row, and atomics for handler-written values. ([0cc3907](https://github.com/google/adk-go/commit/0cc3907bcf3af14264b96645f6f021b033a6752a))
+
 ## [2.8.0](https://github.com/google/adk-go/compare/v2.7.1...v2.8.0) (2026-11-16)
 
 
