@@ -2262,8 +2262,9 @@ type sseChunk struct {
 }
 
 type sseStreamLLM struct {
-	mu    sync.Mutex
-	steps [][]sseChunk
+	model.LLM // embedded so standalone GOWORK=off tests compile against v2.8.0
+	mu        sync.Mutex
+	steps     [][]sseChunk
 }
 
 func (m *sseStreamLLM) Name() string { return "sse-stream-model" }

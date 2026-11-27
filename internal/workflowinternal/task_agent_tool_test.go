@@ -212,6 +212,8 @@ type fakeLLM struct {
 
 func (f *fakeLLM) Name() string { return "fake-model" }
 
+func (*fakeLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (f *fakeLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {}
 }
