@@ -139,12 +139,20 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
+// convertUsage maps completion usage to disjoint genai candidate and thought
+// counts. Unlike adk-python's OpenAILlm, it removes any overlap so telemetry
+// can sum the two without counting reasoning twice.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
-	// OpenAI includes reasoning in its output total. Split the total into
-	// disjoint genai counts so telemetry can sum candidates and thoughts.
-	output := shared.SafeInt32(max(usage.CompletionTokens, 0))
-	thoughts := min(shared.SafeInt32(max(usage.CompletionTokensDetails.ReasoningTokens, 0)), output)
+	prompt, completion, total := usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	reasoning := usage.CompletionTokensDetails.ReasoningTokens
+	output := shared.SafeInt32(max(completion, 0))
+	thoughts := min(shared.SafeInt32(max(reasoning, 0)), output)
 	candidates := output - thoughts
+	// xAI reports reasoning outside completion_tokens. Its total includes
+	// all three counts. Subtract instead of summing counts to avoid overflow.
+	if reasoning > 0 && min(prompt, completion) >= 0 && total >= prompt && total-prompt-completion == reasoning {
+		candidates, thoughts = output, shared.SafeInt32(reasoning)
+	}
 
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),

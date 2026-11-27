@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -297,6 +298,19 @@ func TestConvertUsage(t *testing.T) {
 	}
 	if got.ThoughtsTokenCount != 7 {
 		t.Errorf("reasoning = %d, want 7", got.ThoughtsTokenCount)
+	}
+}
+
+func TestConvertUsage_DoesNotTreatOverflowedTotalAsSeparateReasoning(t *testing.T) {
+	// A malformed total of zero cannot account for both MaxInt64 counts
+	// and another two reasoning tokens, even though their sum wraps to it.
+	got := convertUsage(openai.CompletionUsage{
+		PromptTokens:            math.MaxInt64,
+		CompletionTokens:        math.MaxInt64,
+		CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{ReasoningTokens: 2},
+	})
+	if got.CandidatesTokenCount != math.MaxInt32-2 || got.ThoughtsTokenCount != 2 {
+		t.Errorf("candidate and thought tokens = (%d, %d), want (%d, 2)", got.CandidatesTokenCount, got.ThoughtsTokenCount, math.MaxInt32-2)
 	}
 }
 

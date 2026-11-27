@@ -230,23 +230,33 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 	tests := []struct {
 		name           string
 		details        string
+		prompt         int32
 		output         int32
+		total          int32
+		chatOnly       bool
 		wantCandidates int32
 		wantThoughts   int32
 	}{
-		{name: "reasoning", details: `{"reasoning_tokens":38}`, output: 50, wantCandidates: 12, wantThoughts: 38},
-		{name: "no_reasoning_details", output: 50, wantCandidates: 50},
-		{name: "all_reasoning", details: `{"reasoning_tokens":50}`, output: 50, wantThoughts: 50},
-		{name: "reasoning_exceeds_output", details: `{"reasoning_tokens":60}`, output: 50, wantThoughts: 50},
-		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, output: 50, wantCandidates: 50},
-		{name: "negative_output", output: -1},
+		{name: "reasoning", details: `{"reasoning_tokens":38}`, prompt: 20, output: 50, total: 70, wantCandidates: 12, wantThoughts: 38},
+		{name: "no_reasoning_details", prompt: 20, output: 50, total: 70, wantCandidates: 50},
+		{name: "all_reasoning", details: `{"reasoning_tokens":50}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
+		{name: "reasoning_exceeds_output", details: `{"reasoning_tokens":60}`, prompt: 20, output: 50, total: 70, wantThoughts: 50},
+		{name: "negative_reasoning", details: `{"reasoning_tokens":-1}`, prompt: 20, output: 50, total: 69, wantCandidates: 50},
+		{name: "negative_output", prompt: 20, output: -1, total: 19},
+		{name: "separate_reasoning_tokens", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, total: 135, chatOnly: true, wantCandidates: 9, wantThoughts: 94},
+		{name: "separate_reasoning_tokens_negative_output", details: `{"reasoning_tokens":94}`, prompt: 32, output: -1, total: 125},
+		{name: "separate_reasoning_tokens_negative_prompt", details: `{"reasoning_tokens":94}`, prompt: -1, output: 9, total: 102, wantThoughts: 9},
+		{name: "separate_reasoning_tokens_zero_total", details: `{"reasoning_tokens":94}`, prompt: 32, output: 9, wantThoughts: 9},
 	}
 	for _, api := range []API{APIChatCompletions, APIResponses} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", api, stream), func(t *testing.T) {
 				for _, tt := range tests {
+					if tt.chatOnly && api != APIChatCompletions {
+						continue
+					}
 					t.Run(tt.name, func(t *testing.T) {
-						body, contentType := reasoningUsageResponse(api, stream, tt.output, tt.details)
+						body, contentType := reasoningUsageResponse(api, stream, tt.prompt, tt.output, tt.total, tt.details)
 						client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 							return &http.Response{
 								StatusCode: http.StatusOK,
@@ -287,9 +297,8 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 						if len(details) != 1 || details[0] == nil || details[0].Modality != genai.MediaModalityText || details[0].TokenCount != tt.wantCandidates {
 							t.Errorf("want one text candidate detail with %d tokens", tt.wantCandidates)
 						}
-						wantTotal := 20 + tt.output
-						if usage.PromptTokenCount != 20 || usage.CachedContentTokenCount != 5 || usage.TotalTokenCount != wantTotal {
-							t.Errorf("prompt, cached and total tokens = (%d, %d, %d), want (20, 5, %d)", usage.PromptTokenCount, usage.CachedContentTokenCount, usage.TotalTokenCount, wantTotal)
+						if usage.PromptTokenCount != tt.prompt || usage.CachedContentTokenCount != 5 || usage.TotalTokenCount != tt.total {
+							t.Errorf("prompt, cached and total tokens = (%d, %d, %d), want (%d, 5, %d)", usage.PromptTokenCount, usage.CachedContentTokenCount, usage.TotalTokenCount, tt.prompt, tt.total)
 						}
 						ended := spans.Ended()
 						if len(ended) != 1 {
@@ -312,12 +321,12 @@ func TestGenerateContentReasoningUsage(t *testing.T) {
 	}
 }
 
-func reasoningUsageResponse(api API, stream bool, outputTokens int32, details string) (body, contentType string) {
+func reasoningUsageResponse(api API, stream bool, inputTokens, outputTokens, totalTokens int32, details string) (body, contentType string) {
 	input, output := "input", "output"
 	if api == APIChatCompletions {
 		input, output = "prompt", "completion"
 	}
-	usage := fmt.Sprintf(`"usage":{"%s_tokens":20,"%s_tokens":%d,"total_tokens":%d,"%s_tokens_details":{"cached_tokens":5}`, input, output, outputTokens, 20+outputTokens, input)
+	usage := fmt.Sprintf(`"usage":{"%s_tokens":%d,"%s_tokens":%d,"total_tokens":%d,"%s_tokens_details":{"cached_tokens":5}`, input, inputTokens, output, outputTokens, totalTokens, input)
 	if details != "" {
 		usage += fmt.Sprintf(`,"%s_tokens_details":%s`, output, details)
 	}

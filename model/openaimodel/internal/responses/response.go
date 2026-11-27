@@ -303,9 +303,10 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	return ""
 }
 
+// convertUsage splits inclusive Responses output into disjoint genai candidate
+// and thought counts. Unlike adk-python's OpenAIResponsesLlm, it removes the
+// overlap so telemetry can sum the two without counting reasoning twice.
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
-	// OpenAI includes reasoning in its output total. Split the total into
-	// disjoint genai counts so telemetry can sum candidates and thoughts.
 	output := shared.SafeInt32(max(usage.OutputTokens, 0))
 	thoughts := min(shared.SafeInt32(max(usage.OutputTokensDetails.ReasoningTokens, 0)), output)
 	candidates := output - thoughts

@@ -78,6 +78,24 @@
 // reply folded into context, a compacted transcript, or a memory recall all
 // arrive with the thought marker gone, and reach every model package alike.
 //
+// # Token Usage Metadata
+//
+// Both APIs report token usage on [model.LLMResponse.UsageMetadata] for
+// blocking responses and on the final streaming response, when available.
+// Prompt, cached prompt, and total token counts come from the provider.
+// CandidatesTokenCount and its text modality detail count non-reasoning
+// output; ThoughtsTokenCount counts reasoning. Their sum is the full output
+// count used in GenAI telemetry.
+//
+// OpenAI and compatible endpoints are assumed to include reasoning in their
+// reported output count. Chat Completions recognizes endpoints such as xAI
+// that report reasoning separately when total_tokens equals the sum of
+// prompt_tokens, completion_tokens, and positive reasoning_tokens. Without
+// a matching total, reasoning is subtracted from completion_tokens and is
+// capped at that count. Responses always treats output_tokens as inclusive.
+//
+// # Usage
+//
 // Clients construct a ClientConfig and pass it to NewModel:
 //
 //	ctx := context.Background()
