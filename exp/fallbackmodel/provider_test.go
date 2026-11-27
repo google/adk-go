@@ -42,22 +42,35 @@ import (
 // fakeServer answers every request with status and body, and records the
 // path of each request.
 type fakeServer struct {
-	status int
-	body   string
+	status      int
+	body        string
+	contentType string
 
 	mu    sync.Mutex
 	paths []string
 }
 
+// newFakeServer returns a server that answers with a JSON body.
 func newFakeServer(t *testing.T, status int, body string) (*fakeServer, *httptest.Server) {
 	t.Helper()
-	s := &fakeServer{status: status, body: body}
+	return startFakeServer(t, &fakeServer{status: status, body: body, contentType: "application/json"})
+}
+
+// newFakeEventServer returns a server that accepts the request and answers
+// with the server-sent events in body.
+func newFakeEventServer(t *testing.T, body string) (*fakeServer, *httptest.Server) {
+	t.Helper()
+	return startFakeServer(t, &fakeServer{status: http.StatusOK, body: body, contentType: "text/event-stream"})
+}
+
+func startFakeServer(t *testing.T, s *fakeServer) (*fakeServer, *httptest.Server) {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		s.mu.Lock()
 		s.paths = append(s.paths, r.URL.Path)
 		s.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", s.contentType)
 		w.WriteHeader(s.status)
 		_, _ = io.WriteString(w, s.body)
 	}))
@@ -115,13 +128,20 @@ const (
 	geminiError    = `{"error":{"code":%d,"message":"test error","status":"TEST"}}`
 	openAIError    = `{"error":{"message":"test error","type":"test_error","code":"test"}}`
 	anthropicError = `{"type":"error","error":{"type":"%s","message":"test error"}}`
+	// anthropicErrorEvent is an error event that arrives in a stream whose
+	// HTTP response succeeded, before any content.
+	anthropicErrorEvent = "event: error\ndata: " + anthropicError + "\n\n"
 )
 
 func TestProviderErrorsFallBack(t *testing.T) {
 	tests := []struct {
-		name         string
-		status       int
-		body         string
+		name   string
+		status int
+		body   string
+		// events, when set, makes the server accept the request and send
+		// these server-sent events instead of status and body. The case
+		// then only runs streaming.
+		events       string
 		newPrimary   func(t *testing.T, url string) model.LLM
 		wantFallBack bool
 	}{
@@ -166,31 +186,54 @@ func TestProviderErrorsFallBack(t *testing.T) {
 			body:       fmt.Sprintf(anthropicError, "overloaded_error"),
 			newPrimary: newAnthropic,
 		},
+		{
+			// model/anthropicmodel gives api_error the status 500.
+			name:         "anthropic api_error event",
+			events:       fmt.Sprintf(anthropicErrorEvent, "api_error"),
+			newPrimary:   newAnthropic,
+			wantFallBack: true,
+		},
+		{
+			name:       "anthropic overloaded_error event",
+			status:     anthropicmodel.StatusOverloaded,
+			events:     fmt.Sprintf(anthropicErrorEvent, "overloaded_error"),
+			newPrimary: newAnthropic,
+		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, srv := newFakeServer(t, tt.status, tt.body)
-			backup := healthy("backup")
-			m := newModel(t, Config{Models: []model.LLM{tt.newPrimary(t, srv.URL), backup}})
-
-			got, err := collect(t, m, request(), false)
-
-			if tt.wantFallBack {
-				if err != nil {
-					t.Fatalf("GenerateContent() error = %v, want the backup's response", err)
+		for _, stream := range []bool{false, true} {
+			if tt.events != "" && !stream {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				var srv *httptest.Server
+				if tt.events != "" {
+					_, srv = newFakeEventServer(t, tt.events)
+				} else {
+					_, srv = newFakeServer(t, tt.status, tt.body)
 				}
-				if diff := cmp.Diff([]string{"backup"}, got); diff != "" {
-					t.Errorf("response texts mismatch (-want +got):\n%s", diff)
+				backup := healthy("backup")
+				m := newModel(t, Config{Models: []model.LLM{tt.newPrimary(t, srv.URL), backup}})
+
+				got, err := collect(t, m, request(), stream)
+
+				if tt.wantFallBack {
+					if err != nil {
+						t.Fatalf("GenerateContent() error = %v, want the backup's response", err)
+					}
+					if diff := cmp.Diff([]string{"backup"}, got); diff != "" {
+						t.Errorf("response texts mismatch (-want +got):\n%s", diff)
+					}
+					return
 				}
-				return
-			}
-			if status, _ := statusCode(err); status != tt.status {
-				t.Errorf("GenerateContent() error = %v, want the provider's status %d error", err, tt.status)
-			}
-			if n := backup.callCount(); n != 0 {
-				t.Errorf("backup called %d times, want 0", n)
-			}
-		})
+				if status, _ := statusCode(err); status != tt.status {
+					t.Errorf("GenerateContent() error = %v, want the provider's status %d error", err, tt.status)
+				}
+				if n := backup.callCount(); n != 0 {
+					t.Errorf("backup called %d times, want 0", n)
+				}
+			})
+		}
 	}
 }
 

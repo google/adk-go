@@ -47,6 +47,7 @@ type fakeLLM struct {
 	// edit, when set, edits the request when the model is called, as
 	// Gemini's GenerateContent does before it returns.
 	edit func(*model.LLMRequest)
+	caps model.Capabilities
 
 	mu    sync.Mutex
 	calls []call
@@ -62,6 +63,8 @@ type call struct {
 }
 
 func (f *fakeLLM) Name() string { return f.name }
+
+func (f *fakeLLM) Capabilities() model.Capabilities { return f.caps }
 
 func (f *fakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	c := call{
@@ -372,7 +375,8 @@ type errorThenTextLLM struct {
 	err  error
 }
 
-func (f *errorThenTextLLM) Name() string { return f.name }
+func (f *errorThenTextLLM) Name() string                     { return f.name }
+func (f *errorThenTextLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (f *errorThenTextLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -413,7 +417,8 @@ type errorsLLM struct {
 	errs []error
 }
 
-func (f *errorsLLM) Name() string { return f.name }
+func (f *errorsLLM) Name() string                     { return f.name }
+func (f *errorsLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (f *errorsLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -563,6 +568,49 @@ func TestStatusCode(t *testing.T) {
 			wantStatus: 500,
 			wantOK:     true,
 		},
+		{
+			name:       "genai error pointer",
+			err:        fmt.Errorf("custom model: %w", &genai.APIError{Code: 429}),
+			wantStatus: 429,
+			wantOK:     true,
+		},
+		{name: "nil genai error pointer", err: (*genai.APIError)(nil)},
+		{
+			name:       "custom error with a StatusCode field",
+			err:        fmt.Errorf("custom model: %w", statusError{StatusCode: 502}),
+			wantStatus: 502,
+			wantOK:     true,
+		},
+		{
+			name:       "pointer to a custom error with a StatusCode field",
+			err:        &statusError{StatusCode: 503},
+			wantStatus: 503,
+			wantOK:     true,
+		},
+		{
+			name:       "StatusCode promoted from an embedded struct",
+			err:        &embeddingError{statusError: &statusError{StatusCode: 504}},
+			wantStatus: 504,
+			wantOK:     true,
+		},
+		{name: "StatusCode promoted through a nil embedded pointer", err: &embeddingError{}},
+		{name: "nil pointer to a custom error", err: fmt.Errorf("custom model: %w", (*statusError)(nil))},
+		{name: "StatusCode that is not an int", err: stringStatusError{StatusCode: "503"}},
+		{name: "unexported statusCode field", err: unexportedStatusError{statusCode: 503}},
+		{
+			name:       "joined errors, first with a status wins",
+			err:        errors.Join(errors.New("first"), genai.APIError{Code: 503}, statusError{StatusCode: 429}),
+			wantStatus: 503,
+			wantOK:     true,
+		},
+		{
+			// errors.As order: the outer error's own status comes before the
+			// one it wraps.
+			name:       "outer status before wrapped status",
+			err:        &wrappingStatusError{StatusCode: 500, err: genai.APIError{Code: 429}},
+			wantStatus: 500,
+			wantOK:     true,
+		},
 		{name: "error without a status", err: errors.New("nope")},
 		{name: "context canceled", err: context.Canceled},
 		{name: "deadline exceeded", err: fmt.Errorf("request: %w", context.DeadlineExceeded)},
@@ -572,6 +620,60 @@ func TestStatusCode(t *testing.T) {
 			status, ok := statusCode(tt.err)
 			if status != tt.wantStatus || ok != tt.wantOK {
 				t.Errorf("statusCode() = (%d, %t), want (%d, %t)", status, ok, tt.wantStatus, tt.wantOK)
+			}
+		})
+	}
+}
+
+// statusError is a custom error that carries a status the way the openai-go
+// and anthropic SDK errors do.
+type statusError struct{ StatusCode int }
+
+func (e statusError) Error() string { return fmt.Sprintf("status %d", e.StatusCode) }
+
+type embeddingError struct{ *statusError }
+
+func (e *embeddingError) Error() string { return "embedding" }
+
+type stringStatusError struct{ StatusCode string }
+
+func (e stringStatusError) Error() string { return e.StatusCode }
+
+type unexportedStatusError struct{ statusCode int }
+
+func (e unexportedStatusError) Error() string { return fmt.Sprint(e.statusCode) }
+
+type wrappingStatusError struct {
+	StatusCode int
+	err        error
+}
+
+func (e *wrappingStatusError) Error() string { return e.err.Error() }
+func (e *wrappingStatusError) Unwrap() error { return e.err }
+
+func TestCapabilitiesComeFromThePrimary(t *testing.T) {
+	tests := []struct {
+		name    string
+		primary model.Capabilities
+		backup  model.Capabilities
+	}{
+		{
+			name:    "primary accepts an output schema with tools",
+			primary: model.Capabilities{AcceptsOutputSchemaAndTools: true},
+		},
+		{
+			name:   "only the backup does",
+			backup: model.Capabilities{AcceptsOutputSchemaAndTools: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary, backup := healthy("primary"), healthy("backup")
+			primary.caps, backup.caps = tt.primary, tt.backup
+			m := newModel(t, Config{Models: llms(primary, backup)})
+
+			if got := m.Capabilities(); got != tt.primary {
+				t.Errorf("Capabilities() = %+v, want the primary's %+v", got, tt.primary)
 			}
 		})
 	}
@@ -882,7 +984,8 @@ type endlessLLM struct {
 	stopped bool
 }
 
-func (f *endlessLLM) Name() string { return f.name }
+func (f *endlessLLM) Name() string                     { return f.name }
+func (f *endlessLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (f *endlessLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {

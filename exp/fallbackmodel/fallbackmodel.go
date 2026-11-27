@@ -30,15 +30,15 @@
 //
 // Only a failure that carries one of [Config.RetriableStatusCodes] moves on.
 // Any other error reaches the caller unchanged, and so does every error once
-// the caller's context is done. The status is read from the error types that
-// the models in this module return; see [Config.RetriableStatusCodes].
+// the caller's context is done. [Config.RetriableStatusCodes] says how the
+// status is read from an error.
 //
 // Once a model has yielded a response, or an error that does not move on, the
 // turn belongs to that model. A later error reaches the caller rather than
 // moving on, because the caller already holds part of that model's output and
-// a second model would be spliced onto it. This matters when streaming, where a call can fail after
-// several chunks. A call that does not stream yields once, so it almost always
-// fails before that point and can still move on.
+// a second model would be spliced onto it. This matters when streaming, where
+// a call can fail after several chunks. A call that does not stream yields
+// once, so it almost always fails before that point and can still move on.
 //
 // Live sessions are not supported. The model has no Client method, so running
 // an agent that uses it in live mode reports that the model does not support
@@ -62,12 +62,10 @@ import (
 	"reflect"
 	"slices"
 
-	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/model/anthropicmodel"
 )
 
 // DefaultStatusCodes returns the HTTP status codes that move a call on to the
@@ -95,10 +93,13 @@ type Config struct {
 	// Models are the models to try, in order. At least one is required, and
 	// none may be nil.
 	//
-	// The first is the primary model. The fallback model reports its name and
-	// its Google backend variant, so the agent builds each request for the
-	// primary. A backup is sent that same request; the request is built before
-	// it is known which model will serve it.
+	// The first is the primary model. The fallback model reports its name,
+	// its capabilities and its Google backend variant, so the agent builds
+	// each request for the primary. A backup is sent that same request; the
+	// request is built before it is known which model will serve it. So a
+	// backup should accept what the primary does: if the primary reports
+	// [model.Capabilities.AcceptsOutputSchemaAndTools] and a backup does not,
+	// the backup is sent an output schema alongside tools.
 	//
 	// adk-python also accepts model names here. To build a model from a name,
 	// call [model.NewLLM] first.
@@ -107,12 +108,20 @@ type Config struct {
 	// RetriableStatusCodes are the HTTP status codes that move a call on to
 	// the next model. Empty means [DefaultStatusCodes].
 	//
-	// The status is read from a [genai.APIError] (model/gemini and
-	// model/apigee), an [*openai.Error] (model/openaimodel) or an
-	// [*anthropicmodel.APIError] (model/anthropicmodel), anywhere in the
-	// error's chain. An error of any other type carries no status and never
-	// moves on. A custom [model.LLM] whose failures should move on can return
-	// a genai.APIError with the HTTP status in Code.
+	// The status is the first one found along the error's chain, walked as
+	// [errors.As] walks it: the Code of a [genai.APIError] or
+	// *genai.APIError (model/gemini and model/apigee), or else an exported
+	// int field named StatusCode on an error struct or a pointer to one. The
+	// openai-go errors that model/openaimodel returns and the APIError that
+	// model/anthropicmodel returns have that field. An error with neither
+	// carries no status and never moves on. A custom [model.LLM] whose
+	// failures should move on can return a genai.APIError with the HTTP
+	// status in Code, or an error type with a StatusCode field.
+	//
+	// adk-python reads code off a genai APIError and otherwise a status_code
+	// attribute. The field is looked up by name, not by naming each SDK's
+	// error type, so that using this package does not link every provider
+	// SDK into a binary.
 	//
 	// model/anthropicmodel gives an error event that arrives in a stream, after
 	// the HTTP response has succeeded, a status taken from the event's type:
@@ -172,13 +181,20 @@ func (m *fallbackModel) Name() string {
 	return m.models[0].Name()
 }
 
+// Capabilities returns the primary model's capabilities, as adk-python's
+// FallbackModel.capabilities does. The flow reads them while it builds the
+// request, before any model is called, so the request is built for the
+// primary whichever model serves it.
+func (m *fallbackModel) Capabilities() model.Capabilities {
+	return m.models[0].Capabilities()
+}
+
 // GetGoogleLLMVariant returns the primary model's Google backend variant, or
 // genai.BackendUnspecified when the primary does not report one.
 //
-// The flow reads the variant while it builds the request, before any model is
-// called, to decide for example whether an output schema can be sent alongside
-// tools. The request is built for the primary, as adk-python's
-// FallbackModel.capabilities reports the primary's capabilities.
+// Like the capabilities, the variant is read while the request is built, for
+// example to drop inline data display names, which the Gemini API rejects. It
+// also labels the model call's telemetry span.
 func (m *fallbackModel) GetGoogleLLMVariant() genai.Backend {
 	return googlellm.GetGoogleLLMVariant(m.models[0])
 }
@@ -190,10 +206,9 @@ func (m *fallbackModel) GetGoogleLLMVariant() genai.Backend {
 // Each call sets req.Model to the name of the model being called, since the
 // models read it to choose what to call. This replaces a name that a
 // BeforeModelCallback put there, as adk-python does. Before a model other than
-// the last is
-// called, the request's Contents slice and Config are saved, and put back if
-// the call fails and the next model is tried. The model that serves the call
-// keeps its edits, and req.Model is left naming it.
+// the last is called, the request's Contents slice and Config are saved, and
+// put back if the call fails and the next model is tried. The model that
+// serves the call keeps its edits, and req.Model is left naming it.
 func (m *fallbackModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		last := len(m.models) - 1
@@ -253,22 +268,58 @@ func (m *fallbackModel) shouldFallBack(ctx context.Context, err error) (int, boo
 	return status, ok && m.retriable[status]
 }
 
-// statusCode returns the HTTP status carried by err, if err is or wraps one of
-// the error types that this module's models return.
-//
-// adk-python reads a status_code attribute off any exception. Go has no
-// attribute lookup, so the types are named instead.
+// statusCode returns the HTTP status carried by err or by an error in its
+// chain, as [Config.RetriableStatusCodes] describes. The chain is walked depth
+// first, in the order errors.As walks it.
 func statusCode(err error) (int, bool) {
-	if e, ok := errors.AsType[genai.APIError](err); ok {
-		return e.Code, true
+	if err == nil {
+		return 0, false
 	}
-	if e, ok := errors.AsType[*openai.Error](err); ok {
-		return e.StatusCode, true
+	if status, ok := ownStatusCode(err); ok {
+		return status, true
 	}
-	if e, ok := errors.AsType[*anthropicmodel.APIError](err); ok {
-		return e.StatusCode, true
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return statusCode(u.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if status, ok := statusCode(e); ok {
+				return status, true
+			}
+		}
 	}
 	return 0, false
+}
+
+// ownStatusCode returns the HTTP status that err itself carries, without
+// looking at the errors it wraps.
+func ownStatusCode(err error) (int, bool) {
+	// genai checks for both forms too: model/gemini returns the value, and a
+	// custom model may return a pointer.
+	switch e := err.(type) {
+	case genai.APIError:
+		return e.Code, true
+	case *genai.APIError:
+		if e == nil {
+			return 0, false
+		}
+		return e.Code, true
+	}
+	// Indirect turns a nil pointer into the zero Value, which is no struct.
+	v := reflect.Indirect(reflect.ValueOf(err))
+	if v.Kind() != reflect.Struct {
+		return 0, false
+	}
+	field, ok := v.Type().FieldByName("StatusCode")
+	if !ok || field.Type.Kind() != reflect.Int {
+		return 0, false
+	}
+	// A field promoted through a nil embedded pointer cannot be read.
+	status, fieldErr := v.FieldByIndexErr(field.Index)
+	if fieldErr != nil {
+		return 0, false
+	}
+	return int(status.Int()), true
 }
 
 // snapshot holds the parts of a request that a model edits, so that a failed
