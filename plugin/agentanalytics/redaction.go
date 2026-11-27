@@ -55,7 +55,7 @@ const (
 var (
 	authHeaderRe        = regexp.MustCompile(`(?im)\b((?:proxy[_-])?author[i\x{0130}]zat[i\x{0130}]on|x[_-]ap[i\x{0130}][_-]key|ap[i\x{0130}][_-]key)[ \t]*:[ \t]*[^\s\r\n][^\r\n]*`)
 	authHeaderKeyRe     = regexp.MustCompile(`(?i)\b(?:(?:proxy[_-])?author[i\x{0130}]zat[i\x{0130}]on|x[_-]ap[i\x{0130}][_-]key|ap[i\x{0130}][_-]key)[ \t]*:`)
-	bearerTokenRe       = regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	bearerTokenRe       = regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
 	bearerQuotePrefixRe = regexp.MustCompile(`(?i)\bbearer\s+["']`)
 	basicTokenRe        = regexp.MustCompile(`(?i)\b(basic)\s+([A-Za-z0-9+/]+={0,2})`)
 
@@ -64,7 +64,7 @@ var (
 	jsonKeyPrefixRe   = regexp.MustCompile(`"[\s\p{Z}]*([^"'\s\r\n,}](?:[^"'\r\n,}]*?[^"'\s\r\n,}])?)[\s\p{Z}]*"\s*:`)
 	nestedKeyNameRe   = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)*)(` + fixedSensitiveKeyRegex() + `)$`)
 	compoundKeyNameRe = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:[^\s]*[^\w\s])?(` + bareCandidateKeyRegex() + `)(?:\\?["'])?$`)
-	quotedValueRe     = regexp.MustCompile(`^(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` + escapedQuotedRegex(`"`) + `|` + escapedQuotedRegex(`'`) + `)`)
+	quotedValueRe     = regexp.MustCompile(`^(?:"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|` + escapedQuotedRegex(`"`) + `|` + escapedQuotedRegex(`'`) + `)`)
 )
 
 func escapedQuotedRegex(q string) string {
@@ -462,11 +462,17 @@ func redactJSONTextPass(s string, depth int, laterPass bool, budget *nodeBudget)
 				strings.HasPrefix(ts, `\`) || hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, laterPass, budget) {
 				return unparseableJSONPlaceholder, true, true
 			}
-			if (strings.HasPrefix(ts, ":") || strings.HasPrefix(ts, "=")) && isSensitiveKeyOrColonSuffix(decoded) {
+			if (strings.HasPrefix(ts, ":") || strings.HasPrefix(ts, "=")) && (isSensitiveKeyOrColonSuffix(decoded) || isValidJSONPatternKey(trimBOMAndSpace(decoded))) {
 				valPart := strings.TrimLeft(ts[1:], regexpSpace)
-				tokEnd := matchValueTokenWithCaches(valPart, 0, regexpSpace+",}", nil, nil)
-				if hasUnbalancedEscapedQuote(valPart[:tokEnd]) {
-					return redactedSensitiveTextPlaceholder, true, true
+				if isSensitiveKeyOrColonSuffix(decoded) {
+					tokEnd := matchValueTokenWithCaches(valPart, 0, regexpSpace+",}", nil, nil)
+					if hasUnbalancedEscapedQuote(valPart[:tokEnd]) {
+						return redactedSensitiveTextPlaceholder, true, true
+					}
+				}
+				if valPart != "" && (((valPart[0] == '"' || valPart[0] == '\'') && quotedValueRe.FindString(valPart) == "") ||
+					(strings.HasPrefix(valPart, `\"`) && strings.Count(valPart, `"`)%2 == 1)) {
+					return unparseableJSONPlaceholder, true, true
 				}
 			}
 		}
@@ -1002,7 +1008,7 @@ func scrubTextPatterns(s string) string {
 		return s
 	}
 	if strings.Contains(s, ":") && (strings.Contains(folded, "author") || strings.Contains(folded, "apikey")) {
-		s = authHeaderRe.ReplaceAllString(s, "${1}: "+redactedValue)
+		s = redactAuthHeaders(s)
 	}
 	if strings.Contains(folded, "bearer") {
 		s = replaceSinglePass(s, bearerTokenRe, redactBearerToken)
@@ -1017,6 +1023,72 @@ func scrubTextPatterns(s string) string {
 		s = redactTextPatternPairs(s)
 	}
 	return s
+}
+
+func redactAuthHeaders(s string) string {
+	matches := authHeaderRe.FindAllStringSubmatchIndex(s, -1)
+	if len(matches) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, loc := range matches {
+		if loc[0] < last {
+			continue
+		}
+		colon := strings.IndexByte(s[loc[3]:loc[1]], ':')
+		if colon < 0 {
+			continue
+		}
+		valStart := skipSpace(s, loc[3]+colon+1, " \t")
+		end := max(loc[1], authHeaderValueEnd(s, valStart))
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(s[loc[2]:loc[3]] + ": " + redactedValue)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// authHeaderValueEnd returns the end of a header value starting at s[start],
+// extending across backslash-continued quoted and escaped-quoted strings onto
+// their closing line.
+func authHeaderValueEnd(s string, start int) int {
+	var q byte
+	var qEscaped bool
+	for i := start; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\r' || c == '\n':
+			return i
+		case q == 0 && c == '\\':
+			if i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\'') {
+				q = s[i+1]
+				qEscaped = true
+				i++
+			} else if i+1 < len(s) && s[i+1] != '\r' && s[i+1] != '\n' {
+				i++
+			}
+		case q != 0 && c == '\\':
+			if qEscaped && i+1 < len(s) && s[i+1] == q {
+				q = 0
+				qEscaped = false
+				i++
+			} else if i+1 < len(s) {
+				if i+2 < len(s) && s[i+1] == '\r' && s[i+2] == '\n' {
+					i++
+				}
+				i++
+			}
+		case q == 0 && (c == '"' || c == '\''):
+			q = c
+		case q != 0 && !qEscaped && c == q:
+			q = 0
+		}
+	}
+	return len(s)
 }
 
 func replaceSinglePass(s string, re *regexp.Regexp, repl func(s string, loc []int) string) string {
@@ -1092,16 +1164,67 @@ func bareValueEnd(s string, start int, stop string, cache *int) int {
 	return end
 }
 
+type bareSpan struct{ start, end int }
+
+type bareSuffixJump struct{ start, jump, end int }
+
+// bareEndCache memoizes bare-token end offsets independently from
+// quoted-suffix scans (keyed by outer quote state: 0 = unquoted,
+// 1 = single quote, 2 = double quote) for a fixed (s, bareStop).
+type bareEndCache struct {
+	bareEnd    int
+	suffixEnd  [3]bareSpan
+	suffixJump [3]bareSuffixJump
+	jumpEnd    [3]map[int]int
+}
+
+func outerQuoteSlot(q byte) int {
+	switch q {
+	case '\'':
+		return 1
+	case '"':
+		return 2
+	default:
+		return 0
+	}
+}
+
+func containsUnescapedByte(q string, target byte) bool {
+	if strings.IndexByte(q, target) < 0 {
+		return false
+	}
+	bs := 0
+	for i := range len(q) {
+		if q[i] == '\\' {
+			bs++
+			continue
+		}
+		if q[i] == target && bs%2 == 0 {
+			return true
+		}
+		bs = 0
+	}
+	return false
+}
+
 // matchValueTokenWithCaches returns the end offset of a quoted or bare value at
 // valStart, extending past a closing quote when glued to word bytes or adjacent
 // quotes. gluedMemo caches multi-segment glued ends for a fixed (s, bareStop).
-func matchValueTokenWithCaches(s string, valStart int, bareStop string, bareCache *int, gluedMemo *map[int]int) int {
+func matchValueTokenWithCaches(s string, valStart int, bareStop string, bareCache *bareEndCache, gluedMemo *map[int]int) int {
 	return matchValueTokenWithOuterQuotes(s, valStart, bareStop, bareCache, gluedMemo, nil)
 }
 
-func matchValueTokenWithOuterQuotes(s string, valStart int, bareStop string, bareCache *int, gluedMemo *map[int]int, quotes *outerQuotes) int {
+func matchValueTokenWithOuterQuotes(s string, valStart int, bareStop string, bareCache *bareEndCache, gluedMemo *map[int]int, quotes *outerQuotes) int {
 	if valStart >= len(s) {
 		return valStart
+	}
+	var outerQuote byte
+	if quotes != nil {
+		if quotes.isOpen(s, valStart, '"') {
+			outerQuote = '"'
+		} else if quotes.isOpen(s, valStart, '\'') {
+			outerQuote = '\''
+		}
 	}
 	pos := valStart
 	first := true
@@ -1129,11 +1252,73 @@ func matchValueTokenWithOuterQuotes(s string, valStart int, bareStop string, bar
 		first = false
 	}
 	if first {
-		return bareValueEnd(s, valStart, bareStop, bareCache)
+		var c *int
+		if bareCache != nil {
+			c = &bareCache.bareEnd
+		}
+		return bareValueEnd(s, valStart, bareStop, c)
 	}
+	slot := outerQuoteSlot(outerQuote)
 	end := pos
 	if pos < len(s) && strings.IndexByte(bareStop, s[pos]) < 0 {
-		end = bareValueEnd(s, pos, bareStop, bareCache)
+		if bareCache != nil && bareCache.suffixJump[slot].end > 0 && pos >= bareCache.suffixJump[slot].start && pos <= bareCache.suffixJump[slot].jump {
+			end = bareCache.suffixJump[slot].end
+		} else if bareCache != nil && bareCache.suffixEnd[slot].end > 0 && pos >= bareCache.suffixEnd[slot].start && pos < bareCache.suffixEnd[slot].end {
+			end = bareCache.suffixEnd[slot].end
+		} else {
+			var unclosed uint8
+			firstJump := -1
+			var jumpVisited []int
+			for end < len(s) && strings.IndexByte(bareStop, s[end]) < 0 {
+				if outerQuote != 0 && s[end] == outerQuote && isUnescapedQuoteAt(s, valStart, end) {
+					break
+				}
+				if s[end] == '-' && end+1 < len(s) && (s[end+1] == '"' || s[end+1] == '\'') && s[end+1] != outerQuote {
+					if bareCache != nil && bareCache.jumpEnd[slot] != nil {
+						if cached, ok := bareCache.jumpEnd[slot][end]; ok {
+							if firstJump < 0 {
+								firstJump = end
+							}
+							end = cached
+							break
+						}
+					}
+					bit := uint8(1)
+					if s[end+1] == '"' {
+						bit = 2
+					}
+					if unclosed&bit == 0 {
+						if q := quotedValueRe.FindString(s[end+1:]); q != "" && (outerQuote == 0 || !containsUnescapedByte(q, outerQuote)) {
+							if firstJump < 0 && strings.ContainsAny(q, bareStop) {
+								firstJump = end
+							}
+							if bareCache != nil {
+								jumpVisited = append(jumpVisited, end)
+							}
+							end += 1 + len(q)
+							continue
+						}
+						unclosed |= bit
+					}
+				}
+				end++
+			}
+			if bareCache != nil {
+				if firstJump < 0 {
+					bareCache.suffixEnd[slot] = bareSpan{pos, end}
+				} else {
+					bareCache.suffixJump[slot] = bareSuffixJump{pos, firstJump, end}
+				}
+				if len(jumpVisited) > 0 {
+					if bareCache.jumpEnd[slot] == nil {
+						bareCache.jumpEnd[slot] = make(map[int]int, len(jumpVisited))
+					}
+					for _, p := range jumpVisited {
+						bareCache.jumpEnd[slot][p] = end
+					}
+				}
+			}
+		}
 	}
 	if gluedMemo != nil && len(visited) > 0 {
 		if *gluedMemo == nil {
@@ -1156,7 +1341,8 @@ func redactJSONPatternPairs(s string) string {
 		d := skipSpace(s, skipOneClosingQuote(s, pos), delimSpace)
 		return d < len(s) && (s[d] == ':' || s[d] == '=')
 	}
-	last, coveredEnd, colonBareEnd := 0, 0, 0
+	last, coveredEnd := 0, 0
+	var colonBareEnd bareEndCache
 	var qp quotePrefix
 	var quotes outerQuotes
 	nextQuoteOrBarrier := [4]int{-1, -1, -1, -1}
@@ -1234,8 +1420,11 @@ func redactJSONPatternPairs(s string) string {
 			}
 		}
 		_, tailQuote := unquoteValue(s[tailStart:valEnd])
-		escPos, escDouble, escSingle, escBS := tailStart, 0, 0, 0
-		for j, bareEnd := jStart, 0; valEnd < len(s); {
+		var escPos, escDouble, escSingle, escBS int
+		if tailQuote == "" {
+			escPos, escDouble, escSingle, escBS = initEscapedQuoteState(s, tailStart, valEnd)
+		}
+		for j, bareEnd := jStart, (bareEndCache{}); valEnd < len(s); {
 			prevEnd, extStart := valEnd, -1
 			for ; j < len(matches) && matches[j][0] < valEnd && valEnd < len(s); j++ {
 				if tailIsContainer && matches[j][0] < tailCEnd {
@@ -1265,7 +1454,7 @@ func redactJSONPatternPairs(s string) string {
 				}
 				if s[nv] == '{' || s[nv] == '[' {
 					ncEnd := sensitiveValueEnd(s, nv, nv)
-					ntokEnd := bareValueEnd(s, nv, regexpSpace+",}", &bareEnd)
+					ntokEnd := bareValueEnd(s, nv, regexpSpace+",}", &bareEnd.bareEnd)
 					if cand := max(ncEnd, ntokEnd); cand > valEnd {
 						valEnd = cand
 						if valEnd > ncEnd && extStart < 0 {
@@ -1286,10 +1475,10 @@ func redactJSONPatternPairs(s string) string {
 					}
 					continue
 				}
-				if nv < bareEnd {
+				if nv < bareEnd.bareEnd {
 					continue
 				}
-				if cand := bareValueEnd(s, nv, regexpSpace+",}", &bareEnd); cand > valEnd {
+				if cand := bareValueEnd(s, nv, regexpSpace+",}", &bareEnd.bareEnd); cand > valEnd {
 					valEnd = cand
 					if extStart < 0 {
 						extStart = nv
@@ -1514,6 +1703,11 @@ func matchQuotedKeyCandidate(s string, from, to int) (int, bool) {
 	}
 	if ks := sensitiveKeyStart(s, from, to); ks >= 0 {
 		return ks, true
+	}
+	if kEnd < to {
+		if ks := sensitiveKeyStart(s, from, kEnd); ks >= 0 {
+			return ks, true
+		}
 	}
 	if colon := strings.LastIndexByte(trimmed, ':'); colon >= 0 && colon+1 < len(trimmed) {
 		if ks := sensitiveKeyStart(s, from+colon+1, kEnd); ks >= 0 {
@@ -2033,7 +2227,8 @@ func extendOverlappingTextPair(s string, valStart, valEnd int, nextQuoteOrBarrie
 		}
 		return min(len(s), skipSpace(s, w, delimSpace)+1)
 	}
-	bareCache, tempCache := 0, 0
+	var bareCache bareEndCache
+	tempCache := 0
 	var quotedAssignEnd [4]int
 	extendQuotedAssign := func(start, end int) int {
 		for {
@@ -2076,6 +2271,9 @@ func extendOverlappingTextPair(s string, valStart, valEnd int, nextQuoteOrBarrie
 	valEnd = extendQuotedAssign(valStart, valEnd)
 	_, valQuote := unquoteValue(s[valStart:valEnd])
 	escPos, escDouble, escSingle, escBS := valStart, 0, 0, 0
+	if valQuote == "" {
+		escPos, escDouble, escSingle, escBS = initEscapedQuoteState(s, valStart, valEnd)
+	}
 	base := valStart
 	windowEnd := windowEndFor(valStart, valEnd)
 	spans := textKeyPrefixSpans(s[base:windowEnd])
@@ -2203,7 +2401,8 @@ func stackedBareTempTailEnd(s string, valStart, open int, tempCache *int, nextQu
 		local := [4]int{-1, -1, -1, -1}
 		nextQuote = &local
 	}
-	cur, best, bestRaw, bareCache, containerCache, lastContainerStart, lastContainerEnd := valStart, 0, 0, 0, 0, -1, 0
+	var bareCache bareEndCache
+	cur, best, bestRaw, containerCache, lastContainerStart, lastContainerEnd := valStart, 0, 0, 0, -1, 0
 	for cur < len(s) {
 		j := cur
 		if s[cur] == '{' || (s[cur] == '[' && !isRedactedPlaceholderPrefix(s[cur:], false)) {
@@ -2368,7 +2567,8 @@ func redactTextPatternPairs(s string) string {
 		}
 		var end, containerEnd int
 		jStart := i + 1
-		bareCache, checkedBareEnd, tempCache := 0, 0, 0
+		var bareCache bareEndCache
+		checkedBareEnd, tempCache := 0, 0
 		_, valQuote := unquoteValue(s[valStart:valEnd])
 		gluedQuoted := false
 		if kind == valueEndingInKeyName {
@@ -2388,7 +2588,7 @@ func redactTextPatternPairs(s string) string {
 				if s[gv] == '{' || (s[gv] == '[' && !isRedactedPlaceholderPrefix(s[gv:], false)) {
 					cEnd := sensitiveValueEnd(s, gv, gv)
 					containerEnd = max(containerEnd, cEnd)
-					tokEnd := bareValueEnd(s, gv, regexpSpace+",;&", &bareCache)
+					tokEnd := bareValueEnd(s, gv, regexpSpace+",;&", &bareCache.bareEnd)
 					end = max(cEnd, cEnd+len(trimEnclosingClosers(s[cEnd:max(tokEnd, cEnd)], open)))
 				} else {
 					vEnd := matchValueTokenWithOuterQuotes(s, gv, regexpSpace+",;&", &bareCache, &gluedMemo, &quotes)
@@ -2410,7 +2610,7 @@ func redactTextPatternPairs(s string) string {
 		}
 		var escPos, escDouble, escSingle, escBS int
 		if valQuote == "" {
-			escPos = valStart
+			escPos, escDouble, escSingle, escBS = initEscapedQuoteState(s, valStart, valEnd)
 		}
 		for j := jStart; j < len(matches) && matches[j].openStart < end && end < len(s); j++ {
 			if matches[j].start < containerEnd || !valueStartsAtWithQuotes(s, matches[j].end, &quotes) {
@@ -2461,12 +2661,17 @@ func redactTextPatternPairs(s string) string {
 		if kind == valueEndingInKeyName {
 			valSpan = s[valStart:valEnd]
 		}
-		if ((loc.openStart < loc.keyEnd && s[loc.openStart] == '"') || (loc.quoteEnd > loc.keyEnd && s[loc.quoteEnd-1] == '"')) && hasUnbalancedEscapedQuote(valSpan) {
+		if ((loc.openStart < loc.keyEnd && (s[loc.openStart] == '"' || s[loc.openStart] == '\'')) ||
+			(loc.quoteEnd > loc.keyEnd && (s[loc.quoteEnd-1] == '"' || s[loc.quoteEnd-1] == '\''))) && hasUnbalancedEscapedQuote(valSpan) {
 			return redactedSensitiveTextPlaceholder
 		}
 		inner, quote := unquoteValue(valSpan)
 		if quote == "" && (gluedQuoted || (valQuote != "" && len(quotedValueRe.FindString(s[valStart:valEnd])) < valEnd-valStart)) {
 			quote = valQuote
+		} else if quote == "" && end == valEnd && kind == notNestedKey && !gluedQuoted {
+			if q := quotedValueRe.FindString(valSpan); q != "" && len(q) < len(valSpan) && valSpan[len(q)] == '-' && !strings.ContainsAny(valSpan[len(q):], `"'`) {
+				_, quote = unquoteValue(q)
+			}
 		}
 		if kind != valueEndingInKeyName && isRedactedValue(inner) {
 			coveredEnd = end
@@ -2615,7 +2820,7 @@ func classifyNestedCandidate(s, name string, at int, lineStart bool, matches []t
 // when the terminal value starts with "{" or "[". When bareCache and
 // checkedBareEnd are non-nil (quoted-value scan), repeated bare scans and
 // dominated closer trims are skipped in O(1).
-func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKeyMatch, bareCache, checkedBareEnd, tempCache *int, nextQuote *[4]int, gluedMemo *map[int]int, quotes *outerQuotes) (end, lastIdx, containerEnd int) {
+func nestedPairEndInMatches(s string, idx, fallback, open int, matches []textKeyMatch, bareCache *bareEndCache, checkedBareEnd, tempCache *int, nextQuote *[4]int, gluedMemo *map[int]int, quotes *outerQuotes) (end, lastIdx, containerEnd int) {
 	if idx < 0 || idx >= len(matches) {
 		return fallback, idx, 0
 	}
@@ -2718,6 +2923,22 @@ func hasNonEmptyTextValue(s string, stopOnTextStop bool) bool {
 	return false
 }
 
+func initEscapedQuoteState(s string, valStart, tokEnd int) (pos, escDouble, escSingle, escBS int) {
+	leadBS := 0
+	for valStart+leadBS < tokEnd && s[valStart+leadBS] == '\\' {
+		leadBS++
+	}
+	if leadBS >= 2 && leadBS%2 == 0 && valStart+leadBS < tokEnd {
+		if c := s[valStart+leadBS]; (c == '"' || c == '\'') && !isCompleteQuotedValue(s[valStart+leadBS:tokEnd]) {
+			if c == '"' {
+				return valStart + leadBS + 1, 1, 0, 0
+			}
+			return valStart + leadBS + 1, 0, 1, 0
+		}
+	}
+	return valStart, 0, 0, 0
+}
+
 func stepEscapedQuoteState(c byte, escDouble, escSingle, bs int) (int, int, int) {
 	switch c {
 	case '\\':
@@ -2815,31 +3036,36 @@ func hasUnbalancedEscapedQuote(v string) bool {
 	if _, q := unquoteValue(v); q != "" {
 		return false
 	}
+	if leadBS%2 == 0 && isCompleteQuotedValue(v[leadBS:]) {
+		return false
+	}
 	sqEsc, sqBare, dqEsc, dqBare := countQuoteBytes(v)
 	esc, bare := dqEsc, dqBare
 	if v[leadBS] == '\'' {
 		esc, bare = sqEsc, sqBare
 	}
-	return (esc+bare)%2 == 1 && ((esc >= 1 && bare >= 1) || (leadBS >= 1 && bare >= 3))
+	return ((esc+bare)%2 == 1 && esc >= 1 && bare >= 1) || (leadBS >= 1 && ((esc >= 1 && bare >= 1 && esc+bare >= 3) || bare >= 3))
 }
 
 type quoteCounts struct{ sqEsc, sqBare, dqEsc, dqBare int32 }
 
 type quotePrefix struct {
-	checks int
-	counts []quoteCounts
+	scanned int
+	counts  []quoteCounts
 }
 
+// hasUnbalancedEscapedQuote reports whether s[vs:te] contains an unbalanced
+// escaped-quote prefix. Callers must ensure vs == 0 || s[vs-1] != '\\' so
+// direct slice scans and prefix-sum lookups agree on leading backslash parity.
 func (p *quotePrefix) hasUnbalancedEscapedQuote(s string, vs, te int) bool {
 	if te-vs < 2 {
 		return false
 	}
-	if p.checks == 0 {
-		p.checks = 1
-		return hasUnbalancedEscapedQuote(s[vs:te])
-	}
-	p.checks++
 	if p.counts == nil {
+		if p.scanned+(te-vs) <= len(s) {
+			p.scanned += te - vs
+			return hasUnbalancedEscapedQuote(s[vs:te])
+		}
 		p.counts = make([]quoteCounts, len(s)+1)
 		var c quoteCounts
 		bs := 0
@@ -2882,11 +3108,14 @@ func (p *quotePrefix) hasUnbalancedEscapedQuote(s string, vs, te int) bool {
 		esc = int(p.counts[te].dqEsc - p.counts[vs].dqEsc)
 		bare = int(p.counts[te].dqBare - p.counts[vs].dqBare)
 	}
-	if (esc+bare)%2 == 0 || !((esc >= 1 && bare >= 1) || (leadBS >= 1 && bare >= 3)) {
+	if !(((esc+bare)%2 == 1 && esc >= 1 && bare >= 1) || (leadBS >= 1 && ((esc >= 1 && bare >= 1 && esc+bare >= 3) || bare >= 3))) {
 		return false
 	}
 	_, q := unquoteValue(s[vs:te])
-	return q == ""
+	if q != "" {
+		return false
+	}
+	return !(leadBS%2 == 0 && isCompleteQuotedValue(s[vs+leadBS:te]))
 }
 
 // hasUnclosedOuterQuoteBefore reports whether s[:i] ends an unquoted key token
@@ -3042,7 +3271,7 @@ func quotedValueEndsAtWithOuterCheck(s string, start, end int, checkOuter bool, 
 		return true
 	}
 	r, _ := utf8.DecodeRuneInString(after)
-	if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+	if r == '_' || r == '-' || unicode.IsLetter(r) || unicode.IsDigit(r) {
 		return false
 	}
 	_, quote := unquoteValue(s[start:end])
