@@ -210,7 +210,7 @@ type activeTask struct {
 
 type liveSessionImpl struct {
 	inputCh     chan agent.LiveRequest
-	outputCh    chan eventOrError
+	outputCh    chan *session.Event
 	done        chan struct{}
 	closeOnce   sync.Once
 	audioMgr    *AudioCacheManager
@@ -283,15 +283,10 @@ func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
 	return true
 }
 
-type eventOrError struct {
-	event *session.Event
-	err   error
-}
-
 func newLiveSessionImpl() *liveSessionImpl {
 	return &liveSessionImpl{
 		inputCh:  make(chan agent.LiveRequest),
-		outputCh: make(chan eventOrError),
+		outputCh: make(chan *session.Event),
 		done:     make(chan struct{}),
 		audioMgr: NewAudioCacheManager(),
 	}
@@ -315,8 +310,8 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 				return
 			}
 			select {
-			case res := <-s.outputCh:
-				if !yield(res.event, res.err) {
+			case ev := <-s.outputCh:
+				if !yield(ev, nil) {
 					return
 				}
 			case <-s.done:
@@ -341,16 +336,7 @@ func (s *liveSessionImpl) Close() error {
 
 func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
 	select {
-	case s.outputCh <- eventOrError{event: ev}:
-		return true
-	case <-s.done:
-		return false
-	}
-}
-
-func (s *liveSessionImpl) pushError(err error) bool {
-	select {
-	case s.outputCh <- eventOrError{err: err}:
+	case s.outputCh <- ev:
 		return true
 	case <-s.done:
 		return false
@@ -509,7 +495,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		}
 		for ev, err := range f.preprocess(ctx, nreq) {
 			if err != nil {
-				sess.pushError(err)
+				sess.setFinalError(err)
 				return
 			}
 			if ev != nil {
@@ -575,12 +561,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				if reconnectAttempts > policy.maxAttempts {
 					// Resumable errors are swallowed while retrying, so
 					// without this the caller's stream just goes quiet.
-					sess.pushError(liveReconnectGaveUpError(
+					sess.setFinalError(liveReconnectGaveUpError(
 						fmt.Sprintf("%d consecutive attempts delivered no content", policy.maxAttempts), lastErr))
 					return
 				}
 				if shortLivedReconnects > policy.maxTotal {
-					sess.pushError(liveReconnectGaveUpError(
+					sess.setFinalError(liveReconnectGaveUpError(
 						fmt.Sprintf("%d short-lived connections in one invocation", policy.maxTotal), lastErr))
 					return
 				}
@@ -621,6 +607,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 			connCtx, cancelConn := context.WithCancel(liveCtx)
 			liveConn, err := connect(connCtx, &connectReq)
+			if err == nil && liveConn == nil {
+				err = errors.New("connector returned a nil live connection")
+			}
 			if err != nil {
 				cancelConn()
 				if tornDown(liveCtx, sess) {
@@ -638,6 +627,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 			connectedAt := time.Now()
 
+			var handleMu sync.Mutex
+			var latestHandle string
 			// Closing the session must also release a provider blocked in
 			// SendHistory, before the connection's main loop starts.
 			closeConn := sync.OnceFunc(func() { _ = liveConn.Close() })
@@ -646,6 +637,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				stopClose()
 				cancelConn()
 				closeConn()
+				// Snapshot this connection's handle on the flow goroutine.
+				// The next dial reads the invocation's handle; the old
+				// reader cannot overwrite it after a reconnect.
+				handleMu.Lock()
+				if latestHandle != "" {
+					iCtx.SetLiveSessionResumptionHandle(latestHandle)
+				}
+				handleMu.Unlock()
 			}
 
 			eventsChan := make(chan *session.Event)
@@ -685,6 +684,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						return
 					}
 					if resp != nil {
+						if isIContext && resp.SessionResumptionHandle != "" {
+							// Save the handle before forwarding: a send
+							// failure can reconnect while the event is still
+							// waiting behind a pending tool response.
+							handleMu.Lock()
+							latestHandle = resp.SessionResumptionHandle
+							handleMu.Unlock()
+						}
 						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
 							for _, part := range resp.Content.Parts {
 								if part.InlineData != nil {
@@ -773,9 +780,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 				select {
 				case ev := <-eventCase:
-					if isIContext && ev.SessionResumptionHandle != "" {
-						iCtx.SetLiveSessionResumptionHandle(ev.SessionResumptionHandle)
-					}
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -810,7 +814,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						if flushUser || flushModel {
 							flushedEvents, err := sess.audioMgr.FlushCaches(ctx, flushUser, flushModel)
 							if err != nil {
-								sess.pushError(err)
+								sess.setFinalError(err)
 								cleanup()
 								return
 							}
@@ -825,7 +829,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if len(fnCalls) > 0 {
 						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
 						if err != nil {
-							sess.pushError(err)
+							sess.setFinalError(err)
 							cleanup()
 							return
 						}
@@ -882,11 +886,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						reconnect = true
 						break // Break the select
 					}
-					// pushError would park here until the consumer pulls from
-					// outputCh, but the consumer may already be blocked in Send,
-					// which only Close can release. Buffer the terminal error so
-					// the iterator can deliver it; the deferred Close above ends
-					// waits in Send and recvIter when this goroutine returns.
 					sess.setFinalError(ce.err)
 					cleanup()
 					return

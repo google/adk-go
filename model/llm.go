@@ -48,6 +48,8 @@ type LiveConnector interface {
 // The flow serializes calls to the Send methods and may iterate Receive
 // concurrently with them. Close may run concurrently with either and must
 // unblock any pending sends or receives.
+// Instructions and tools are configured at Connect time; updating them
+// in place is outside the base connection contract.
 type LiveConnection interface {
 	// SendHistory sends earlier turns immediately after connecting. The model
 	// should reply if the final turn is the user's.
@@ -58,9 +60,13 @@ type LiveConnection interface {
 	// SendRealtime accepts live input such as *genai.Blob, *genai.ActivityStart,
 	// or *genai.ActivityEnd. It returns an error for unsupported input types.
 	SendRealtime(ctx context.Context, input any) error
-	// Receive is called once per connection. Returning without an error ends
-	// the session cleanly. A resumable transport error such as io.EOF allows
-	// the flow to reconnect, using the latest SessionResumptionHandle if set.
+	// Receive is called once per connection. Unlike adk-python's per-turn
+	// receive pass, the Go iterator spans turns so a temporarily idle model
+	// can keep the connection open for future input. Yield a response with
+	// TurnComplete to mark a turn boundary instead of ending the iterator.
+	// Returning without an error ends the session cleanly. A resumable
+	// transport error such as io.EOF allows the flow to reconnect, using the
+	// latest SessionResumptionHandle if set.
 	// The flow may retain yielded responses, so implementations must leave
 	// their contents intact after yielding.
 	Receive(ctx context.Context) iter.Seq2[*LLMResponse, error]
