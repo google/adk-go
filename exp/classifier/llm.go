@@ -193,7 +193,13 @@ func (c *LLMClassifier) Classify(
 		return nil, err
 	}
 
-	return parseAnswers(modelName, finalResp.ModelVersion, text, names, normalized)
+	response, err := parseAnswers(modelName, finalResp.ModelVersion, text, names, normalized)
+	if err != nil {
+		return nil, err
+	}
+
+	response.UsageMetadata = finalResp.UsageMetadata
+	return response, nil
 }
 
 func (c *LLMClassifier) buildRequest(
