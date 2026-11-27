@@ -16,7 +16,10 @@ package gcp
 
 import (
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -33,6 +36,7 @@ import (
 // JSON does not define is outside this function's contract, which is to leave
 // what it does not decode alone. TestUnescapeJSONLeavesTheRestAlone covers those.
 func TestUnescapeJSONMatchesEncodingJSON(t *testing.T) {
+	t.Parallel()
 	// "n" earns its place by being the one symbol that forms an escape this
 	// package deliberately does not decode, which is what exercises the
 	// hasForeignEscape filter below. Without it the filter never fires and the
@@ -51,26 +55,55 @@ func TestUnescapeJSONMatchesEncodingJSON(t *testing.T) {
 	}
 	gen("", 6)
 
+	workers := runtime.GOMAXPROCS(0)
+	type workerResult struct {
+		checked  int
+		escaped  int
+		foreign  int
+		rejected int
+		fail     string
+	}
+	results := make([]workerResult, workers)
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Go(func() {
+			var res workerResult
+			for idx := worker; idx < len(words); idx += workers {
+				w := words[idx]
+				var want string
+				if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
+					res.rejected++
+					continue
+				}
+				// Only inputs whose escapes are all ours. \n, \t and friends are real JSON
+				// and deliberately not decoded here, so they are not a disagreement.
+				if hasForeignEscape(w) {
+					res.foreign++
+					continue
+				}
+				res.checked++
+				if strings.Contains(w, `\`) {
+					res.escaped++
+				}
+				if got := unescapeJSON(w); got != want {
+					res.fail = fmt.Sprintf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
+					break
+				}
+			}
+			results[worker] = res
+		})
+	}
+	wg.Wait()
+
 	checked, escaped, foreign, rejected := 0, 0, 0, 0
-	for _, w := range words {
-		var want string
-		if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
-			rejected++
-			continue
+	for _, res := range results {
+		if res.fail != "" {
+			t.Fatalf("%s", res.fail)
 		}
-		// Only inputs whose escapes are all ours. \n, \t and friends are real JSON
-		// and deliberately not decoded here, so they are not a disagreement.
-		if hasForeignEscape(w) {
-			foreign++
-			continue
-		}
-		checked++
-		if strings.Contains(w, `\`) {
-			escaped++
-		}
-		if got := unescapeJSON(w); got != want {
-			t.Fatalf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
-		}
+		checked += res.checked
+		escaped += res.escaped
+		foreign += res.foreign
+		rejected += res.rejected
 	}
 	t.Logf("%d inputs compared (%d of them escaped), %d rejected by the oracle, %d skipped as foreign escapes",
 		checked, escaped, rejected, foreign)
@@ -96,6 +129,7 @@ func TestUnescapeJSONMatchesEncodingJSON(t *testing.T) {
 // highs, of a high followed by a BMP escape, and of a doubled backslash in front
 // of any of them falls out of the enumeration.
 func TestUnescapeJSONMatchesEncodingJSONOnPairs(t *testing.T) {
+	t.Parallel()
 	tokens := []string{`\ud83d`, `\ude00`, `\u0041`, `\\`, `\/`, "q"}
 	var words []string
 	var gen func(prefix string, n int)
@@ -110,18 +144,42 @@ func TestUnescapeJSONMatchesEncodingJSONOnPairs(t *testing.T) {
 	}
 	gen("", 5)
 
+	workers := runtime.GOMAXPROCS(0)
+	type workerResult struct {
+		pairs int
+		fail  string
+	}
+	results := make([]workerResult, workers)
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Go(func() {
+			var res workerResult
+			for idx := worker; idx < len(words); idx += workers {
+				w := words[idx]
+				var want string
+				if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
+					res.fail = fmt.Sprintf("the oracle rejected %q, so the token set is wrong: %v", w, err)
+					break
+				}
+				if strings.Contains(w, `\ud83d\ude00`) {
+					res.pairs++
+				}
+				if got := unescapeJSON(w); got != want {
+					res.fail = fmt.Sprintf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
+					break
+				}
+			}
+			results[worker] = res
+		})
+	}
+	wg.Wait()
+
 	var pairs int
-	for _, w := range words {
-		var want string
-		if err := json.Unmarshal([]byte(`"`+w+`"`), &want); err != nil {
-			t.Fatalf("the oracle rejected %q, so the token set is wrong: %v", w, err)
+	for _, res := range results {
+		if res.fail != "" {
+			t.Fatalf("%s", res.fail)
 		}
-		if strings.Contains(w, `\ud83d\ude00`) {
-			pairs++
-		}
-		if got := unescapeJSON(w); got != want {
-			t.Fatalf("unescapeJSON(%q) = %q, encoding/json says %q", w, got, want)
-		}
+		pairs += res.pairs
 	}
 	t.Logf("%d token sequences compared against encoding/json", len(words))
 	// Guards the reason this test exists: a token set that stopped producing
@@ -158,6 +216,7 @@ func hasForeignEscape(s string) bool {
 // property is the same throughout: nothing panics, nothing is dropped, and what
 // cannot be decoded comes back as it went in.
 func TestUnescapeJSONLeavesTheRestAlone(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, in, want string }{
 		{"a high surrogate at the end", `\ud83d`, "\uFFFD"},
 		{"a high surrogate then a truncated escape", `\ud83d\ude0`, "\uFFFD" + `\ude0`},
@@ -182,6 +241,7 @@ func TestUnescapeJSONLeavesTheRestAlone(t *testing.T) {
 
 // TestUnescapeJSONNeverGrows pins the assumption b.Grow(len(s)) rests on.
 func TestUnescapeJSONNeverGrows(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{
 		`\ud83d\ude00`, `\u0041`, `\/`, `\\`, `\uFFFF`, strings.Repeat(`\u0040`, 1000),
 	} {
@@ -200,6 +260,7 @@ func TestUnescapeJSONNeverGrows(t *testing.T) {
 // likes. Deciding from the output instead is what these rows hold in place.
 
 func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		in      string
@@ -296,6 +357,7 @@ func TestServiceTextReturnsOnlyWhatItCanShowClean(t *testing.T) {
 // making the same structural choices, re-frozen whenever it moves. So this catches a future weakening of
 // recoverable, and not a blind spot the two share today.
 func TestServiceTextNeverReturnsARecoverableSecret(t *testing.T) {
+	t.Parallel()
 	const user = "alice@example.test"
 	const uri = "https://app.test/cb"
 	pieces := []string{
@@ -424,6 +486,7 @@ func readable(t *testing.T, x string, secrets []string) bool {
 // a read that changes nothing, so the last of the maxDecodePasses reads has no
 // successor to confirm it. Fail-closed either way, and pinned so it cannot drift.
 func TestDecodeFullyStopsAtItsPassBound(t *testing.T) {
+	t.Parallel()
 	// Well inside a pass bound, and a fixpoint it can actually reach.
 	if got, done := decodeFully(`\u005c` + strings.Repeat("u005c", 4)); !done {
 		t.Errorf("decodeFully() gave up on %d passes' worth of input, got %q", 5, got)
@@ -456,6 +519,7 @@ func TestDecodeFullyStopsAtItsPassBound(t *testing.T) {
 // relies on, which is not the same claim as TestUnescapeJSONNeverGrows: an equal
 // length that still changed would loop forever.
 func TestDecodeFullyShrinksWheneverItChanges(t *testing.T) {
+	t.Parallel()
 	for _, in := range []string{
 		`\\u0040`, `\u0040`, `\/`, `\\`, `\ud83d\ude00`, `\uZZZZ`, `plain`, ``,
 		`\\\\u0040example`, `a\\b\/c\u0041d`,
@@ -482,6 +546,7 @@ func TestDecodeFullyShrinksWheneverItChanges(t *testing.T) {
 // and match. The controls additionally assert the response is SHOWN, since
 // suppressing them is the failure the split was introduced to prevent.
 func TestSecretSpanningOurOwnMarkerIsNotShown(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		body     string

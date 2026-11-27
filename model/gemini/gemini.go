@@ -38,6 +38,11 @@
 // once without it, and the next request creates a new cache.
 //
 // A request that already names a cache in its own config is sent as it is.
+// When the provider reports that a model does not support explicit context
+// caching, that refusal is remembered for the model and backend for the life
+// of the process (shared across model instances and never cleared), so later
+// requests are sent without trying to create a cache again until the process
+// restarts.
 //
 // Each request with a CacheConfig gets one handle_context_caching span, a
 // child of the generate_content span when an agent makes the call. Its
@@ -61,6 +66,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -68,6 +74,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/schemacache"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
@@ -280,6 +287,7 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+	config.Tools = encodeToolSchemas(config.Tools)
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
@@ -298,6 +306,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+		config.Tools = encodeToolSchemas(config.Tools)
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
 			if err != nil {
 				yield(nil, err)
@@ -337,6 +346,57 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	httpOptions.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(httpOptions.ExtrasRequestProvider, fallbackProvider)
 	configCopy.HTTPOptions = httpOptions
 	return &configCopy
+}
+
+// encodeToolSchemas returns tools with each function declaration schema that
+// schemacache remembers replaced by its encoding, which genai sends as is
+// instead of encoding the schema again: genai marshals the whole request on
+// every call, and jsonschema.Schema's MarshalJSON dominates that for small
+// tools. The request's own tools are left alone, so callbacks and history
+// keep the schemas they set. Unchanged tools and declarations are shared, not
+// copied.
+func encodeToolSchemas(tools []*genai.Tool) []*genai.Tool {
+	var out []*genai.Tool
+	for i, t := range tools {
+		if t == nil {
+			continue
+		}
+		var decls []*genai.FunctionDeclaration
+		for j, d := range t.FunctionDeclarations {
+			if d == nil {
+				continue
+			}
+			params, paramsOK := schemacache.Encoded(d.ParametersJsonSchema)
+			response, responseOK := schemacache.Encoded(d.ResponseJsonSchema)
+			if !paramsOK && !responseOK {
+				continue
+			}
+			if decls == nil {
+				decls = slices.Clone(t.FunctionDeclarations)
+			}
+			encoded := *d
+			if paramsOK {
+				encoded.ParametersJsonSchema = params
+			}
+			if responseOK {
+				encoded.ResponseJsonSchema = response
+			}
+			decls[j] = &encoded
+		}
+		if decls == nil {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(tools)
+		}
+		withDecls := *t
+		withDecls.FunctionDeclarations = decls
+		out[i] = &withDecls
+	}
+	if out == nil {
+		return tools
+	}
+	return out
 }
 
 // providerPreservingEmptyTextThoughtSignatures returns an extras provider that
@@ -440,4 +500,17 @@ func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
 
-var _ googlellm.GoogleLLM = &geminiModel{}
+func (m *geminiModel) Capabilities() model.Capabilities {
+	if m == nil {
+		return model.Capabilities{}
+	}
+	return model.Capabilities{
+		AcceptsOutputSchemaAndTools: !googlellm.IsGeminiModel(m.name) ||
+			(m.GetGoogleLLMVariant() == genai.BackendVertexAI && googlellm.IsGemini2OrAbove(m.name)),
+	}
+}
+
+var (
+	_ googlellm.GoogleLLM = &geminiModel{}
+	_ model.LLM           = &geminiModel{}
+)

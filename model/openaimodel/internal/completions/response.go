@@ -15,6 +15,7 @@
 package completions
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -139,21 +140,60 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count.
+// convertUsage maps completion usage to disjoint genai candidate and thought
+// counts. Unlike adk-python's OpenAILlm, it removes any overlap so telemetry
+// can sum the two without counting reasoning twice. It returns nil when any
+// count is invalid (see [shared.InvalidUsage]): usage the server could not
+// have measured is reported as unknown rather than as numbers every reader
+// would trust.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		return nil
+	}
+	// InvalidUsage has bounded every count to [0, math.MaxInt32].
+	prompt, completion, total := usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	reasoning := usage.CompletionTokensDetails.ReasoningTokens
+	output := int32(completion)
+	thoughts := min(int32(reasoning), output)
+	candidates := output - thoughts
+	// xAI reports reasoning outside completion_tokens. Its total includes
+	// all three counts. Subtract instead of summing counts to avoid overflow.
+	if reasoning > 0 && total >= prompt && total-prompt-completion == reasoning {
+		candidates, thoughts = output, int32(reasoning)
+	}
+
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
-		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
+		PromptTokenCount:        int32(usage.PromptTokens),
+		CandidatesTokenCount:    candidates,
+		TotalTokenCount:         int32(usage.TotalTokens),
+		CachedContentTokenCount: int32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: int32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
+	}
+}
+
+// usageCounts lists the counts convertUsage reports, under their Chat
+// Completions names.
+func usageCounts(usage openai.CompletionUsage) []shared.UsageCount {
+	return []shared.UsageCount{
+		{Name: "prompt_tokens", Value: usage.PromptTokens},
+		{Name: "completion_tokens", Value: usage.CompletionTokens},
+		{Name: "total_tokens", Value: usage.TotalTokens},
+		{Name: "prompt_tokens_details.cached_tokens", Value: usage.PromptTokensDetails.CachedTokens},
+		{Name: "completion_tokens_details.reasoning_tokens", Value: usage.CompletionTokensDetails.ReasoningTokens},
+	}
+}
+
+// traceInvalidUsage records on the span in ctx why convertUsage dropped usage,
+// when it did.
+func traceInvalidUsage(ctx context.Context, usage openai.CompletionUsage) {
+	if name, reason := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		shared.TraceInvalidUsage(ctx, name, reason)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/cmd/launcher"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
@@ -45,6 +46,8 @@ type streamAwareLLM struct{}
 func (streamAwareLLM) Name() string {
 	return "stream-aware-llm"
 }
+
+func (streamAwareLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (streamAwareLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -135,7 +138,8 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 		t.Fatalf("Create() failed: %v", err)
 	}
 
-	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: sessionService}, "app", "streaming_agent_run_with_events", "async_stream")
+	recorder := &testutil.RecordingSessionService{Service: sessionService}
+	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: recorder}, "app", "streaming_agent_run_with_events", "async_stream")
 	req := &models.StreamingAgentRunWithEventsRunRequest{
 		UserID:    "jan@example.com",
 		SessionID: created.Session.ID(),
@@ -146,6 +150,11 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 	}
 	if req.SessionID != created.Session.ID() {
 		t.Errorf("SessionID = %q, want existing backend session %q", req.SessionID, created.Session.ID())
+	}
+	// The runner reads the events when the run starts, so this check must not.
+	gets := recorder.Gets()
+	if len(gets) != 1 || !gets[0].ExcludeEvents {
+		t.Errorf("session reads = %+v, want one read with ExcludeEvents", gets)
 	}
 }
 

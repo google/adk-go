@@ -24,8 +24,10 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -245,48 +247,58 @@ func TestTrackingHeaderDestinationIsDialed(t *testing.T) {
 	}
 	dnsName := regexp.MustCompile(`^[a-z0-9.-]*\.googleapis\.com$`)
 
-	var dialed string
-	dial := func(_ context.Context, _, addr string) (net.Conn, error) {
-		dialed = addr
-		return nil, errDialed
-	}
-	client := &http.Client{Transport: &http.Transport{DialContext: dial, DialTLSContext: dial, DisableKeepAlives: true}}
 	tagged := "google-adk/" + Version + "+cloud_run"
 
-	// check reports whether dest gets the suffix, after checking where a
-	// request to it would connect.
-	var connects int
-	check := func(t *testing.T, dest string) bool {
-		u, err := url.Parse(dest)
-		if err != nil || adkToken(TrackingHeader(u)) != tagged {
-			return false
+	var prefixes []string
+	var walk func(prefix string, depth int)
+	walk = func(prefix string, depth int) {
+		prefixes = append(prefixes, prefix)
+		if depth == 0 {
+			return
 		}
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, dest, http.NoBody)
-		if err != nil {
-			return true // No request can be sent there.
+		for _, piece := range pieces {
+			walk(prefix+piece, depth-1)
 		}
-		dialed = ""
-		resp, err := client.Do(req)
-		if err == nil {
-			_ = resp.Body.Close()
-			t.Fatalf("request to %q was sent", dest)
+	}
+	walk("", 3)
+
+	newChecker := func(ctx context.Context) func(dest string) (suffixed, connected bool, errs []string, fatal string) {
+		var dialed string
+		dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, errDialed
 		}
-		if !errors.Is(err, errDialed) {
-			return true // Refused before any connection.
+		client := &http.Client{Transport: &http.Transport{DialContext: dial, DialTLSContext: dial, DisableKeepAlives: true}}
+		return func(dest string) (suffixed, connected bool, errs []string, fatal string) {
+			u, err := url.Parse(dest)
+			if err != nil || adkToken(TrackingHeader(u)) != tagged {
+				return false, false, nil, ""
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, dest, http.NoBody)
+			if err != nil {
+				return true, false, nil, "" // No request can be sent there.
+			}
+			dialed = ""
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				return true, false, nil, fmt.Sprintf("request to %q was sent", dest)
+			}
+			if !errors.Is(err, errDialed) {
+				return true, false, nil, "" // Refused before any connection.
+			}
+			host, _, err := net.SplitHostPort(dialed)
+			if err != nil {
+				return true, true, []string{fmt.Sprintf("%q gets the runtime suffix and connects to %q, which is not host:port", dest, dialed)}, ""
+			}
+			if _, err := netip.ParseAddr(host); err == nil {
+				errs = append(errs, fmt.Sprintf("%q gets the runtime suffix and connects to the IP address %q", dest, dialed))
+			}
+			if !dnsName.MatchString(strings.ToLower(host)) {
+				errs = append(errs, fmt.Sprintf("%q gets the runtime suffix and connects to %q, which is not a DNS name under googleapis.com", dest, dialed))
+			}
+			return true, true, errs, ""
 		}
-		connects++
-		host, _, err := net.SplitHostPort(dialed)
-		if err != nil {
-			t.Errorf("%q gets the runtime suffix and connects to %q, which is not host:port", dest, dialed)
-			return true
-		}
-		if _, err := netip.ParseAddr(host); err == nil {
-			t.Errorf("%q gets the runtime suffix and connects to the IP address %q", dest, dialed)
-		}
-		if !dnsName.MatchString(strings.ToLower(host)) {
-			t.Errorf("%q gets the runtime suffix and connects to %q, which is not a DNS name under googleapis.com", dest, dialed)
-		}
-		return true
 	}
 
 	for _, mode := range []struct {
@@ -302,6 +314,7 @@ func TestTrackingHeaderDestinationIsDialed(t *testing.T) {
 		t.Run(mode.name, func(t *testing.T) {
 			versiontest.ClearRuntimeEnv(t)
 			t.Setenv("K_SERVICE", "svc")
+			ctx := t.Context()
 			if mode.godebug != "" {
 				// After what the environment holds, because the last setting
 				// of a name wins.
@@ -309,28 +322,68 @@ func TestTrackingHeaderDestinationIsDialed(t *testing.T) {
 				if _, err := url.Parse(mode.only); err != nil {
 					t.Skipf("GODEBUG=%s has no effect: %v", mode.godebug, err)
 				}
-				if check(t, mode.only) {
+				suffixed, _, errs, fatal := newChecker(ctx)(mode.only)
+				if fatal != "" {
+					t.Fatal(fatal)
+				}
+				for _, msg := range errs {
+					t.Error(msg)
+				}
+				if suffixed {
 					t.Errorf("%q gets the runtime suffix", mode.only)
 				}
 			}
-			connects = 0
-			var total, suffixed int
-			var walk func(prefix string, depth int)
-			walk = func(prefix string, depth int) {
-				for _, tmpl := range templates {
-					total++
-					if check(t, fmt.Sprintf(tmpl, prefix)) {
-						suffixed++
-					}
-				}
-				if depth == 0 {
-					return
-				}
-				for _, piece := range pieces {
-					walk(prefix+piece, depth-1)
-				}
+
+			workers := runtime.GOMAXPROCS(0)
+			type workerResult struct {
+				total    int
+				suffixed int
+				connects int
+				errs     []string
+				fatal    string
 			}
-			walk("", 3)
+			results := make([]workerResult, workers)
+			var wg sync.WaitGroup
+			for w := range workers {
+				wg.Go(func() {
+					check := newChecker(ctx)
+					var res workerResult
+					for i := w; i < len(prefixes); i += workers {
+						prefix := prefixes[i]
+						for _, tmpl := range templates {
+							res.total++
+							suffixed, connected, errs, fatal := check(fmt.Sprintf(tmpl, prefix))
+							if fatal != "" {
+								res.fatal = fatal
+								results[w] = res
+								return
+							}
+							if suffixed {
+								res.suffixed++
+							}
+							if connected {
+								res.connects++
+							}
+							res.errs = append(res.errs, errs...)
+						}
+					}
+					results[w] = res
+				})
+			}
+			wg.Wait()
+
+			var total, suffixed, connects int
+			for _, res := range results {
+				if res.fatal != "" {
+					t.Fatal(res.fatal)
+				}
+				for _, msg := range res.errs {
+					t.Error(msg)
+				}
+				total += res.total
+				suffixed += res.suffixed
+				connects += res.connects
+			}
 			// Guards against a generator, or a dialer, that reaches nothing.
 			if total < 50000 || suffixed < 500 || connects < suffixed/2 {
 				t.Errorf("checked %d destinations, %d with the suffix, %d of those connecting: too few to mean anything", total, suffixed, connects)

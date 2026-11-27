@@ -52,6 +52,8 @@ type scriptedModel struct {
 
 func (m *scriptedModel) Name() string { return "scripted" }
 
+func (*scriptedModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *scriptedModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	m.prompts = append(m.prompts, req.Contents)
@@ -576,6 +578,8 @@ type toolCallingModel struct {
 
 func (m *toolCallingModel) Name() string { return "tool-calling" }
 
+func (*toolCallingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *toolCallingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	m.prompts = append(m.prompts, req.Contents)
@@ -819,6 +823,8 @@ type erroringModel struct{}
 
 func (m *erroringModel) Name() string { return "erroring" }
 
+func (*erroringModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *erroringModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		yield(nil, errors.New("model is down"))
@@ -1029,6 +1035,8 @@ type usageModel struct {
 }
 
 func (m *usageModel) Name() string { return "usage" }
+
+func (*usageModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *usageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
@@ -1332,6 +1340,8 @@ type toolLoopModel struct {
 
 func (m *toolLoopModel) Name() string { return "tool-loop" }
 
+func (*toolLoopModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *toolLoopModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	m.calls++
@@ -1458,6 +1468,8 @@ type hangingSummarizerModel struct {
 
 func (m *hangingSummarizerModel) Name() string { return "hanging" }
 
+func (*hangingSummarizerModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *hangingSummarizerModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()
 	m.calls++
@@ -1566,6 +1578,8 @@ type proportionalUsageModel struct {
 }
 
 func (m *proportionalUsageModel) Name() string { return "proportional" }
+
+func (*proportionalUsageModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *proportionalUsageModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.mu.Lock()

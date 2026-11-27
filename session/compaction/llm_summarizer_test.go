@@ -444,6 +444,8 @@ type partialModel struct{}
 
 func (m *partialModel) Name() string { return "partial" }
 
+func (*partialModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *partialModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if !yield(&model.LLMResponse{Content: genai.NewContentFromText("chunk-1", "model"), Partial: true}, nil) {
@@ -636,6 +638,8 @@ func TestFormatEventsEscapesAuthorAndToolNames(t *testing.T) {
 type hangingModel struct{}
 
 func (m *hangingModel) Name() string { return "hanging" }
+
+func (*hangingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *hangingModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -902,6 +906,8 @@ func TestTranscriptCannotForgeATurnThroughAnAttachment(t *testing.T) {
 type headerWritingModel struct{}
 
 func (headerWritingModel) Name() string { return "header-writer" }
+
+func (headerWritingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (headerWritingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {

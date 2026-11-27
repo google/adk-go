@@ -15,6 +15,7 @@
 package responses
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -303,19 +304,53 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	return ""
 }
 
+// convertUsage splits inclusive Responses output into disjoint genai candidate
+// and thought counts. Unlike adk-python's OpenAIResponsesLlm, it removes the
+// overlap so telemetry can sum the two without counting reasoning twice. It
+// returns nil when any count is invalid (see [shared.InvalidUsage]): usage the
+// server could not have measured is reported as unknown rather than as numbers
+// every reader would trust.
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
+	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		return nil
+	}
+	// InvalidUsage has bounded every count to [0, math.MaxInt32].
+	output := int32(usage.OutputTokens)
+	thoughts := min(int32(usage.OutputTokensDetails.ReasoningTokens), output)
+	candidates := output - thoughts
+
 	return &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:        shared.SafeInt32(usage.InputTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.OutputTokens),
-		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
-		CachedContentTokenCount: shared.SafeInt32(usage.InputTokensDetails.CachedTokens),
+		PromptTokenCount:        int32(usage.InputTokens),
+		CandidatesTokenCount:    candidates,
+		TotalTokenCount:         int32(usage.TotalTokens),
+		CachedContentTokenCount: int32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.InputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: int32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
+	}
+}
+
+// usageCounts lists the counts convertUsage reports, under their Responses API
+// names.
+func usageCounts(usage oairesponses.ResponseUsage) []shared.UsageCount {
+	return []shared.UsageCount{
+		{Name: "input_tokens", Value: usage.InputTokens},
+		{Name: "output_tokens", Value: usage.OutputTokens},
+		{Name: "total_tokens", Value: usage.TotalTokens},
+		{Name: "input_tokens_details.cached_tokens", Value: usage.InputTokensDetails.CachedTokens},
+		{Name: "output_tokens_details.reasoning_tokens", Value: usage.OutputTokensDetails.ReasoningTokens},
+	}
+}
+
+// traceInvalidUsage records on the span in ctx why convertUsage dropped usage,
+// when it did.
+func traceInvalidUsage(ctx context.Context, usage oairesponses.ResponseUsage) {
+	if name, reason := shared.InvalidUsage(usageCounts(usage)...); name != "" {
+		shared.TraceInvalidUsage(ctx, name, reason)
 	}
 }
 
