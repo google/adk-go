@@ -138,6 +138,31 @@ func convertSnakeValue(path string, v reflect.Value, depth int, active map[snake
 		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
 			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
 		}
+		// A fixed-size byte array (or any array/slice) with its own text or
+		// JSON form — e.g. uuid.UUID, a [16]byte with MarshalText — must not be
+		// walked element-by-element: that serializes it as an array of numbers.
+		// Honor the marshaler instead, matching encoding/json's precedence
+		// (json.Marshaler, then encoding.TextMarshaler).
+		if v.CanInterface() {
+			if jm, ok := v.Interface().(json.Marshaler); ok {
+				b, err := jm.MarshalJSON()
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal %v as JSON: %w", v.Type(), err)
+				}
+				var out any
+				if err := json.Unmarshal(b, &out); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal JSON for %v: %w", v.Type(), err)
+				}
+				return out, nil
+			}
+			if tm, ok := v.Interface().(encoding.TextMarshaler); ok {
+				b, err := tm.MarshalText()
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal %v as text: %w", v.Type(), err)
+				}
+				return string(b), nil
+			}
+		}
 		res := []any{}
 		for i := range v.Len() {
 			elem, err := convertSnakeValue(path+".[]", v.Index(i), depth+1, active)
