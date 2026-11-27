@@ -140,28 +140,40 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count. It
-// returns nil when any count is invalid (see [shared.InvalidUsage]): usage the
-// server could not have measured is reported as unknown rather than as numbers
-// every reader would trust.
+// convertUsage maps completion usage to disjoint genai candidate and thought
+// counts. Unlike adk-python's OpenAILlm, it removes any overlap so telemetry
+// can sum the two without counting reasoning twice. It returns nil when any
+// count is invalid (see [shared.InvalidUsage]): usage the server could not
+// have measured is reported as unknown rather than as numbers every reader
+// would trust.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
 	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
 		return nil
 	}
 	// InvalidUsage has bounded every count to [0, math.MaxInt32].
+	prompt, completion, total := usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	reasoning := usage.CompletionTokensDetails.ReasoningTokens
+	output := int32(completion)
+	thoughts := min(int32(reasoning), output)
+	candidates := output - thoughts
+	// xAI reports reasoning outside completion_tokens. Its total includes
+	// all three counts. Subtract instead of summing counts to avoid overflow.
+	if reasoning > 0 && total >= prompt && total-prompt-completion == reasoning {
+		candidates, thoughts = output, int32(reasoning)
+	}
+
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        int32(usage.PromptTokens),
-		CandidatesTokenCount:    int32(usage.CompletionTokens),
+		CandidatesTokenCount:    candidates,
 		TotalTokenCount:         int32(usage.TotalTokens),
 		CachedContentTokenCount: int32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: int32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: int32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: int32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
 	}
 }
 

@@ -304,27 +304,33 @@ func finishMessage(resp *oairesponses.Response, incompleteEvent bool) string {
 	return ""
 }
 
-// convertUsage converts Responses API token accounting into genai usage
-// metadata. It returns nil when any count is invalid (see
-// [shared.InvalidUsage]): usage the server could not have measured is reported
-// as unknown rather than as numbers every reader would trust.
+// convertUsage splits inclusive Responses output into disjoint genai candidate
+// and thought counts. Unlike adk-python's OpenAIResponsesLlm, it removes the
+// overlap so telemetry can sum the two without counting reasoning twice. It
+// returns nil when any count is invalid (see [shared.InvalidUsage]): usage the
+// server could not have measured is reported as unknown rather than as numbers
+// every reader would trust.
 func convertUsage(usage oairesponses.ResponseUsage) *genai.GenerateContentResponseUsageMetadata {
 	if name, _ := shared.InvalidUsage(usageCounts(usage)...); name != "" {
 		return nil
 	}
 	// InvalidUsage has bounded every count to [0, math.MaxInt32].
+	output := int32(usage.OutputTokens)
+	thoughts := min(int32(usage.OutputTokensDetails.ReasoningTokens), output)
+	candidates := output - thoughts
+
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        int32(usage.InputTokens),
-		CandidatesTokenCount:    int32(usage.OutputTokens),
+		CandidatesTokenCount:    candidates,
 		TotalTokenCount:         int32(usage.TotalTokens),
 		CachedContentTokenCount: int32(usage.InputTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: int32(usage.InputTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: int32(usage.OutputTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: int32(usage.OutputTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
 	}
 }
 

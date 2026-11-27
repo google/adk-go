@@ -103,10 +103,43 @@ func preserveSchemaNumbers(val any) any {
 // deliberately. Its _enforce_strict_openai_schema rewrites an object only when
 // the schema already carries a properties key, which leaves one without to fail
 // the same request.
+//
+// When the root schema itself is a $ref into $defs (for example recursive model
+// schemas produced by JSON schema generators), the referenced definition is
+// inlined at the root instead of stripping $defs alongside $ref, because OpenAI
+// rejects a root $ref and $defs still need to remain available for nested refs.
 func EnforceStrictOpenAISchema(val any) {
 	schema, ok := val.(map[string]any)
 	if !ok {
 		return
+	}
+
+	// Inline a $ref pointing into sibling $defs (for example recursive schemas
+	// whose root is {"$ref": "#/$defs/...", "$defs": {...}}), keeping root
+	// keys and stopping on cyclic or unresolvable references.
+	if defsMap, ok := schema["$defs"].(map[string]any); ok {
+		seen := map[string]bool{}
+		for {
+			refStr, ok := schema["$ref"].(string)
+			if !ok {
+				break
+			}
+			name, ok := strings.CutPrefix(refStr, "#/$defs/")
+			if !ok || seen[name] {
+				break
+			}
+			target, ok := defsMap[name].(map[string]any)
+			if !ok {
+				break
+			}
+			seen[name] = true
+			delete(schema, "$ref")
+			for k, v := range target {
+				if _, exists := schema[k]; !exists {
+					schema[k] = cloneSchemaValue(v)
+				}
+			}
+		}
 	}
 
 	if _, hasRef := schema["$ref"]; hasRef {
@@ -161,6 +194,31 @@ func EnforceStrictOpenAISchema(val any) {
 		if _, isMap := itemsVal.(map[string]any); isMap {
 			EnforceStrictOpenAISchema(itemsVal)
 		}
+	}
+}
+
+func cloneSchemaValue(val any) any {
+	switch v := val.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(v))
+		for k, child := range v {
+			cloned[k] = cloneSchemaValue(child)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(v))
+		for i, child := range v {
+			cloned[i] = cloneSchemaValue(child)
+		}
+		return cloned
+	case []string:
+		return slices.Clone(v)
+	case json.RawMessage:
+		return slices.Clone(v)
+	case []byte:
+		return slices.Clone(v)
+	default:
+		return v
 	}
 }
 
