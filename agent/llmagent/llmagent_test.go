@@ -457,6 +457,8 @@ type streamingTextModel struct {
 
 func (m *streamingTextModel) Name() string { return "streaming-text" }
 
+func (*streamingTextModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, delta := range []string{"Hello ", "world."} {
@@ -1118,10 +1120,10 @@ func TestAgentTransfer(t *testing.T) {
 
 	check := func(t *testing.T, rootAgent agent.Agent, wants [][]content) {
 		runner := testutil.NewTestAgentRunner(t, rootAgent)
-		for i := range len(wants) {
+		for i := range wants {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
 			if err != nil {
-				t.Fatalf("[round $d]: stream ended with an error: %v", err)
+				t.Fatalf("[round %d]: stream ended with an error: %v", i, err)
 			}
 			if diff := cmp.Diff(wants[i], got); diff != "" {
 				t.Errorf("[round %d] events diff (-want, +got) = %v", i, diff)

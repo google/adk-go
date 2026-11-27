@@ -33,12 +33,12 @@
 // overridden per request by [genai.GenerateContentConfig.MaxOutputTokens].
 //
 //	// First-party Anthropic API (uses ANTHROPIC_API_KEY when APIKey is empty):
-//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-5-5", anthropicmodel.ClientConfig{
 //		Backend: anthropicmodel.BackendAnthropic,
 //	})
 //
 //	// Claude on Vertex AI (uses GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and ADC):
-//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-4-5@20250929", anthropicmodel.ClientConfig{
+//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-5-5", anthropicmodel.ClientConfig{
 //		Backend: anthropicmodel.BackendVertex,
 //	})
 //
@@ -248,6 +248,13 @@
 // stop reason), the raw string value is preserved in
 // `LLMResponse.CustomMetadata[StopReasonMetadataKey]`. `LLMResponse.ErrorCode`
 // is never set on a content-bearing response because of its stop reason alone.
+//
+// A turn that maps to anything other than [genai.FinishReasonStop] and carries
+// no content, meaning no non-thought text and no tool call, is reported as an
+// error: `LLMResponse.ErrorCode` holds the [genai.FinishReason] (for example
+// `SAFETY` for a refusal) and `LLMResponse.ErrorMessage` names the stop reason.
+// This covers a turn that holds only thinking, and one whose only output was a
+// `tool_use` block dropped because the turn was truncated.
 //
 // # Errors and Retries
 //

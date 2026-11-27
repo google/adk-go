@@ -247,6 +247,8 @@ type scriptedModel struct {
 
 func (m *scriptedModel) Name() string { return "scripted" }
 
+func (*scriptedModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *scriptedModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		i := m.call
@@ -692,10 +694,11 @@ func TestRunner_Node_YieldsUserEventWithStateDelta(t *testing.T) {
 
 // TestRunner_StampsEventsYieldedWithoutTimestamp checks that an event built as
 // a struct literal, with no timestamp, is stored with the run's current time,
-// whether an agent yielded it or a plugin returned it in place of the agent's
-// event, on the agent path (sequential root) and on the node path (an LlmAgent
-// root that transfers to the agent). An event that already carries a
-// timestamp keeps it.
+// on the agent path (sequential root) and on the node path (an LlmAgent root
+// that transfers to the agent). That holds when an agent yielded the event,
+// when a plugin returned a copy of it, which inherits the timestamp the runner
+// stamped on the original before the plugin ran, and when a plugin overwrote
+// it in place. An event that already carries a timestamp keeps it.
 func TestRunner_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
 	ownTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
@@ -748,7 +751,8 @@ func TestRunner_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 		// none.
 		own time.Time
 		// replace makes a plugin swap the custom agent's event for a struct
-		// literal copy, which has no timestamp whatever the original carried.
+		// literal copy with no timestamp of its own. The copy takes the
+		// original's, which the runner stamped before the plugin ran.
 		replace bool
 		// rewrite makes a plugin overwrite the custom agent's event in place
 		// with such a copy and return nil.
@@ -991,7 +995,7 @@ func TestRunner_PluginReplacementKeepsEventIdentity(t *testing.T) {
 // TestRunner_PluginSharedReplacementIsNotModified checks that a plugin that
 // returns one replacement object for events by two different agents gets each
 // event back under its own author and ID, and that the runner leaves the
-// replacement as the plugin built it.
+// replacement as the plugin built it, including its compaction record.
 func TestRunner_PluginSharedReplacementIsNotModified(t *testing.T) {
 	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
 	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
@@ -1024,8 +1028,10 @@ func TestRunner_PluginSharedReplacementIsNotModified(t *testing.T) {
 		t.Fatalf("sequentialagent.New() error = %v", err)
 	}
 
+	planted := &session.EventCompaction{}
 	shared := &session.Event{
 		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("redacted", genai.RoleModel)},
+		Actions:     session.EventActions{Compaction: planted},
 	}
 	p, err := plugin.New(plugin.Config{
 		Name: "redact",
@@ -1083,6 +1089,9 @@ func TestRunner_PluginSharedReplacementIsNotModified(t *testing.T) {
 	if shared.ID != "" || shared.InvocationID != "" || shared.Author != "" || !shared.Timestamp.IsZero() {
 		t.Errorf("shared replacement was modified: ID = %q, InvocationID = %q, Author = %q, Timestamp = %v; want all empty",
 			shared.ID, shared.InvocationID, shared.Author, shared.Timestamp)
+	}
+	if shared.Actions.Compaction != planted {
+		t.Errorf("shared replacement Actions.Compaction = %p, want the planted record %p", shared.Actions.Compaction, planted)
 	}
 }
 
@@ -1496,7 +1505,7 @@ var errNodeBoom = errors.New("node failure")
 // whose content carries the given text.
 func sessionHasUserText(sess session.Session, want string) bool {
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil || ev.Author != "user" || ev.LLMResponse.Content == nil {
 			continue
@@ -1514,7 +1523,7 @@ func sessionHasUserText(sess session.Session, want string) bool {
 func sessionOutputs(sess session.Session) []any {
 	var outs []any
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev != nil && ev.Output != nil {
 			outs = append(outs, ev.Output)

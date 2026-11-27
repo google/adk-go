@@ -92,7 +92,6 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 	// from this moment on we must not return error. Instead, it should be handled by using helper.EmitJSONError
 
 	for event, err := range events {
-		log.Printf("Processing event: %+v err: %+v\n", event, err) //nolint:forbidigo // pre-slog call site
 		if err != nil {
 			// A compaction failure is bookkeeping, not the turn. The events are
 			// already persisted and the agent has already answered, so emitting
@@ -115,15 +114,16 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 		if event == nil {
 			continue
 		}
-		if event.LLMResponse.Content == nil {
-			continue
-		}
 
 		err = helper.EmitJSON(rw, models.StreamingAgentRunWithEventsResponse{
-			Events:    []*session.Event{event},
+			Events:    []*session.Event{helper.EventForStream(event)},
 			SessionID: runReq.SessionID,
 		})
 		if err != nil {
+			if errors.Is(err, helper.ErrEventEncoding) {
+				// An error frame would end iteration in Agent Engine clients.
+				continue
+			}
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
 			log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			e = helper.EmitJSONError(rw, e)
@@ -170,10 +170,12 @@ func (s *streamingAgentRunWithEventsHandler) ensureBackendSession(ctx context.Co
 		return fmt.Errorf("session service is required for backend session handling")
 	}
 
+	// The runner reads the events when the run starts, so this read skips them.
 	getResp, err := s.config.SessionService.Get(ctx, &session.GetRequest{
-		AppName:   s.agentEngineID,
-		UserID:    req.UserID,
-		SessionID: requestedSessionID,
+		AppName:       s.agentEngineID,
+		UserID:        req.UserID,
+		SessionID:     requestedSessionID,
+		ExcludeEvents: true,
 	})
 	if err == nil && getResp.Session != nil {
 		req.SessionID = getResp.Session.ID()

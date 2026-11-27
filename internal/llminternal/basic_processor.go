@@ -50,8 +50,8 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// structured output for tasks is collected via the FinishTaskTool's
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
-		if state.Mode != ModeTask && !needOutputSchemaProcessor(state) {
-			if schema := outputSchemaFor(ctx, state); schema != nil {
+		if state.Mode != ModeTask {
+			if schema := outputSchemaFor(ctx, state); schema != nil && !needOutputSchemaProcessor(state) {
 				req.Config.ResponseSchema = schema
 				req.Config.ResponseMIMEType = "application/json"
 			}
@@ -109,7 +109,7 @@ func deepCopy(src, dst reflect.Value) {
 	switch src.Kind() {
 	case reflect.Struct:
 		t := src.Type()
-		for i := 0; i < src.NumField(); i++ {
+		for i := range src.NumField() {
 			if !t.Field(i).IsExported() {
 				panic(fmt.Sprintf("deepCopy: unexported field %q in type %q", t.Field(i).Name, t.Name()))
 			}
@@ -123,7 +123,7 @@ func deepCopy(src, dst reflect.Value) {
 			return
 		}
 		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
-		for i := 0; i < src.Len(); i++ {
+		for i := range src.Len() {
 			// Create a copy of each element and set it in the new slice
 			elemCopy := reflect.New(src.Index(i).Type()).Elem()
 			deepCopy(src.Index(i), elemCopy)

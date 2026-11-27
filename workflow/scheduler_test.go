@@ -19,7 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -631,7 +631,7 @@ func outputsOf(events []*session.Event) []string {
 		}
 		out = append(out, fmt.Sprint(ev.Output))
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -1324,7 +1324,7 @@ type progressThenSchemaOutputNode struct {
 
 func (n *progressThenSchemaOutputNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for i := 0; i < n.progress; i++ {
+		for range n.progress {
 			if !yield(session.NewEvent(ctx, ctx.InvocationID()), nil) {
 				return
 			}

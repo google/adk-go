@@ -15,10 +15,12 @@
 package bigquerytoolset
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +32,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/clientcert"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/session"
 )
@@ -54,12 +57,16 @@ type client struct {
 }
 
 func newClient(ctx context.Context, cfg Config) (*client, error) {
-	opts := []option.ClientOption{
+	certOpts, mtlsEndpoint, err := clientcert.APIOptions(ctx, cfg.ClientOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("bigquerytoolset: creating the BigQuery HTTP client: %w", err)
+	}
+	opts := append([]option.ClientOption{
 		option.WithScopes(bigqueryScope),
 		internaloption.WithDefaultEndpointTemplate(defaultEndpointTemplate),
 		internaloption.WithDefaultMTLSEndpoint(defaultMTLSEndpoint),
 		internaloption.WithDefaultUniverseDomain(defaultUniverseDomain),
-	}
+	}, certOpts...)
 	if cfg.ExternalAccessTokenKey != "" {
 		// Each call adds the token from the session state, so the shared
 		// client must not authenticate on its own.
@@ -76,6 +83,11 @@ func newClient(ctx context.Context, cfg Config) (*client, error) {
 		}
 		return nil, fmt.Errorf("bigquerytoolset: creating the BigQuery HTTP client: %w", err)
 	}
+	// Only the default moves. An endpoint from ClientOptions stays, unless it
+	// spells that default, which cannot be told from it.
+	if mtlsEndpoint && endpoint == strings.Replace(defaultEndpointTemplate, "UNIVERSE_DOMAIN", defaultUniverseDomain, 1) {
+		endpoint = defaultMTLSEndpoint
+	}
 	if !strings.HasSuffix(endpoint, "/") {
 		endpoint += "/"
 	}
@@ -83,7 +95,9 @@ func newClient(ctx context.Context, cfg Config) (*client, error) {
 		return nil, fmt.Errorf("bigquerytoolset: invalid BigQuery endpoint: %w", withoutURL(err))
 	}
 
-	userAgent := userAgentPrefix + " " + version.TrackingHeader()
+	// No destination, so no hosting runtime suffix: adk-python's BigQuery
+	// user agent has none either.
+	userAgent := userAgentPrefix + " " + version.TrackingHeader(nil)
 	if cfg.ApplicationName != "" {
 		userAgent += " " + cfg.ApplicationName
 	}
@@ -98,6 +112,21 @@ func newClient(ctx context.Context, cfg Config) (*client, error) {
 // get sends a GET request for path, relative to the BigQuery API endpoint,
 // on behalf of the named tool and decodes the JSON response into out.
 func (c *client) get(ctx agent.Context, toolName, path string, query url.Values, out any) error {
+	return c.do(ctx, toolName, http.MethodGet, path, query, nil, out)
+}
+
+// post sends body as JSON in a POST request for path, relative to the
+// BigQuery API endpoint, on behalf of the named tool and decodes the JSON
+// response into out.
+func (c *client) post(ctx agent.Context, toolName, path string, body, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("encoding the BigQuery request: %w", err)
+	}
+	return c.do(ctx, toolName, http.MethodPost, path, nil, b, out)
+}
+
+func (c *client) do(ctx agent.Context, toolName, method, path string, query url.Values, body []byte, out any) error {
 	httpClient, err := c.httpClientFor(ctx)
 	if err != nil {
 		return err
@@ -107,11 +136,18 @@ func (c *client) get(ctx agent.Context, toolName, path string, query url.Values,
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, reqBody)
 	if err != nil {
 		return fmt.Errorf("building the BigQuery request: %w", withoutURL(err))
 	}
 	req.Header.Set("User-Agent", c.userAgent+" "+toolName)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -188,8 +224,14 @@ func withoutURL(err error) error {
 // errorResult is what a tool returns to the model when its BigQuery call
 // fails, in adk-python's format.
 func errorResult(err error) map[string]any {
+	return errorDetails(err.Error())
+}
+
+// errorDetails is an error result with the given details, for a message
+// written as adk-python writes it rather than as a Go error.
+func errorDetails(details string) map[string]any {
 	return map[string]any{
 		"status":        "ERROR",
-		"error_details": err.Error(),
+		"error_details": details,
 	}
 }

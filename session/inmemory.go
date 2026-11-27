@@ -116,7 +116,9 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	copiedSession.state = s.mergeStates(res.state, appName, userID)
 
 	filteredEvents := res.events
-	if req.NumRecentEvents > 0 {
+	if req.ExcludeEvents {
+		filteredEvents = nil
+	} else if req.NumRecentEvents > 0 {
 		start := max(len(filteredEvents)-req.NumRecentEvents, 0)
 		// create a new slice header pointing to the same array
 		filteredEvents = filteredEvents[start:]
@@ -251,8 +253,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Trim here, before sess.appendEvent publishes its own trimmed event into
 	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach. The database backend trims twice for the same
-	// reason, once for the live session and once for what it persists.
+	// goroutine can reach.
 	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
 
 	// update the in-memory session

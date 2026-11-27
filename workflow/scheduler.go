@@ -141,6 +141,17 @@ type nodeRun struct {
 	// the node's events. A non-empty set at completion parks the node
 	// in NodeWaiting. Mirrors adk-python's Context._interrupt_ids.
 	interruptIDs map[string]struct{}
+
+	// usedResponses is set at completion when the activation held user
+	// responses from a resume. completionEvent records that completion
+	// so rehydration stops offering the responses to later visits.
+	usedResponses bool
+
+	// end is the node's state as this activation left it, saved before
+	// its successors are scheduled. A successor can be the node itself:
+	// starting or queueing it resets the node's NodeState before
+	// completionEvent reads it.
+	end *NodeState
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -679,15 +690,23 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 // Output events alone cannot distinguish success from a partial result
 // followed by failure, or record successful completion with no output.
 // Keep those outcomes in history without persisting the node's error text.
+//
+// A completion with output is recorded only for an activation that used
+// resume responses. Nothing else reads such a record, and one per node
+// would add an event to every step of every run.
 func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureInventory) *session.Event {
-	if name == Start.Name() || s.graph.isRootWrapper {
+	if name == Start.Name() || s.graph.isRootWrapper || nr == nil {
 		return nil
 	}
 	ns := s.state.Nodes[name]
-	if ns == nil || nr == nil {
+	if nr.end != nil {
+		ns = nr.end
+	}
+	if ns == nil {
 		return nil
 	}
 	var outcome string
+	completedKey := workflowNodeCompletedKey
 	switch ns.Status {
 	case NodeFailed, NodePending:
 		outcome = workflowNodeFailureOutcome
@@ -695,7 +714,10 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureI
 		outcome = workflowNodeCancelledOutcome
 	case NodeCompleted:
 		if ns.Output != nil {
-			return nil
+			if !nr.usedResponses {
+				return nil
+			}
+			completedKey = workflowNodeResumeCompletedKey
 		}
 	default:
 		return nil
@@ -714,7 +736,7 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureI
 		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
 		recordFailedChildPaths(ev.CustomMetadata, inventory)
 	} else {
-		ev.CustomMetadata[workflowNodeCompletedKey] = true
+		ev.CustomMetadata[completedKey] = true
 	}
 	return ev
 }
@@ -1002,7 +1024,14 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	// Release the accumulated re-entry response history; the node
 	// has finished and a future activation (if any, e.g. via
 	// loop-back routing) starts a fresh lifecycle.
+	if nr != nil {
+		nr.usedResponses = len(ns.ResumedInputs) > 0
+	}
 	ns.ResumedInputs = nil
+	if nr != nil {
+		end := *ns
+		nr.end = &end
+	}
 
 	if !scheduleNewWork {
 		return nil

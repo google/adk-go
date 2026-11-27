@@ -204,7 +204,7 @@ func getSubagentTasksToCancel(ctx context.Context, status a2a.TaskStatus, sessio
 			}
 			foundCalls[call.ID] = true
 			if taskID, _ := GetA2ATaskInfo(event); taskID != "" {
-				tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: a2a.TaskID(taskID)})
+				tasksToCancel = append(tasksToCancel, subagentTask{agentName: event.Author, taskID: taskID})
 				foundTaskIDs++
 			}
 		}

@@ -63,9 +63,10 @@ type SkipSummarizationResultDisplayer interface {
 	DisplayResultOnSkipSummarization() bool
 }
 
-// PanicError is a panic recovered from a tool's handler. Its message includes
-// the panic value and the stack, so callbacks and plugins can record them, but
-// the flow must not show it to the model.
+// PanicError is a panic recovered from a tool's handler, or from a callback
+// that ran for a call of the tool. Its message includes the panic value and the
+// stack, so callbacks and plugins can record them, but the flow must not show
+// it to the model.
 type PanicError struct {
 	msg string
 }
@@ -76,6 +77,13 @@ func NewPanicError(toolName string, value any, stack []byte) *PanicError {
 	// Format the message now, so that every reader gets the same text even if
 	// value changes later.
 	return &PanicError{msg: fmt.Sprintf("panic in tool %q: %v\nstack: %s", toolName, value, stack)}
+}
+
+// NewCallbackPanicError returns the error for the value a callback panicked
+// with while it ran for a call of the tool named toolName, recovered at the
+// stack given. callback is the kind of callback, such as "BeforeTool".
+func NewCallbackPanicError(callback, toolName string, value any, stack []byte) *PanicError {
+	return &PanicError{msg: fmt.Sprintf("panic in %s callback of tool %q: %v\nstack: %s", callback, toolName, value, stack)}
 }
 
 func (e *PanicError) Error() string { return e.msg }

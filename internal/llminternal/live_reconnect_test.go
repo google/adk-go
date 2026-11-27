@@ -29,6 +29,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -139,6 +141,7 @@ func waitForReconnectBackoff(t *testing.T) {
 // endpoint that completes the websocket handshake and then hangs up must not
 // redial without limit, and the caller must be told the session is over.
 func TestRunLiveBoundsADeadEndpoint(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		// Hard close straight after setupComplete.
 	})
@@ -171,6 +174,7 @@ func TestRunLiveBoundsADeadEndpoint(t *testing.T) {
 // frame and then hangs up resets that budget on every connection, so only the
 // invocation-wide ceiling ends the session.
 func TestRunLiveBoundsAOneFramePerConnectionBackend(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong))
 		// Give the flow time to consume the frame and reset the consecutive
@@ -208,6 +212,7 @@ func TestRunLiveBoundsAOneFramePerConnectionBackend(t *testing.T) {
 // TestRunLiveReconnectSurvivesATransientDrop guards the other direction: the
 // bounds must not kill a session that recovers.
 func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		if connNum == 1 {
 			return // one abrupt drop
@@ -259,6 +264,180 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 	if got := connCount.Load(); got != 2 {
 		t.Errorf("dialled %d times, want 2", got)
 	}
+}
+
+// TestRunLiveResumedConnectionDoesNotReplayHistory pins that a reconnect which
+// resumes the session with the server's handle does not send the conversation
+// history again. The server already holds it, and SendHistory ends a history
+// whose last turn is the user's with turnComplete, so a replay would also have
+// the model answer that turn a second time. The server reports the session as
+// not resumable just before the drop, as it does while the model is answering,
+// so the reconnect also has to keep the handle it was offered before that.
+func TestRunLiveResumedConnectionDoesNotReplayHistory(t *testing.T) {
+	t.Parallel()
+	const handle = "handle-1"
+	firstConnFrame := make(chan string, 1)
+	resumedConnFrames := make(chan []string, 1)
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		switch connNum {
+		case 1:
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				t.Errorf("reading the first connection's history failed: %v", err)
+				return
+			}
+			firstConnFrame <- string(frame)
+			for _, update := range []string{
+				`{"sessionResumptionUpdate":{"newHandle":"` + handle + `","resumable":true}}`,
+				`{"sessionResumptionUpdate":{"resumable":false}}`,
+			} {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(update)); err != nil {
+					return
+				}
+			}
+			// Then the connection drops.
+		case 2:
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+				return
+			}
+			// Everything the client sends until it closes. A history replay is
+			// written before the client reads the turn above, so it is here.
+			var frames []string
+			for {
+				_, frame, err := conn.ReadMessage()
+				if err != nil {
+					break
+				}
+				frames = append(frames, string(frame))
+			}
+			resumedConnFrames <- frames
+		}
+	})
+	f := newReconnectFlow(client, testLiveReconnectPolicy(4, 20))
+	f.RequestProcessors = append(f.RequestProcessors, func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+		req.Contents = []*genai.Content{genai.NewContentFromText("Book a table for two.", genai.RoleUser)}
+		return func(yield func(*session.Event, error) bool) {}
+	})
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	done := startDrainClosingOnContent(sess, seq)
+
+	select {
+	case frame := <-firstConnFrame:
+		if !strings.Contains(frame, `"clientContent"`) {
+			t.Fatalf("first connection got %s, want the history as clientContent", frame)
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the first connection never received the history")
+	}
+	select {
+	case frames := <-resumedConnFrames:
+		for _, frame := range frames {
+			if strings.Contains(frame, `"clientContent"`) {
+				t.Errorf("resumed connection replayed the history: %s", frame)
+			}
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the session never resumed on a second connection")
+	}
+	if _, err := awaitDrain(t, done); err != nil {
+		t.Errorf("caller got an error after a resumed drop: %v", err)
+	}
+
+	if got := ctx.(*icontext.InvocationContext).LiveSessionResumptionHandle(); got != handle {
+		t.Errorf("resumption handle = %q, want %q", got, handle)
+	}
+	if got := connCount.Load(); got != 2 {
+		t.Errorf("dialled %d times, want 2", got)
+	}
+}
+
+// TestRunLiveCallerHandleDoesNotReplayHistory covers the other way a
+// connection resumes: the caller hands RunLive a handle from an earlier run in
+// LiveRunConfig.SessionResumption. That first connection resumes the session
+// too, so it must not replay the history either.
+func TestRunLiveCallerHandleDoesNotReplayHistory(t *testing.T) {
+	t.Parallel()
+	frames := make(chan []string, 1)
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			return
+		}
+		var got []string
+		for {
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			got = append(got, string(frame))
+		}
+		frames <- got
+	})
+	f := newReconnectFlow(client, testLiveReconnectPolicy(4, 20))
+	f.RequestProcessors = append(f.RequestProcessors, func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+		req.Contents = []*genai.Content{genai.NewContentFromText("Book a table for two.", genai.RoleUser)}
+		return func(yield func(*session.Event, error) bool) {}
+	})
+	testAgent, err := agent.New(agent.Config{Name: "test-live-agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live: &agent.LiveRunConfig{
+				SessionResumption: &genai.SessionResumptionConfig{Handle: "earlier-run-handle"},
+			},
+		}),
+		icontext.InvocationContextParams{Agent: testAgent},
+	)
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	done := startDrainClosingOnContent(sess, seq)
+
+	select {
+	case got := <-frames:
+		for _, frame := range got {
+			if strings.Contains(frame, `"clientContent"`) {
+				t.Errorf("connection resuming the caller's handle replayed the history: %s", frame)
+			}
+		}
+	case <-time.After(drainTimeout):
+		t.Fatal("the connection never closed")
+	}
+	if _, err := awaitDrain(t, done); err != nil {
+		t.Errorf("caller got an error: %v", err)
+	}
+}
+
+// startDrainClosingOnContent is startDrain that closes sess once the first
+// event with content arrives, which ends a session the server keeps open.
+func startDrainClosingOnContent(sess agent.LiveSession, seq iter.Seq2[*session.Event, error]) <-chan drainResult {
+	done := make(chan drainResult, 1)
+	go func() {
+		var r drainResult
+		for ev, err := range seq {
+			if err != nil {
+				r.err = err
+			}
+			if ev != nil {
+				r.events++
+				if ev.LLMResponse.Content != nil {
+					_ = sess.Close()
+				}
+			}
+		}
+		done <- r
+	}()
+	return done
 }
 
 // TestRunLiveReconnectStopsOnTeardown pins that neither Close nor cancellation
@@ -325,6 +504,7 @@ func TestRunLiveReconnectStopsOnTeardown(t *testing.T) {
 // backoff is unreachable in the outage it exists for, because the first failed
 // dial would end the session outright.
 func TestRunLiveChargesAFailedRedialToTheBudget(t *testing.T) {
+	t.Parallel()
 	client, connCount, closeServer := startClosableLiveServer(t, func(connNum int, conn *websocket.Conn) {})
 	f := newReconnectFlow(client, testLiveReconnectPolicy(3, 20))
 	ctx, cancel := newLiveInvocationContext(t)
@@ -349,6 +529,7 @@ func TestRunLiveChargesAFailedRedialToTheBudget(t *testing.T) {
 // connected, so this is bad credentials or an unknown model, and retrying only
 // delays a permanent error.
 func TestRunLiveFirstConnectFailureIsFatal(t *testing.T) {
+	t.Parallel()
 	client, connCount, closeServer := startClosableLiveServer(t, func(connNum int, conn *websocket.Conn) {})
 	closeServer()
 
@@ -375,6 +556,7 @@ func TestRunLiveFirstConnectFailureIsFatal(t *testing.T) {
 }
 
 func TestLiveReconnectPolicyNextBackoff(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		p    *liveReconnectPolicy
@@ -418,6 +600,7 @@ func TestLiveReconnectPolicyNextBackoff(t *testing.T) {
 }
 
 func TestLiveReconnectPolicyJittered(t *testing.T) {
+	t.Parallel()
 	t.Run("stays within the band and varies", func(t *testing.T) {
 		p := &liveReconnectPolicy{jitter: 0.2}
 		const base = time.Second
@@ -457,6 +640,7 @@ func TestLiveReconnectPolicyJittered(t *testing.T) {
 }
 
 func TestDefaultLiveReconnectPolicy(t *testing.T) {
+	t.Parallel()
 	p := defaultLiveReconnectPolicy()
 	if p.maxAttempts <= 0 || p.maxTotal <= 0 {
 		t.Fatalf("policy has no bound: maxAttempts=%d maxTotal=%d", p.maxAttempts, p.maxTotal)
@@ -507,6 +691,7 @@ func TestDefaultLiveReconnectPolicy(t *testing.T) {
 }
 
 func TestTornDown(t *testing.T) {
+	t.Parallel()
 	t.Run("open session", func(t *testing.T) {
 		if tornDown(t.Context(), newLiveSessionImpl()) {
 			t.Error("tornDown = true for a live session and an uncancelled context")
@@ -529,6 +714,7 @@ func TestTornDown(t *testing.T) {
 }
 
 func TestWaitBeforeReconnect(t *testing.T) {
+	t.Parallel()
 	t.Run("proceeds when nothing tore down", func(t *testing.T) {
 		if !waitBeforeReconnect(t.Context(), newLiveSessionImpl(), time.Millisecond) {
 			t.Error("waitBeforeReconnect = false with a live session and an uncancelled context")
@@ -568,6 +754,7 @@ func TestWaitBeforeReconnect(t *testing.T) {
 // lifecycle, so counting every reconnect would end a long healthy call once it
 // had been cycled maxTotal times.
 func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
+	t.Parallel()
 	const connLifetime = 120 * time.Millisecond
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong))
@@ -619,6 +806,7 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 // absolute size. At full scale the session dies eight minutes in, which is no
 // use as a test.
 func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
+	t.Parallel()
 	const (
 		scale        = 100
 		connLifetime = intermediaryWebsocketTimeout / scale
@@ -669,6 +857,7 @@ func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
 // no content to reset that budget, how long each connection lasts is the only
 // thing separating this session from a backend that hangs up on every dial.
 func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
+	t.Parallel()
 	const connLifetime = 120 * time.Millisecond
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		// No content on any connection, only the setup exchange and a drop.
@@ -722,6 +911,7 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 // before it meets the error, which is what puts the caller's delay after the
 // error is stamped rather than before.
 func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
+	t.Parallel()
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"turnComplete":true}}`))
 	})

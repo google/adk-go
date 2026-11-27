@@ -45,6 +45,10 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+func (m *Model) Capabilities() model.Capabilities {
+	return model.Capabilities{AcceptsOutputSchemaAndTools: true}
+}
+
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -501,7 +505,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
-		final.ModelVersion = string(term.resp.Model)
+		final.ModelVersion = term.resp.Model
 	}
 	if !term.seen {
 		// The model never said why it stopped, and finishReason would read that

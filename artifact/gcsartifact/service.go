@@ -29,7 +29,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -153,7 +152,7 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 		if err != nil {
 			return nil, fmt.Errorf("failed to list artifact versions: %w", err)
 		}
-		nextVersion := int64(1)
+		nextVersion := int64(0)
 		if len(response.Versions) > 0 {
 			nextVersion = slices.Max(response.Versions) + 1
 		}
@@ -252,11 +251,10 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 		return fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	version := req.Version
 
 	// Delete specific version
-	if version != 0 {
-		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
+	if req.Version != nil {
+		blobName := buildBlobName(appName, userID, sessionID, fileName, *req.Version)
 		if err := s.bucket.object(blobName).delete(ctx); err != nil {
 			return fmt.Errorf("failed to delete artifact: %w", err)
 		}
@@ -274,9 +272,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	g, gctx := errgroup.WithContext(ctx)
 
 	// delete versions in parallel
-	for _, version := range response.Versions {
-		v := version // capture loop variable for goroutine
-
+	for _, v := range response.Versions {
 		g.Go(func() error {
 			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
 			obj := s.bucket.object(blobName)
@@ -396,8 +392,7 @@ func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*arti
 		return nil, fmt.Errorf("failed to fetch user filenames: %w", err)
 	}
 
-	filenames := slices.Collect(maps.Keys(filenamesSet))
-	sort.Strings(filenames)
+	filenames := slices.Sorted(maps.Keys(filenamesSet))
 	return &artifact.ListResponse{FileNames: filenames}, nil
 }
 
@@ -450,21 +445,21 @@ func (s *gcsService) Versions(ctx context.Context, req *artifact.VersionsRequest
 	return response, nil
 }
 
-// resolveVersion returns the provided version if non-zero, otherwise finds the latest version.
-func (s *gcsService) resolveVersion(ctx context.Context, appName, userID, sessionID, fileName string, version int64) (int64, error) {
-	if version == 0 {
-		response, err := s.versions(ctx, &artifact.VersionsRequest{
-			AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
-		})
-		if err != nil {
-			return 0, fmt.Errorf("failed to list artifact versions: %w", err)
-		}
-		if len(response.Versions) == 0 {
-			return 0, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		version = slices.Max(response.Versions)
+// resolveVersion returns *version if non-nil, otherwise finds the latest version.
+func (s *gcsService) resolveVersion(ctx context.Context, appName, userID, sessionID, fileName string, version *int64) (int64, error) {
+	if version != nil {
+		return *version, nil
 	}
-	return version, nil
+	response, err := s.versions(ctx, &artifact.VersionsRequest{
+		AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to list artifact versions: %w", err)
+	}
+	if len(response.Versions) == 0 {
+		return 0, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+	}
+	return slices.Max(response.Versions), nil
 }
 
 // GetArtifactVersion implements [artifact.Service] and returns the metadata for a specific version.
