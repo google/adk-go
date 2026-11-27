@@ -838,6 +838,8 @@ type parallelCallModel struct {
 
 func (*parallelCallModel) Name() string { return "parallel-call-model" }
 
+func (*parallelCallModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *parallelCallModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		defer func() { m.step++ }()

@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,45 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 	}
 	if got := resp.Session.LastUpdateTime(); !got.Equal(fixedTime) {
 		t.Errorf("LastUpdateTime() = %v, want provider value %v", got, fixedTime)
+	}
+}
+
+// A database that keeps microseconds rounds a sub-microsecond creation time,
+// as MySQL does, and rounding up made the stored row newer than the session
+// Create returned. The first AppendEvent on that session then failed the stale
+// check. A runner with AutoCreateSession takes this path whenever it creates a
+// session for a message: it appends the message to the session Create returned.
+func Test_databaseService_CreateThenAppend_survivesMicrosecondRounding(t *testing.T) {
+	// 700 ns past the microsecond, so rounding goes up.
+	created := time.Date(2026, time.January, 2, 3, 4, 5, 123456700, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return created })
+
+	s := emptyService(t)
+	// Round the stored row only, leaving the Go struct alone, since MySQL
+	// rounds on the server.
+	roundOnWrite := func(tx *gorm.DB) {
+		ss, ok := tx.Statement.Dest.(*storageSession)
+		if !ok || tx.Error != nil {
+			return
+		}
+		err := tx.Session(&gorm.Session{NewDB: true}).Model(&storageSession{}).
+			Where("app_name = ? AND user_id = ? AND id = ?", ss.AppName, ss.UserID, ss.ID).
+			Update("update_time", ss.UpdateTime.Round(time.Microsecond)).Error
+		if err != nil {
+			_ = tx.AddError(err)
+		}
+	}
+	if err := s.db.Callback().Create().After("gorm:create").Register("test:round_to_microsecond", roundOnWrite); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	resp, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ev := &session.Event{ID: "e1", Author: "user", InvocationID: "inv1", Timestamp: created.Add(time.Second)}
+	if err := s.AppendEvent(ctx, resp.Session, ev); err != nil {
+		t.Fatalf("AppendEvent() on the session Create returned: %v", err)
 	}
 }
 
@@ -414,6 +454,44 @@ func Test_databaseServiceFromDB(t *testing.T) {
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyServiceFromDB(t)
 	})
+}
+
+// ExcludeEvents must skip the events query, not just drop its rows: that query
+// is the cost the field exists to avoid.
+func Test_databaseService_GetExcludeEvents_skipsEventsQuery(t *testing.T) {
+	s := emptyService(t)
+	resp, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := s.AppendEvent(t.Context(), resp.Session, &session.Event{ID: "e1", Author: "user", InvocationID: "inv1", Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	var eventQueries atomic.Int32
+	countEvents := func(tx *gorm.DB) {
+		if tx.Statement.Table == "events" {
+			eventQueries.Add(1)
+		}
+	}
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:count_events_queries", countEvents); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+
+	if _, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1", ExcludeEvents: true}); err != nil {
+		t.Fatalf("Get(ExcludeEvents) error = %v", err)
+	}
+	if n := eventQueries.Load(); n != 0 {
+		t.Errorf("events queries = %d, want 0", n)
+	}
+
+	// Control: a full Get is counted, so the zero above is not a callback
+	// that never fires.
+	if _, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1"}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := eventQueries.Load(); n != 1 {
+		t.Errorf("events queries after a full Get = %d, want 1", n)
+	}
 }
 
 func emptyServiceFromDB(t *testing.T) *databaseService {

@@ -46,6 +46,8 @@ func (streamAwareLLM) Name() string {
 	return "stream-aware-llm"
 }
 
+func (streamAwareLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (streamAwareLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if stream {
@@ -135,7 +137,8 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 		t.Fatalf("Create() failed: %v", err)
 	}
 
-	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: sessionService}, "app", "streaming_agent_run_with_events", "async_stream")
+	recorder := &recordingSessionService{Service: sessionService}
+	handler := NewStreamingAgentRunWithEventsHandler(&launcher.Config{SessionService: recorder}, "app", "streaming_agent_run_with_events", "async_stream")
 	req := &models.StreamingAgentRunWithEventsRunRequest{
 		UserID:    "jan@example.com",
 		SessionID: created.Session.ID(),
@@ -147,6 +150,21 @@ func TestEnsureBackendSession_ReuseReturnedBackendSession(t *testing.T) {
 	if req.SessionID != created.Session.ID() {
 		t.Errorf("SessionID = %q, want existing backend session %q", req.SessionID, created.Session.ID())
 	}
+	// The runner reads the events when the run starts, so this check must not.
+	if len(recorder.gets) != 1 || !recorder.gets[0].ExcludeEvents {
+		t.Errorf("session reads = %+v, want one read with ExcludeEvents", recorder.gets)
+	}
+}
+
+// recordingSessionService records every Get request it serves.
+type recordingSessionService struct {
+	session.Service
+	gets []session.GetRequest
+}
+
+func (s *recordingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.gets = append(s.gets, *req)
+	return s.Service.Get(ctx, req)
 }
 
 func TestStreamJSONL_AgentSpaceResponseEnvelope(t *testing.T) {
