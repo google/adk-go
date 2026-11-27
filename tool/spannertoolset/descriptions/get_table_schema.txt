@@ -1,0 +1,56 @@
+Get schema and metadata information about a Spanner table.
+
+Args:
+    project_id (str): The Google Cloud project id.
+    instance_id (str): The Spanner instance id.
+    database_id (str): The Spanner database id.
+    table_name (str): The Spanner table name.
+    named_schema (str): The named schema to list tables in. Default is empty
+      string "" to search for tables in the default schema of the database.
+
+Returns:
+    dict: Dictionary with the Spanner table schema information.
+
+Examples:
+    >>> get_table_schema("my_project", "my_instance", "my_database",
+    ... "my_table")
+    {
+      "status": "SUCCESS",
+      "results":
+        {
+          "schema":  {
+            'colA': {
+              'SPANNER_TYPE': 'STRING(1024)',
+              'TABLE_SCHEMA': '',
+              'ORDINAL_POSITION': 1,
+              'COLUMN_DEFAULT': None,
+              'IS_NULLABLE': 'NO',
+              'IS_GENERATED': 'NEVER',
+              'GENERATION_EXPRESSION': None,
+              'IS_STORED': None,
+              'KEY_COLUMN_USAGE': [
+                # This part is added if it's a key column
+                {
+                  'CONSTRAINT_NAME': 'PK_Table1',
+                  'ORDINAL_POSITION': 1,
+                  'POSITION_IN_UNIQUE_CONSTRAINT': None
+                }
+              ]
+            },
+            'colB': { ... },
+            ...
+          },
+          "metadata": [
+            {
+              'TABLE_SCHEMA': '',
+              'TABLE_NAME': 'MyTable',
+              'TABLE_TYPE': 'BASE TABLE',
+              'PARENT_TABLE_NAME': NULL,
+              'ON_DELETE_ACTION': NULL,
+              'SPANNER_STATE': 'COMMITTED',
+              'INTERLEAVE_TYPE': NULL,
+              'ROW_DELETION_POLICY_EXPRESSION':
+                'OLDER_THAN(CreatedAt, INTERVAL 1 DAY)',
+            }
+          ]
+        }

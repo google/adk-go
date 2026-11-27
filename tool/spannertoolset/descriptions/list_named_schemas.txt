@@ -1,0 +1,20 @@
+Get the named schemas in the Spanner database.
+
+Args:
+    project_id (str): The Google Cloud project id.
+    instance_id (str): The Spanner instance id.
+    database_id (str): The Spanner database id.
+
+Returns:
+    dict: Dictionary with a list of named schemas information in the Spanner
+    database.
+
+Examples:
+    >>> list_named_schemas("my_project", "my_instance", "my_database")
+    {
+      "status": "SUCCESS",
+      "results": [
+          "schema_1",
+          "schema_2"
+        ]
+    }

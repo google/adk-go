@@ -1,0 +1,37 @@
+Get index information about a Spanner table.
+
+Args:
+    project_id (str): The Google Cloud project id.
+    instance_id (str): The Spanner instance id.
+    database_id (str): The Spanner database id.
+    table_id (str): The Spanner table id.
+
+Returns:
+    dict: Dictionary with a list of the Spanner table index information.
+
+Examples:
+    >>> list_table_indexes("my_project", "my_instance", "my_database",
+    ... "my_table")
+    {
+      "status": "SUCCESS",
+      "results": [
+        {
+          'INDEX_NAME': 'IDX_MyTable_Column_FC70CD41F3A5FD3A',
+          'TABLE_SCHEMA': '',
+          'INDEX_TYPE': 'INDEX',
+          'PARENT_TABLE_NAME': '',
+          'IS_UNIQUE': False,
+          'IS_NULL_FILTERED': False,
+          'INDEX_STATE': 'READ_WRITE'
+        },
+        {
+          'INDEX_NAME': 'PRIMARY_KEY',
+          'TABLE_SCHEMA': '',
+          'INDEX_TYPE': 'PRIMARY_KEY',
+          'PARENT_TABLE_NAME': '',
+          'IS_UNIQUE': True,
+          'IS_NULL_FILTERED': False,
+          'INDEX_STATE': None
+        }
+      ]
+    }

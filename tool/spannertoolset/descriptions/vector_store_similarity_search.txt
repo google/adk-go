@@ -1,0 +1,36 @@
+Performs a semantic similarity search to retrieve relevant context from the Spanner vector store.
+
+This function performs vector similarity search directly on a vector store
+table in Spanner database and returns the relevant data.
+
+Args:
+    query (str): The search string based on the user's question.
+
+Returns:
+    Dict[str, Any]: A dictionary representing the result of the search.
+      On success, it contains {"status": "SUCCESS", "rows": [...]}. The last
+      column of each row is the distance between the query and the row result.
+      On error, it contains {"status": "ERROR", "error_details": "..."}.
+
+Examples:
+      >>> vector_store_similarity_search(
+      ...   query="Spanner database optimization techniques for high QPS",
+      ... )
+      {
+        "status": "SUCCESS",
+        "rows": [
+          (
+            "Optimizing Query Performance",
+            0.12,
+          ),
+          (
+            "Schema Design Best Practices",
+            0.25,
+          ),
+          (
+            "Using Secondary Indexes Effectively",
+            0.31,
+          ),
+          ...
+        ],
+      }

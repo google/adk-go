@@ -1,0 +1,65 @@
+Run a Spanner Read-Only query in the spanner database and return the result.
+
+Args:
+    project_id (str): The GCP project id in which the spanner database
+      resides.
+    instance_id (str): The instance id of the spanner database.
+    database_id (str): The database id of the spanner database.
+    query (str): The Spanner SQL query to be executed.
+
+Returns:
+    dict: Dictionary with the result of the query.
+          If the result contains the key "result_is_likely_truncated" with
+          value True, it means that there may be additional rows matching the
+          query not returned in the result.
+
+Examples:
+    <Example>
+      >>> execute_sql("my_project", "my_instance", "my_database",
+      ... "SELECT COUNT(*) AS count FROM my_table")
+      {
+        "status": "SUCCESS",
+        "rows": [
+          {
+            "count": 100
+          }
+        ]
+      }
+    </Example>
+
+    <Example>
+      >>> execute_sql("my_project", "my_instance", "my_database",
+      ... "SELECT COUNT(*) FROM my_table")
+      {
+        "status": "SUCCESS",
+        "rows": [
+          {
+            "": 100
+          }
+        ]
+      }
+    </Example>
+
+    <Example>
+      >>> execute_sql("my_project", "my_instance", "my_database",
+      ... "SELECT name, rating, description FROM hotels_table")
+      {
+        "status": "SUCCESS",
+        "rows": [
+          {
+            "name": "The Hotel",
+            "rating": 4.1,
+            "description": "Modern hotel."
+          },
+          {
+            "name": "Park Inn",
+            "rating": 4.5,
+            "description": "Cozy hotel."
+          },
+          ...
+        ]
+      }
+    </Example>
+
+Note:
+  This is running with Read-Only Transaction for query that only read data.

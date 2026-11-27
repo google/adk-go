@@ -1,0 +1,21 @@
+List tables within the database.
+
+Args:
+    project_id (str): The Google Cloud project id.
+    instance_id (str): The Spanner instance id.
+    database_id (str): The Spanner database id.
+    named_schema (str): The named schema to list tables in. Default is empty
+      string "" to search for tables in the default schema of the database.
+
+Returns:
+    dict: Dictionary with a list of the Spanner table names.
+
+Examples:
+    >>> list_tables("my_project", "my_instance", "my_database")
+    {
+      "status": "SUCCESS",
+      "results": [
+        "table_1",
+        "table_2"
+      ]
+    }
