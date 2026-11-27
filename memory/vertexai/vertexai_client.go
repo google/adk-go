@@ -125,9 +125,17 @@ func (v *vertexAIClient) searchMemory(ctx context.Context, req *memory.SearchReq
 	}
 
 	for _, m := range r.RetrievedMemories {
-		res.Memories = append(res.Memories, memory.Entry{
+		// A memory is a fact about the user, dated by its last update, as
+		// adk-python reports it. Without an update time the timestamp stays
+		// zero: AsTime of a nil timestamp would give the Unix epoch.
+		entry := memory.Entry{
 			Content: genai.NewContentFromText(m.Memory.Fact, genai.RoleUser),
-		})
+			Author:  "user",
+		}
+		if updateTime := m.Memory.GetUpdateTime(); updateTime != nil {
+			entry.Timestamp = updateTime.AsTime()
+		}
+		res.Memories = append(res.Memories, entry)
 	}
 
 	return res, nil
