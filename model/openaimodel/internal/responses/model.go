@@ -89,6 +89,7 @@ func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewPar
 			yield(nil, err)
 			return
 		}
+		traceInvalidUsage(ctx, resp.Usage)
 		llmResp := converters.Genai2LLMResponse(genaiResp)
 		attachMetadata(llmResp, resp)
 		attachFinishSignal(llmResp, resp, false)
@@ -243,7 +244,7 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			trace.SpanFromContext(ctx).AddEvent("openai.terminal_response_conversion_failed",
 				trace.WithAttributes(attribute.String("error.type", errorType)))
 		}
-		finalizeStreamResponse(final, term)
+		finalizeStreamResponse(ctx, final, term)
 		yield(final, nil)
 	}
 }
@@ -501,7 +502,7 @@ func restoreUnstated(part *genai.Part, streamed *genai.FunctionCall, argsUsable,
 // OpenAI response is in reach — hence the fields copied here, which are what
 // let a streamed turn report what the same turn reports unstreamed. An erroring
 // stream never arrives: the error ends the turn in place of TurnComplete.
-func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
+func finalizeStreamResponse(ctx context.Context, final *model.LLMResponse, term terminalEvent) {
 	final.TurnComplete = true
 	if term.resp != nil {
 		attachMetadata(final, term.resp)
@@ -517,6 +518,7 @@ func finalizeStreamResponse(final *model.LLMResponse, term terminalEvent) {
 	}
 	// term.seen implies term.resp != nil.
 	final.UsageMetadata = convertUsage(term.resp.Usage)
+	traceInvalidUsage(ctx, term.resp.Usage)
 	final.FinishReason = finishReason(term.resp, term.incomplete)
 	final.LogprobsResult = logprobsFor(term.resp, shared.AnswerText(final.Content))
 	attachFinishSignal(final, term.resp, term.incomplete)

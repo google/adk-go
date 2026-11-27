@@ -15,24 +15,60 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"math"
 	"reflect"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 )
 
-// SafeInt32 narrows a token count to the int32 genai carries, saturating at
-// math.MaxInt32 rather than wrapping.
-func SafeInt32(v int64) int32 {
-	if v > math.MaxInt32 {
-		return math.MaxInt32
+// UsageCount is one count from a provider's usage report, under the name the
+// provider gives it.
+type UsageCount struct {
+	Name  string
+	Value int64
+}
+
+// Reasons [InvalidUsage] reports.
+const (
+	usageNegative     = "negative"
+	usageExceedsInt32 = "exceeds_int32"
+)
+
+// InvalidUsage returns the name of the first count no request can have, and
+// why: "negative", or "exceeds_int32" for one beyond the int32 genai carries,
+// about a thousand times the largest context window. Such a count comes from a
+// broken server or proxy. Wrapping or saturating it would hand compaction,
+// telemetry and analytics a number they trust, so callers drop the usage
+// instead. name is empty when every count is valid, and each then converts to
+// int32 exactly.
+func InvalidUsage(counts ...UsageCount) (name, reason string) {
+	for _, c := range counts {
+		switch {
+		case c.Value < 0:
+			return c.Name, usageNegative
+		case c.Value > math.MaxInt32:
+			return c.Name, usageExceedsInt32
+		}
 	}
-	return int32(v)
+	return "", ""
+}
+
+// TraceInvalidUsage records on the span in ctx that a response's usage was
+// dropped because the count name was invalid for reason. Only the name and the
+// reason are recorded, never the count, so the event carries no response data.
+func TraceInvalidUsage(ctx context.Context, name, reason string) {
+	trace.SpanFromContext(ctx).AddEvent("openai.usage_invalid", trace.WithAttributes(
+		attribute.String("openai.usage.field", name),
+		attribute.String("openai.usage.reason", reason),
+	))
 }
 
 // SingleErrorSequence is a response sequence that yields err and ends.
