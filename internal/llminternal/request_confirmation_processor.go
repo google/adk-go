@@ -116,15 +116,54 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return
 		}
 
-		responseLatestIndex := make(map[string]int)
+		responseIndexes := make(map[string][]int)
 		firstAnswerIndex := make(map[string]int)
 		for idx, ev := range events {
 			for _, resp := range utils.FunctionResponses(ev.Content) {
-				responseLatestIndex[resp.ID] = idx
+				responseIndexes[resp.ID] = append(responseIndexes[resp.ID], idx)
 				if _, ok := firstAnswerIndex[resp.ID]; !ok && ev.Author == "user" && resp.Name == toolconfirmation.FunctionCallName {
 					firstAnswerIndex[resp.ID] = idx
 				}
 			}
+		}
+		// answeredAfter reports whether the response at idx to call (whose
+		// confirmation was requested by the event at reqIdx) was written after
+		// the user's first answer at ansIdx, so it is the result of resuming
+		// that call.
+		//
+		// A response that sorts after the answer counts, as in adk-python
+		// (flows/llm_flows/tools/_confirmation.py). That includes the
+		// placeholder of a resumed tool that asks for confirmation again.
+		//
+		// The database session service orders events that share a timestamp
+		// by ID, so a response written after the answer can sort before it
+		// when both have the same timestamp. That happens when every event of
+		// a runner.Run call gets one time (platform.WithTimeProvider), or with
+		// a clock coarser than the gap between two writes. A response that
+		// sorts before the answer therefore also counts when all of these hold:
+		//   - The request is strictly older than the answer. The placeholder
+		//     stored with the request is never newer than the request, so it
+		//     cannot share the answer's timestamp, and a response that does
+		//     was written in the answer's run or later. If the clock did not
+		//     move between the two runs, a tie says nothing about which run
+		//     wrote the response, so only the order of the slice is used.
+		//   - It shares the answer's timestamp.
+		//   - It is a response of the same tool. A response of another tool
+		//     that reuses the call ID is not the result of this call.
+		answeredAfter := func(idx, ansIdx, reqIdx int, call genai.FunctionCall) bool {
+			if idx > ansIdx {
+				return true
+			}
+			ev, ans, req := events[idx], events[ansIdx], events[reqIdx]
+			if req.Timestamp.IsZero() || !req.Timestamp.Before(ans.Timestamp) || !ev.Timestamp.Equal(ans.Timestamp) {
+				return false
+			}
+			for _, resp := range utils.FunctionResponses(ev.Content) {
+				if resp.ID == call.ID && resp.Name == call.Name {
+					return true
+				}
+			}
+			return false
 		}
 
 		agentName := ctx.Agent().Name()
@@ -238,14 +277,20 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			// Remove the tools that already have a result stored after the user's first
-			// answer to the confirmation (repeated approvals). The "requires confirmation"
-			// placeholder response is stored before that answer, and may sort after the
-			// request, so it must not count.
-			for callID := range toolsToResumeByFunctionCallID {
-				start := max(k, firstAnswerIndex[confirmationIDByCallID[callID]])
-				if idx, ok := responseLatestIndex[callID]; ok && idx > start {
-					delete(toolsToResumeByFunctionCallID, callID)
+			// Remove the tools that already have a response written after the user's
+			// first answer to the confirmation (repeated approvals): one sorted after
+			// that answer, or one that shares its timestamp and sorts before it (see
+			// answeredAfter).
+			for callID, cc := range toolsToResumeByFunctionCallID {
+				ansIdx, answered := firstAnswerIndex[confirmationIDByCallID[callID]]
+				if !answered {
+					ansIdx = k
+				}
+				for _, idx := range responseIndexes[callID] {
+					if idx > k && answeredAfter(idx, ansIdx, k, cc.call) {
+						delete(toolsToResumeByFunctionCallID, callID)
+						break
+					}
 				}
 			}
 			if len(toolsToResumeByFunctionCallID) == 0 {
