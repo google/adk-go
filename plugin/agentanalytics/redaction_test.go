@@ -910,9 +910,18 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"single-quoted namespaced compound key with trailing space", `log: 'ConnectionStrings:dbPassword '=S3CR3T`, `log: 'ConnectionStrings:dbPassword '=[REDACTED]`},
 			{"multi-colon namespaced quoted key with trailing space", `log: "a:b:DB_PASSWORD "=S3CR3T`, `log: "a:b:DB_PASSWORD "=[REDACTED]`},
 			{"slash and colon namespaced quoted key with trailing space", `log: "Application Support/ConnectionStrings:dbPassword "=S3CR3T`, `log: "Application Support/ConnectionStrings:dbPassword "=[REDACTED]`},
+			{"spaced namespaced double-quoted key with trailing space", `"Connection Strings:dbPassword "=S3CR3T`, `"Connection Strings:dbPassword "=[REDACTED]`},
+			{"spaced namespaced single-quoted key with trailing space", `'Connection Strings:dbPassword '=S3CR3T`, `'Connection Strings:dbPassword '=[REDACTED]`},
+			{"slash and spaced namespaced double-quoted key with trailing space", `"Application Support/Connection Strings:dbPassword "=S3CR3T`, `"Application Support/Connection Strings:dbPassword "=[REDACTED]`},
+			{"spaced namespaced double-quoted key with trailing colon", `"Connection Strings:dbPassword:"=S3CR3T`, `"Connection Strings:dbPassword:"=[REDACTED]`},
+			{"prefixed spaced namespaced JSON key with trailing colon", `log: "Connection Strings:dbPassword:": S3CR3T`, `log: "Connection Strings:dbPassword:":[REDACTED]`},
+			{"namespaced double-quoted key with trailing colon", `"ConnectionStrings:dbPassword:"=S3CR3T`, `"ConnectionStrings:dbPassword:"=[REDACTED]`},
 			{"quoted double-colon non-sensitive suffix stays unredacted", `" a.temp::x "=S3CR3T`, `" a.temp::x "=S3CR3T`},
 			{"quoted phrase with space and no slash stays unredacted", `he said "use DB_PASSWORD " = "v"`, `he said "use DB_PASSWORD " = "v"`},
 			{"quoted space inside final path component stays unredacted", `"Application Support/my password "=S3CR3T`, `"Application Support/my password "=S3CR3T`},
+			{"quoted key with space before colon and sensitive suffix redacts", `log: "foo bar:password"=S3CR3T`, `log: "foo bar:password"=[REDACTED]`},
+			{"bare quoted key with space before colon and sensitive suffix redacts", `"foo bar:password"=S3CR3T`, `"foo bar:password"=[REDACTED]`},
+			{"quoted key with space before colon and space inside suffix stays unredacted", `log: "foo bar:my password "=S3CR3T`, `log: "foo bar:my password "=S3CR3T`},
 			{"glued empty quotes after single-quoted key redact trailing secret", `password=''' token':' 'S3CR3T`, `password='[REDACTED]'`},
 			{"prefixed glued empty quotes after single-quoted key redact trailing secret", `log: password=''' token':' 'S3CR3T`, `log: password='[REDACTED]'`},
 			{"glued empty quotes with non-empty single-quoted prefix redact trailing secret", `password=''' token':' a'S3CR3T`, `password='[REDACTED]'`},
@@ -923,10 +932,44 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{"colon followed by space-padded quote and unclosed secret redacts", `password: " a "S3CR3T`, `password:[REDACTED]`},
 			{"colon followed by space-padded quote and closed secret redacts", `password: " a "S3CR3T"`, `password:"[REDACTED]"`},
 			{"equals followed by comma-space quote and secret redacts", `password=",a "S3CR3T`, `password=[REDACTED]`},
+			{"glued adjacent double then single quoted segments redact both", `password="foo"'S3CR3T'`, `password=[REDACTED]`},
+			{"glued adjacent single then double quoted segments redact both", `password='foo'"S3CR3T"`, `password=[REDACTED]`},
+			{"glued empty double then single quoted secret redacts", `password=""'S3CR3T'`, `password=[REDACTED]`},
+			{"glued empty single then double quoted secret redacts", `password=''"S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then leading-space double quoted secret redacts both", `password='fixture-'" S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then double quoted secret redacts both", `password='fixture-'"S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then equals double quoted secret redacts both", `password='fixture-'"=S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then colon double quoted secret redacts both", `password='fixture-'":S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then comma double quoted secret redacts both", `password='fixture-'",S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then semicolon double quoted secret redacts both", `password='fixture-'";S3CR3T"`, `password=[REDACTED]`},
+			{"glued single quote then space-padded double quoted secret redacts both", `password='fixture-'" S3CR3T "`, `password=[REDACTED]`},
+			{"glued single quote then space-padded double quoted secret preserves trailing sibling", `password='fixture-'" S3CR3T " other="val"`, `password=[REDACTED] other="val"`},
+			{"glued double quote then single quoted secret redacts both", `password="fixture-"'S3CR3T'`, `password=[REDACTED]`},
+			{"glued double quote then empty single quotes redacts both", `password="fixture-"''`, `password=[REDACTED]`},
+			{"glued three-segment single double empty-double shell secret redacts", `password='fixture-'" S3CR3T""`, `password=[REDACTED]`},
+			{"glued three-segment single double suffix shell secret redacts", `password='fixture-'" S3CR3T"suffix"`, `password=[REDACTED]`},
+			{"glued three-segment single comma-double empty-double shell secret redacts", `password='fixture-'",S3CR3T""`, `password=[REDACTED]`},
+			{"contraction apostrophe before glued double then single quoted secret redacts", `it's password="fixture-"'S3CR3T'`, `it's password=[REDACTED]`},
+			{"nested double quote inside earlier single-quoted value does not suppress glued shell redaction", `msg='say "hi' password='fixture-'"S3CR3T"`, `msg='say "hi' password=[REDACTED]`},
+			{"nested single quote inside earlier double-quoted value does not suppress glued shell redaction", `msg="say 'hi" password="fixture-"'S3CR3T'`, `msg="say 'hi" password=[REDACTED]`},
+			{"apostrophe inside earlier JSON string does not suppress glued shell redaction", `log: {"msg":"users' error"} password="fixture-"'S3CR3T'`, `log: {"msg":"users' error"} password=[REDACTED]`},
+			{"nested double quote inside earlier single-quoted value does not corrupt outer double quote", `log: 'quote "' "password='fixture-'" other="val"`, `log: 'quote "' "password='[REDACTED]'" other="val"`},
+			{"nested single quote inside earlier double-quoted value does not corrupt outer single quote", `log: "a'1" 'password="fixture-"' other='val'`, `log: "a'1" 'password="[REDACTED]"' other='val'`},
+			{"outer double quote after single-quoted secret before plain key stays intact", `log: "password='fixture-'" other=val`, `log: "password='[REDACTED]'" other=val`},
+			{"outer double quote after single-quoted secret before quoted word stays intact", `log: "password='fixture-'" "other"`, `log: "password='[REDACTED]'" "other"`},
+			{"outer double quote after single-quoted secret before quoted sibling pair stays intact", `log: "password='fixture-'" other="val"`, `log: "password='[REDACTED]'" other="val"`},
+			{"outer single quote after double-quoted secret before quoted sibling pair stays intact", `log: 'password="fixture-"' other='val'`, `log: 'password="[REDACTED]"' other='val'`},
+			{"outer double quote after single-quoted secret before plain and quoted pairs stays intact", `log: "password='fixture-'" a=1 msg="ok"`, `log: "password='[REDACTED]'" a=1 msg="ok"`},
+			{"outer double quote wrapping prose and single-quoted secret before quoted sibling stays intact", `log: "login failed: password='fixture-'" other="val"`, `log: "login failed: password='[REDACTED]'" other="val"`},
+			{"JSON string ending in single-quoted secret preserves sibling fields", `{"a":"password='fixture-'","b":1}`, `{"a":"password='[REDACTED]'","b":1}`},
+			{"outer single quote wrapping text and already-redacted double-quoted secret stays intact", `text: 'login failed: password="[REDACTED]"'`, `text: 'login failed: password="[REDACTED]"'`},
 			{"empty space quote not glued to trailing secret leaves unredacted tail", `password=''' token':' ' `, `password='[REDACTED]' ' `},
 			{"quoted greeting with escaped apostrophe stays intact", `"hello" it\'s fine`, `"hello" it\'s fine`},
+			{"JSON key with balanced escaped double quotes before ok stays in place", `log: "password" : \"foo\" ok`, `log: "password":"[REDACTED]" ok`},
 			{"JSON key with single escaped single quote does not fail closed", `"password":\' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
 			{"JSON key with two escaped single quotes does not fail closed", `"password":\'' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"JSON key with two backslashes and one escaped single quote does not fail closed", `"password":\\' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
+			{"prefixed JSON key with two backslashes and two single quotes does not fail closed", `log: "password":\\'' S3CR3T`, `log: "password":"[REDACTED]" S3CR3T`},
 			{"JSON key with three bare single quotes does not fail closed", `"password":''' S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
 			{"JSON key with escaped double quote does not fail closed", `"password":\"" S3CR3T`, `"password":"[REDACTED]" S3CR3T`},
 			{"prefixed JSON key with escaped double quote does not fail closed", `log: "password":\"" S3CR3T`, `log: "password":"[REDACTED]" S3CR3T`},
@@ -960,10 +1003,35 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			{name: "escaped quote before nested token key", in: `password=\"'e /token'=x" S3CR3T`},
 			{name: "escaped quote before nested JSON password key", in: `token=abc\"password\": SECRET123`},
 			{name: "escaped quote inside quoted nested temp key before password", in: `password=a'temp:\" /password'=x" S3CR3T`},
+			{name: "prefixed JSON key with escaped quote before nested temp key", in: `log: "password" : \"'e /temp:'=x" S3CR3T`},
+			{name: "prefixed JSON key with escaped single quote before nested temp key", in: `log: "password" : \'"e /temp:"=x' S3CR3T`},
+			{name: "prefixed JSON key with escaped quote before nested quoted token key", in: `log: "password" : \"'e "token":x" S3CR3T`},
+			{name: "prefixed JSON key with unclosed escaped quote before bare word", in: `log: "password" : \"foo bar" S3CR3T`},
 			{name: "JSON key with unbalanced escaped single quote", in: `"password":\''' S3CR3T`},
 			{name: "prefixed JSON key with unbalanced escaped single quote", in: `log: "password":\''' S3CR3T`},
+			{name: "JSON key with two backslashes and three single quotes", in: `"password":\\''' S3CR3T`},
+			{name: "prefixed JSON key with two backslashes and three single quotes", in: `log: "password":\\''' S3CR3T`},
+			{name: "JSON key with three backslashes and three single quotes", in: `"password":\\\''' S3CR3T`},
+			{name: "prefixed JSON key with three backslashes and three single quotes", in: `log: "password":\\\''' S3CR3T`},
+			{name: "JSON key with four backslashes and three single quotes", in: `"password":\\\\''' S3CR3T`},
+			{name: "JSON key with colon suffix and unbalanced escaped single quote", in: `"password:":\''' S3CR3T`},
+			{name: "prefixed JSON key with colon suffix and unbalanced escaped single quote", in: `log: "password:":\''' S3CR3T`},
+			{name: "namespaced JSON key with two escaped single quotes and one bare single quote", in: `"ConnectionStrings:dbPassword":\'\'' S3CR3T`},
+			{name: "prefixed namespaced JSON key with two escaped single quotes and one bare single quote", in: `log: "ConnectionStrings:dbPassword":\'\'' S3CR3T`},
+			{name: "namespaced JSON key with unbalanced escaped single quote", in: `"ConnectionStrings:dbPassword":\''' S3CR3T`},
+			{name: "namespaced JSON key with two backslashes and three single quotes", in: `"ConnectionStrings:dbPassword":\\''' S3CR3T`},
+			{name: "spaced namespaced JSON key with two escaped single quotes and one bare single quote", in: `"Connection Strings:dbPassword":\'\'' S3CR3T`},
+			{name: "namespaced JSON key with trailing colon and unbalanced escaped single quote", in: `"ConnectionStrings:dbPassword:":\''' S3CR3T`},
+			{name: "spaced namespaced JSON key with trailing colon and unbalanced escaped single quote", in: `"Connection Strings:dbPassword:":\''' S3CR3T`},
+			{name: "namespaced quoted equals key with two escaped single quotes and one bare single quote", in: `"ConnectionStrings:dbPassword"=\'\'' S3CR3T`},
+			{name: "quoted equals key with unbalanced escaped single quote", in: `"password"=\''' S3CR3T`},
+			{name: "prefixed quoted equals key with unbalanced escaped single quote", in: `log: "password"=\''' S3CR3T`},
 			{name: "JSON key with unbalanced escaped double quote", in: `"password":\""" S3CR3T`},
 			{name: "prefixed JSON key with unbalanced escaped double quote", in: `log: "password":\""" S3CR3T`},
+			{name: "JSON key with two backslashes and three double quotes", in: `"password":\\""" S3CR3T`},
+			{name: "prefixed JSON key with two backslashes and three double quotes", in: `log: "password":\\""" S3CR3T`},
+			{name: "JSON key with three backslashes and three double quotes", in: `"password":\\\""" S3CR3T`},
+			{name: "prefixed JSON key with three backslashes and three double quotes", in: `log: "password":\\\""" S3CR3T`},
 			{name: "JSON key with two escaped double quotes and one bare double quote", in: `"password":\"\"" S3CR3T`},
 			{name: "prefixed JSON key with two escaped double quotes and one bare double quote", in: `log: "password":\"\"" S3CR3T`},
 			{name: "JSON key with two escaped single quotes and one bare single quote", in: `"password":\'\'' S3CR3T`},
@@ -978,6 +1046,22 @@ func TestRedactTextAndErrorMessages(t *testing.T) {
 			}
 		}
 		checkRedaction(t, escaped)
+		if got := scrubErrorText(`"password" : \"'e /temp:'=x" S3CR3T`); got != redactedSensitiveTextPlaceholder {
+			t.Errorf("scrubErrorText top-level escaped quote before nested temp = %q, want %q", got, redactedSensitiveTextPlaceholder)
+		}
+		for _, in := range []string{
+			`"password" : \"'e /temp:'=x" S3CR3T`,
+			`"password" : \'"e /temp:"=x' S3CR3T`,
+			`"password" : \"'e "token":x" S3CR3T`,
+			`"password" : \"foo bar" S3CR3T`,
+		} {
+			for _, ep := range textEntryPoints {
+				got := ep.redact(t, in)
+				if strings.Contains(got, "S3CR3T") || (got != redactedSensitiveTextPlaceholder && got != unparseableJSONPlaceholder) {
+					t.Errorf("%s(%q) = %q, want %q or %q without secret leak", ep.name, in, got, redactedSensitiveTextPlaceholder, unparseableJSONPlaceholder)
+				}
+			}
+		}
 	})
 
 	// Text that a runtime comparison with the earlier patterns used to
@@ -1207,7 +1291,10 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 			{"compound key with apostrophe and Bearer keeps siblings", `{"db_password": "don't mention Bearer", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 			{"compound key with closed Bearer quote keeps siblings", `{"db_password": "Bearer 'tok'", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 			{"compound key with percent-encoded space and balanced Bearer quotes keeps siblings", `{"db_password": "Bearer%20%22tok\"", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with percent-encoded trailing space and balanced Bearer quotes keeps siblings", `{"db_password": "Bearer%20%22tok\"%20", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with percent-encoded trailing tab and balanced Bearer quotes keeps siblings", `{"db_password": "Bearer%20%22tok\"%09", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 			{"compound key with literal space and balanced percent-encoded Bearer quote keeps siblings", `{"db_password": "Bearer %22tok\"", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
+			{"compound key with percent-encoded quote after literal quote and trailing encoded quote keeps siblings", `{"db_password": "Bearer%20%22x\"%20%22y%22", "request_id": "req-1"}`, `{"db_password":"[REDACTED]","request_id":"req-1"}`},
 		})
 	})
 
@@ -1251,6 +1338,12 @@ func TestRedactJSONAndSmartTruncate(t *testing.T) {
 			{
 				name:      "compound sensitive key with percent-encoded space and unclosed Bearer quote",
 				in:        `{"db_password": "Bearer%20\"unclosed", "request_id": "req-1"}`,
+				wantError: `{"db_password":"[REDACTED]","request_id":"req-1"}`,
+				wantText:  redactedSensitiveTextPlaceholder,
+			},
+			{
+				name:      "compound sensitive key with percent-encoded quote before literal quote and trailing text",
+				in:        `{"db_password": "Bearer%20%22x\" tail", "request_id": "req-1"}`,
 				wantError: `{"db_password":"[REDACTED]","request_id":"req-1"}`,
 				wantText:  redactedSensitiveTextPlaceholder,
 			},
@@ -1564,6 +1657,27 @@ func TestRedactionLinearTimeScaling(t *testing.T) {
 		}},
 		{"repeated glued quoted token pairs in extendOverlappingTextPair", 64 << 10, func(n int) string {
 			return `log: "password": ` + strings.Repeat(`'x''token='a''`, n/14) + " password=SECRET"
+		}},
+		{"repeated colon-qualified JSON keys with escaped quotes", 64 << 10, func(n int) string {
+			return "log: " + strings.Repeat(`"a:password":\\'';`, n/18) + " password=SECRET"
+		}},
+		{"repeated alternating long and short colon-qualified JSON keys with escaped quotes", 64 << 10, func(n int) string {
+			return "log: " + strings.Repeat(`"a:password":\\'';"a:password":'x';`, n/35) + " password=SECRET"
+		}},
+		{"repeated colon-qualified JSON keys inside outer single-quoted span", 64 << 10, func(n int) string {
+			return `log: "a:password":'` + strings.Repeat(`"a:password":\\"";`, n/18) + `,'`
+		}},
+		{"repeated chained quoted assigns in extendQuotedAssign", 64 << 10, func(n int) string {
+			return `log: "password":'x'=` + strings.Repeat(`'x'"y"=`, n/7)
+		}},
+		{"repeated glued opposite-quote shell words", 64 << 10, func(n int) string {
+			return strings.Repeat(`token='x'"y" `, n/13)
+		}},
+		{"repeated glued alternating empty quotes in valueStartsAt", 64 << 10, func(n int) string {
+			return "password=" + strings.Repeat(`''""`, n/4) + "SECRET"
+		}},
+		{"repeated glued alternating empty quotes on nested key in valueStartsAt", 64 << 10, func(n int) string {
+			return "password=token=" + strings.Repeat(`''""`, n/4) + "SECRET"
 		}},
 		{"repeated raw IPv6 scheme prefixes with percent-25 marker", 64 << 10, func(n int) string {
 			return strings.Repeat("http://[", n/8) + "]%25"
