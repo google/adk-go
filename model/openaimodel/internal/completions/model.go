@@ -87,6 +87,7 @@ func (m *Model) generate(ctx context.Context, params openai.ChatCompletionNewPar
 			yield(nil, err)
 			return
 		}
+		traceInvalidUsage(ctx, resp.Usage)
 		llmResp := converters.Genai2LLMResponse(genaiResp)
 		attachMetadata(llmResp, resp)
 		yield(llmResp, nil)
@@ -172,7 +173,7 @@ func (m *Model) generateStream(ctx context.Context, params openai.ChatCompletion
 		if final == nil {
 			return
 		}
-		finalizeStreamResponse(final, completion, translator.usage)
+		finalizeStreamResponse(ctx, final, completion, translator.usage)
 		yield(final, nil)
 	}
 }
@@ -192,7 +193,7 @@ func functionCallParts(content *genai.Content) []*genai.Part {
 // reason or usage, so this is the one response that reports them: the finish
 // reason from the accumulated snapshot, and usage from the latest report, if
 // any arrived.
-func finalizeStreamResponse(final *model.LLMResponse, completion *openai.ChatCompletion, usage *openai.CompletionUsage) {
+func finalizeStreamResponse(ctx context.Context, final *model.LLMResponse, completion *openai.ChatCompletion, usage *openai.CompletionUsage) {
 	final.TurnComplete = true
 	// A provider that ignores stream_options reports no usage, and zeros would
 	// say a turn that did real work cost nothing; the Responses path leaves
@@ -200,6 +201,7 @@ func finalizeStreamResponse(final *model.LLMResponse, completion *openai.ChatCom
 	final.UsageMetadata = nil
 	if usage != nil {
 		final.UsageMetadata = convertUsage(*usage)
+		traceInvalidUsage(ctx, *usage)
 	}
 	if completion == nil {
 		return
