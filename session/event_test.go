@@ -194,29 +194,3 @@ func TestIsFinalResponseAllocationsDoNotGrowWithParts(t *testing.T) {
 		})
 	}
 }
-
-// Only the last non-nil part decides HasTrailingCodeExecutionResult; a code
-// execution result earlier in the content does not count, and a nil *Event is
-// valid input.
-func TestEventHasTrailingCodeExecutionResult(t *testing.T) {
-	tests := []struct {
-		name  string
-		event *session.Event
-		want  bool
-	}{
-		{"nil receiver", nil, false},
-		{"zero value", &session.Event{}, false},
-		{"empty non-nil part list", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{}}}}, false},
-		{"only nil part", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{nil}}}}, false},
-		{"code result before text and nil", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, {Text: "done"}, nil}}}}, false},
-		{"code result after text, before nil", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "running"}, {CodeExecutionResult: &genai.CodeExecutionResult{}}, nil}}}}, true},
-		{"executable code after a code result", &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, {ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}}}}}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.event.HasTrailingCodeExecutionResult(); got != tc.want {
-				t.Errorf("HasTrailingCodeExecutionResult() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}

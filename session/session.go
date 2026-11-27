@@ -309,24 +309,7 @@ func (e *Event) IsFinalResponse() bool {
 	if e.ErrorCode != "" && !e.Partial && !hasCalls {
 		return true
 	}
-	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !e.HasTrailingCodeExecutionResult()
-}
-
-// HasTrailingCodeExecutionResult reports whether the last non-nil part of
-// e.Content holds a CodeExecutionResult. It returns false when e is nil,
-// e.Content is nil, or no non-nil part exists.
-func (e *Event) HasTrailingCodeExecutionResult() bool {
-	if e == nil || e.Content == nil {
-		return false
-	}
-	// A nil entry after a code execution result does not hide it: the
-	// trailing part is the last non-nil one.
-	for _, p := range slices.Backward(e.Content.Parts) {
-		if p != nil {
-			return p.CodeExecutionResult != nil
-		}
-	}
-	return false
+	return !hasCalls && !hasAny(e.FunctionResponses()) && !e.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
 
 // hasAny reports whether seq yields at least one value. It stops seq after the
@@ -553,6 +536,21 @@ const (
 
 // ErrStateKeyNotExist is the error thrown when key does not exist.
 var ErrStateKeyNotExist = errors.New("state key does not exist")
+
+// Returns whether the event has a trailing code execution result. Nil Parts
+// entries are skipped: the trailing part is the last non-nil one, so a stray
+// nil after a code execution result does not change the classification.
+func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
+		return false
+	}
+	for _, part := range slices.Backward(resp.Content.Parts) {
+		if part != nil {
+			return part.CodeExecutionResult != nil
+		}
+	}
+	return false
+}
 
 // Bounds on a decoded numeric event timestamp, in microseconds: years 1 and
 // 9999. Wide enough for any real event time, narrow enough that a value in the
