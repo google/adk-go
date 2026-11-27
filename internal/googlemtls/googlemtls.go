@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package googlemtls sends requests for Google API hosts over mutual TLS when
-// the environment provides a client certificate.
+// Package googlemtls sends https requests over mutual TLS when the environment
+// provides a client certificate: Google API hosts only via [NewTransport], or
+// every https host via [NewTransportAllHosts].
 //
 // A certificate-bound access token is accepted only on a connection that
 // presented the matching certificate, and Google API hosts ask for one only on
@@ -41,7 +42,7 @@ import (
 const (
 	googleAPIsSuffix = ".googleapis.com"
 	mtlsSuffix       = ".mtls.googleapis.com"
-	optOut           = "set GOOGLE_API_USE_CLIENT_CERTIFICATE=false to send Google API requests without it"
+	optOut           = "set GOOGLE_API_USE_CLIENT_CERTIFICATE=false to send requests without it"
 )
 
 // Multi-region hosts have no mTLS names, so they are never rewritten. Same
@@ -51,13 +52,13 @@ var noMTLSSuffixes = []string{".us.rep.googleapis.com", ".eu.rep.googleapis.com"
 // provider follows crypto/tls.Config.GetClientCertificate.
 type provider = func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 
-// source returns the provider to present to Google API hosts, nil when none
-// is to be presented, or an error when a certificate the environment
-// configures cannot be loaded. A transport keeps the first provider it gets.
-// The auth library resolves its own once per process, and a workload
-// certificate config's provider reads the certificate files again for every
-// handshake, so a rotated certificate is picked up. A config that later
-// names other files is not.
+// source returns the provider to present on mTLS requests, nil when none is to
+// be presented, or an error when a certificate the environment configures
+// cannot be loaded. A transport keeps the first provider it gets. The auth
+// library resolves its own once per process, and a workload certificate
+// config's provider reads the certificate files again for every handshake, so
+// a rotated certificate is picked up. A config that later names other files is
+// not.
 type source func() (provider, error)
 
 // defaultSource is the environment's source, under the rule clientcert.Source
@@ -68,11 +69,11 @@ var defaultSource source = clientcert.Source
 // while it is set. See SetTestHooks.
 var testConfigure func(*http.Transport)
 
-// SetTestHooks makes transports created by NewTransport after it returns use
-// src as their certificate source, the one in place when src is nil, and
-// apply configure to their mTLS transport, until restore is called. It is for
-// tests in other packages, which must not run in parallel while the hooks are
-// set.
+// SetTestHooks makes transports created by [NewTransport] and
+// [NewTransportAllHosts] after it returns use src as their certificate source,
+// the one in place when src is nil, and apply configure to their mTLS
+// transport, until restore is called. It is for tests in other packages, which
+// must not run in parallel while the hooks are set.
 func SetTestHooks(src func() (func(*tls.CertificateRequestInfo) (*tls.Certificate, error), error), configure func(*http.Transport)) (restore func()) {
 	prevSource, prevConfigure := defaultSource, testConfigure
 	if src != nil {
@@ -93,17 +94,28 @@ func SetTestHooks(src func() (func(*tls.CertificateRequestInfo) (*tls.Certificat
 //
 // The mTLS requests do not go through base. They use a transport of this
 // one's own, with its own connections, built at the first such request: a
-// clone of http.DefaultTransport, or net/http's default settings when the
-// application replaced that with a wrapper. It presents the certificate and
-// refuses an https proxy, which would be offered the certificate in its own
-// handshake.
+// clone of http.DefaultTransport (or net/http's default settings when the
+// application replaced that with a wrapper), tuned with
+// [clientcert.ConfigureTransport] (100 idle connections per host, HTTP/2 and a
+// 31-second read idle timeout). It presents the certificate and refuses an
+// https proxy, which would be offered the certificate in its own handshake.
 func NewTransport(base http.RoundTripper) http.RoundTripper {
 	return &transport{base: base, source: defaultSource, configure: testConfigure}
 }
 
+// NewTransportAllHosts is [NewTransport], except that while the environment
+// provides a certificate every https request goes over mutual TLS, so any
+// host that asks for the certificate gets it. Only *.googleapis.com hosts are
+// moved to their mTLS names. This is what google-genai Python, which
+// adk-python's Gemini model uses, does for a Vertex AI client.
+func NewTransportAllHosts(base http.RoundTripper) http.RoundTripper {
+	return &transport{base: base, source: defaultSource, configure: testConfigure, allHosts: true}
+}
+
 type transport struct {
-	base   http.RoundTripper
-	source source
+	base     http.RoundTripper
+	source   source
+	allHosts bool
 	// configure, when set, is applied to the mTLS transport after it is
 	// built. Tests use it to reach a local server.
 	configure func(*http.Transport)
@@ -121,7 +133,8 @@ type lookup struct {
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !isGoogleAPI(req.URL) {
+	google := isGoogleAPI(req.URL)
+	if !google && (!t.allHosts || !isHTTPS(req.URL)) {
 		return t.plain().RoundTrip(req)
 	}
 	p, err := t.provider(req.Context())
@@ -135,7 +148,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.plain().RoundTrip(req)
 	}
 	mtls := t.mtlsTransport(p)
-	if host, ok := mtlsHost(req.URL); ok {
+	if host, ok := mtlsHost(req.URL); google && ok {
 		req = req.Clone(req.Context())
 		req.URL.Host = host
 		// net/http writes the Host header and the HTTP/2 :authority from
@@ -231,6 +244,7 @@ func newMTLSTransport(p provider) *http.Transport {
 	if tr.Proxy != nil {
 		tr.Proxy = guardProxy(tr.Proxy)
 	}
+	clientcert.ConfigureTransport(tr)
 	return tr
 }
 
@@ -250,11 +264,15 @@ func guardProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request)
 // isGoogleAPI reports whether u is an https URL on a *.googleapis.com host,
 // written as an ASCII name (see asciiName).
 func isGoogleAPI(u *url.URL) bool {
-	if u == nil || !strings.EqualFold(u.Scheme, "https") {
+	if !isHTTPS(u) {
 		return false
 	}
 	h := u.Hostname()
 	return asciiName(h) && len(h) > len(googleAPIsSuffix) && strings.HasSuffix(strings.ToLower(h), googleAPIsSuffix)
+}
+
+func isHTTPS(u *url.URL) bool {
+	return u != nil && strings.EqualFold(u.Scheme, "https")
 }
 
 // asciiName reports whether host is written as an ASCII name. Other

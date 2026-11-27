@@ -117,7 +117,7 @@ func callerSettings(ctx context.Context, opts []option.ClientOption) (httpClient
 	// the caller's endpoint, which the library would return in place of the
 	// default one. And it has a certificate in hand, so that the library
 	// does not search for one of its own, which can run a helper.
-	probeOpts = append(probeOpts, internaloption.SkipDialSettingsValidation(), option.WithEndpoint(""), option.WithClientCertSource(noCertificate))
+	probeOpts = append(probeOpts, internaloption.SkipDialSettingsValidation(), option.WithEndpoint(""), option.WithClientCertSource(NoCertificate))
 	got, endpoint, err := htransport.NewClient(ctx, probeOpts...)
 	// What the library still fails on is its mTLS endpoint outside
 	// googleapis.com, and options it takes for no HTTP client at all.

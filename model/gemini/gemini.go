@@ -68,9 +68,14 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/httptransport"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/clientcert"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
@@ -96,6 +101,19 @@ type geminiModel struct {
 // [genai.Client]. The modelName specifies which Gemini model to target
 // (e.g., "gemini-2.5-flash").
 //
+// On Vertex AI with credentials, from cfg or Application Default Credentials,
+// the client presents the environment's client certificate under the rule
+// [google.golang.org/adk/v2/auth/gcp.NewClient] documents. While the
+// certificate is on, requests for a *.googleapis.com host go to its
+// .mtls.googleapis.com name, which asks for the certificate, unless
+// GOOGLE_API_USE_MTLS_ENDPOINT=never. The multi-region hosts of the us and eu
+// locations have no such name and keep theirs. Any other https host that asks
+// for the certificate gets it too. Application Default Credentials also
+// exchange their tokens through this transport, so user credentials use
+// oauth2.mtls.googleapis.com unless GOOGLE_API_USE_MTLS_ENDPOINT=never. The
+// Live API is not covered: the genai SDK dials it without the client's
+// transport. With cfg.HTTPClient set, that client decides alone.
+//
 // An error is returned if the [genai.Client] fails to initialize.
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
 	// Create a copy of the config to avoid mutating the caller's config
@@ -113,7 +131,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	callerHeaders := cfgCopy.HTTPOptions.Headers
 	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, nil)
 
-	client, err := genai.NewClient(ctx, &cfgCopy)
+	client, err := newClient(ctx, &cfgCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -136,6 +154,88 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		client:  client,
 		baseURL: baseURL,
 	}, nil
+}
+
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// tokenExchangeTimeout matches cloud.google.com/go/auth's
+// internal.DefaultClient timeout so a hanging token endpoint cannot stall a
+// background token refresh. Variable for tests.
+var tokenExchangeTimeout = 30 * time.Second
+
+// newClient creates the genai client for cfg. Where the SDK would build an
+// authenticated transport of its own, it builds the same one with a base that
+// presents the client certificate.
+func newClient(ctx context.Context, cfg *genai.ClientConfig) (*genai.Client, error) {
+	if cfg.HTTPClient != nil {
+		return genai.NewClient(ctx, cfg)
+	}
+	// Given an HTTP client, the SDK resolves the backend, API key, project and
+	// location from cfg and the environment, and neither detects credentials
+	// nor builds a transport.
+	resolving := *cfg
+	resolving.HTTPClient = &http.Client{}
+	client, err := genai.NewClient(ctx, &resolving)
+	if err != nil {
+		return nil, err
+	}
+	rc := client.ClientConfig()
+	// The SDK's own test for its authenticated transport (genai v1.77.0
+	// client.go:365-384), given that the Gemini API always has a key and that
+	// without one the SDK leaves project and location both set or both empty.
+	// Elsewhere it builds a plain http.Client, as the resolving client has.
+	if rc.APIKey != "" || (rc.Credentials == nil && rc.Project == "") {
+		return client, nil
+	}
+	// A config the rule cannot use fails here, as it failed in the auth
+	// library before, rather than on every request.
+	certSource, err := clientcert.Source()
+	if err != nil {
+		return nil, fmt.Errorf("gemini: %w", err)
+	}
+	base, _ := clientcert.PlainTransport(http.DefaultTransport)
+	mtlsTransport := googlemtls.NewTransportAllHosts(base)
+	creds := rc.Credentials
+	if creds == nil {
+		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}}
+		if certSource != nil {
+			// mtlsTransport presents the certificate on token exchanges and
+			// rewrites *.googleapis.com (including oauth2.googleapis.com) to
+			// .mtls.googleapis.com while respecting GOOGLE_API_USE_MTLS_ENDPOINT=never.
+			detect.Client = &http.Client{
+				Transport: mtlsTransport,
+				Timeout:   tokenExchangeTimeout,
+			}
+		}
+		creds, err = credentials.DetectDefault(detect)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find default credentials: %w", err)
+		}
+	}
+	quotaProjectID, err := creds.QuotaProjectID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get quota project ID: %w", err)
+	}
+	hc, err := httptransport.NewClient(&httptransport.Options{
+		Credentials: creds,
+		// As the SDK sets it. Given no Headers, the library (v0.24.4) drops
+		// the quota project header it would add itself.
+		Headers: http.Header{"X-Goog-User-Project": []string{quotaProjectID}},
+		// The certificate is presented below, by the rule's source. Any source
+		// here stops the library's own search, which would run a certificate
+		// helper even with the rule off. BaseRoundTripper replaces the
+		// transport it would be installed in, so it is never asked.
+		ClientCertProvider: clientcert.NoCertificate,
+		BaseRoundTripper:   mtlsTransport,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
+	}
+	authed := *cfg
+	authed.HTTPClient = hc
+	// The Live API takes its bearer token from Credentials.
+	authed.Credentials = creds
+	return genai.NewClient(ctx, &authed)
 }
 
 func (m *geminiModel) Name() string {
