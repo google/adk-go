@@ -568,3 +568,80 @@ func makeTerminalEvents(processor *eventProcessor) []a2a.Event {
 	result = append(result, processor.makeFinalStatusUpdate())
 	return result
 }
+
+// TestEventProcessor_PartialLongRunningCallsAreNotRequired covers a streamed
+// call whose preview carries an ID the complete event does not repeat, as
+// happens when Gemini streams function call arguments.
+func TestEventProcessor_PartialLongRunningCallsAreNotRequired(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	call := func(id string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "approve"}}
+	}
+	preview := &session.Event{
+		LLMResponse:        modelPartialResponseFromParts(genai.NewPartFromText("Asking."), call("preview")),
+		LongRunningToolIDs: []string{"preview"},
+	}
+	complete := &session.Event{
+		LLMResponse:        modelResponseFromParts(call("stored")),
+		LongRunningToolIDs: []string{"stored"},
+	}
+
+	tests := []struct {
+		name      string
+		events    []*session.Event
+		wantState a2a.TaskState
+		wantIDs   []string
+	}{
+		{
+			name:      "only the complete call is required",
+			events:    []*session.Event{preview, complete},
+			wantState: a2a.TaskStateInputRequired,
+			wantIDs:   []string{"stored"},
+		},
+		{
+			name:      "a preview alone requires no input",
+			events:    []*session.Event{preview},
+			wantState: a2a.TaskStateCompleted,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reqCtx := &a2asrv.ExecutorContext{TaskID: task.ID, ContextID: task.ContextID}
+			processor := newEventProcessor(reqCtx, invocationMeta{}, nil, newLegacyArtifactMaker(reqCtx))
+			for i, event := range tc.events {
+				got, err := processor.process(t.Context(), event)
+				if err != nil {
+					t.Fatalf("processor.process() error for %d-th = %v", i, err)
+				}
+				// The preview keeps its text and loses its call, as the
+				// complete event loses the call the status carries.
+				if i == 0 {
+					if got == nil || len(got.Artifact.Parts) != 1 || got.Artifact.Parts[0].Text() != "Asking." {
+						t.Errorf("processor.process() preview = %+v, want the text part alone", got)
+					}
+				} else if got != nil {
+					t.Errorf("processor.process() complete = %+v, want nil", got)
+				}
+			}
+
+			status := processor.makeFinalStatusUpdate()
+			if status.Status.State != tc.wantState {
+				t.Errorf("final state = %v, want %v", status.Status.State, tc.wantState)
+			}
+			var ids []string
+			if status.Status.Message != nil {
+				for _, part := range status.Status.Message.Parts {
+					data, ok := part.Data().(map[string]any)
+					if !ok {
+						t.Fatalf("status part = %+v, want a data part", part)
+					}
+					id, _ := data["id"].(string)
+					ids = append(ids, id)
+				}
+			}
+			if diff := cmp.Diff(tc.wantIDs, ids); diff != "" {
+				t.Errorf("required call IDs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
