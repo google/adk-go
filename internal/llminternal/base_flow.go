@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/trace"
@@ -154,9 +155,11 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 			if lastEvent.IsFinalResponse() {
 				// A thought-only ("thinking") turn reports as final but has no
-				// answer; don't stop on it — call the model again. Give up once
-				// the model has produced only thoughts too many times in a row,
-				// leaving the last thinking event as the result.
+				// answer; don't stop on it — call the model again. Some
+				// thought-only turns end the run instead; isThoughtOnlyTurn says
+				// which. Give up once the model has produced only thoughts too
+				// many times in a row, leaving the last thinking event as the
+				// result.
 				if !isThoughtOnlyTurn(lastEvent) {
 					return
 				}
@@ -185,10 +188,18 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 
 // isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
 // whose parts are all model "thinking" (Thought) parts — no surfaced answer.
-// Thought signatures ride on substantive parts (text, function calls), which
-// are not Thought, so any such part makes the turn non-thought-only.
+// Flow.Run calls the model again after such a turn. Thought signatures ride on
+// substantive parts (text, function calls), which are not Thought, so any such
+// part makes the turn non-thought-only.
+//
+// A turn that finished with STOP, or that carries the MODEL_RETURNED_NO_CONTENT
+// error code, does not count: it is an error event (see
+// applyEmptyResponsePolicy) and ends the run. The error code covers events
+// relayed from a remote agent, which carry no finish reason. A thought-only
+// turn that finished for any other reason, such as MAX_TOKENS, counts with or
+// without an error code.
 func isThoughtOnlyTurn(ev *session.Event) bool {
-	if ev == nil || ev.LLMResponse.Partial {
+	if ev == nil || ev.LLMResponse.Partial || ev.LLMResponse.FinishReason == genai.FinishReasonStop || ev.LLMResponse.ErrorCode == noContentErrorCode {
 		return false
 	}
 	content := ev.LLMResponse.Content
@@ -201,6 +212,98 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 		}
 	}
 	return true
+}
+
+// isSpaceOrSeparator reports whether r is whitespace: a rune unicode.IsSpace
+// reports, or one of the file, group, record and unit separators U+001C to
+// U+001F.
+func isSpaceOrSeparator(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// hasMeaningfulContent reports whether resp contains meaningful, actionable
+// content.
+//
+// A response is considered to have meaningful content if it contains at least
+// one part with:
+//   - An active function call or function response
+//   - Executable code or a code execution result
+//   - Inline data or file data
+//   - Non-thought, non-whitespace text
+//
+// Responses that are nil, have no content, have empty parts, or contain only
+// thought parts (reasoning tokens) or whitespace-only text return false.
+func hasMeaningfulContent(resp *model.LLMResponse) bool {
+	if !hasParts(resp) {
+		return false
+	}
+	for _, p := range resp.Content.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionCall != nil || p.FunctionResponse != nil || p.ExecutableCode != nil ||
+			p.CodeExecutionResult != nil || p.InlineData != nil || p.FileData != nil {
+			return true
+		}
+		if !p.Thought && strings.TrimFunc(p.Text, isSpaceOrSeparator) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParts reports whether resp has content with at least one part.
+func hasParts(resp *model.LLMResponse) bool {
+	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
+}
+
+// streamingMode returns the streaming mode of the invocation.
+func streamingMode(ctx agent.InvocationContext) agent.StreamingMode {
+	if rc := ctx.RunConfig(); rc != nil {
+		return rc.StreamingMode
+	}
+	return agent.StreamingModeNone
+}
+
+// Error code and messages applyEmptyResponsePolicy sets.
+const (
+	noContentErrorCode              = "MODEL_RETURNED_NO_CONTENT"
+	noContentErrorMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	noMeaningfulContentErrorMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// applyEmptyResponsePolicy marks terminal STOP responses that lack meaningful
+// content as errors.
+//
+// A turn that finishes with STOP but has no meaningful content (empty parts,
+// thought-only parts, or whitespace-only text) would otherwise be skipped or
+// treated as a complete answer; surface it as an actionable error instead.
+// In SSE streaming, the aggregator folds the entire turn into a single
+// non-partial response, so a non-partial response carrying only thought or
+// whitespace parts represents a completed turn with no answer, whereas empty
+// parts (a terminal finish-only chunk) are excluded.
+//
+// This must run before the response processors. Emptiness is a property of
+// what the model returned, so it can only be judged before local processing
+// touches the response: a processor may clear the content deliberately to
+// signal that the flow should continue, as the code execution processor does
+// once it has run the code and emitted its result.
+func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMResponse) {
+	if resp == nil || resp.Partial || resp.ErrorCode != "" || resp.FinishReason != genai.FinishReasonStop || hasMeaningfulContent(resp) {
+		return
+	}
+	withParts := hasParts(resp)
+	if !withParts && streamingMode(ctx) == agent.StreamingModeSSE {
+		return
+	}
+	resp.ErrorCode = noContentErrorCode
+	if resp.ErrorMessage != "" {
+		return
+	}
+	resp.ErrorMessage = noContentErrorMessage
+	if withParts {
+		resp.ErrorMessage = noMeaningfulContentErrorMessage
+	}
 }
 
 type activeTask struct {
@@ -947,6 +1050,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
 			if err := f.postprocess(ctx, req, resp); err != nil {
 				yield(nil, err)
 				return
