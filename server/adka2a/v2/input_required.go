@@ -64,6 +64,13 @@ func (p *inputRequiredProcessor) process(ctx context.Context, event *session.Eve
 			remainingParts = append(remainingParts, part)
 			continue
 		}
+		// As in adk-python, only complete events are collected for the
+		// input-required status. A partial event is a preview whose call can
+		// carry an ID the session never stores, which no client could answer.
+		// The part still stays out of the partial output.
+		if event.Partial {
+			continue
+		}
 		added := slices.ContainsFunc(p.addedParts, func(p *genai.Part) bool {
 			if part.FunctionCall != nil && p.FunctionCall != nil && part.FunctionCall.ID == p.FunctionCall.ID {
 				return true

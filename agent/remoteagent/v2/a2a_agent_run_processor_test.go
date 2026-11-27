@@ -349,6 +349,20 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				newCompletedEvent(),
 			},
 		},
+		{
+			name: "long-running calls streamed in chunks stay long-running",
+			events: []a2a.Event{
+				a2a.NewArtifactUpdateEvent(task, "a1", newLongRunningCallPart(t, "c1")),
+				a2a.NewArtifactUpdateEvent(task, "a1", newLongRunningCallPart(t, "c2")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{Partial: true, Content: callContent("c1")}, LongRunningToolIDs: []string{"c1"}},
+				{LLMResponse: model.LLMResponse{Partial: true, Content: callContent("c2")}, LongRunningToolIDs: []string{"c2"}},
+				{LLMResponse: model.LLMResponse{Content: callContent("c1", "c2")}, LongRunningToolIDs: []string{"c1", "c2"}},
+				newCompletedEvent(),
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -432,4 +446,25 @@ func BenchmarkA2AAgentRunProcessor_updateAggregation(b *testing.B) {
 			}
 		})
 	}
+}
+
+// newLongRunningCallPart returns the A2A part an ADK peer sends for a
+// long-running call with the given ID.
+func newLongRunningCallPart(t *testing.T, id string) *a2a.Part {
+	t.Helper()
+	part := &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "approve"}}
+	converted, err := adka2a.ToA2APart(part, []string{id})
+	if err != nil {
+		t.Fatalf("ToA2APart() error = %v", err)
+	}
+	return converted
+}
+
+// callContent returns the model content holding one call per ID.
+func callContent(ids ...string) *genai.Content {
+	content := &genai.Content{Role: genai.RoleModel}
+	for _, id := range ids {
+		content.Parts = append(content.Parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "approve"}})
+	}
+	return content
 }

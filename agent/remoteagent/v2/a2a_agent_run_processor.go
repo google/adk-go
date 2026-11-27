@@ -40,6 +40,8 @@ type artifactAggregation struct {
 	grounding  *genai.GroundingMetadata
 	customMeta map[string]any
 	usage      *genai.GenerateContentResponseUsageMetadata
+	// longRunningToolIDs name the aggregated calls that still await an answer.
+	longRunningToolIDs []string
 }
 
 type a2aAgentRunProcessor struct {
@@ -178,6 +180,7 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 	if event.UsageMetadata != nil { // cumulative
 		agg.usage = event.UsageMetadata
 	}
+	agg.longRunningToolIDs = append(agg.longRunningToolIDs, event.LongRunningToolIDs...)
 
 	p.removeFromOrder(aid)
 	p.aggregationOrder = append(p.aggregationOrder, aid)
@@ -191,6 +194,7 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 	result.GroundingMetadata = agg.grounding
 	result.CitationMetadata = agg.citations
 	result.UsageMetadata = agg.usage
+	result.LongRunningToolIDs = agg.longRunningToolIDs
 	return result
 }
 
