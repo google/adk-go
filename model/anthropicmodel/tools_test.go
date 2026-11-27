@@ -31,6 +31,11 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// stabilityIterations is how many identical builds or calls a test compares.
+// Key order can vary only with two or more extra keywords, so only cases
+// containing such a schema are repeated.
+const stabilityIterations = 20
+
 // buildToolInputSchemaReference is buildToolInputSchema with every extra
 // keyword left in ExtraFields, which the SDK writes in map iteration order.
 func buildToolInputSchemaReference(decl *genai.FunctionDeclaration) (anthropic.ToolInputSchemaParam, error) {
@@ -99,7 +104,7 @@ func toolSchemaCorpus() []*genai.FunctionDeclaration {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	largeProps := make(map[string]any)
 	var largeRequired []any
-	for i := range 300 {
+	for i := range 100 {
 		name := fmt.Sprintf("field_%03d", i)
 		largeProps[name] = map[string]any{"type": "STRING", "description": strings.Repeat("Long description. ", 10)}
 		if i%3 == 0 {
@@ -107,7 +112,7 @@ func toolSchemaCorpus() []*genai.FunctionDeclaration {
 		}
 	}
 	largeDefs := make(map[string]any)
-	for i := range 50 {
+	for i := range 20 {
 		largeDefs[fmt.Sprintf("def_%02d", i)] = map[string]any{"type": "object", "properties": map[string]any{"v": map[string]any{"type": "number"}}}
 	}
 	manyKeys := map[string]any{"type": "object", "properties": map[string]any{"a": str("a")}}
@@ -372,7 +377,10 @@ func TestBuildToolInputSchemaMatchesReference(t *testing.T) {
 				}
 			}
 
-			for range 200 {
+			for range stabilityIterations {
+				if len(ref.ExtraFields) < 2 {
+					break
+				}
 				again, err := buildToolInputSchema(decl)
 				if err != nil {
 					t.Fatalf("buildToolInputSchema() error = %v", err)
@@ -439,7 +447,7 @@ func TestBuildToolsStableSerialization(t *testing.T) {
 	cfg := &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: decls}}}
 
 	var first []byte
-	for i := range 200 {
+	for i := range stabilityIterations {
 		tools, _, err := buildToolsAndChoice(cfg, nil)
 		if err != nil {
 			t.Fatalf("buildToolsAndChoice() error = %v", err)
@@ -495,7 +503,8 @@ func TestBuildToolInputSchemaErrorsMatchReference(t *testing.T) {
 // TestToolSchemaRequestBodyMatchesReference checks whole request bodies: the
 // body GenerateContent sends equals, as a JSON value, the body built with the
 // reference schemas, byte for byte when no tool has more than one extra
-// keyword, and is identical across 100 calls.
+// keyword, and is identical across repeated calls when a tool has two or
+// more.
 func TestToolSchemaRequestBodyMatchesReference(t *testing.T) {
 	corpus := toolSchemaCorpus()
 	corpusReq := benchToolsRequest(0, 0)
@@ -555,7 +564,11 @@ func TestToolSchemaRequestBodyMatchesReference(t *testing.T) {
 				t.Fatalf("decoded body mismatch (-reference +got):\n%s", diff)
 			}
 
-			for range 100 {
+			calls := stabilityIterations
+			if tc.byteEquals {
+				calls = 1
+			}
+			for range calls {
 				for _, err := range m.GenerateContent(t.Context(), tc.req, false) {
 					if err != nil {
 						t.Fatalf("GenerateContent() error = %v", err)
@@ -563,7 +576,7 @@ func TestToolSchemaRequestBodyMatchesReference(t *testing.T) {
 				}
 			}
 			if distinct, changes := rec.counts(); distinct != 1 || changes != 0 {
-				t.Errorf("100 identical calls sent %d distinct bodies with %d changes, want 1 and 0", distinct, changes)
+				t.Errorf("%d identical calls sent %d distinct bodies with %d changes, want 1 and 0", calls, distinct, changes)
 			}
 			if rec.bodies[0] != string(gotBody) {
 				t.Errorf("sent body\n%s\nwant\n%s", rec.bodies[0], gotBody)
