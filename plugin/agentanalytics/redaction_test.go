@@ -365,7 +365,7 @@ func linearRatio(limit float64, small, large func()) (ratio float64, tSmall, tLa
 	if ratio <= limit {
 		return ratio, tSmall, tLarge
 	}
-	// The caller, a redaction test, holds scalingMu shared.
+	// The caller holds scalingMu shared via runInParallel.
 	scalingMu.RUnlock()
 	scalingMu.Lock()
 	defer func() {
@@ -394,15 +394,18 @@ func minRatio(limit float64, small, large func()) (ratio float64, tSmall, tLarge
 	return ratio, tSmall, tLarge
 }
 
-// scalingMu lets a linear-scaling check whose ratio stays above its limit
-// time its runs again alone (see linearRatio): each redaction test, which runs
-// in parallel with the others, holds it shared while it runs (see
-// runInParallel), and the check holds it alone while it times, so that no
-// other test takes the CPU from the runs that it compares.
+// scalingMu lets a linear-scaling or wall-clock check whose measurement stays
+// above its limit time its runs again alone (see linearRatio and
+// withinWallClock): parallel tests in this package hold it shared while running
+// (see runInParallel), and the check holds it alone while retrying, so other
+// parallel tests do not take CPU from the timed runs.
 var scalingMu sync.RWMutex
 
-// runInParallel runs the redaction test t in parallel with the others and
-// holds scalingMu shared until t and its subtests end.
+// runInParallel runs t in parallel with other package tests and holds
+// scalingMu shared until t and its subtests end. A parent test whose subtests
+// call runInParallel must use bare t.Parallel instead of runInParallel, because
+// a concurrent scalingMu.Lock blocks a child's RLock while waiting on the
+// parent's RLock, deadlocking.
 func runInParallel(t *testing.T) {
 	t.Parallel()
 	scalingMu.RLock()
@@ -417,12 +420,12 @@ func timed(f func()) time.Duration {
 }
 
 // withinWallClock returns how long the shortest run of f takes: one run timed
-// while the other redaction tests run (see runInParallel) and, when that run
-// takes longer than limit, up to two more timed alone, as linearRatio times
+// while other package tests run in parallel (see runInParallel) and, when that
+// run takes longer than limit, up to two more timed alone, as linearRatio times
 // its runs again, so that a scheduler pause on a loaded host or a test
 // running in parallel does not fail a check that a quadratic scan, which
-// takes minutes, fails on every run. The caller, a redaction test, holds
-// scalingMu shared; f must give the same result each run.
+// takes minutes, fails on every run. The caller holds scalingMu shared via
+// runInParallel; f must give the same result each run.
 func withinWallClock(limit time.Duration, f func()) time.Duration {
 	d := timed(f)
 	if d <= limit {

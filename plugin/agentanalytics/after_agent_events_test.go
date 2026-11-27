@@ -39,6 +39,7 @@ import (
 // responded activation with after-agent callbacks keeps its entry and maps
 // while its callbacks may still run.
 func TestGuardlessRetirementKeepsAfterAgentEntry(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	ctx := t.Context()
@@ -127,6 +128,7 @@ func TestGuardlessRetirementKeepsAfterAgentEntry(t *testing.T) {
 // that credit was settled, while an event that more than one activation, or
 // none, can have created settles one credit of the agent.
 func TestSettleRetiredResponseCredit(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker"})
@@ -663,6 +665,7 @@ func TestSettleRetiredResponseCredit(t *testing.T) {
 }
 
 func TestParseLLMKey(t *testing.T) {
+	runInParallel(t)
 	for _, tc := range []struct {
 		name       string
 		key        string
@@ -705,6 +708,7 @@ func TestParseLLMKey(t *testing.T) {
 // its own events either. Once root's run returned, the hull no longer stands
 // for them.
 func TestPendingAfterAgentHull(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	setup := func(t *testing.T) (*invocationTrace, *spanRecord) {
@@ -793,6 +797,7 @@ func TestPendingAfterAgentHull(t *testing.T) {
 // or ends on it, and drops their action maps unless something still needs
 // them, such as the activation's outstanding credit.
 func TestAfterAgentCallbacksReturnedOn(t *testing.T) {
+	runInParallel(t)
 	m1, m2, m3, m4 := map[string]any{}, map[string]any{}, map[string]any{}, map[string]any{}
 	mapsOf := func(m map[string]any) actionMaps { return actionMaps{stateDelta: mapPointer(reflect.ValueOf(m))} }
 	root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
@@ -830,6 +835,7 @@ func TestAfterAgentCallbacksReturnedOn(t *testing.T) {
 // created, as when the callbacks ran an agent themselves. It also pins how
 // that time is recorded and merged.
 func TestAfterAgentDoneBoundsRetiredEvents(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	retired := func(spanID string) retiredActivation {
@@ -1038,6 +1044,7 @@ func TestAfterAgentDoneBoundsRetiredEvents(t *testing.T) {
 // after-agent events. Once no peer is open, the entries whose callbacks may
 // still run fold as usual, and the others lose their maps and compact.
 func TestPeerRetirementsStayUncompactedWhilePeerOpen(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker"})
@@ -1153,6 +1160,7 @@ func TestPeerRetirementsStayUncompactedWhilePeerOpen(t *testing.T) {
 // first among those not recorded yet, are not recorded as returned (see
 // markAfterAgentCallbacksReturnedOnLocked).
 func TestAfterAgentCallbacksStillRunning(t *testing.T) {
+	runInParallel(t)
 	frame := func(fn string) string {
 		return fn + "(0x1, 0x2)\n\t/src/file.go:10 +0x20\n"
 	}
@@ -1297,6 +1305,7 @@ func TestAfterAgentCallbacksStillRunning(t *testing.T) {
 }
 
 func TestMultiLevelGuardRetirementSettlesAndPrunes(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -1600,6 +1609,7 @@ func TestMultiLevelGuardRetirementSettlesAndPrunes(t *testing.T) {
 }
 
 func TestDeadParentSpanIDLoopBoundedUnderOpenGuard(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -1856,6 +1866,7 @@ func TestDeadParentSpanIDLoopBoundedUnderOpenGuard(t *testing.T) {
 }
 
 func TestUnjoinedParentDoesNotStampParentRetiredTime(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -2464,6 +2475,7 @@ func TestUnjoinedParentDoesNotStampParentRetiredTime(t *testing.T) {
 }
 
 func TestCustomUUIDProvenancePreservedInHulls(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker"})
@@ -2717,6 +2729,7 @@ func TestCustomUUIDProvenancePreservedInHulls(t *testing.T) {
 }
 
 func TestCompactedHullClearsUnsharedParentSpanID(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -2794,6 +2807,7 @@ func TestCompactedHullClearsUnsharedParentSpanID(t *testing.T) {
 }
 
 func TestUnderOpenRetiredAncestorSettlesAndPrunesWhenDescendantRetires(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -2935,6 +2949,7 @@ func TestUnderOpenRetiredAncestorSettlesAndPrunesWhenDescendantRetires(t *testin
 }
 
 func TestSoleOpenAuthor_WildcardAndSiblingPathRetiredPeers(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	allowAll := func(*spanRecord) bool { return true }
@@ -3065,6 +3080,7 @@ func TestSoleOpenAuthor_WildcardAndSiblingPathRetiredPeers(t *testing.T) {
 }
 
 func TestPruneSettledRetiredActivations_SettlesSiblingPathsBeforeFold(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -3119,6 +3135,7 @@ func TestPruneSettledRetiredActivations_SettlesSiblingPathsBeforeFold(t *testing
 }
 
 func TestSettleRetiredResponseCredit_ZeroAndModelCredits(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker"})
@@ -3585,6 +3602,7 @@ func TestSettleRetiredResponseCredit_ZeroAndModelCredits(t *testing.T) {
 }
 
 func TestExcludedByEventTimestamp_BoundedPendingHull(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Unix(1_700_000_000, 0)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
@@ -3655,6 +3673,7 @@ func TestExcludedByEventTimestamp_BoundedPendingHull(t *testing.T) {
 }
 
 func TestRetiredActivation_ActionMapPinAcrossLiveReplacement(t *testing.T) {
+	runInParallel(t)
 	var (
 		capturedMaps actionMaps
 		capturedKeep any
@@ -3742,6 +3761,7 @@ func TestRetiredActivation_ActionMapPinAcrossLiveReplacement(t *testing.T) {
 }
 
 func TestRetiredActivationLedger_PerInvocationCap4000Retirements(t *testing.T) {
+	t.Parallel()
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -3769,6 +3789,7 @@ func TestRetiredActivationLedger_PerInvocationCap4000Retirements(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			runInParallel(t)
 			root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1, nonLLM: true}
 			inv := &invocationTrace{agentStack: []*spanRecord{{kind: spanKindInvocation}, root}}
 			openSet := inv.openSpanSetLocked()
@@ -3828,6 +3849,7 @@ func TestRetiredActivationLedger_PerInvocationCap4000Retirements(t *testing.T) {
 }
 
 func TestRetiredActivationLedger_ReplayAfterPartialCreditConsumptionDoesNotRestoreCredit(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -3923,6 +3945,7 @@ func TestRetiredActivationLedger_ReplayAfterPartialCreditConsumptionDoesNotResto
 }
 
 func TestRetiredActivationLedger_DetachedChildGoroutineNotStampedByCustomParentReturn(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -4086,6 +4109,7 @@ func TestRetiredActivationLedger_DetachedChildGoroutineNotStampedByCustomParentR
 }
 
 func TestRetiredActivation_PreservesHasUnjoinedTaskAcrossCompaction(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -4207,6 +4231,7 @@ func TestRetiredActivation_PreservesHasUnjoinedTaskAcrossCompaction(t *testing.T
 }
 
 func TestRetiredActivationLedger_CompactedReplayDoesNotStealLaterWorkerCredit(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -4323,6 +4348,7 @@ func TestRetiredActivationLedger_CompactedReplayDoesNotStealLaterWorkerCredit(t 
 }
 
 func TestRetiredActivationLedger_IndexAndShrinkCapacity(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 
@@ -4391,6 +4417,7 @@ func TestRetiredActivationLedger_IndexAndShrinkCapacity(t *testing.T) {
 }
 
 func TestRetiredActivationLedger_PartialCapFoldSharedGroupAfterAgent(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker", path: "p1"})
@@ -4551,6 +4578,7 @@ func TestRetiredActivationLedger_PartialCapFoldSharedGroupAfterAgent(t *testing.
 }
 
 func TestRetiredActivationLedger_PartialCapFoldSharedGroupModelCredits(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker", path: "p1"})
@@ -4671,6 +4699,7 @@ func TestRetiredActivationLedger_PartialCapFoldSharedGroupModelCredits(t *testin
 }
 
 func TestRetiredActivationLedger_IncrementalCreditGrantAfterSettled(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker", path: "p1"})
@@ -4736,6 +4765,7 @@ func TestRetiredActivationLedger_IncrementalCreditGrantAfterSettled(t *testing.T
 }
 
 func TestRetiredActivationLedger_CapFoldPostRetirementAfterAgentCredit(t *testing.T) {
+	runInParallel(t)
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
 	k := llmKey(identity{agentName: "worker", path: "p1"})

@@ -44,6 +44,7 @@ import (
 )
 
 func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
+	runInParallel(t)
 	t.Run("STATE_DELTA scrubs temp: keys case-sensitively and writes attributes.state_delta with NULL content", func(t *testing.T) {
 		p, requests, mCtx := setupTestPlugin(t)
 		var errs callbackErrors
@@ -919,6 +920,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 }
 
 func TestSessionEvents_LegacyEventFiltering(t *testing.T) {
+	runInParallel(t)
 	allNonSessionTypes := []string{
 		EventUserMessageReceived,
 		EventToolStarting,
@@ -1049,6 +1051,7 @@ func TestSessionEvents_LegacyEventFiltering(t *testing.T) {
 }
 
 func TestAgentResponse_ContentFormatterAndNilParts(t *testing.T) {
+	runInParallel(t)
 	t.Run("ContentFormatter scrubbing does not leak raw text into content_parts", func(t *testing.T) {
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.ContentFormatter = func(payload any, eventType string) (any, error) {
@@ -1122,6 +1125,7 @@ func TestAgentResponse_ContentFormatterAndNilParts(t *testing.T) {
 }
 
 func TestAgentResponse_SkipsThoughtOnlyAndPartialEvents(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPlugin(t)
 	var errs callbackErrors
 
@@ -1249,6 +1253,7 @@ func TestAgentResponse_SkipsThoughtOnlyAndPartialEvents(t *testing.T) {
 }
 
 func TestADKEnvelope_ExtrasCannotOverwriteCoreKeys(t *testing.T) {
+	runInParallel(t)
 	ap := &analyticsPlugin{config: applyDefaults(DefaultConfig()), traces: newTraceManager()}
 	id := identity{
 		agentName:    "agent-name",
@@ -1854,6 +1859,7 @@ func (s *swapUnwrapTool) Unwrap() tool.Tool {
 }
 
 func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
+	runInParallel(t)
 	fnTool, err := functiontool.New(functiontool.Config{
 		Name:        "fn_swap",
 		Description: "Function tool",
@@ -2020,6 +2026,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 // among the tools configured on the agent that the runner runs and its
 // sub-agents, then in the rest of the agent tree seen so far.
 func TestUserMessage_ResumedToolRecordsToolOrigin(t *testing.T) {
+	runInParallel(t)
 	newLLMAgent := func(cfg llmagent.Config) agent.Agent {
 		t.Helper()
 		a, err := llmagent.New(cfg)
@@ -2150,6 +2157,7 @@ func (t *allocUnwrapTool) Unwrap() tool.Tool {
 }
 
 func TestToolConfirmationRejected_CompletesCall(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.FinalResponseToolNames = []string{"deploy"}
 	})
@@ -2196,6 +2204,7 @@ func TestToolConfirmationRejected_CompletesCall(t *testing.T) {
 }
 
 func TestA2ANamespacedSensitiveKeys(t *testing.T) {
+	runInParallel(t)
 	newA2AEvent := func() *session.Event {
 		return &session.Event{
 			ID:     "ev-a2a-redact",
@@ -2292,6 +2301,7 @@ func (m *sseStreamLLM) GenerateContent(context.Context, *model.LLMRequest, bool)
 }
 
 func TestSSEStreaming_PauseAndStateDeltaEmittedOnce(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	type approvalArgs struct {
 		Item string `json:"item"`
@@ -2389,6 +2399,7 @@ func TestSSEStreaming_PauseAndStateDeltaEmittedOnce(t *testing.T) {
 }
 
 func TestSSEStreaming_AbortedStreamDoesNotEmitPause(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	type approvalArgs struct {
 		Item string `json:"item"`
@@ -2468,6 +2479,7 @@ func TestSSEStreaming_AbortedStreamDoesNotEmitPause(t *testing.T) {
 }
 
 func TestAgentTool_SkipSummarizationLogsFinalAgentResponse(t *testing.T) {
+	runInParallel(t)
 	p, requests, _ := setupTestPlugin(t)
 	subAgent, err := llmagent.New(llmagent.Config{
 		Name:        "sub_agent",
@@ -2530,6 +2542,7 @@ func TestAgentTool_SkipSummarizationLogsFinalAgentResponse(t *testing.T) {
 }
 
 func TestCompaction_CyclicMetadataDoesNotHang(t *testing.T) {
+	runInParallel(t)
 	var cyclic any
 	cyclic = &cyclic
 
@@ -2570,7 +2583,7 @@ func TestCompaction_CyclicMetadataDoesNotHang(t *testing.T) {
 				if err != nil {
 					t.Fatalf("OnEventCallback() error: %v", err)
 				}
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(5 * time.Second):
 				t.Fatal("OnEventCallback() hung on cyclic compaction pointer")
 			}
 
@@ -2587,6 +2600,7 @@ func TestCompaction_CyclicMetadataDoesNotHang(t *testing.T) {
 }
 
 func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
+	runInParallel(t)
 	t.Run("AGENT_STATE_CHECKPOINT emits without CustomMetadataAllowlist while custom_metadata stays filtered", func(t *testing.T) {
 		// (a) Empty CustomMetadataAllowlist (default): AGENT_STATE_CHECKPOINT is emitted
 		// while attributes.custom_metadata is omitted.
@@ -2893,6 +2907,7 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 // response with the same metadata does, and only then: a replaced value under
 // a key that custom_metadata leaves out does not count.
 func TestCustomMetadataScrubLossSetsIsTruncated(t *testing.T) {
+	runInParallel(t)
 	// blob looks like JSON but does not parse, so redaction replaces it with
 	// the unparseable-JSON placeholder.
 	const blob = `{"api_key": "x"`
@@ -2941,6 +2956,7 @@ func TestCustomMetadataScrubLossSetsIsTruncated(t *testing.T) {
 }
 
 func TestEventCompaction_SiblingKeysOmitted(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.CustomMetadataAllowlist = []string{"adk_compaction"}
 	})
@@ -2980,6 +2996,7 @@ func TestEventCompaction_SiblingKeysOmitted(t *testing.T) {
 }
 
 func TestAfterTool_EventDenylistDoesNotDropAgentResponse(t *testing.T) {
+	runInParallel(t)
 	// Using logEvent in afterTool ensures EventDenylist: ["EVENT"]
 	// does not drop AGENT_RESPONSE emitted by final response tools.
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
@@ -3004,6 +3021,7 @@ func TestAfterTool_EventDenylistDoesNotDropAgentResponse(t *testing.T) {
 }
 
 func TestSensitiveKeys_StandardRedactionInCompactionAndA2A(t *testing.T) {
+	runInParallel(t)
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 		c.CustomMetadataAllowlist = []string{"adk_compaction"}
 	})
@@ -3050,6 +3068,7 @@ func TestSensitiveKeys_StandardRedactionInCompactionAndA2A(t *testing.T) {
 }
 
 func TestAgentStateCheckpoint_RetainedCustomMetadataTruncation(t *testing.T) {
+	runInParallel(t)
 	deepMeta := map[string]any{"leaf": "ok"}
 	for range maxSanitizeDepth + 2 {
 		deepMeta = map[string]any{"nested": deepMeta}
@@ -3205,6 +3224,7 @@ func TestAgentStateCheckpoint_RetainedCustomMetadataTruncation(t *testing.T) {
 }
 
 func TestAgentStateCheckpoint_ScrubbedBeforeContentFormatter(t *testing.T) {
+	runInParallel(t)
 	flattenFormatter := func(content any, eventType string) (any, error) {
 		if eventType != EventAgentStateCheckpoint {
 			return content, nil
