@@ -144,7 +144,7 @@ func TestA2AInputRequired(t *testing.T) {
 
 			// Server
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executor := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun)
+			executor := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun, false)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -255,7 +255,7 @@ func TestA2ARunnerResumesMixedFunctionResponses(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			peer := newInputRequestingAgent(t, "peer", newLongRunningTool(t))
-			server := startA2AServer(newAgentExecutor(peer, nil, adka2a.OutputArtifactPerRun))
+			server := startA2AServer(newAgentExecutor(peer, nil, adka2a.OutputArtifactPerRun, false))
 			defer server.Close()
 			client := newA2AClient(t, server)
 			defer func() {
@@ -378,7 +378,7 @@ func TestA2ATaskCarriesADKExtensionMeta(t *testing.T) {
 	t.Parallel()
 
 	inputRequestingAgent := newInputRequestingAgent(t, "agent-b", newLongRunningTool(t))
-	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun))
+	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun, false))
 	defer server.Close()
 	client := newA2AClient(t, server)
 
@@ -414,7 +414,7 @@ func TestA2ATaskCarriesADKExtensionMetaWhenStreaming(t *testing.T) {
 	t.Parallel()
 
 	inputRequestingAgent := newInputRequestingAgent(t, "agent-b", newLongRunningTool(t))
-	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun))
+	server := startA2AServer(newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerRun, false))
 	defer server.Close()
 	client := newA2AClient(t, server)
 
@@ -501,14 +501,14 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 
 			// Server B
 			inputRequestingAgent := newInputRequestingAgent(t, "agent-b", tc.tool)
-			executorB := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerEvent)
+			executorB := newAgentExecutor(inputRequestingAgent, nil, adka2a.OutputArtifactPerEvent, false)
 			serverB := startA2AServer(executorB)
 			defer serverB.Close()
 
 			// Server A
 			remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
 			rootAgent := newRootAgent("root", remoteAgent)
-			executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+			executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun, false)
 			serverA := startA2AServer(executorA)
 			defer serverA.Close()
 
@@ -707,13 +707,14 @@ func artifactContainsText(tau *a2a.TaskArtifactUpdateEvent, substr string) bool 
 
 func TestA2ASingleHopFinalResponse(t *testing.T) {
 	testCases := []struct {
-		name              string
-		agentFn           func(*testing.T) agent.Agent
-		sessionService    session.Service
-		wantArtifactParts a2a.ContentParts
-		wantState         a2a.TaskState
-		wantStatusContain string
-		wantPartial       bool
+		name               string
+		agentFn            func(*testing.T) agent.Agent
+		sessionService     session.Service
+		wantArtifactParts  a2a.ContentParts
+		wantState          a2a.TaskState
+		wantStatusText     string
+		wantPartial        bool
+		exposeErrorDetails bool
 	}{
 		{
 			name: "streaming",
@@ -770,9 +771,25 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 				}))
 			},
 			sessionService:    failingCreateSessionService{Service: session.InMemoryService()},
-			wantStatusContain: "failed to create a session: session creation failed",
+			wantStatusText:    "agent run failed",
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
+		},
+		{
+			name: "internal error with exposed details",
+			agentFn: func(t *testing.T) agent.Agent {
+				return utils.Must(agent.New(agent.Config{
+					Name: "internal_error",
+					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {}
+					},
+				}))
+			},
+			sessionService:     failingCreateSessionService{Service: session.InMemoryService()},
+			wantStatusText:     "failed to create a session: session creation failed",
+			wantState:          a2a.TaskStateFailed,
+			wantArtifactParts:  a2a.ContentParts{},
+			exposeErrorDetails: true,
 		},
 		{
 			name: "llm mid-response error response",
@@ -794,7 +811,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Instruction: "You are a helpful assistant.",
 				}))
 			},
-			wantStatusContain: "Model Failed!",
+			wantStatusText:    `llm error response (code 500): "Model Failed!"`,
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
 			wantPartial:       true,
@@ -819,7 +836,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 					Instruction: "You are a helpful assistant.",
 				}))
 			},
-			wantStatusContain: "connection error!",
+			wantStatusText:    "agent run failed",
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
 			wantPartial:       true,
@@ -827,7 +844,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newAgentExecutor(tc.agentFn(t), tc.sessionService, adka2a.OutputArtifactPerRun)
+			executor := newAgentExecutor(tc.agentFn(t), tc.sessionService, adka2a.OutputArtifactPerRun, tc.exposeErrorDetails)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -849,12 +866,12 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 				}
 			}
 
-			if tc.wantStatusContain != "" {
+			if tc.wantStatusText != "" {
 				if task.Status.Message == nil || len(task.Status.Message.Parts) != 1 {
 					t.Fatalf("got status message = %v, want message with one part", task.Status.Message)
 				}
-				if !strings.Contains(task.Status.Message.Parts[0].Text(), tc.wantStatusContain) {
-					t.Fatalf("got status message = %v, want text containing %q", task.Status.Message.Parts[0], tc.wantStatusContain)
+				if got := task.Status.Message.Parts[0].Text(); got != tc.wantStatusText {
+					t.Fatalf("got status message text = %q, want %q", got, tc.wantStatusText)
 				}
 			}
 
@@ -900,14 +917,14 @@ func TestA2ARemoteAgentStreamingGeminiSuccess(t *testing.T) {
 		Model:       llmModel,
 		Instruction: "You are a helpful assistant.",
 	}))
-	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerEvent)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerEvent, false)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun, false)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -1012,14 +1029,14 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 			},
 		},
 	}))
-	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerRun)
+	executorB := newAgentExecutor(modelAgent, nil, adka2a.OutputArtifactPerRun, false)
 	serverB := startA2AServer(executorB)
 	defer serverB.Close()
 
 	// Server A with RemoteAgent
 	remoteAgent := newA2ARemoteAgent(t, "remote-agent", serverB)
 	serviceA := session.InMemoryService()
-	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun)
+	executorA := newAgentExecutor(remoteAgent, serviceA, adka2a.OutputArtifactPerRun, false)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -1048,8 +1065,8 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 	if task.Status.Message == nil || len(task.Status.Message.Parts) != 1 {
 		t.Fatalf("task status message = %v, want 1 part", task.Status.Message)
 	}
-	if !strings.Contains(task.Status.Message.Parts[0].Text(), errorMessage) {
-		t.Fatalf("task status message = %v, want containing %q", task.Status.Message.Parts[0], errorMessage)
+	if got := task.Status.Message.Parts[0].Text(); got != `llm error response: "agent run failed"` {
+		t.Fatalf("task status message = %q, want %q", got, `llm error response: "agent run failed"`)
 	}
 	if len(task.Artifacts) != 1 || len(adka2a.WithoutPartialArtifacts(task.Artifacts)) != 0 {
 		t.Fatalf("task artifacts = %v, want single partial artifact", task.Artifacts)
@@ -1071,8 +1088,8 @@ func TestA2ARemoteAgentStreamingGeminiError(t *testing.T) {
 	if events.Len() != 2 {
 		t.Fatalf("got event count = %d, want 2", events.Len())
 	}
-	if !strings.Contains(events.At(1).ErrorMessage, errorMessage) {
-		t.Fatalf("got event error message = %q, want containing %q", events.At(1).ErrorMessage, errorMessage)
+	if got := events.At(1).ErrorMessage; got != "agent run failed" {
+		t.Fatalf("got event error message = %q, want %q", got, "agent run failed")
 	}
 }
 
@@ -1199,7 +1216,7 @@ func (failingCreateSessionService) Create(context.Context, *session.CreateReques
 	return nil, errors.New("session creation failed")
 }
 
-func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode) a2asrv.AgentExecutor {
+func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode, exposeErrorDetails bool) a2asrv.AgentExecutor {
 	if service == nil {
 		service = session.InMemoryService()
 	}
@@ -1210,7 +1227,8 @@ func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.Out
 			SessionService: service,
 			Agent:          agnt,
 		},
-		RunConfig: agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		RunConfig:          agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		ExposeErrorDetails: exposeErrorDetails,
 	})
 }
 
@@ -1415,7 +1433,7 @@ func TestA2AMultiHopInputRequiredCancellation(t *testing.T) {
 	// Server A
 	remoteAgent := newA2ARemoteAgent(t, remoteAgentName, serverB)
 	rootAgent := newRootAgent("root", remoteAgent)
-	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun, false)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -1473,7 +1491,7 @@ func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
 	// Server A, default configuration
 	remoteAgent := newA2ARemoteAgent(t, "broken-remote", serverB)
 	rootAgent := newRootAgent("root", remoteAgent)
-	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun)
+	executorA := newAgentExecutor(rootAgent, nil, adka2a.OutputArtifactPerRun, false)
 	serverA := startA2AServer(executorA)
 	defer serverA.Close()
 
@@ -1487,8 +1505,8 @@ func TestA2AMultiHopStructuredErrorPropagation(t *testing.T) {
 	if len(task1.Status.Message.Parts) != 2 {
 		t.Fatalf("len(task1.Status.Message.Parts) = %d, want len([error text, extra parts]) = 2", len(task1.Status.Message.Parts))
 	}
-	if !strings.Contains(task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error()) {
-		t.Fatalf("status.Message.Parts[0].Text() = %s, want contain %q", task1.Status.Message.Parts[0].Text(), a2a.ErrUnauthorized.Error())
+	if got := task1.Status.Message.Parts[0].Text(); got != `llm error response: "agent run failed"` {
+		t.Fatalf("status.Message.Parts[0].Text() = %q, want %q", got, `llm error response: "agent run failed"`)
 	}
 	if diff := cmp.Diff(task1.Status.Message.Parts[1].Data(), structuredErr.Data()); diff != "" {
 		t.Fatalf("wrong structured error part (-want,+got):\n%s", diff)

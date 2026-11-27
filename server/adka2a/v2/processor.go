@@ -46,12 +46,18 @@ type eventProcessor struct {
 	// Will be sent as the final Task status update if not nil.
 	failedEvent *a2a.TaskStatusUpdateEvent
 
+	// failedCause records the raw error cause of a failure.
+	failedCause error
+
 	// inputRequiredProcessor is used to postpone sending input-required in response to long-running function tool calls.
 	// inputRequiredProcessor.event will be sent as the final Task status update if failedEvent is nil.
 	inputRequiredProcessor *inputRequiredProcessor
 
 	// eventToArtifact is used to convert ADK events to A2A TaskArtifactUpdateEvents.
 	eventToArtifact eventToArtifactTransform
+
+	// exposeErrorDetails controls whether raw error messages are sent in failed task status events.
+	exposeErrorDetails bool
 }
 
 func newEventProcessor(
@@ -59,6 +65,7 @@ func newEventProcessor(
 	meta invocationMeta,
 	converter GenAIPartConverter,
 	transform eventToArtifactTransform,
+	exposeErrorDetails bool,
 ) *eventProcessor {
 	return &eventProcessor{
 		inputRequiredProcessor: newInputRequiredProcessor(reqCtx, converter),
@@ -66,6 +73,7 @@ func newEventProcessor(
 		reqCtx:                 reqCtx,
 		meta:                   meta,
 		eventToArtifact:        transform,
+		exposeErrorDetails:     exposeErrorDetails,
 	}
 }
 
@@ -98,7 +106,12 @@ func (p *eventProcessor) process(ctx context.Context, event *session.Event) (*a2
 			// terminal event might add additional keys to its metadata when it's dispatched and these changes should
 			// not be reflected in this event's metadata
 			terminalEventMeta := maps.Clone(eventMeta)
-			p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, errorFromResponse(&resp), terminalEventMeta)
+			err := errorFromResponse(&resp)
+			p.failedCause = err
+			// Matches adk-python (from_adk_event.py:127-132), which still relays
+			// model error responses (event.error_message) to the peer while redacting
+			// uncaught runner exceptions.
+			p.failedEvent = toTaskFailedUpdateEvent(p.reqCtx, err, terminalEventMeta, true)
 			p.failedEvent.Status.Message.Parts = append(p.failedEvent.Status.Message.Parts, parts...)
 		}
 	}
@@ -135,6 +148,10 @@ func (p *eventProcessor) makeFinalStatusUpdate() *a2a.TaskStatusUpdateEvent {
 }
 
 func (p *eventProcessor) makeTaskFailedEvent(ctx context.Context, cause error, event *session.Event) *a2a.TaskStatusUpdateEvent {
+	p.failedCause = cause
+	if !p.exposeErrorDetails {
+		log.Warn(ctx, "agent run failed", "error", cause)
+	}
 	meta := p.meta.eventMeta
 	if event != nil {
 		if eventMeta, err := toEventMeta(p.meta, event); err != nil {
@@ -143,7 +160,7 @@ func (p *eventProcessor) makeTaskFailedEvent(ctx context.Context, cause error, e
 			meta = eventMeta
 		}
 	}
-	return toTaskFailedUpdateEvent(p.reqCtx, cause, meta)
+	return toTaskFailedUpdateEvent(p.reqCtx, cause, meta, p.exposeErrorDetails)
 }
 
 func (p *eventProcessor) updateTerminalActions(event *session.Event) {
@@ -175,8 +192,14 @@ func (p *eventProcessor) convertParts(ctx context.Context, event *session.Event)
 	return converted, nil
 }
 
-func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any) *a2a.TaskStatusUpdateEvent {
-	msgPart := a2a.NewTextPart(cause.Error())
+const defaultFailedTaskMessage = "agent run failed"
+
+func toTaskFailedUpdateEvent(task a2a.TaskInfoProvider, cause error, meta map[string]any, exposeErrorDetails bool) *a2a.TaskStatusUpdateEvent {
+	text := defaultFailedTaskMessage
+	if exposeErrorDetails && cause != nil {
+		text = cause.Error()
+	}
+	msgPart := a2a.NewTextPart(text)
 	msgPart.Metadata = map[string]any{metadataIsErrMessageKey: true}
 	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, task, msgPart)
 	ev := a2a.NewStatusUpdateEvent(task, a2a.TaskStateFailed, msg)
