@@ -88,7 +88,8 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 // contentAttrsEqual is reflect.DeepEqual(a, b) without reflection for the
 // values requestContent builds: DeepEqual records every non-nil slice, pointer
 // and interface it passes in a map, at least one entry per message and one per
-// part. Values of other types are left to reflect.DeepEqual.
+// part. Values of other types are left to reflect.DeepEqual. A field added to
+// chatMessage or a part type has to be compared here too.
 func contentAttrsEqual(a, b []contentAttr) bool {
 	return slicesDeepEqual(a, b, func(x, y contentAttr) bool {
 		if x.key != y.key {
