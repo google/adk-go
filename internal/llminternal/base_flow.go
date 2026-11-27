@@ -880,7 +880,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					cleanup()
 					return
 				case <-ctx.Done():
-					sess.pushError(ctx.Err())
+					sess.setFinalError(ctx.Err())
 					cleanup()
 					return
 				}
