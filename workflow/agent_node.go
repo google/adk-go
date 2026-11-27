@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"reflect"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -310,6 +312,68 @@ func childEventOutput(event *session.Event) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// outputCountsFor reports whether event's output counts for the RunNode child
+// at path. An event with no OutputFor hasn't been attributed yet and counts for
+// whoever emitted it. Otherwise the scheduler that ran the emitter already
+// said whose output it is, and it counts only if that list names path. A
+// workflow behind an AgentNode child adds path to its own terminal outputs
+// (see ownerOutputFor), on a fresh run and on a resume alike.
+// Output from anything below the child, including an agent with the same
+// name, never names path.
+func outputCountsFor(event *session.Event, path string) bool {
+	if event.NodeInfo == nil || len(event.NodeInfo.OutputFor) == 0 {
+		return true
+	}
+	return slices.Contains(event.NodeInfo.OutputFor, path)
+}
+
+// agentNodeOwnerKey keys the value a scheduler leaves for the agent an
+// AgentNode wraps: the paths that agent's own output counts for.
+type agentNodeOwnerKey struct{}
+
+type agentNodeOwner struct {
+	agent     agent.Agent
+	outputFor []string
+}
+
+// withAgentNodeOwner returns ctx carrying outputFor for the agent n wraps, if
+// n is an AgentNode and there is anything to carry.
+func withAgentNodeOwner(ctx agent.Context, n Node, outputFor []string) agent.Context {
+	an, ok := n.(*AgentNode)
+	if !ok || an.agent == nil || len(outputFor) == 0 {
+		return ctx
+	}
+	return ctx.WithAgentContext(context.WithValue(ctx, agentNodeOwnerKey{}, &agentNodeOwner{
+		agent:     an.agent,
+		outputFor: outputFor,
+	}))
+}
+
+// ownerOutputFor returns the paths a scheduler left for ctx's agent, and a
+// context with them removed. AgentNode runs its agent without a path, so this
+// is the only way a workflow behind it learns who its terminal output is for:
+// the RunNode child, or the enclosing workflow when the node is terminal.
+//
+// Only the wrapped agent itself takes them, so an agent it transfers to, which
+// runs with the same context, doesn't. They're also taken once, so a workflow
+// further down that runs with the same agent doesn't pick them up either.
+func ownerOutputFor(ctx agent.InvocationContext) ([]string, context.Context, bool) {
+	owner, _ := ctx.Value(agentNodeOwnerKey{}).(*agentNodeOwner)
+	if owner == nil || !isAgent(ctx.Agent(), owner.agent) {
+		return nil, nil, false
+	}
+	return owner.outputFor, context.WithValue(ctx, agentNodeOwnerKey{}, (*agentNodeOwner)(nil)), true
+}
+
+// isAgent reports whether a and b are the same agent instance.
+func isAgent(a, b agent.Agent) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	return ta == tb && ta.Comparable() && a == b
 }
 
 func nodeInputToContent(input any) (*genai.Content, error) {
