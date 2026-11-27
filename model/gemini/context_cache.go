@@ -54,6 +54,11 @@ const (
 // to delete it has ended, possibly by cancellation.
 const cacheCleanupTimeout = 30 * time.Second
 
+// mediaPartChars matches Gemini's minimum image/media token allowance (258
+// tokens at ~4 characters per token) so binary parts contribute to the
+// character share in estimatePrefixTokens.
+const mediaPartChars = 258 * 4
+
 // contextCache manages the explicit context caches of one model request,
 // following adk-python's GeminiContextCacheManager
 // (models/gemini_context_cache_manager.py).
@@ -545,7 +550,7 @@ func minCacheTokens(modelName string) int32 {
 // word either way.
 func estimatePrefixTokens(req *model.LLMRequest, count int) int32 {
 	full := req.PreviousPromptTokenCount
-	fixed := textChars(req.Config.SystemInstruction)
+	fixed := contentChars(req.Config.SystemInstruction)
 	for _, t := range req.Config.Tools {
 		if encoded, err := json.Marshal(t); err == nil {
 			fixed += len(encoded)
@@ -553,31 +558,71 @@ func estimatePrefixTokens(req *model.LLMRequest, count int) int32 {
 	}
 	prefix, total := fixed, fixed
 	for i, content := range req.Contents {
-		chars := textChars(content)
+		chars := contentChars(content)
 		total += chars
 		if i < count {
 			prefix += chars
 		}
 	}
 	if total == 0 {
-		// Nothing to measure the share by, for example only non-text parts.
+		// Nothing to measure the share by, for example an empty part.
 		// The real count is a better guess than skipping the cache.
 		return full
 	}
 	return int32(float64(full) * float64(prefix) / float64(total))
 }
 
-func textChars(content *genai.Content) int {
+func contentChars(content *genai.Content) int {
 	if content == nil {
 		return 0
 	}
 	chars := 0
 	for _, part := range content.Parts {
-		if part != nil {
-			chars += len(part.Text)
-		}
+		chars += partChars(part)
 	}
 	return chars
+}
+
+func partChars(part *genai.Part) int {
+	if part == nil {
+		return 0
+	}
+	chars := len(part.Text)
+	if fc := part.FunctionCall; fc != nil {
+		chars += len(fc.Name) + jsonMapChars(fc.Args)
+	}
+	if fr := part.FunctionResponse; fr != nil {
+		chars += len(fr.Name) + jsonMapChars(fr.Response)
+		for _, p := range fr.Parts {
+			if p != nil && (p.InlineData != nil || p.FileData != nil) {
+				chars += mediaPartChars
+			}
+		}
+	}
+	if part.InlineData != nil {
+		chars += mediaPartChars
+	}
+	if part.FileData != nil {
+		chars += mediaPartChars
+	}
+	if part.ExecutableCode != nil {
+		chars += len(part.ExecutableCode.Code)
+	}
+	if part.CodeExecutionResult != nil {
+		chars += len(part.CodeExecutionResult.Output)
+	}
+	return chars
+}
+
+func jsonMapChars(m map[string]any) int {
+	if len(m) == 0 {
+		return 0
+	}
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return 0
+	}
+	return len(encoded)
 }
 
 func cacheIntervals(cfg *model.ContextCacheConfig) int {

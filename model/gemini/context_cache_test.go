@@ -1357,11 +1357,11 @@ func TestGenerateContent_ContextCacheModelMinimum(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
 			m := newCacheTestModel(t, api, tt.modelName)
-			// Only the question follows the prefix, and it has no text, so
-			// the prefix's estimated share of the earlier prompt is all of
-			// it and the estimate equals promptTokens.
+			// Only the question follows the prefix, and it has no countable
+			// content, so the prefix's estimated share of the earlier prompt
+			// is all of it and the estimate equals promptTokens.
 			req := cacheTestRequest(&model.ContextCacheConfig{})
-			req.Contents = []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}}}}}
+			req.Contents = []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{}}}}
 			req.PreviousPromptTokenCount = tt.promptTokens
 			req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, req, 0)}
 
@@ -1375,8 +1375,9 @@ func TestGenerateContent_ContextCacheModelMinimum(t *testing.T) {
 }
 
 // TestEstimatePrefixTokens checks that the earlier prompt's count is scaled by
-// the prefix's share of the text, so a long conversation whose prefix is small
-// is not taken to clear the model's minimum.
+// the prefix's share of the content characters (text and non-text parts), so a
+// long conversation whose prefix is small is not taken to clear the model's
+// minimum.
 func TestEstimatePrefixTokens(t *testing.T) {
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
@@ -1387,9 +1388,74 @@ func TestEstimatePrefixTokens(t *testing.T) {
 		Config:                   &genai.GenerateContentConfig{},
 		PreviousPromptTokenCount: 4000,
 	}
-	noText := &model.LLMRequest{
-		Contents:                 []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{InlineData: &genai.Blob{Data: []byte("x")}}}}},
+	noCountable := &model.LLMRequest{
+		Contents:                 []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{}}}},
 		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	fnReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "fn", Args: map[string]any{"k": strings.Repeat("x", 90)}}}}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "fn", Response: map[string]any{"k": strings.Repeat("y", 90)}}}}},
+			genai.NewContentFromText(strings.Repeat("z", 200), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	mediaReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleUser, Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}}}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FileData: &genai.FileData{FileURI: "gs://bucket/a.png", MIMEType: "image/png"}}}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Parts: []*genai.FunctionResponsePart{genai.NewFunctionResponsePartFromBytes([]byte("x"), "image/png")},
+			}}}},
+			genai.NewContentFromText(strings.Repeat("t", 258*4), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	codeReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: strings.Repeat("c", 90)}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: strings.Repeat("o", 10)}},
+			}},
+			genai.NewContentFromText(strings.Repeat("t", 300), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	nilMapReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{Name: strings.Repeat("a", 100)}},
+				{FunctionResponse: &genai.FunctionResponse{Name: strings.Repeat("b", 100)}},
+			}},
+			genai.NewContentFromText(strings.Repeat("c", 200), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	fnRespFileDataReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Parts: []*genai.FunctionResponsePart{genai.NewFunctionResponsePartFromURI("gs://bucket/b.png", "image/png")},
+			}}}},
+			genai.NewContentFromText(strings.Repeat("t", 258*4), genai.RoleUser),
+		},
+		Config:                   &genai.GenerateContentConfig{},
+		PreviousPromptTokenCount: 4000,
+	}
+	nonTextSysReq := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText(strings.Repeat("t", 258*4), genai.RoleUser),
+		},
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Role:  genai.RoleUser,
+				Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}}},
+			},
+		},
 		PreviousPromptTokenCount: 4000,
 	}
 	tests := []struct {
@@ -1402,7 +1468,16 @@ func TestEstimatePrefixTokens(t *testing.T) {
 		{name: "a quarter of the text", req: req, count: 1, want: 1000},
 		{name: "half of the text", req: req, count: 2, want: 2000},
 		{name: "all of the text", req: req, count: 3, want: 4000},
-		{name: "no text keeps the real count", req: noText, count: 0, want: 4000},
+		{name: "no countable content keeps the real count", req: noCountable, count: 0, want: 4000},
+		{name: "function call scales prefix share", req: fnReq, count: 1, want: 1000},
+		{name: "function call and response scale prefix share", req: fnReq, count: 2, want: 2000},
+		{name: "inline media scales prefix share", req: mediaReq, count: 1, want: 1000},
+		{name: "inline media and file data scale prefix share", req: mediaReq, count: 2, want: 2000},
+		{name: "function response media parts scale prefix share", req: mediaReq, count: 3, want: 3000},
+		{name: "function response file data part scales prefix share", req: fnRespFileDataReq, count: 1, want: 2000},
+		{name: "non-text system instruction scales prefix share", req: nonTextSysReq, count: 0, want: 2000},
+		{name: "executable code and result scale prefix share", req: codeReq, count: 1, want: 1000},
+		{name: "nil args and response maps count as zero chars", req: nilMapReq, count: 1, want: 2000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1410,6 +1485,64 @@ func TestEstimatePrefixTokens(t *testing.T) {
 				t.Errorf("estimatePrefixTokens(count=%d) = %d, want %d", tt.count, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGenerateContent_ContextCacheLargeTrailingNonTextDoesNotPassSizeGate(t *testing.T) {
+	api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m := newCacheTestModel(t, api, "gemini-2.5-flash")
+	req := cacheTestRequest(&model.ContextCacheConfig{})
+	req.Contents = []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				Name:     "lookup",
+				Response: map[string]any{"body": strings.Repeat("x", 5000)},
+			},
+		}},
+	}}
+	req.PreviousPromptTokenCount = 4000
+	req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, req, 0)}
+
+	generateOnce(t, cacheTestContext(t), m, req)
+
+	if len(api.creates) != 0 {
+		t.Errorf("caches created = %d, want 0 when trailing non-text part dominates prompt", len(api.creates))
+	}
+}
+
+func TestGenerateContent_ContextCacheLargePrefixToolResultPassesSizeGate(t *testing.T) {
+	api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m := newCacheTestModel(t, api, "gemini-2.5-flash")
+	req := cacheTestRequest(&model.ContextCacheConfig{})
+	req.Contents = []*genai.Content{
+		{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{Name: "lookup", Args: map[string]any{"id": "1"}},
+			}},
+		},
+		{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     "lookup",
+					Response: map[string]any{"body": strings.Repeat("d", 4000)},
+				},
+			}},
+		},
+		genai.NewContentFromText(strings.Repeat("q", 500), genai.RoleUser),
+	}
+	req.PreviousPromptTokenCount = 4096
+	req.CacheMetadata = &model.CacheMetadata{
+		Fingerprint:   fingerprintOf(m, req, 2),
+		ContentsCount: 2,
+	}
+
+	generateOnce(t, cacheTestContext(t), m, req)
+
+	if len(api.creates) != 1 {
+		t.Errorf("caches created = %d, want 1 when prefix non-text parts clear minimum", len(api.creates))
 	}
 }
 
