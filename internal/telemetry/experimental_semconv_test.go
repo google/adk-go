@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/genai"
 
@@ -27,10 +28,11 @@ import (
 func TestOperationDetailsNoteLLMRequest(t *testing.T) {
 	setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44", captureMessageContentEnvVar: "SPAN_AND_EVENT"})
 	setupTestTracer(t)
+	OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(&inMemoryExporter{}))))
 	_, span := tracer().Start(t.Context(), "generate_content")
 	defer span.End()
 	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("original", genai.RoleUser)}}
-	d := operationDetails{span: span}
+	d := newOperationDetails(t.Context(), span)
 	d.noteLLMRequest(req)
 	first := d.eventRequest
 
