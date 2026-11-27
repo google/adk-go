@@ -92,8 +92,7 @@ func (c *toolContextWrapper) IsolationScope() string {
 
 // Memory implements [Context].
 func (c *toolContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Memory()
 }
 
 // Path implements [Context].

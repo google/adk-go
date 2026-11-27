@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
+	memoryinternal "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
@@ -150,12 +151,27 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	sessionService := session.InMemoryService()
 
+	// The sub-agent reads and writes the caller's memory, and gets a scratch
+	// store only when the caller has none, as in adk-python
+	// (src/google/adk/tools/agent_tool.py, AgentTool.run_async, 4e0ac64).
+	memoryService := memory.InMemoryService()
+	if parentMemory := toolCtx.Memory(); parentMemory != nil {
+		memoryService = memoryinternal.NewForwardingService(parentMemory)
+	}
+
+	// Run under the caller's app, as adk-python does, so that a session the
+	// sub-agent adds to the shared memory is stored where the caller can find it.
+	childApp := toolCtx.AppName()
+	if childApp == "" {
+		childApp = t.agent.Name()
+	}
+
 	r, err := runner.New(runner.Config{
-		AppName:         t.agent.Name(),
+		AppName:         childApp,
 		Agent:           t.agent,
 		SessionService:  sessionService,
 		ArtifactService: artifactinternal.NewForwardingService(toolCtx.Artifacts()),
-		MemoryService:   memory.InMemoryService(),
+		MemoryService:   memoryService,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create runner for agent %s: %w", t.agent.Name(), err)
@@ -171,7 +187,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	subSession, err := sessionService.Create(toolCtx, &session.CreateRequest{
-		AppName: t.agent.Name(),
+		AppName: childApp,
 		UserID:  toolCtx.UserID(),
 		State:   stateMap,
 	})
