@@ -24,7 +24,7 @@ import (
 
 // baseParityCase is a case of testdata/redaction_base_corpus.json: an input,
 // the secrets planted in it, and what scrubErrorText, redactErrorMessage,
-// sanitizeRawText, SmartTruncate and FormatContentParts returned for it at
+// sanitizeRawText, smartTruncate and formatContentParts returned for it at
 // the merge base of the change that replaced the regular expressions with
 // the scanners, in that order.
 type baseParityCase struct {
@@ -63,7 +63,7 @@ func changedByBase(c baseParityCase) bool {
 // expressions read otherwise than their strings decoded, as a header that an
 // escaped line break ends, a quote that a later string closes, or a document
 // that the redaction writes again with its keys sorted, the reproducers of
-// earlier reviews, malformed JSON text that SmartTruncate fails closed, with
+// earlier reviews, malformed JSON text that smartTruncate fails closed, with
 // or without a placeholder in it, sensitive keys that hold an object or an
 // array, shapes left for later work, prose, and seeded random
 // combinations. Each output is also run through a second call, which may

@@ -40,7 +40,7 @@ const (
 	gcsUploadTimeout = 10 * time.Second
 
 	// rawPartsKey is the row key under which the plugin queues the payloads
-	// that the BatchProcessor still has to upload. It is not a column.
+	// that the batchProcessor still has to upload. It is not a column.
 	rawPartsKey = "_raw_parts"
 
 	// summaryBuilderKey is the row key under which addContent attaches a
@@ -156,7 +156,7 @@ type pendingUpload struct {
 	// fallbackTruncated reports whether the inline fallback text for this part
 	// was truncated by MaxContentLen.
 	fallbackTruncated bool
-	// reserved is the byte count reserved in BatchProcessor.pendingUploadBytes.
+	// reserved is the byte count reserved in batchProcessor.pendingUploadBytes.
 	reserved int64
 }
 
@@ -432,7 +432,7 @@ func cleanGCSPrefixWithReason(prefix string) (cleaned, reason string) {
 // resolveGCSPathPrefix returns cleanGCSPrefix(c.GCSPathPrefix) and logs a
 // constant-format warning with the rewrite reason and byte counts when
 // c.GCSPathPrefix had to be rewritten, without logging raw or sanitized prefix
-// text. Config.GCSPathPrefix itself is left unmodified; NewBatchProcessor
+// text. Config.GCSPathPrefix itself is left unmodified; newBatchProcessor
 // caches the returned effective prefix so uploads neither re-clean nor
 // double-normalize it.
 func resolveGCSPathPrefix(c Config) string {
@@ -616,7 +616,7 @@ type uploadResolveOptions struct {
 // retried. A write that panics before the caller settles the deferred uploads
 // leaves them to dropDeferredUploadsQuietly, which the caller defers. The
 // failure of an upload that is not deferred is logged at once.
-func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
+func (b *batchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
@@ -857,7 +857,7 @@ type deferredRowUploads struct {
 // parts keep the inline form that resolveUploadsForBatch gave them, and logs
 // their failures as final. The reservations of all the rows are released before
 // anything is logged, so that a panicking Logger cannot leak any of them.
-func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
+func (b *batchProcessor) clearDeferredUploads(batch []map[string]any) {
 	b.logDeferredUploadFailures(b.dropDeferredUploadsQuietly(batch), false)
 }
 
@@ -867,7 +867,7 @@ func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
 // it, so that a write that panics, as a panicking Logger makes it do, before
 // the caller settles the deferred uploads cannot leak their reservations. On
 // a batch whose deferred uploads are settled, it does nothing.
-func (b *BatchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []deferredUpload {
+func (b *batchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []deferredUpload {
 	var dropped []deferredUpload
 	var total int64
 	for _, row := range batch {
@@ -890,7 +890,7 @@ func (b *BatchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []de
 // next flush of batch retries them; the uploads keep their reservations. Their
 // failures are logged as pending that retry, but only once every row has been
 // requeued, so that a panicking Logger cannot leave a row without its uploads.
-func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
+func (b *batchProcessor) requeueDeferredUploads(batch []map[string]any) {
 	var requeued []deferredUpload
 	for _, row := range batch {
 		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
@@ -930,14 +930,14 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 
 // logDeferredUploadFailures logs the failures of deferred uploads that were
 // dropped or, if retry is true, requeued.
-func (b *BatchProcessor) logDeferredUploadFailures(uploads []deferredUpload, retry bool) {
+func (b *batchProcessor) logDeferredUploadFailures(uploads []deferredUpload, retry bool) {
 	for _, du := range uploads {
 		b.logUploadFailure(du.eventID, du.upload, du.errSummary, retry)
 	}
 }
 
 // objectPath returns the name of the object that holds the part u of row.
-func (b *BatchProcessor) objectPath(row map[string]any, u pendingUpload) string {
+func (b *batchProcessor) objectPath(row map[string]any, u pendingUpload) string {
 	ts, _ := row[timestampField].(time.Time)
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1031,7 +1031,7 @@ func stripURIQueries(msg string) string {
 // panic in it is turned into an error that names only its type. Once ctx is
 // done the offloader is no longer called, which is what ends the uploads that
 // were still waiting for their turn.
-func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started bool, err error) {
+func (b *batchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			uri, err = "", offloaderPanicError{valueType: fmt.Sprintf("%T", r)}
@@ -1063,7 +1063,7 @@ func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffload
 // inline text is kept, the summary retains it via retainInlineSummary, and
 // is_truncated is set to true when fallbackTruncated indicates the inline
 // fallback was itself truncated.
-func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
+func (b *batchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	u := t.pending
 	err := t.err
 	if err == nil && !strings.HasPrefix(t.uri, "gs://") {
@@ -1103,7 +1103,7 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 // logUploadFailure logs that the upload of part u of the row of eventID
 // failed, with its byte size and errSummary but nothing from its payload.
 // retry reports whether the upload is retried on the next flush.
-func (b *BatchProcessor) logUploadFailure(eventID string, u pendingUpload, errSummary string, retry bool) {
+func (b *batchProcessor) logUploadFailure(eventID string, u pendingUpload, errSummary string, retry bool) {
 	if retry {
 		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
 			eventID, u.partIdx, u.size(), errSummary)

@@ -582,6 +582,33 @@ func TestAuthHTTPClientTimeout(t *testing.T) {
 	}
 }
 
+// The Auth client sends requests that get no client certificate through the
+// http.DefaultTransport it found when it was built, as it did before the
+// certificate transport was put in front of it.
+func TestAuthHTTPClientKeepsDefaultTransportFromConstruction(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	atConstruction, later := &hostRecorder{}, &hostRecorder{}
+	http.DefaultTransport = atConstruction
+	c := authHTTPClient(auth.StaticToken("tok"))
+	http.DefaultTransport = later
+	resp, err := c.Get("https://agent.example.test/rpc")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(atConstruction.hosts) != 1 || len(later.hosts) != 0 {
+		t.Errorf("transport at construction got %v, the later one %v; want the request on the first", atConstruction.hosts, later.hosts)
+	}
+}
+
+type hostRecorder struct{ hosts []string }
+
+func (r *hostRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.hosts = append(r.hosts, req.URL.Host)
+	return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: req}, nil
+}
+
 // TestCheckRedirect covers the redirect policy as a whole, including a chain
 // every hop of which looks safe against the original request. Only comparing
 // against the previous hop as well catches http climbing to https and dropping

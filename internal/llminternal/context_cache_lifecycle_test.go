@@ -55,6 +55,12 @@ func record(author, branch, name string) *session.Event {
 	return &session.Event{Author: author, Branch: branch, LLMResponse: model.LLMResponse{CacheMetadata: m}}
 }
 
+// inScope returns ev moved into the named isolation scope.
+func inScope(ev *session.Event, scope string) *session.Event {
+	ev.IsolationScope = scope
+	return ev
+}
+
 func TestContextCacheLedger_Settle(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -88,6 +94,11 @@ func TestContextCacheLedger_Settle(t *testing.T) {
 			name:    "an agent on another branch is another agent",
 			tracked: []string{"c/1", "c/2"},
 			events:  eventList{record("a", "b", "c/1"), record("a", "b@2", "c/2")},
+		},
+		{
+			name:    "an agent in another isolation scope is another agent",
+			tracked: []string{"c/1", "c/2"},
+			events:  eventList{inScope(record("a", "b", "c/1"), "task-1"), inScope(record("a", "b", "c/2"), "task-2")},
 		},
 		{
 			name:        "events without cache state are skipped",
@@ -328,6 +339,12 @@ func TestInheritModelFields(t *testing.T) {
 			original:    &model.LLMResponse{UsageMetadata: usage, CacheMetadata: cache},
 			replacement: &model.LLMResponse{Content: text},
 			want:        &model.LLMResponse{Content: text, UsageMetadata: usage, CacheMetadata: cache},
+		},
+		{
+			name:        "cache state alone is carried",
+			original:    &model.LLMResponse{CacheMetadata: cache},
+			replacement: &model.LLMResponse{Content: text},
+			want:        &model.LLMResponse{Content: text, CacheMetadata: cache},
 		},
 		{
 			name:        "a replacement's own cache state is kept",

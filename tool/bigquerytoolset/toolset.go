@@ -46,10 +46,13 @@ var (
 	getTableInfoDescription string
 	//go:embed descriptions/get_job_info.txt
 	getJobInfoDescription string
+	//go:embed descriptions/execute_sql.txt
+	executeSQLDescription string
 )
 
-// New returns a toolset with the BigQuery metadata tools: list_dataset_ids,
-// get_dataset_info, list_table_ids, get_table_info and get_job_info.
+// New returns a toolset with the BigQuery metadata tools, list_dataset_ids,
+// get_dataset_info, list_table_ids, get_table_info and get_job_info, and
+// execute_sql, which runs read-only queries.
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
@@ -64,11 +67,20 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxRows := cfg.MaxQueryResultRows
+	if maxRows == 0 {
+		maxRows = defaultMaxQueryResultRows
+	}
 	b := &bigQuery{
 		client:           c,
 		location:         cfg.Location,
 		defaultProjectID: cfg.DefaultProjectID,
 		defaultDatasetID: cfg.DefaultDatasetID,
+		applicationName:  cfg.ApplicationName,
+		computeProjectID: cfg.ComputeProjectID,
+		maxRows:          maxRows,
+		maxBytesBilled:   cfg.MaximumBytesBilled,
+		labels:           maps.Clone(cfg.JobLabels),
 	}
 
 	var errs []error
@@ -77,6 +89,7 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 		return t
 	}
 	tools := []tool.Tool{
+		add(newTool(b, executeSQLName, executeSQLDescription, b.executeSQL)),
 		add(newTool(b, "get_dataset_info", getDatasetInfoDescription, b.getDatasetInfo)),
 		add(newTool(b, "get_job_info", getJobInfoDescription, b.getJobInfo)),
 		add(newTool(b, "get_table_info", getTableInfoDescription, b.getTableInfo)),
@@ -105,6 +118,13 @@ type bigQuery struct {
 	location         string
 	defaultProjectID string
 	defaultDatasetID string
+
+	// What execute_sql needs from Config.
+	applicationName  string
+	computeProjectID string
+	maxRows          int
+	maxBytesBilled   int64
+	labels           map[string]string
 }
 
 func (b *bigQuery) project(id string) string { return orDefault(id, b.defaultProjectID) }

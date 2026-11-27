@@ -103,10 +103,37 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 		}
 	})
 
+	t.Run("version 0 reference resolves to version 0 when newer versions exist", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		for _, content := range []string{"v0 content", "v1 content"} {
+			if _, err := svc.Save(ctx, &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: "sess", FileName: "target.txt",
+				Part: genai.NewPartFromText(content),
+			}); err != nil {
+				t.Fatalf("Save(target) failed: %v", err)
+			}
+		}
+		if _, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "sess", FileName: "alias.txt",
+			Part: refPart("app", "user", "sess", "target.txt", 0),
+		}); err != nil {
+			t.Fatalf("Save(alias) failed: %v", err)
+		}
+		resp, err := svc.Load(ctx, &artifact.LoadRequest{
+			AppName: "app", UserID: "user", SessionID: "sess", FileName: "alias.txt",
+		})
+		if err != nil {
+			t.Fatalf("Load(alias) failed: %v", err)
+		}
+		if resp.Part.Text != "v0 content" {
+			t.Errorf("Load(alias) = %q, want %q", resp.Part.Text, "v0 content")
+		}
+	})
+
 	t.Run("save rejects a malformed reference URI", func(t *testing.T) {
 		for _, uri := range []string{
 			"artifact://nonsense",
-			"artifact://apps/app/users/user/sessions/s/artifacts/f.txt/versions/0",
+			"artifact://apps/app/users/user/sessions/s/artifacts/f.txt/versions/-1",
 		} {
 			t.Run(uri, func(t *testing.T) {
 				svc := artifact.InMemoryService()
@@ -262,7 +289,7 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 			if i == hops {
 				req.Part = genai.NewPartFromText("chain end")
 			} else {
-				req.Part = refPart("app", "user", "s", fmt.Sprintf("f%d", i+1), 1)
+				req.Part = refPart("app", "user", "s", fmt.Sprintf("f%d", i+1), 0)
 			}
 			if _, err := svc.Save(ctx, req); err != nil {
 				t.Fatalf("Save(%q) failed: %v", name, err)
@@ -302,7 +329,7 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 		svc := artifact.InMemoryService()
 		if _, err := svc.Save(ctx, &artifact.SaveRequest{
 			AppName: "app", UserID: "user", SessionID: "s", FileName: "loop.txt",
-			Part: refPart("app", "user", "s", "loop.txt", 1),
+			Part: refPart("app", "user", "s", "loop.txt", 0),
 		}); err != nil {
 			t.Fatalf("Save(loop) failed: %v", err)
 		}
@@ -345,7 +372,7 @@ func TestInMemoryArtifactVersionReferenceMimeType(t *testing.T) {
 	}
 
 	got, err := svc.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
-		AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt", Version: alias.Version,
+		AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt", Version: new(alias.Version),
 	})
 	if err != nil {
 		t.Fatalf("GetArtifactVersion(alias) failed: %v", err)

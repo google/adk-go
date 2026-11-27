@@ -457,6 +457,8 @@ type streamingTextModel struct {
 
 func (m *streamingTextModel) Name() string { return "streaming-text" }
 
+func (*streamingTextModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, delta := range []string{"Hello ", "world."} {

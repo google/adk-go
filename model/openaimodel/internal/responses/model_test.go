@@ -2318,6 +2318,30 @@ func TestModel_GenerateStream_ErrorsEndTheTurn(t *testing.T) {
 	}
 }
 
+// TestModel_GenerateStream_MissingItemID pins that function call events without
+// an item_id end the turn with an error, rather than emitting the call without
+// the arguments its deltas carried.
+func TestModel_GenerateStream_MissingItemID(t *testing.T) {
+	got, err := runStream(t,
+		evCreated,
+		`{"type":"response.function_call_arguments.delta","item_id":"","delta":"{\"query\":\""}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"","delta":"cats\"}"}`,
+		`{"type":"response.function_call_arguments.done","item_id":"","arguments":""}`,
+		evCompleted,
+	)
+	if !errors.Is(err, errFunctionCallMissingItemID) {
+		t.Errorf("streaming err = %v, want %v", err, errFunctionCallMissingItemID)
+	}
+	for i, resp := range got {
+		if resp.TurnComplete {
+			t.Errorf("response %d has TurnComplete = true, want the error to end the turn", i)
+		}
+		if calls := functionCalls(resp); len(calls) != 0 {
+			t.Errorf("response %d carries %d function calls, want none", i, len(calls))
+		}
+	}
+}
+
 // TestModel_GenerateStream_FunctionCall pins that a streamed tool call closes its
 // turn the way a streamed message does.
 func TestModel_GenerateStream_FunctionCall(t *testing.T) {

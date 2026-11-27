@@ -71,9 +71,36 @@ func TestParseArtifactURI(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			// A reference must name a stored version; 0 is the "latest" sentinel.
-			name:   "zero version rejected",
-			uri:    "artifact://apps/myapp/users/user-1/sessions/sess-1/artifacts/report.pdf/versions/0",
+			name: "zero version",
+			uri:  "artifact://apps/myapp/users/user-1/sessions/sess-1/artifacts/report.pdf/versions/0",
+			want: parsedArtifactURI{
+				AppName:   "myapp",
+				UserID:    "user-1",
+				SessionID: "sess-1",
+				FileName:  "report.pdf",
+				Version:   0,
+			},
+			wantOK: true,
+		},
+		{
+			name: "user-scoped zero version",
+			uri:  "artifact://apps/myapp/users/user-1/artifacts/user:profile.png/versions/0",
+			want: parsedArtifactURI{
+				AppName:  "myapp",
+				UserID:   "user-1",
+				FileName: "user:profile.png",
+				Version:  0,
+			},
+			wantOK: true,
+		},
+		{
+			name:   "negative version rejected",
+			uri:    "artifact://apps/myapp/users/user-1/sessions/sess-1/artifacts/report.pdf/versions/-1",
+			wantOK: false,
+		},
+		{
+			name:   "user-scoped negative version rejected",
+			uri:    "artifact://apps/myapp/users/user-1/artifacts/user:profile.png/versions/-1",
 			wantOK: false,
 		},
 		{
@@ -109,6 +136,15 @@ func TestBuildArtifactURI(t *testing.T) {
 		want      string
 	}{
 		{
+			name:      "session-scoped zero version",
+			appName:   "myapp",
+			userID:    "user-1",
+			sessionID: "sess-1",
+			fileName:  "report.pdf",
+			version:   0,
+			want:      "artifact://apps/myapp/users/user-1/sessions/sess-1/artifacts/report.pdf/versions/0",
+		},
+		{
 			name:      "session-scoped",
 			appName:   "myapp",
 			userID:    "user-1",
@@ -122,8 +158,8 @@ func TestBuildArtifactURI(t *testing.T) {
 			appName:  "myapp",
 			userID:   "user-1",
 			fileName: "user:profile.png",
-			version:  1,
-			want:     "artifact://apps/myapp/users/user-1/artifacts/user:profile.png/versions/1",
+			version:  0,
+			want:     "artifact://apps/myapp/users/user-1/artifacts/user:profile.png/versions/0",
 		},
 	}
 

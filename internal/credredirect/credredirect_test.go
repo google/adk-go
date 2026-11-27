@@ -90,6 +90,26 @@ func TestSameTarget(t *testing.T) {
 		// A punycode label net/http cannot encode has no Host header, so
 		// the request could not be sent, and the hop is refused.
 		{name: "invalid punycode label beside a unicode one", from: "https://xn--zzz-.fa\u00df.example/rpc", to: "https://xn--zzz-.fa\u00df.example/rpc", want: false},
+		// A Google API host and its mTLS name are the same service: a
+		// client presenting a certificate is sent to the mTLS name.
+		{name: "google api host to its mtls name", from: "https://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com/rpc", want: true},
+		{name: "mtls name to its google api host", from: "https://agent.mtls.googleapis.com/rpc", to: "https://agent.googleapis.com:443/rpc", want: true},
+		{name: "mtls twin, mixed case", from: "https://Agent.GoogleAPIs.com/rpc", to: "https://agent.MTLS.googleapis.com/rpc", want: true},
+		{name: "mtls name of another service", from: "https://agent.googleapis.com/rpc", to: "https://other.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls twin on another port", from: "https://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com:8443/rpc", want: false},
+		{name: "mtls twin over http", from: "http://agent.googleapis.com/rpc", to: "http://agent.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls twin upgraded to https", from: "http://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls suffix outside googleapis", from: "https://agent.example.com/rpc", to: "https://agent.mtls.example.com/rpc", want: false},
+		{name: "mtls twin upgraded to https, same explicit port", from: "http://agent.googleapis.com:443/rpc", to: "https://agent.mtls.googleapis.com:443/rpc", want: false},
+		// strings.ToLower folds the Kelvin sign into k, which would make
+		// these twins although they send different Host headers.
+		{name: "kelvin sign in the mtls twin", from: "https://agentk.googleapis.com/rpc", to: "https://agent\u212a.mtls.googleapis.com/rpc", want: false},
+		{name: "kelvin sign in the plain twin", from: "https://agent\u212a.googleapis.com/rpc", to: "https://agentk.mtls.googleapis.com/rpc", want: false},
+		{name: "empty label and its mtls name", from: "https://.googleapis.com/rpc", to: "https://.mtls.googleapis.com/rpc", want: false},
+		{name: "bare mtls host to bare googleapis", from: "https://googleapis.com/rpc", to: "https://mtls.googleapis.com/rpc", want: false},
+		// Names the client certificate transport never moves a request to.
+		{name: "multi-region host and an mtls name it does not have", from: "https://agent.us.rep.googleapis.com/rpc", to: "https://agent.us.rep.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls host and a doubled mtls name", from: "https://mtls.googleapis.com/rpc", to: "https://mtls.mtls.googleapis.com/rpc", want: false},
 		{name: "ipv6 literal, same", from: "https://[::1]:8443/rpc", to: "https://[::1]:8443/rpc", want: true},
 		{name: "ipv6 literals differ", from: "https://[::1]:8443/rpc", to: "https://[2001:db8::1]:8443/rpc", want: false},
 	}
@@ -125,6 +145,10 @@ func TestCheck(t *testing.T) {
 		{name: "same origin", via: []string{"https://h/a"}, to: "https://h/b"},
 		{name: "cross host", via: []string{"https://h/a"}, to: "https://other/b", wantErr: true},
 		{name: "upgrade then downgrade", via: []string{"http://h/a", "https://h/b"}, to: "http://h/c", wantErr: true},
+		{name: "google api host to its mtls name", via: []string{"https://agent.googleapis.com/a"}, to: "https://agent.mtls.googleapis.com/b"},
+		// Only the comparison with the original request refuses this one:
+		// the two names count as one host between https URLs alone.
+		{name: "upgrade then move to the mtls name", via: []string{"http://agent.googleapis.com/a", "https://agent.googleapis.com/b"}, to: "https://agent.mtls.googleapis.com/c", wantErr: true},
 		{name: "same origin across a chain", via: []string{"http://h/a", "https://h/b"}, to: "https://h:443/c"},
 		{name: "host header names the same host", via: []string{"http://h/a"}, to: "http://h/b", host: "h"},
 		{name: "host header names another host", via: []string{"http://h/a"}, to: "http://h/b", host: "evil.test", wantErr: true},

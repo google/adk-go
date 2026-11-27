@@ -25,14 +25,15 @@ import (
 // ADK traffic from other clients. A value already on the request when it gets
 // here is kept after the ADK tokens (see [version.WithTrackingHeaders]). go-sdk
 // sets neither header itself, and base runs later, so a header base sets is not
-// merged.
+// merged. The labels name the hosting runtime only on a request to a Google
+// API endpoint (see [version.TrackingHeader]).
 type trackingTransport struct {
 	base http.RoundTripper
 }
 
 func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	req.Header = version.WithTrackingHeaders(req.Header)
+	req.Header = version.WithTrackingHeaders(req.Header, req.URL)
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport

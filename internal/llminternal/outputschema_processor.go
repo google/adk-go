@@ -22,7 +22,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -46,12 +45,8 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		}
 
 		state := llmAgent.internal()
-		// Check if we need the processor in the first place.
-		if !needOutputSchemaProcessor(state) {
-			return
-		}
 		schema := outputSchemaFor(ctx, state)
-		if schema == nil {
+		if schema == nil || !needOutputSchemaProcessor(state) {
 			return
 		}
 
@@ -99,6 +94,12 @@ func retrieveStructuredModelResponse(ev *session.Event) (string, error) {
 	return "", nil
 }
 
+// NeedsOutputSchemaProcessor reports whether state requires the
+// set_model_response tool workaround to combine OutputSchema with tools.
+func NeedsOutputSchemaProcessor(state *State) bool {
+	return state != nil && state.OutputSchema != nil && needOutputSchemaProcessor(state)
+}
+
 func needOutputSchemaProcessor(state *State) bool {
 	if state == nil || state.Model == nil {
 		return false
@@ -110,7 +111,7 @@ func needOutputSchemaProcessor(state *State) bool {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
-	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
+	return hasTools && !state.Model.Capabilities().AcceptsOutputSchemaAndTools
 }
 
 // setModelResponseTool implements tool.Tool and toolinternal.FunctionTool.

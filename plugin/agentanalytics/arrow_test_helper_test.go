@@ -291,20 +291,43 @@ func checkJSONAt(t *testing.T, obj map[string]any, want string, path ...string) 
 
 // recordingLogger is a Logger that keeps what is logged.
 type recordingLogger struct {
-	mu    sync.Mutex
-	lines []string
+	mu      sync.Mutex
+	lines   []string
+	rawArgs [][]any
+	notify  chan struct{}
+}
+
+func (l *recordingLogger) broadcastLocked() {
+	if l.notify != nil {
+		close(l.notify)
+		l.notify = nil
+	}
 }
 
 func (l *recordingLogger) Printf(format string, v ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lines = append(l.lines, fmt.Sprintf(format, v...))
+	l.rawArgs = append(l.rawArgs, slices.Clone(v))
+	l.broadcastLocked()
 }
 
 func (l *recordingLogger) Println(v ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lines = append(l.lines, fmt.Sprintln(v...))
+	l.rawArgs = append(l.rawArgs, slices.Clone(v))
+	l.broadcastLocked()
+}
+
+func (l *recordingLogger) argsSnapshot() [][]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([][]any, len(l.rawArgs))
+	for i, args := range l.rawArgs {
+		out[i] = slices.Clone(args)
+	}
+	return out
 }
 
 func (l *recordingLogger) contains(substr string) bool {
@@ -313,6 +336,31 @@ func (l *recordingLogger) contains(substr string) bool {
 	return slices.ContainsFunc(l.lines, func(line string) bool {
 		return strings.Contains(line, substr)
 	})
+}
+
+func (l *recordingLogger) waitContains(substr string, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		l.mu.Lock()
+		if slices.ContainsFunc(l.lines, func(line string) bool {
+			return strings.Contains(line, substr)
+		}) {
+			l.mu.Unlock()
+			return true
+		}
+		if l.notify == nil {
+			l.notify = make(chan struct{})
+		}
+		ch := l.notify
+		l.mu.Unlock()
+
+		select {
+		case <-ch:
+		case <-timer.C:
+			return l.contains(substr)
+		}
+	}
 }
 
 func (l *recordingLogger) String() string {

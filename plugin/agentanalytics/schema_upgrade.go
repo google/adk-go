@@ -28,6 +28,52 @@ import (
 
 const maxPreconditionRetries = 2
 
+// safeLogf calls logf, if it is not nil, and suppresses any panic from the
+// logger so a broken Logger cannot escape a recovery handler.
+func safeLogf(logf func(format string, args ...any), format string, args ...any) {
+	if logf == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	logf(format, args...)
+}
+
+// notifySchemaReady calls onReady, Config.OnSchemaReady, if it is set. A
+// panic in the callback is recovered and reported through logf, if that is
+// not nil, by the pre-formatted type name of the panic value so the raw panic
+// value never reaches Logger.Printf arguments.
+func notifySchemaReady(onReady func(), logf func(format string, args ...any)) {
+	if onReady == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			panicType := fmt.Sprintf("%T", r)
+			safeLogf(logf, "agentanalytics: OnSchemaReady callback failed: recovered panic of type %s", panicType)
+		}
+	}()
+	onReady()
+}
+
+// notifySchemaError calls onError, Config.OnSchemaError, with err if it is
+// set. A panic in the callback is recovered and reported through logf, if
+// that is not nil, by the pre-formatted type name of the panic value so the
+// raw panic value never reaches Logger.Printf arguments.
+func notifySchemaError(onError func(error), err error, logf func(format string, args ...any)) {
+	if onError == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			panicType := fmt.Sprintf("%T", r)
+			safeLogf(logf, "agentanalytics: OnSchemaError callback failed: recovered panic of type %s", panicType)
+		}
+	}()
+	onError(err)
+}
+
 // tableMetadataOps abstracts the BigQuery Table metadata RPCs so that all
 // startup and schema upgrade paths can be unit-tested deterministically.
 type tableMetadataOps interface {
@@ -80,23 +126,33 @@ func ensureTableAndSchema(ctx context.Context, table tableMetadataOps, config Co
 		if createErr == nil {
 			return nil
 		}
-		if isConflictError(createErr) {
-			if config.DisableSchemaUpgrade {
-				return nil
-			}
-			md, err = table.Metadata(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get BigQuery table %s metadata: %w", config.TableName, err)
-			}
-			return maybeUpgradeSchema(ctx, table, md, config, desired)
+		if !isConflictError(createErr) {
+			return fmt.Errorf("failed to create BigQuery table %s: %w", config.TableName, createErr)
 		}
-		return fmt.Errorf("failed to create BigQuery table %s: %w", config.TableName, createErr)
+		md, err = table.Metadata(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get BigQuery table %s metadata: %w", config.TableName, err)
+		}
 	}
 
+	if err := validateDestinationTableType(config.TableName, md); err != nil {
+		return err
+	}
 	if config.DisableSchemaUpgrade {
 		return nil
 	}
 	return maybeUpgradeSchema(ctx, table, md, config, desired)
+}
+
+// validateDestinationTableType rejects BigQuery objects that are not regular
+// tables (such as logical views, materialized views, external tables, and
+// snapshots), since the BigQuery Storage Write API cannot append rows to them.
+// An empty Type is allowed for synthetic test metadata responses that omit it.
+func validateDestinationTableType(tableName string, md *bq.TableMetadata) error {
+	if md != nil && md.Type != "" && md.Type != bq.RegularTable {
+		return fmt.Errorf("BigQuery destination %s has type %s, want %s", tableName, md.Type, bq.RegularTable)
+	}
+	return nil
 }
 
 func maybeUpgradeSchema(ctx context.Context, table tableMetadataOps, md *bq.TableMetadata, config Config, desired bq.Schema) error {
@@ -107,6 +163,9 @@ func maybeUpgradeSchema(ctx context.Context, table tableMetadataOps, md *bq.Tabl
 			if err != nil {
 				return fmt.Errorf("failed to get BigQuery table %s metadata: %w", config.TableName, err)
 			}
+		}
+		if err := validateDestinationTableType(config.TableName, md); err != nil {
+			return err
 		}
 
 		updatedSchema, schemaChanged, err := upgradeTableSchema(md.Schema, desired)
@@ -157,4 +216,22 @@ func isConflictError(err error) bool {
 
 func isPreconditionFailedError(err error) bool {
 	return hasErrorCode(err, http.StatusPreconditionFailed, codes.FailedPrecondition)
+}
+
+func isRetryableConflictVerifyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
+		return apiErr.Code == http.StatusNotFound ||
+			apiErr.Code == http.StatusTooManyRequests ||
+			(apiErr.Code >= http.StatusInternalServerError && apiErr.Code < 600)
+	}
+	if st, ok := status.FromError(err); ok {
+		switch st.Code() {
+		case codes.NotFound, codes.ResourceExhausted, codes.Internal, codes.Unavailable, codes.DeadlineExceeded:
+			return true
+		}
+	}
+	return false
 }

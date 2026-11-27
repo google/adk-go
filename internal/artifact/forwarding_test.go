@@ -55,16 +55,16 @@ func TestForwardingService(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if actions.ArtifactDelta["report.txt"] != 2 {
+	if actions.ArtifactDelta["report.txt"] != 1 {
 		t.Error("parent delta does not contain the latest saved version")
 	}
 	if got, err := parent.Load(ctx, "report.txt"); err != nil || got.Part.Text != "second" {
 		t.Fatal("forwarded save did not reach the parent")
 	}
 	for _, tc := range []struct {
-		version int64
+		version *int64
 		text    string
-	}{{0, "second"}, {1, "first"}} {
+	}{{nil, "second"}, {new(int64(0)), "first"}, {new(int64(1)), "second"}} {
 		got, err := service.Load(ctx, &artifact.LoadRequest{
 			AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt", Version: tc.version,
 		})
@@ -80,24 +80,24 @@ func TestForwardingService(t *testing.T) {
 	versionsReq := &artifact.VersionsRequest{AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt"}
 	versionsBefore := *versionsReq
 	versions, err := service.Versions(ctx, versionsReq)
-	if err != nil || len(versions.Versions) != 2 || !slices.Contains(versions.Versions, int64(1)) || !slices.Contains(versions.Versions, int64(2)) {
+	if err != nil || len(versions.Versions) != 2 || !slices.Contains(versions.Versions, int64(0)) || !slices.Contains(versions.Versions, int64(1)) {
 		t.Error("versions did not use parent scope")
 	}
 	if *versionsReq != versionsBefore {
 		t.Error("versions request was mutated")
 	}
 
-	metadataReq := &artifact.GetArtifactVersionRequest{AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt", Version: 1}
+	metadataReq := &artifact.GetArtifactVersionRequest{AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt", Version: new(int64(0))}
 	metadataBefore := *metadataReq
 	metadata, err := service.GetArtifactVersion(ctx, metadataReq)
-	if err != nil || metadata.ArtifactVersion.Version != 1 {
+	if err != nil || metadata.ArtifactVersion.Version != 0 {
 		t.Error("metadata did not use parent scope and requested version")
 	}
 	if *metadataReq != metadataBefore {
 		t.Error("metadata request was mutated")
 	}
 
-	deleteReq := &artifact.DeleteRequest{AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt", Version: 2}
+	deleteReq := &artifact.DeleteRequest{AppName: "child_app", UserID: "child_user", SessionID: "child_session", FileName: "report.txt", Version: new(int64(0))}
 	deleteBefore := *deleteReq
 	if err := service.Delete(ctx, deleteReq); err != nil {
 		t.Fatal(err)
@@ -105,10 +105,10 @@ func TestForwardingService(t *testing.T) {
 	if *deleteReq != deleteBefore {
 		t.Error("delete request was mutated")
 	}
-	if _, err := parent.LoadVersion(ctx, "report.txt", 2); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := parent.LoadVersion(ctx, "report.txt", new(int64(0))); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("delete did not remove the requested parent version")
 	}
-	if _, err := parent.LoadVersion(ctx, "report.txt", 1); err != nil {
+	if _, err := parent.LoadVersion(ctx, "report.txt", new(int64(1))); err != nil {
 		t.Error("delete removed another version")
 	}
 }
@@ -130,7 +130,7 @@ func TestForwardingService_ParallelSaves(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	if actions.ArtifactDelta["report.txt"] != saves {
+	if actions.ArtifactDelta["report.txt"] != saves-1 {
 		t.Error("parallel saves lost the latest artifact version")
 	}
 }
@@ -149,7 +149,7 @@ func (p failingParent) Load(context.Context, string) (*artifact.LoadResponse, er
 	return nil, p.loadErr
 }
 
-func (p failingParent) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+func (p failingParent) LoadVersion(context.Context, string, *int64) (*artifact.LoadResponse, error) {
 	return nil, p.err
 }
 func (p failingParent) List(context.Context) (*artifact.ListResponse, error) { return nil, p.err }
@@ -173,7 +173,10 @@ func TestForwardingService_Errors(t *testing.T) {
 			}{
 				{name: "save", want: backendErr, run: func() error { _, err := service.Save(t.Context(), &artifact.SaveRequest{}); return err }},
 				{name: "load latest", want: loadErr, run: func() error { _, err := service.Load(t.Context(), &artifact.LoadRequest{}); return err }},
-				{name: "load version", want: backendErr, run: func() error { _, err := service.Load(t.Context(), &artifact.LoadRequest{Version: 1}); return err }},
+				{name: "load version", want: backendErr, run: func() error {
+					_, err := service.Load(t.Context(), &artifact.LoadRequest{Version: new(int64(0))})
+					return err
+				}},
 				{name: "list", want: backendErr, run: func() error { _, err := service.List(t.Context(), &artifact.ListRequest{}); return err }},
 				{name: "delete", want: errors.ErrUnsupported, run: func() error { return service.Delete(t.Context(), &artifact.DeleteRequest{}) }},
 				{name: "versions", want: errors.ErrUnsupported, run: func() error { _, err := service.Versions(t.Context(), &artifact.VersionsRequest{}); return err }},
