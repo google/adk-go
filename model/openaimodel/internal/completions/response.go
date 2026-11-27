@@ -139,21 +139,33 @@ func finishReason(reason string) genai.FinishReason {
 	}
 }
 
-// convertUsage converts Chat Completions token accounting into genai usage
-// metadata, whose field names differ from this endpoint's on every count.
+// convertUsage maps completion usage to disjoint genai candidate and thought
+// counts. Unlike adk-python's OpenAILlm, it removes any overlap so telemetry
+// can sum the two without counting reasoning twice.
 func convertUsage(usage openai.CompletionUsage) *genai.GenerateContentResponseUsageMetadata {
+	prompt, completion, total := usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+	reasoning := usage.CompletionTokensDetails.ReasoningTokens
+	output := shared.SafeInt32(max(completion, 0))
+	thoughts := min(shared.SafeInt32(max(reasoning, 0)), output)
+	candidates := output - thoughts
+	// xAI reports reasoning outside completion_tokens. Its total includes
+	// all three counts. Subtract instead of summing counts to avoid overflow.
+	if reasoning > 0 && min(prompt, completion) >= 0 && total >= prompt && total-prompt-completion == reasoning {
+		candidates, thoughts = output, shared.SafeInt32(reasoning)
+	}
+
 	return &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:        shared.SafeInt32(usage.PromptTokens),
-		CandidatesTokenCount:    shared.SafeInt32(usage.CompletionTokens),
+		CandidatesTokenCount:    candidates,
 		TotalTokenCount:         shared.SafeInt32(usage.TotalTokens),
 		CachedContentTokenCount: shared.SafeInt32(usage.PromptTokensDetails.CachedTokens),
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.PromptTokens)},
 		},
 		CandidatesTokensDetails: []*genai.ModalityTokenCount{
-			{Modality: genai.MediaModalityText, TokenCount: shared.SafeInt32(usage.CompletionTokens)},
+			{Modality: genai.MediaModalityText, TokenCount: candidates},
 		},
-		ThoughtsTokenCount: shared.SafeInt32(usage.CompletionTokensDetails.ReasoningTokens),
+		ThoughtsTokenCount: thoughts,
 	}
 }
 

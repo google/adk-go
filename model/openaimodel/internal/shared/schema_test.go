@@ -15,6 +15,8 @@
 package shared
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -158,4 +160,206 @@ func TestResponseFormatName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEnforceStrictOpenAISchema(t *testing.T) {
+	t.Run("recursive root ref inlines definition and preserves defs", func(t *testing.T) {
+		schema := map[string]any{
+			"$ref": "#/$defs/TreeNode",
+			"$defs": map[string]any{
+				"TreeNode": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"value": map[string]any{"type": "string"},
+						"children": map[string]any{
+							"type": "array",
+							"items": map[string]any{
+								"$ref":        "#/$defs/TreeNode",
+								"description": "should be stripped on nested ref",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		want := map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"children", "value"},
+			"properties": map[string]any{
+				"value": map[string]any{"type": "string"},
+				"children": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"$ref": "#/$defs/TreeNode"},
+				},
+			},
+			"$defs": map[string]any{
+				"TreeNode": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []string{"children", "value"},
+					"properties": map[string]any{
+						"value": map[string]any{"type": "string"},
+						"children": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"$ref": "#/$defs/TreeNode"},
+						},
+					},
+				},
+			},
+		}
+		if !reflect.DeepEqual(schema, want) {
+			t.Fatalf("EnforceStrictOpenAISchema() =\n%#v\nwant\n%#v", schema, want)
+		}
+
+		// Mutating the inlined root must not alias $defs.
+		rootProps := schema["properties"].(map[string]any)
+		rootProps["extra"] = map[string]any{"type": "boolean"}
+		defProps := schema["$defs"].(map[string]any)["TreeNode"].(map[string]any)["properties"].(map[string]any)
+		if _, leaked := defProps["extra"]; leaked {
+			t.Fatal("root properties aliased $defs.TreeNode.properties")
+		}
+	})
+
+	t.Run("chained root ref follows defs chain", func(t *testing.T) {
+		schema := map[string]any{
+			"$ref": "#/$defs/Alias",
+			"$defs": map[string]any{
+				"Alias": map[string]any{"$ref": "#/$defs/Target"},
+				"Target": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"id": map[string]any{"type": "string"}},
+				},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		if _, hasRef := schema["$ref"]; hasRef {
+			t.Fatalf("expected root $ref to be inlined, got %#v", schema)
+		}
+		if schema["type"] != "object" || schema["additionalProperties"] != false {
+			t.Fatalf("expected strict object at root, got %#v", schema)
+		}
+		if _, hasDefs := schema["$defs"]; !hasDefs {
+			t.Fatalf("expected $defs to be preserved, got %#v", schema)
+		}
+	})
+
+	t.Run("cyclic root ref terminates without infinite loop", func(t *testing.T) {
+		schema := map[string]any{
+			"$ref":        "#/$defs/A",
+			"description": "extra",
+			"$defs": map[string]any{
+				"A": map[string]any{"$ref": "#/$defs/B"},
+				"B": map[string]any{"$ref": "#/$defs/A"},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		want := map[string]any{"$ref": "#/$defs/A"}
+		if !reflect.DeepEqual(schema, want) {
+			t.Fatalf("cyclic root ref got %#v, want %#v", schema, want)
+		}
+	})
+
+	t.Run("root keys take precedence over referenced def keys", func(t *testing.T) {
+		schema := map[string]any{
+			"$ref":        "#/$defs/Node",
+			"description": "root description",
+			"$defs": map[string]any{
+				"Node": map[string]any{
+					"type":        "object",
+					"description": "def description",
+					"properties":  map[string]any{"name": map[string]any{"type": "string"}},
+				},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		if got := schema["description"]; got != "root description" {
+			t.Fatalf("root description = %v, want %q", got, "root description")
+		}
+	})
+
+	t.Run("unresolvable external root ref strips siblings without panic", func(t *testing.T) {
+		schema := map[string]any{
+			"$ref":        "https://example.com/schema.json",
+			"description": "should be stripped",
+			"$defs": map[string]any{
+				"Local": map[string]any{"type": "object"},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		want := map[string]any{"$ref": "https://example.com/schema.json"}
+		if !reflect.DeepEqual(schema, want) {
+			t.Fatalf("external ref = %#v, want %#v", schema, want)
+		}
+	})
+
+	t.Run("nested ref still strips sibling keywords", func(t *testing.T) {
+		schema := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"child": map[string]any{
+					"$ref":        "#/$defs/Child",
+					"description": "not allowed alongside $ref",
+				},
+			},
+			"$defs": map[string]any{
+				"Child": map[string]any{"type": "object"},
+			},
+		}
+
+		EnforceStrictOpenAISchema(schema)
+
+		child := schema["properties"].(map[string]any)["child"].(map[string]any)
+		wantChild := map[string]any{"$ref": "#/$defs/Child"}
+		if !reflect.DeepEqual(child, wantChild) {
+			t.Fatalf("nested ref = %#v, want %#v", child, wantChild)
+		}
+	})
+
+	t.Run("normalize schema numeric constraints preserved across root ref clone", func(t *testing.T) {
+		raw := map[string]any{
+			"$ref": "#/$defs/Score",
+			"$defs": map[string]any{
+				"Score": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"value": map[string]any{
+							"type":    "integer",
+							"minimum": 1,
+						},
+					},
+				},
+			},
+		}
+
+		normalized, err := NormalizeSchema(raw)
+		if err != nil {
+			t.Fatalf("NormalizeSchema() error = %v", err)
+		}
+		EnforceStrictOpenAISchema(normalized)
+
+		encoded, err := json.Marshal(normalized)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		var roundTrip map[string]any
+		if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+		minVal := roundTrip["properties"].(map[string]any)["value"].(map[string]any)["minimum"]
+		if _, isNum := minVal.(float64); !isNum {
+			t.Fatalf("minimum decoded as %T (%v), want numeric JSON value", minVal, minVal)
+		}
+	})
 }
