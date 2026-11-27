@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Backport merged `main` pull requests onto the `v1` maintenance branch.
+# Backport merged pull requests between release branches.
 #
-# A PR into `main` is labelled `v1-needed` when it also has to ship to 1.x.
-# This script drains that queue: one backport pull request per labelled PR.
+# Supported routes (selected via --target):
+#   v1 (default): merged `main` PRs labelled `v1-needed` onto `v1`
+#   main:         merged `v3` PRs labelled `feature-parity-main` onto `main`
 #
-# The one systematic obstacle is the module path: `main` is
-# `google.golang.org/adk/v2`, `v1` is `google.golang.org/adk`, so every Go
-# file's import block differs and a plain cherry-pick conflicts on any patch
-# that touches imports. That difference is a pure string rewrite, so the patch
-# is rewritten before it is applied and the common case lands cleanly. Genuine
-# semantic drift still conflicts, and is left for a human.
+# When source and target branches declare different root module paths in go.mod
+# (for example `google.golang.org/adk/v2` vs `google.golang.org/adk`), the patch
+# is rewritten before it is applied so import blocks match the target tree.
+# Genuine semantic drift still conflicts, and is left for a human.
 #
-# Each PR is replayed on its own branch, cut fresh from v1, in its own throwaway
-# worktree. One conflict costs one backport, not the run; the current checkout
-# is never touched.
+# Each PR is replayed on its own branch, cut fresh from the target branch, in
+# its own throwaway worktree. One conflict costs one backport, not the run; the
+# current checkout is never touched.
 
 set -euo pipefail
 
@@ -45,27 +44,22 @@ fi
 shopt -s inherit_errexit
 
 readonly REPO="${ADK_REPO:-google/adk-go}"
-readonly MAIN_BRANCH="main"
-readonly V1_BRANCH="v1"
-readonly V2_MODULE="google.golang.org/adk/v2"
-readonly V1_MODULE="google.golang.org/adk"
 
-# `v1-needed` marks a merged main PR as still owing a 1.x equivalent and is what
-# the queue filters on. `v1` is informational, and goes on the PRs this opens.
-readonly BACKPORT_LABEL="v1-needed"
-readonly V1_LABEL="v1"
-
-# Every branch this script pushes lives under here. Also the guard: nothing
-# outside this prefix is ever pushed.
-readonly BRANCH_PREFIX="backport/v1/pr-"
-
-# Hidden marker on the conflict comment, so a nightly re-run recognises its own
-# earlier message and does not post it again.
-readonly COMMENT_MARKER="<!-- adk-backport-conflict -->"
+target="v1"
+SOURCE_BRANCH=""
+TARGET_BRANCH=""
+BACKPORT_LABEL=""
+declare -a TARGET_LABELS=()
+BRANCH_PREFIX=""
+COMMENT_MARKER=""
+REPLAY_CMD=""
+SOURCE_MODULE=""
+TARGET_MODULE=""
 
 list_only=false
 open_pr=false
 skip_gomod=false
+show_help=false
 declare -a prs=()
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
@@ -75,30 +69,96 @@ die() {
   exit 1
 }
 
+configure_target() {
+  case "$1" in
+    v1)
+      SOURCE_BRANCH="main"
+      TARGET_BRANCH="v1"
+      BACKPORT_LABEL="v1-needed"
+      TARGET_LABELS=("v1")
+      BRANCH_PREFIX="backport/v1/pr-"
+      COMMENT_MARKER="<!-- adk-backport-conflict -->"
+      REPLAY_CMD="scripts/backport.sh"
+      ;;
+    main)
+      SOURCE_BRANCH="v3"
+      TARGET_BRANCH="main"
+      BACKPORT_LABEL="feature-parity-main"
+      TARGET_LABELS=("v2" "feature-parity")
+      BRANCH_PREFIX="backport/main/pr-"
+      COMMENT_MARKER="<!-- adk-backport-conflict:main -->"
+      REPLAY_CMD="scripts/backport.sh --target main"
+      ;;
+    *)
+      die "unknown target '$1'; expected 'v1' or 'main'"
+      ;;
+  esac
+}
+
+# Prints the root module path declared in go.mod at ref, failing closed if
+# go.mod is unreadable or does not declare a valid module path.
+module_path_at() {
+  local ref="$1" content mod
+  if ! content="$(git show "${ref}:go.mod" 2>/dev/null)"; then
+    die "could not read go.mod at ${ref}"
+  fi
+  mod="$(printf '%s\n' "${content}" | awk '
+    {
+      sub(/\/\/.*$/, "")
+      sub(/\r$/, "")
+    }
+    in_block {
+      if ($1 == ")") { in_block = 0; next }
+      if (NF >= 1) { print $1; exit }
+      next
+    }
+    $1 == "module" && $2 == "(" { in_block = 1; next }
+    $1 == "module(" { in_block = 1; next }
+    $1 == "module" && NF >= 2 { print $2; exit }
+  ')"
+  mod="${mod#\"}"
+  mod="${mod%\"}"
+  if [[ ! "${mod}" =~ ^[A-Za-z0-9._~/-]+$ ]]; then
+    die "invalid or missing module path in ${ref}:go.mod"
+  fi
+  printf '%s\n' "${mod}"
+}
+
+# Escapes extended-regex metacharacters for sed -E patterns.
+escape_sed_ere() {
+  printf '%s' "$1" | sed 's/[.[\*^$+?(){}|\\]/\\&/g'
+}
+
+needs_module_rewrite() {
+  [[ -n "${SOURCE_MODULE}" && -n "${TARGET_MODULE}" && "${SOURCE_MODULE}" != "${TARGET_MODULE}" ]]
+}
+
 usage() {
   cat <<EOF
-Backport merged '${MAIN_BRANCH}' PRs labelled '${BACKPORT_LABEL}' onto '${V1_BRANCH}'.
+Backport merged '${SOURCE_BRANCH}' PRs labelled '${BACKPORT_LABEL}' onto '${TARGET_BRANCH}'.
 
 Usage:
-  scripts/backport.sh --list             Show what is pending.
-  scripts/backport.sh [PR...]            Replay locally; nothing is pushed.
-  scripts/backport.sh --pr [PR...]       Replay, push, and open the PRs.
+  scripts/backport.sh [--target v1|main] --list       Show what is pending.
+  scripts/backport.sh [--target v1|main] [PR...]      Replay locally; nothing is pushed.
+  scripts/backport.sh [--target v1|main] --pr [PR...] Replay, push, and open the PRs.
 
 With no PR numbers, the whole pending queue is taken. One pull request is
 opened per backported PR: a conflict on one does not stop the others.
 
 Options:
-  -l, --list        List the pending queue and exit.
-  -p, --pr          Push each branch and open its pull request. Without this
-                    nothing leaves the machine.
-      --skip-gomod  Leave go.mod / go.sum out of the patch. The 1.x dependency
-                    set differs from main's, so those hunks often reject on
-                    their own; run 'go mod tidy' on the result.
-  -h, --help        This text.
+  -t, --target TARGET  Backport route: 'v1' (main -> v1, label 'v1-needed', default)
+                       or 'main' (v3 -> main, label 'feature-parity-main').
+  -l, --list           List the pending queue and exit.
+  -p, --pr             Push each branch and open its pull request. Without this
+                       nothing leaves the machine.
+      --skip-gomod     Leave go.mod / go.sum out of the patch. Dependencies can
+                       differ across branches, so those hunks often reject on
+                       their own; run 'go mod tidy' on the result.
+  -h, --help           This text.
 
 Environment:
-  ADK_REPO          Override the repository (default ${REPO}).
-  ADK_REMOTE        Override the git remote to use.
+  ADK_REPO             Override the repository (default ${REPO}).
+  ADK_REMOTE           Override the git remote to use.
 EOF
 }
 
@@ -124,7 +184,7 @@ detect_remote() {
   die "no git remote points at ${REPO}; set ADK_REMOTE to choose one"
 }
 
-# True when this source commit is already on v1.
+# True when this source commit is already on the target branch.
 #
 # Keyed off the "(cherry picked from commit <sha>)" trailer that this script
 # writes on every backport, so the question is answered by an exact match on
@@ -132,19 +192,22 @@ detect_remote() {
 # titles instead would mean parsing prose: "Fixes #1152" names an issue, and one
 # v1 commit lists seven PR numbers precisely because they were *not* backported.
 # The --grep only narrows: it matches the phrase anywhere in a message, and a
-# squash merge copies contributor commit bodies onto v1 verbatim, so a v1 commit
-# that merely quotes the line would otherwise suppress an unrelated backport.
+# squash merge copies contributor commit bodies verbatim, so a commit that
+# merely quotes the line would otherwise suppress an unrelated backport.
 # Each candidate is then confirmed against the exact trailer line.
 already_backported() {
   local remote="$1" sha="$2" candidates candidate
   local trailer="(cherry picked from commit ${sha})"
+  if git merge-base --is-ancestor "${sha}" "${remote}/${TARGET_BRANCH}" 2>/dev/null; then
+    return 0
+  fi
   # Captured rather than piped straight into the loop: a git failure inside a
   # process substitution is invisible, and would read here as "no candidates",
   # meaning not yet backported -- which opens a duplicate pull request. Same
   # failure mode as the `gh pr list` one below, so it fails closed the same way.
   if ! candidates="$(git log --format=%H --fixed-strings \
-    --grep="cherry picked from commit ${sha}" "${remote}/${V1_BRANCH}")"; then
-    die "could not search ${V1_BRANCH} for an existing backport of ${sha}"
+    --grep="cherry picked from commit ${sha}" "${remote}/${TARGET_BRANCH}")"; then
+    die "could not search ${TARGET_BRANCH} for an existing backport of ${sha}"
   fi
   [[ -n "${candidates}" ]] || return 1
   while read -r candidate; do
@@ -176,14 +239,14 @@ in_flight() {
 }
 
 # Prints "number<TAB>merge-sha<TAB>title" for each pending PR, oldest merge
-# first, so backports land on v1 in the order they landed on main.
+# first, so backports land on the target branch in the order they merged.
 pending_queue() {
   local remote="$1" listing
-  listing="$(gh pr list --repo "${REPO}" --base "${MAIN_BRANCH}" --state merged \
+  listing="$(gh pr list --repo "${REPO}" --base "${SOURCE_BRANCH}" --state merged \
     --label "${BACKPORT_LABEL}" --limit 200 \
     --json number,title,mergedAt,mergeCommit \
     --jq 'sort_by(.mergedAt)[] | "\(.number)\t\(.mergeCommit.oid // "")\t\(.title)"')" ||
-    die "could not list merged ${MAIN_BRANCH} pull requests"
+    die "could not list merged ${SOURCE_BRANCH} pull requests"
 
   local number sha title
   while IFS=$'\t' read -r number sha title; do
@@ -206,7 +269,7 @@ comment_conflict() {
   # signal a human gets. Accepts the bot (how CI posts) or whoever is
   # authenticated (how a local --pr run posts), and nobody else.
   # gh's --jq takes no --arg, so both values are interpolated. The marker is a
-  # readonly constant; the login has to be validated, because on an API error
+  # constant per target; the login has to be validated, because on an API error
   # `gh api --jq` prints the response body to *stdout* -- 2>/dev/null does not
   # suppress it and `|| echo ''` only appends to it. Unvalidated, a failed call
   # puts a JSON blob into the filter, jq refuses to parse it, `gh pr view` exits
@@ -230,13 +293,13 @@ comment_conflict() {
   fi
 
   gh pr comment "${pr}" --repo "${REPO}" --body "${COMMENT_MARKER}
-Automatic backport to \`${V1_BRANCH}\` failed: this change does not replay
-cleanly, which usually means 1.x lacks something 2.x already had.
+Automatic backport to \`${TARGET_BRANCH}\` failed: this change does not replay
+cleanly, which usually means \`${TARGET_BRANCH}\` has diverged from \`${SOURCE_BRANCH}\`.
 
 To finish it by hand:
 
 \`\`\`bash
-scripts/backport.sh ${pr}
+${REPLAY_CMD} ${pr}
 \`\`\`
 
 That leaves the conflicts as \`.rej\` files in a scratch worktree and prints its
@@ -254,11 +317,11 @@ git commit -m '<subject>
 
 (cherry picked from commit ${sha})'
 git push <remote> HEAD:refs/heads/${BRANCH_PREFIX}${pr}
-gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${BRANCH_PREFIX}${pr}
+gh pr create --repo ${REPO} --base ${TARGET_BRANCH} --head ${BRANCH_PREFIX}${pr}
 \`\`\`
 
 This is reported once. The backport is still queued and will be retried, so if a
-later \`${V1_BRANCH}\` change makes it apply, it lands without further action." >/dev/null ||
+later \`${TARGET_BRANCH}\` change makes it apply, it lands without further action." >/dev/null ||
     warn "could not comment on PR #${pr}"
 }
 
@@ -369,7 +432,7 @@ backport_one() {
   # is inert for this whole function, so a failure here would otherwise fall
   # through to `git apply` and be reported to the contributor as a conflict in
   # their patch.
-  if ! git worktree add --quiet --detach "${worktree}" "${remote}/${V1_BRANCH}"; then
+  if ! git worktree add --quiet --detach "${worktree}" "${remote}/${TARGET_BRANCH}"; then
     warn "  could not create worktree ${worktree}"
     return 3
   fi
@@ -389,24 +452,40 @@ backport_one() {
     return 3
   fi
 
-  # A main squash commit has a single parent, so `git show` is the whole change.
-  # Rewriting the module path makes the context lines match the v1 tree, which
-  # is what lets the patch apply directly.
-  git show --binary --format= "${sha}" "${pathspec[@]}" |
-    sed "s|${V2_MODULE}|${V1_MODULE}|g" |
-    # Put back the one place that rewrite is wrong: a go.mod require line reads
-    # `google.golang.org/adk/v2 v2.0.0`, and dropping the /v2 leaves
-    # `google.golang.org/adk v2.0.0`, which the go tool rejects outright
-    # ("should be v0 or v1, not v2"). Left alone the hunk simply fails to
-    # apply, which is the honest outcome: the 1.x dependency set differs.
-    sed -E "s|${V1_MODULE} (v2[0-9.])|${V2_MODULE} \1|g" >"${patch}"
+  # A squash commit has a single parent, so `git show` is the whole change.
+  # When source and target branches use different module paths, rewriting the
+  # module path makes context lines match the target tree.
+  #
+  # PIPESTATUS is captured inside each branch immediately after the pipeline:
+  # errexit is inert in this function (the call site is `|| status=$?`), so a
+  # failed `git show` would otherwise leave an empty file and be tallied as a
+  # benign skip on a green run.
+  local -a pipe_status=()
+  if needs_module_rewrite; then
+    local src_re target_re src_major=""
+    src_re="$(escape_sed_ere "${SOURCE_MODULE}")"
+    target_re="$(escape_sed_ere "${TARGET_MODULE}")"
+    if [[ "${SOURCE_MODULE}" =~ /v([0-9]+)$ ]]; then
+      src_major="${BASH_REMATCH[1]}"
+    fi
+    if [[ -n "${src_major}" ]]; then
+      # Put back go.mod require lines whose version matches the source major
+      # (e.g. `google.golang.org/adk/v2 v2.0.0`), because dropping the /vN
+      # suffix produces an invalid go.mod line that the go tool rejects.
+      git show --binary --format= "${sha}" "${pathspec[@]}" |
+        LC_ALL=C sed -E "s|${src_re}|${TARGET_MODULE}|g" |
+        LC_ALL=C sed -E "s|${target_re} (v${src_major}[0-9.])|${SOURCE_MODULE} \1|g" >"${patch}"
+      pipe_status=("${PIPESTATUS[@]}")
+    else
+      git show --binary --format= "${sha}" "${pathspec[@]}" |
+        LC_ALL=C sed -E "s|${src_re}|${TARGET_MODULE}|g" >"${patch}"
+      pipe_status=("${PIPESTATUS[@]}")
+    fi
+  else
+    git show --binary --format= "${sha}" "${pathspec[@]}" >"${patch}"
+    pipe_status=("${PIPESTATUS[@]}")
+  fi
 
-  # Checked, and checked before the emptiness test. errexit is inert in this
-  # function (the call site is `|| status=$?`), so a failed `git show` would
-  # otherwise leave an empty file, be read as "nothing to backport", and be
-  # tallied as a benign skip on a green run. Of the four return codes 2 is the
-  # one that quietly absorbs tooling failure, so it has to be earned.
-  local -a pipe_status=("${PIPESTATUS[@]}")
   local stage
   for stage in "${pipe_status[@]}"; do
     if [[ "${stage}" -ne 0 ]]; then
@@ -444,13 +523,13 @@ backport_one() {
     # resolve the conflicts, then drop the .rej files git apply left behind:
     find . -name '*.rej' -delete
     # -A, so files the patch *added* are included; the delete above is what
-    # keeps .rej files off ${V1_BRANCH}:
+    # keeps .rej files off ${TARGET_BRANCH}:
     git add -A
     git commit -m '<subject>
 
 (cherry picked from commit ${sha})'
     git push ${remote} HEAD:refs/heads/${branch}
-    gh pr create --repo ${REPO} --base ${V1_BRANCH} --head ${branch}
+    gh pr create --repo ${REPO} --base ${TARGET_BRANCH} --head ${branch}
 
   The worktree is detached on purpose, so the push needs the HEAD:refs/heads/
   form: there is no local branch of that name to push by name.
@@ -466,9 +545,18 @@ EOF
 
   # Command substitution strips trailing newlines, so appending a blank line
   # here always leaves exactly one before the trailer. It matters: around one in
-  # eight main squash commits has no body, and without the separator git folds
-  # the trailer into the subject and the PR title ends in a bare 40-char SHA.
-  message="$(git log -1 --format=%B "${sha}" | sed "s|${V2_MODULE}|${V1_MODULE}|g")
+  # eight squash commits has no body, and without the separator git folds the
+  # trailer into the subject and the PR title ends in a bare 40-char SHA.
+  local raw_message
+  if ! raw_message="$(git log -1 --format=%B "${sha}")" || [[ -z "${raw_message}" ]]; then
+    warn "  could not read commit message for ${sha}"
+    cleanup_worktree "${worktree}"
+    return 3
+  fi
+  if needs_module_rewrite; then
+    raw_message="${raw_message//"${SOURCE_MODULE}"/"${TARGET_MODULE}"}"
+  fi
+  message="${raw_message}
 
 (cherry picked from commit ${sha})"
 
@@ -493,8 +581,8 @@ EOF
 open_backport_pr() {
   local remote="$1" pr="$2" branch="$3" worktree="$4" subject="$5" url
 
-  # The invariant is held by construction: `branch` is the readonly prefix plus
-  # an integer. This is an assertion against a future refactor passing something
+  # The invariant is held by construction: `branch` is the prefix plus an
+  # integer. This is an assertion against a future refactor passing something
   # else, not the thing that makes it safe. The second guard is load-bearing: a
   # branch with no commits pushes fine and then fails at PR creation, leaving an
   # orphan behind. Both read HEAD, which is what the push sends.
@@ -503,8 +591,8 @@ open_backport_pr() {
     cleanup_worktree "${worktree}"
     return 3
   fi
-  if [[ "$(git -C "${worktree}" rev-list --count "${remote}/${V1_BRANCH}..HEAD")" -eq 0 ]]; then
-    warn "nothing to push for #${pr}: HEAD is ${V1_BRANCH}"
+  if [[ "$(git -C "${worktree}" rev-list --count "${remote}/${TARGET_BRANCH}..HEAD")" -eq 0 ]]; then
+    warn "nothing to push for #${pr}: HEAD is ${TARGET_BRANCH}"
     cleanup_worktree "${worktree}"
     return 3
   fi
@@ -516,15 +604,20 @@ open_backport_pr() {
     return 3
   fi
 
+  local rewrite_note=""
+  if needs_module_rewrite; then
+    rewrite_note="
+
+Import paths were rewritten from \`${SOURCE_MODULE}\` to \`${TARGET_MODULE}\`; the change
+is otherwise identical to the original."
+  fi
+
   local err
   err="$(mktemp "${TMPDIR:-/tmp}/adk-backport-err.XXXXXX")"
-  url="$(gh pr create --repo "${REPO}" --base "${V1_BRANCH}" --head "${branch}" \
-    --title "${subject}" --body "Backports #${pr} from \`${MAIN_BRANCH}\` to \`${V1_BRANCH}\`.
+  url="$(gh pr create --repo "${REPO}" --base "${TARGET_BRANCH}" --head "${branch}" \
+    --title "${subject}" --body "Backports #${pr} from \`${SOURCE_BRANCH}\` to \`${TARGET_BRANCH}\`.${rewrite_note}
 
-Import paths were rewritten from \`${V2_MODULE}\` to \`${V1_MODULE}\`; the change
-is otherwise identical to the original.
-
-A clean apply is not a correct backport — 1.x can lack a helper that main
+A clean apply is not a correct backport — \`${TARGET_BRANCH}\` can lack a helper that \`${SOURCE_BRANCH}\`
 already had — so read the diff rather than just the checks.
 
 If the merge box says the workflows are awaiting approval, click **Approve
@@ -560,8 +653,11 @@ Generated by \`scripts/backport.sh\`." 2>"${err}")" || {
 
   # Labelled separately: `gh pr create --label` fails outright on a label the
   # repository does not have, and the pull request is already open by now.
-  gh pr edit "${url##*/}" --repo "${REPO}" --add-label "${V1_LABEL}" >/dev/null ||
-    warn "could not add the '${V1_LABEL}' label; add it by hand"
+  local label
+  for label in "${TARGET_LABELS[@]}"; do
+    gh pr edit "${url##*/}" --repo "${REPO}" --add-label "${label}" >/dev/null ||
+      warn "could not add the '${label}' label; add it by hand"
+  done
 
   # Explicit: as the last statement, cleanup_worktree's status would become this
   # function's, so a worktree that refused to go away would report a landed
@@ -589,16 +685,19 @@ main() {
 
   # Spell the refspecs out. A CI checkout configures a narrow remote.fetch
   # covering only the branch it cloned, and under it a bare `git fetch <remote>
-  # v1` updates FETCH_HEAD without ever writing refs/remotes/<remote>/v1, which
-  # everything below refers to.
+  # <branch>` updates FETCH_HEAD without ever writing refs/remotes/<remote>/<branch>,
+  # which everything below refers to.
   git fetch --quiet "${remote}" \
-    "+refs/heads/${MAIN_BRANCH}:refs/remotes/${remote}/${MAIN_BRANCH}" \
-    "+refs/heads/${V1_BRANCH}:refs/remotes/${remote}/${V1_BRANCH}" ||
-    die "failed to fetch ${MAIN_BRANCH} and ${V1_BRANCH} from ${remote}"
+    "+refs/heads/${SOURCE_BRANCH}:refs/remotes/${remote}/${SOURCE_BRANCH}" \
+    "+refs/heads/${TARGET_BRANCH}:refs/remotes/${remote}/${TARGET_BRANCH}" ||
+    die "failed to fetch ${SOURCE_BRANCH} and ${TARGET_BRANCH} from ${remote}"
 
-  git merge-base "${remote}/${MAIN_BRANCH}" "${remote}/${V1_BRANCH}" >/dev/null 2>&1 ||
-    die "${MAIN_BRANCH} and ${V1_BRANCH} have no common ancestor here; a shallow
+  git merge-base "${remote}/${SOURCE_BRANCH}" "${remote}/${TARGET_BRANCH}" >/dev/null 2>&1 ||
+    die "${SOURCE_BRANCH} and ${TARGET_BRANCH} have no common ancestor here; a shallow
 clone cannot be used, check out with fetch-depth: 0"
+
+  SOURCE_MODULE="$(module_path_at "${remote}/${SOURCE_BRANCH}")"
+  TARGET_MODULE="$(module_path_at "${remote}/${TARGET_BRANCH}")"
 
   # Explicit numbers are filtered out of the same queue rather than resolved
   # separately, so a hand-run and an unattended run cannot disagree about what
@@ -620,11 +719,11 @@ clone cannot be used, check out with fetch-depth: 0"
       # contributor to run, so "nothing pending" reads as though their PR does
       # not need a backport at all.
       info "nothing to do for ${prs[*]/#/#}. A PR is skipped when it is already
-  on '${V1_BRANCH}', when its '${BRANCH_PREFIX}<n>' branch is already pushed, or
-  when it is not a merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}'.
+  on '${TARGET_BRANCH}', when its '${BRANCH_PREFIX}<n>' branch is already pushed, or
+  when it is not a merged '${SOURCE_BRANCH}' PR labelled '${BACKPORT_LABEL}'.
   Run --list to see the whole queue."
     else
-      info "nothing pending: no merged '${MAIN_BRANCH}' PR labelled '${BACKPORT_LABEL}' is missing from '${V1_BRANCH}'"
+      info "nothing pending: no merged '${SOURCE_BRANCH}' PR labelled '${BACKPORT_LABEL}' is missing from '${TARGET_BRANCH}'"
     fi
     return 0
   fi
@@ -665,13 +764,19 @@ clone cannot be used, check out with fetch-depth: 0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -t | --target)
+      [[ $# -ge 2 ]] || die "--target requires a value (v1 or main)"
+      target="$2"
+      shift
+      ;;
+    --target=*)
+      target="${1#*=}"
+      [[ -n "${target}" ]] || die "--target requires a value (v1 or main)"
+      ;;
     -l | --list) list_only=true ;;
     -p | --pr) open_pr=true ;;
     --skip-gomod) skip_gomod=true ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
+    -h | --help) show_help=true ;;
     -*) die "unknown option: $1" ;;
     *)
       [[ "$1" =~ ^[0-9]+$ ]] || die "not a PR number: $1"
@@ -680,5 +785,11 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+configure_target "${target}"
+if [[ "${show_help}" == true ]]; then
+  usage
+  exit 0
+fi
 
 main
