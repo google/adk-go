@@ -433,10 +433,12 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 	if c.autoCreateSession {
 		return nil
 	}
+	// The runner reads the events when the run starts, so this read skips them.
 	_, err := c.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:       appName,
+		UserID:        userID,
+		SessionID:     sessionID,
+		ExcludeEvents: true,
 	})
 	if err != nil {
 		// A session the service reports missing, or one the request does not

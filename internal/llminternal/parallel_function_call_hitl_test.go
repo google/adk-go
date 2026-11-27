@@ -55,6 +55,8 @@ func (m *hitlMockModel) Name() string {
 	return "hitl-mock-model"
 }
 
+func (*hitlMockModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *hitlMockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.Calls++

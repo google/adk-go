@@ -269,6 +269,20 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 	}
 }
 
+func TestNewModel_Capabilities(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			if !llm.Capabilities().AcceptsOutputSchemaAndTools {
+				t.Error("Capabilities().AcceptsOutputSchemaAndTools = false, want true")
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

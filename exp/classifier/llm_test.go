@@ -68,6 +68,8 @@ func (f *fakeLLM) Name() string {
 	return f.name
 }
 
+func (*fakeLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (f *fakeLLM) GenerateContent(_ context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		f.mu.Lock()
@@ -323,6 +325,8 @@ type scriptedLLM struct {
 }
 
 func (s *scriptedLLM) Name() string { return "scripted" }
+
+func (*scriptedLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (s *scriptedLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
