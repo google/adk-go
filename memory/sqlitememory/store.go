@@ -53,6 +53,9 @@ type Config struct {
 	DB *sql.DB
 	// FTS controls full-text search: "auto" (the default) uses FTS5 when
 	// available, "on" requires it, and "off" uses substring matching.
+	// FTS5 matches whole words and ignores diacritics, so the modes can return
+	// different results. Queries with Chinese, Japanese, Korean or Thai text
+	// use substring matching in every mode.
 	// Reopening a database with an existing FTS index requires an FTS5-capable driver.
 	FTS string
 	// MaxEventBytes limits the UTF-8 bytes used to make each event searchable. Zero
