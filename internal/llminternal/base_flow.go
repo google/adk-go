@@ -208,16 +208,17 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 	return true
 }
 
-// isSpaceOrSeparator reports whether r is whitespace: a rune unicode.IsSpace
-// reports, or one of the file, group, record and unit separators U+001C to
-// U+001F.
+// isSpaceOrSeparator reports whether r is whitespace or an ASCII information
+// separator (U+001C to U+001F). unicode.IsSpace excludes those four control
+// separators, so checking them explicitly prevents separator-only text from
+// counting as visible output.
 func isSpaceOrSeparator(r rune) bool {
 	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
 }
 
-// hasMeaningfulContent reports whether resp holds a part a caller can act on:
-// a function call or response, executable code or its result, inline or file
-// data, or text that is not a thought and not only whitespace.
+// hasMeaningfulContent reports whether resp holds at least one part a caller
+// or the flow loop can act on. A response with no parts, only thought parts,
+// or only whitespace text returns false.
 func hasMeaningfulContent(resp *model.LLMResponse) bool {
 	if !hasParts(resp) {
 		return false
@@ -226,10 +227,21 @@ func hasMeaningfulContent(resp *model.LLMResponse) bool {
 		if p == nil {
 			continue
 		}
+		// Standalone non-text payloads a caller or the flow loop can act on.
+		// Qualifier and metadata fields (VideoMetadata, MediaResolution,
+		// MediaProcessing, PartMetadata, SpeechMetadata, ThoughtSignature) only
+		// annotate another payload, and AudioTranscription accompanies an audio
+		// part (live-session transcriptions arrive on
+		// LLMResponse.OutputTranscription outside runOneStep), so none of them
+		// counts on its own.
 		if p.FunctionCall != nil || p.FunctionResponse != nil || p.ExecutableCode != nil ||
 			p.CodeExecutionResult != nil || p.InlineData != nil || p.FileData != nil {
 			return true
 		}
+		// Thought parts carry internal model reasoning that callers skip (for
+		// example, agenttool ignores Thought parts) and UIs hide or collapse,
+		// while whitespace-only text carries no visible reply. Only non-thought
+		// text with at least one visible character counts as an answer.
 		if !p.Thought && strings.TrimFunc(p.Text, isSpaceOrSeparator) != "" {
 			return true
 		}
@@ -257,22 +269,27 @@ const (
 	noMeaningfulContentErrorMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
 )
 
-// applyEmptyResponsePolicy marks a completed response that finished with STOP
-// but holds no meaningful content (no parts, only thought parts, or only
-// whitespace text) as an error, so that the turn ends with an error event the
-// caller can act on instead of a silent empty answer. It sets resp.ErrorCode
-// to MODEL_RETURNED_NO_CONTENT and, unless resp already has an error message,
-// a message that says whether the response had no parts or only thought or
-// whitespace parts.
+// applyEmptyResponsePolicy marks a completed STOP response that lacks
+// meaningful content (no parts, only thought parts, or only whitespace text)
+// as a model error event by mutating resp in place.
 //
-// It leaves resp unchanged when resp is partial, already has an error code, or
-// finished for another reason. Under SSE streaming it also leaves a response
-// without parts unchanged.
+// Without this, a nil-content STOP turn would be dropped by runOneStep's skip
+// guard and a thought-only or whitespace-only STOP turn would end as a blank
+// reply. Setting resp.ErrorCode to MODEL_RETURNED_NO_CONTENT (and a default
+// resp.ErrorMessage when none is set) instead of returning a Go error keeps
+// the runner yielding and persisting the event, matching how other model-level
+// errors are reported to callers and to agenttool.
 //
-// It must run after the after-model callbacks and before the response
-// processors: emptiness is a property of what the model returned, and a
-// processor may clear the content on purpose, as the code execution processor
-// does.
+// Partial responses, responses that already carry an ErrorCode, and non-STOP
+// responses are left unchanged. Under SSE streaming, the aggregator folds a
+// turn into one non-partial response, so a non-partial STOP response with only
+// thought or whitespace parts is still flagged, whereas one with no parts is
+// exempt because a finish-only chunk with no parts can close a stream.
+//
+// Callers must run this after model callbacks (so AfterModelCallbacks can
+// inspect or replace an empty reply first) and before response processors (a
+// processor may clear resp.Content to nil deliberately to trigger another flow
+// step, as code execution does once it emits its result).
 func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMResponse) {
 	if resp == nil || resp.Partial || resp.ErrorCode != "" || resp.FinishReason != genai.FinishReasonStop || hasMeaningfulContent(resp) {
 		return
@@ -1028,6 +1045,14 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			// Judge the response after callLLM (so BeforeModel, OnModelError,
+			// and AfterModel callbacks have all had a chance to supply or
+			// repair it) and before f.postprocess (a response processor may
+			// clear resp.Content to nil deliberately to loop again, which must
+			// not be flagged as an empty model turn). Mutating resp.LLMResponse
+			// in place ensures the skip guard below preserves a nil-content
+			// STOP turn as an error event and finalizeModelResponseEvent copies
+			// the stamped error fields into the yielded event.
 			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
 			if err := f.postprocess(ctx, req, resp); err != nil {
 				yield(nil, err)

@@ -27,7 +27,8 @@
 // thought or whitespace parts. The check runs after the AfterModelCallbacks,
 // on the response a callback put in place of the model's, and leaves a
 // response that already has an ErrorCode as it is. Under
-// [agent.StreamingModeSSE], a response without parts is exempt.
+// [agent.StreamingModeSSE], a response without parts is exempt, because a
+// finish-only chunk with no parts can close a stream.
 //
 // After a thought-only response that did not finish with STOP, the agent calls
 // the model again, up to ten thought-only responses in a row, and then ends its
