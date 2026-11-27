@@ -230,6 +230,120 @@ func TestNewModelWithoutProxyURL(t *testing.T) {
 	}
 }
 
+func TestNewModelBlankConfigTreatedAsUnset(t *testing.T) {
+	tests := []struct {
+		name    string
+		vertex  bool
+		env     map[string]string
+		opts    []Option
+		wantErr string
+	}{
+		{
+			name:    "blank proxy URL env",
+			env:     map[string]string{apigeeProxyURLEnvVar: "   "},
+			wantErr: apigeeProxyURLEnvVar,
+		},
+		{
+			name:    "blank proxy URL option and no env",
+			env:     map[string]string{apigeeProxyURLEnvVar: ""},
+			opts:    []Option{WithProxyURL("   ")},
+			wantErr: apigeeProxyURLEnvVar,
+		},
+		{
+			name:    "blank project",
+			vertex:  true,
+			env:     map[string]string{projectEnvVar: "  ", locationEnvVar: "us-central1"},
+			opts:    []Option{WithProxyURL(proxyURL)},
+			wantErr: projectEnvVar,
+		},
+		{
+			name:    "blank location",
+			vertex:  true,
+			env:     map[string]string{projectEnvVar: "p", locationEnvVar: "  "},
+			opts:    []Option{WithProxyURL(proxyURL)},
+			wantErr: locationEnvVar,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			if tt.vertex {
+				t.Setenv(googleGenaiUseVertexAIEnvVar, "true")
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			_, err := NewModel(t.Context(), "apigee/gemini-1.5-flash", tt.opts...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("NewModel() error = %v, want error mentioning %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewModelBlankProxyURLOptionFallsBackToEnv(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "test-key")
+	t.Setenv(apigeeProxyURLEnvVar, "https://env.proxy.url")
+	if _, err := NewModel(t.Context(), "apigee/gemini-1.5-flash", WithProxyURL("   ")); err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if got := resolveProxyURL("   "); got != "https://env.proxy.url" {
+		t.Errorf("resolveProxyURL(blank) = %q, want env value", got)
+	}
+}
+
+func TestGenerateContentProxyURLResolution(t *testing.T) {
+	const envURL = "https://env.apigee.net"
+	tests := []struct {
+		name    string
+		opts    []Option
+		wantURL string
+	}{
+		{
+			name:    "blank option uses env URL",
+			opts:    []Option{WithProxyURL("   ")},
+			wantURL: envURL + "/v1/models/gemini-1.5-flash:generateContent",
+		},
+		{
+			name:    "padded option URL is trimmed",
+			opts:    []Option{WithProxyURL("  https://opt.apigee.net  ")},
+			wantURL: "https://opt.apigee.net/v1/models/gemini-1.5-flash:generateContent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			t.Setenv(googleGenaiUseVertexAIEnvVar, "")
+			t.Setenv(apigeeProxyURLEnvVar, envURL)
+			var gotURLs []string
+			client := newTestClient(func(req *http.Request) (*http.Response, error) {
+				gotURLs = append(gotURLs, req.URL.String())
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"role":"model","parts":[{"text":"Paris"}]},"finishReason":"STOP"}]}`)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			})
+			m, err := NewModel(t.Context(), "apigee/gemini/v1/gemini-1.5-flash", append(tt.opts, WithHTTPClient(client))...)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			req := &model.LLMRequest{
+				Model:    m.Name(),
+				Contents: genai.Text("hi"),
+			}
+			for _, err := range m.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff([]string{tt.wantURL}, gotURLs); diff != "" {
+				t.Errorf("request URLs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
