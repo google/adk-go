@@ -251,7 +251,11 @@ information on using pull requests.
     associated. If a relevant issue doesn't exist, please create one first, then
     reference it from the PR description with `Closes: #<number>` or
     `Related: #<number>`. Describe the problem and the solution in the PR
-    description as well, following the structure of our issue templates.
+    description as well, following the structure of our issue templates. For
+    the release notes to link the issue a PR fixes, the merged commit message
+    must also end with a line such as `Fixes #<number>`. On a single-commit PR,
+    end your commit message with it. On a PR with several commits, the
+    maintainer who merges moves it to the end of the squash message.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
 -   Library code must not write diagnostics to stdout, stderr, the standard
     `log` package's logger or `slog`'s default logger, and `golangci-lint`
@@ -285,7 +289,7 @@ First install the `golangci-lint` version CI pins. A newer release reports
 findings CI does not, which reads as a failure you did not cause:
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ```
 
 Then set up the Go workspace and run every module:

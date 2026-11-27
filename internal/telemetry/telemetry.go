@@ -23,7 +23,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -55,11 +57,23 @@ var (
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
-var tracerProvider = otel.GetTracerProvider()
+var defaultTracerProvider = otel.GetTracerProvider()
+
+// tracerOverride is atomic because goroutines a test leaves behind, such as a
+// live session's tool calls, can still be starting spans when the next test
+// swaps the provider.
+var tracerOverride atomic.Pointer[trace.TracerProvider]
+
+func tracerProvider() trace.TracerProvider {
+	if tp := tracerOverride.Load(); tp != nil {
+		return *tp
+	}
+	return defaultTracerProvider
+}
 
 // tracer is looked up per use, since the schema URL follows the env.
 func tracer() trace.Tracer {
-	return tracerProvider.Tracer(
+	return tracerProvider().Tracer(
 		systemName,
 		trace.WithInstrumentationVersion(version.Version),
 		trace.WithSchemaURL(schemaURL()),
@@ -76,9 +90,8 @@ func schemaURL() string {
 
 // OverrideTracerForTesting makes tracing use tp until the test ends.
 func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
-	original := tracerProvider
-	tracerProvider = tp
-	t.Cleanup(func() { tracerProvider = original })
+	original := tracerOverride.Swap(&tp)
+	t.Cleanup(func() { tracerOverride.Store(original) })
 }
 
 type TraceAgentResultParams struct {
@@ -140,6 +153,9 @@ type generateContentResult struct {
 	// Responses are every response of the call, in order, ending with
 	// Response. Nil means Response alone. The legacy schema reads only Response.
 	Responses []*model.LLMResponse
+	// RequestModel is the model name requested for the call, used as a
+	// fallback for gen_ai.response.model when no response reports ModelVersion.
+	RequestModel string
 }
 
 func (r generateContentResult) responses() []*model.LLMResponse {
@@ -149,6 +165,24 @@ func (r generateContentResult) responses() []*model.LLMResponse {
 	return r.Responses
 }
 
+// responseModel returns the latest non-empty ModelVersion reported by the
+// response(s), falling back to RequestModel when none is reported, matching
+// adk-python's _response_model.
+func (r generateContentResult) responseModel() string {
+	if useLegacySchema() {
+		if r.Response != nil && r.Response.ModelVersion != "" {
+			return r.Response.ModelVersion
+		}
+		return r.RequestModel
+	}
+	for _, response := range slices.Backward(r.responses()) {
+		if response.ModelVersion != "" {
+			return response.ModelVersion
+		}
+	}
+	return r.RequestModel
+}
+
 // usage is the token usage of the latest response that reports any, as a
 // stream may repeat it on every chunk or put it on one.
 func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetadata {
@@ -156,8 +190,8 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 		return r.Response.UsageMetadata
 	}
 	responses := r.responses()
-	for i := len(responses) - 1; i >= 0; i-- {
-		if u := responses[i].UsageMetadata; u != nil {
+	for _, response := range slices.Backward(responses) {
+		if u := response.UsageMetadata; u != nil {
 			return u
 		}
 	}
@@ -193,6 +227,9 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 		return attrs
 	}
 	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
+	if model := params.responseModel(); model != "" {
+		attrs = append(attrs, semconv.GenAIResponseModel(model))
+	}
 	if u := params.usage(); u != nil {
 		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
@@ -303,10 +340,19 @@ func RecordError(span trace.Span, err error) {
 	}
 }
 
+// RecordPanic records err, the error for a recovered panic, as an exception on
+// span when content capture on spans is enabled. Otherwise it records nothing,
+// because the text of err carries the panic value, which may be user data, and
+// the goroutine stack.
+func RecordPanic(span trace.Span, err error) {
+	if captureContentOnSpans() {
+		span.RecordError(err)
+	}
+}
+
 // errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
 func errorType(err error) attribute.KeyValue {
-	var apiErr genai.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
 		return semconv.ErrorTypeKey.String(strconv.Itoa(apiErr.Code))
 	}
 	return semconv.ErrorType(err)

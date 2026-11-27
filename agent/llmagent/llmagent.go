@@ -30,6 +30,7 @@ import (
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -96,6 +97,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			OutputArtifact:            cfg.OutputArtifact,
 		},
 	}
 
@@ -135,8 +137,40 @@ func New(cfg Config) (agent.Agent, error) {
 	if err := installTaskTools(a); err != nil {
 		return nil, err
 	}
+	if a.OutputArtifact != "" && llminternal.NeedsOutputSchemaProcessor(&a.State) {
+		return nil, fmt.Errorf("agent %q cannot combine OutputArtifact %q with OutputSchema: model %q cannot use OutputSchema together with %s without the set_model_response tool, which OutputArtifact does not support; remove OutputSchema or OutputArtifact, or use a model that supports OutputSchema with tools, such as Gemini 2.0 or later on Vertex AI", cfg.Name, cfg.OutputArtifact, cfg.Model.Name(), describeTools(&a.State))
+	}
 
 	return a, nil
+}
+
+// describeTools lists the tools and toolsets on state for an error message.
+// Tools that New installs for task and single-turn sub-agents are labeled, since
+// the caller did not add them to Config.Tools.
+func describeTools(state *llminternal.State) string {
+	var parts []string
+	if len(state.Tools) > 0 {
+		names := make([]string, len(state.Tools))
+		for i, t := range state.Tools {
+			switch t.(type) {
+			case *workflowinternal.SingleTurnTool:
+				names[i] = t.Name() + " (single-turn sub-agent)"
+			case *workflowinternal.TaskAgentTool:
+				names[i] = t.Name() + " (task sub-agent)"
+			default:
+				names[i] = t.Name()
+			}
+		}
+		parts = append(parts, fmt.Sprintf("tools [%s]", strings.Join(names, ", ")))
+	}
+	if len(state.Toolsets) > 0 {
+		names := make([]string, len(state.Toolsets))
+		for i, ts := range state.Toolsets {
+			names[i] = ts.Name()
+		}
+		parts = append(parts, fmt.Sprintf("toolsets [%s]", strings.Join(names, ", ")))
+	}
+	return strings.Join(parts, " and ")
 }
 
 func installTaskTools(a *llmAgent) error {
@@ -241,8 +275,10 @@ type Config struct {
 	// The string is treated as a template:
 	//  - There can be placeholders like {key_name} that will be resolved by ADK
 	//    at runtime using session state and context.
-	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
-	//    treated as a literal.
+	//  - key_name must be an underscore or a Unicode ID_Start character
+	//    followed by Unicode ID_Continue characters, optionally after an
+	//    app:, user: or temp: prefix; otherwise the placeholder is left
+	//    as literal text.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
 	//  - A placeholder directly preceded by $ or \ is treated as a literal,
@@ -272,8 +308,10 @@ type Config struct {
 	// The string is treated as a template:
 	//  - There can be placeholders like {key_name} that will be resolved by ADK
 	//    at runtime using session state and context.
-	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
-	//    treated as a literal.
+	//  - key_name must be an underscore or a Unicode ID_Start character
+	//    followed by Unicode ID_Continue characters, optionally after an
+	//    app:, user: or temp: prefix; otherwise the placeholder is left
+	//    as literal text.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
 	//  - A placeholder directly preceded by $ or \ is treated as a literal,
@@ -341,6 +379,41 @@ type Config struct {
 	// - Connects agents to coordinate with each other.
 	OutputKey string
 
+	// OutputArtifact is an optional artifact filename under which the agent's
+	// final text reply is saved as a new revision.
+	//
+	// When set, the reply text is written to the invocation's artifact service,
+	// the saved version is recorded in EventActions.ArtifactDelta, and the
+	// event's non-thought text parts are replaced with the reference
+	// `Saved artifact "<name>" (version <N>).`. The event's content then
+	// carries the reference instead of the body, so the body is not replayed
+	// from the session's events on later turns.
+	//
+	// OutputKey still receives the full reply, or the value parsed against
+	// OutputSchema when OutputSchema is set. That value is written to the same
+	// event's EventActions.StateDelta, which session services store with the
+	// event, so with OutputKey set the body is persisted in the session's
+	// events and state, and an instruction placeholder for the key carries it
+	// into later turns. Leave OutputKey empty to keep the body out of the
+	// session entirely.
+	//
+	// The reference is also what the agent hands to its callers: the output of
+	// a workflow node running the agent, the function response of an agent
+	// tool or single-turn sub-agent tool, and the input of a successor node.
+	// This holds when OutputSchema is set, so a typed node whose output type is
+	// an object, such as one built with workflow.NewAgentNodeTyped, fails
+	// output validation. Callers read the body with the load_artifacts tool or
+	// the artifact service.
+	//
+	// Nothing is saved in task mode (ModeTask), where the agent's result
+	// arrives through the finish_task tool rather than in a final text reply.
+	//
+	// Saving requires an artifact service on the runner; the run fails if none
+	// is configured. Live runs (RunLive) and models that require the
+	// set_model_response tool workaround for OutputSchema with tools are not
+	// supported when OutputArtifact is set and return an error.
+	OutputArtifact string
+
 	// Mode is the delegation mode for this agent.
 	//
 	// Options:
@@ -398,6 +471,9 @@ type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, 
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
+// The edits reach the tool and the callbacks that run after this one for the
+// same call. They do not reach the function call event, which keeps the
+// arguments the model sent in the session and in later model requests.
 type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
@@ -468,7 +544,12 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 	return func(yield func(*session.Event, error) bool) {
 		for ev, err := range f.Run(ctx) {
-			a.maybeSaveOutputToState(ev)
+			if err == nil {
+				if saveErr := a.maybeSaveOutput(ctx, ev); saveErr != nil {
+					yield(nil, saveErr)
+					return
+				}
+			}
 			if !yield(ev, err) {
 				return
 			}
@@ -477,6 +558,10 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 }
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if a.OutputArtifact != "" {
+		return nil, nil, fmt.Errorf("agent %q cannot use OutputArtifact %q in RunLive: live mode is not supported", a.Name(), a.OutputArtifact)
+	}
+
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:      ctx.Artifacts(),
 		Memory:         ctx.Memory(),
@@ -520,6 +605,14 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return sess, wrappedIter, nil
 }
 
+func (a *llmAgent) maybeSaveOutput(ctx agent.InvocationContext, event *session.Event) error {
+	if a.SavedOutputArtifact(event) {
+		return nil
+	}
+	a.maybeSaveOutputToState(event)
+	return a.maybeSaveOutputToArtifact(ctx, event)
+}
+
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event
 // was authored by some other agent (e.g. current agent transferred to another agent)
 func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
@@ -530,11 +623,21 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
+	// A task agent delivers its result through finish_task, which runTask writes
+	// to OutputKey. Its text turns (a clarification question, a greeting) are
+	// not the result. runTask runs only when the task agent is entered as a node
+	// (its RunNode method or RunLLMAgentAsNode), whichever agent sits above it.
+	// When it is run through Run (as SequentialAgent, LoopAgent and
+	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
+	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
+	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
+		return
+	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
 		hasTextPart := false
 		for _, part := range event.Content.Parts {
-			if part.Text != "" && !part.Thought {
+			if part != nil && part.Text != "" && !part.Thought {
 				hasTextPart = true
 				sb.WriteString(part.Text)
 			}
@@ -560,6 +663,71 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 
 		event.Actions.StateDelta[a.OutputKey] = result
 	}
+}
+
+func (a *llmAgent) maybeSaveOutputToArtifact(ctx agent.InvocationContext, event *session.Event) error {
+	if a.OutputArtifact == "" || event == nil || event.Author != a.Name() {
+		return nil
+	}
+	mode := llminternal.ModeFor(ctx, a.Name(), &a.State)
+	if mode == llminternal.ModeTask {
+		return nil
+	}
+	if !event.IsFinalResponse() || event.Content == nil || len(event.Content.Parts) == 0 {
+		return nil
+	}
+	if len(utils.FunctionCalls(event.Content)) > 0 || len(utils.FunctionResponses(event.Content)) > 0 {
+		return nil
+	}
+	var sb strings.Builder
+	hasTextPart := false
+	for _, part := range event.Content.Parts {
+		if part != nil && part.Text != "" && !part.Thought {
+			hasTextPart = true
+			sb.WriteString(part.Text)
+		}
+	}
+	if !hasTextPart {
+		return nil
+	}
+	result := sb.String()
+
+	if a.OutputSchema != nil {
+		if strings.TrimSpace(result) == "" {
+			return nil
+		}
+		parsed, err := utils.ValidateOutputSchema(result, a.OutputSchema)
+		if err != nil {
+			return fmt.Errorf("LlmAgent %q output validation failed", a.Name())
+		}
+		if a.OutputKey != "" {
+			if event.Actions.StateDelta == nil {
+				event.Actions.StateDelta = make(map[string]any)
+			}
+			event.Actions.StateDelta[a.OutputKey] = parsed
+		}
+	}
+
+	if ctx.Artifacts() == nil {
+		return fmt.Errorf("agent %q cannot save OutputArtifact %q: artifact service is not configured", a.Name(), a.OutputArtifact)
+	}
+	cbCtx := agent.NewCallbackContextWithArtifactTracking(ctx, &event.Actions)
+	resp, err := cbCtx.Artifacts().Save(ctx, a.OutputArtifact, genai.NewPartFromText(result))
+	if err != nil {
+		return fmt.Errorf("agent %q failed to save OutputArtifact %q: %w", a.Name(), a.OutputArtifact, err)
+	}
+
+	kept := make([]*genai.Part, 0, len(event.Content.Parts))
+	for _, part := range event.Content.Parts {
+		if part != nil && (part.Text == "" || part.Thought) {
+			kept = append(kept, part)
+		}
+	}
+	kept = append(kept, genai.NewPartFromText(llminternal.OutputArtifactReference(a.OutputArtifact, resp.Version)))
+	contentCopy := *event.Content
+	contentCopy.Parts = kept
+	event.Content = &contentCopy
+	return nil
 }
 
 // FindAgent finds a sub-agent by name.

@@ -44,7 +44,7 @@ func (m *audioMockArtifacts) Load(ctx context.Context, name string) (*artifact.L
 	return nil, nil
 }
 
-func (m *audioMockArtifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+func (m *audioMockArtifacts) LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error) {
 	return nil, nil
 }
 

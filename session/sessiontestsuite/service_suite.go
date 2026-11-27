@@ -18,6 +18,7 @@ package sessiontestsuite
 
 import (
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,9 +52,7 @@ func Snapshot(s session.Session) ExpectedSession {
 
 	state := make(map[string]any)
 	if s.State() != nil {
-		for k, v := range s.State().All() {
-			state[k] = v
-		}
+		maps.Insert(state, s.State().All())
 	}
 
 	var events []*session.Event
@@ -307,6 +306,45 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 			if gotCombined.Session.Events().Len() != 2 {
 				t.Errorf("Get Combined filters len = %d, want 2", gotCombined.Session.Events().Len())
+			}
+		})
+
+		// ExcludeEvents is part of the Get contract, as num_recent_events=0
+		// is in adk-python, so every Service runs this case.
+		t.Run("exclude_events", func(t *testing.T) {
+			s := setup(t)
+			ctx := t.Context()
+			created, err := s.Create(ctx, &session.CreateRequest{
+				AppName: testAppName,
+				UserID:  "user1",
+				State:   map[string]any{"k1": "v1", session.KeyPrefixApp + "a": "app", session.KeyPrefixUser + "u": "user"},
+			})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			if err := s.AppendEvent(ctx, created.Session, &session.Event{ID: "1", Author: "user", InvocationID: "inv1", Timestamp: time.Now()}); err != nil {
+				t.Fatalf("AppendEvent failed: %v", err)
+			}
+
+			// The filters are set too, to show they do not bring events back.
+			got, err := s.Get(ctx, &session.GetRequest{AppName: testAppName, UserID: "user1", SessionID: created.Session.ID(), ExcludeEvents: true, NumRecentEvents: 5, After: time.Unix(0, 0)})
+			if err != nil {
+				t.Fatalf("Get(ExcludeEvents) error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 0 {
+				t.Errorf("Get(ExcludeEvents) events len = %d, want 0", n)
+			}
+			// State still carries the merged app and user state.
+			snap := Snapshot(got.Session)
+			for k, want := range map[string]any{"k1": "v1", session.KeyPrefixApp + "a": "app", session.KeyPrefixUser + "u": "user"} {
+				if snap.State[k] != want {
+					t.Errorf("Get(ExcludeEvents) State[%q] = %v, want %v", k, snap.State[k], want)
+				}
+			}
+
+			_, err = s.Get(ctx, &session.GetRequest{AppName: testAppName, UserID: "user1", SessionID: "missing", ExcludeEvents: true})
+			if !errors.Is(err, session.ErrNotFound) {
+				t.Errorf("Get(ExcludeEvents, missing session) error = %v, want session.ErrNotFound", err)
 			}
 		})
 	})

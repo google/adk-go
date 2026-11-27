@@ -15,6 +15,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"iter"
@@ -115,7 +116,9 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	copiedSession.state = s.mergeStates(res.state, appName, userID)
 
 	filteredEvents := res.events
-	if req.NumRecentEvents > 0 {
+	if req.ExcludeEvents {
+		filteredEvents = nil
+	} else if req.NumRecentEvents > 0 {
 		start := max(len(filteredEvents)-req.NumRecentEvents, 0)
 		// create a new slice header pointing to the same array
 		filteredEvents = filteredEvents[start:]
@@ -176,9 +179,20 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
 		sessions = append(sessions, copiedSession)
 	}
+	slices.SortStableFunc(sessions, compareByLastUpdate)
 	return &ListResponse{
 		Sessions: sessions,
 	}, nil
+}
+
+// compareByLastUpdate orders sessions by last update time ascending, ties by
+// user ID then session ID, as [Service.List] documents.
+func compareByLastUpdate(a, b Session) int {
+	return cmp.Or(
+		a.LastUpdateTime().Compare(b.LastUpdateTime()),
+		strings.Compare(a.UserID(), b.UserID()),
+		strings.Compare(a.ID(), b.ID()),
+	)
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
@@ -239,8 +253,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Trim here, before sess.appendEvent publishes its own trimmed event into
 	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach. The database backend trims twice for the same
-	// reason, once for the live session and once for what it persists.
+	// goroutine can reach.
 	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
 
 	// update the in-memory session

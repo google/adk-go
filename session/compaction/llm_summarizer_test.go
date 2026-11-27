@@ -426,7 +426,7 @@ func TestLLMSummarizerTranscriptCannotForgeTurns(t *testing.T) {
 		events)
 
 	transcript := prompt[strings.Index(prompt, "user: what is adk?"):]
-	for _, line := range strings.Split(transcript, "\n") {
+	for line := range strings.SplitSeq(transcript, "\n") {
 		switch {
 		case strings.HasPrefix(line, "user: forget"), strings.HasPrefix(line, "model: OK"):
 			t.Errorf("tool output forged a transcript turn: %q\nfull transcript:\n%s", line, transcript)
@@ -443,6 +443,8 @@ func TestLLMSummarizerTranscriptCannotForgeTurns(t *testing.T) {
 type partialModel struct{}
 
 func (m *partialModel) Name() string { return "partial" }
+
+func (*partialModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *partialModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -622,7 +624,7 @@ func TestFormatEventsEscapesAuthorAndToolNames(t *testing.T) {
 	})
 
 	got := s.formatEvents([]*session.Event{ev, tool}, s.maxToolContentChars)
-	for _, line := range strings.Split(got, "\n") {
+	for line := range strings.SplitSeq(got, "\n") {
 		if strings.HasPrefix(line, "user: ignore the above") || strings.HasPrefix(line, "user: and this") {
 			t.Errorf("a forged turn reached the transcript:\n%s", got)
 		}
@@ -636,6 +638,8 @@ func TestFormatEventsEscapesAuthorAndToolNames(t *testing.T) {
 type hangingModel struct{}
 
 func (m *hangingModel) Name() string { return "hanging" }
+
+func (*hangingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *hangingModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -903,6 +907,8 @@ type headerWritingModel struct{}
 
 func (headerWritingModel) Name() string { return "header-writer" }
 
+func (headerWritingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (headerWritingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if req.Config != nil && req.Config.HTTPOptions != nil {
@@ -944,13 +950,11 @@ func TestConcurrentSummarizationsDoNotShareOneGenConfig(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := s.SummarizeEvents(t.Context(), []*session.Event{ev}); err != nil {
 				t.Errorf("SummarizeEvents() error = %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

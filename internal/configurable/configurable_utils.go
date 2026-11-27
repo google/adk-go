@@ -35,6 +35,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/exampletool"
@@ -43,7 +44,7 @@ import (
 	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
-type AgentFactory func(ctx context.Context, configBytes []byte, configPath string) (agent.Agent, error)
+type AgentFactory func(ctx context.Context, configBytes []byte, agentDir string) (agent.Agent, error)
 
 type ToolFactory func(ctx context.Context, args map[string]any) (tool.Tool, error)
 
@@ -56,6 +57,13 @@ var (
 	toolRegistry     = make(map[string]any)
 	callbackRegistry = make(map[string]any)
 )
+
+const allowConfigStdioServersEnv = "ADK_ALLOW_CONFIG_STDIO_MCP_SERVERS"
+
+func allowConfigStdioServers() bool {
+	v := os.Getenv(allowConfigStdioServersEnv)
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 func init() {
 	if err := Register("LlmAgent", newLLMAgent); err != nil {
@@ -110,12 +118,12 @@ func init() {
 		if ss, ok := a["skip_summarization"].(bool); ok {
 			skipSummarization = ss
 		}
-		parentPath, ok := ctx.Value(parentPathKey).(string)
+		configDir, ok := ctx.Value(parentPathKey).(string)
 		if !ok {
 			return nil, fmt.Errorf("parentPath not found in context")
 		}
 		if configPath, ok := a["config_path"].(string); ok {
-			ag, err := ResolveAgentReference(ctx, parentPath, configPath)
+			ag, err := ResolveAgentReference(ctx, configDir, configPath)
 			if err != nil {
 				return nil, err
 			}
@@ -198,6 +206,12 @@ func init() {
 		panic(err)
 	}
 	err = RegisterToolsetFactory("McpToolset", func(ctx context.Context, args map[string]any) (tool.Toolset, error) {
+		_, hasConnectionParams := args["stdio_connection_params"]
+		_, hasServerParams := args["stdio_server_params"]
+		if (hasConnectionParams || hasServerParams) && !allowConfigStdioServers() {
+			return nil, fmt.Errorf("stdio MCP servers are not allowed in agent configs: set %s=1 only if you trust every config this process loads", allowConfigStdioServersEnv)
+		}
+
 		stdioConnectionParams, ok := args["stdio_connection_params"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("stdio_connection_params not found in args")
@@ -332,9 +346,10 @@ func FromConfig(ctx context.Context, configPath string) (agent.Agent, error) {
 		return nil, fmt.Errorf("invalid agent class '%s': not registered. Ensure the package is imported", agentClass)
 	}
 
+	agentDir := filepath.Dir(absPath)
 	// 4. Delegate creation to the specific factory.
 	// We pass the raw data so the factory can unmarshal into its specific Config struct.
-	return factory(ctx, data, absPath)
+	return factory(ctx, data, agentDir)
 }
 
 func ResolveToolReference(ctx context.Context, toolName string, args map[string]any) (tool.Tool, tool.Toolset, error) {
@@ -373,40 +388,32 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-// ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
-	if refPath == "" {
-		return nil, fmt.Errorf("agent reference path cannot be empty")
-	}
-
-	if filepath.IsAbs(refPath) {
-		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
-	}
-
-	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
-
-	absPath, err := filepath.Abs(targetPath)
+// resolveConfigReference is the one containment check for every config
+// reference: a sub_agents or AgentTool config_path and a workflow edge. It
+// refuses a reference that is not a relative path inside configDir or that
+// leads outside it through a link, naming the reference in the error so a
+// refusal in a log says which one.
+func resolveConfigReference(configDir, refPath string) (string, error) {
+	abs, _, err := utils.SafeSubpath(configDir, refPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
+		return "", fmt.Errorf("config reference %q: %w", refPath, err)
 	}
+	// abs is the path the check followed the reference to, links replaced by
+	// their targets. It is what gets read and what keys the registries, so the
+	// file judged is the file opened, and one config cannot be registered under
+	// two spellings. Resolving it again here by other rules (EvalSymlinks does
+	// not follow a Windows junction, and applies a ".." in a link target after
+	// the link before it) would reopen the gap between the check and the read.
+	return abs, nil
+}
 
-	// Prevent path traversal outside the parent agent's directory. Both sides are
-	// made absolute before comparing, and symlinks are resolved where the paths
-	// exist, so a symlink inside the agent directory cannot be used to escape it.
-	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
+// ResolveAgentReference builds an agent from a reference config. configDir is
+// the directory of the referencing config and refPath is the reference as
+// written there.
+func ResolveAgentReference(ctx context.Context, configDir, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(configDir, refPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
-		parentDir = resolved
-	}
-	checkPath := absPath
-	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-		checkPath = resolved
-	}
-	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
-		return nil, fmt.Errorf(
-			"path traversal detected: config_path %q resolves outside agent directory", refPath)
+		return nil, err
 	}
 
 	registryMu.RLock()
@@ -431,7 +438,7 @@ func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (age
 }
 
 // NewLLMAgent is the factory function registered in the system.
-func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newLLMAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg llmAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -448,7 +455,7 @@ func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Age
 		return nil, fmt.Errorf("'model' is required for LlmAgent")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toLLMAgentConfig(ctx)
 	if err != nil {
@@ -458,7 +465,7 @@ func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Age
 	return llmagent.New(*agentConfig)
 }
 
-func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newLoopAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg loopAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -472,7 +479,7 @@ func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Ag
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toLoopAgentConfig(ctx)
 	if err != nil {
@@ -482,7 +489,7 @@ func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Ag
 	return loopagent.New(*agentConfig)
 }
 
-func newParallelAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newParallelAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg parallelAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -496,7 +503,7 @@ func newParallelAgent(ctx context.Context, data []byte, configPath string) (agen
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toParallelAgentConfig(ctx)
 	if err != nil {
@@ -506,7 +513,7 @@ func newParallelAgent(ctx context.Context, data []byte, configPath string) (agen
 	return parallelagent.New(*agentConfig)
 }
 
-func newSequentialAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newSequentialAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg sequentialAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -520,7 +527,7 @@ func newSequentialAgent(ctx context.Context, data []byte, configPath string) (ag
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toSequentialAgentConfig(ctx)
 	if err != nil {

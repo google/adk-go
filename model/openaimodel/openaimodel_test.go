@@ -65,7 +65,7 @@ func TestNewModel_SelectsAPI(t *testing.T) {
 			req := &model.LLMRequest{Contents: []*genai.Content{
 				genai.NewContentFromText("hi", genai.RoleUser),
 			}}
-			for range llm.GenerateContent(t.Context(), req, false) {
+			for range llm.GenerateContent(t.Context(), req, false) { //nolint:errcheck // the server answers 500; the test asserts the request path
 			}
 			if got != tt.wantPath {
 				t.Errorf("path = %q, want %q", got, tt.wantPath)
@@ -264,6 +264,20 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 			}
 			if optionHeader != "set" {
 				t.Errorf("X-Adk-Option = %q, want the header ClientConfig.Options set", optionHeader)
+			}
+		})
+	}
+}
+
+func TestNewModel_Capabilities(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			if !llm.Capabilities().AcceptsOutputSchemaAndTools {
+				t.Error("Capabilities().AcceptsOutputSchemaAndTools = false, want true")
 			}
 		})
 	}

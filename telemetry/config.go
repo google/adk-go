@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/oauth2/google"
@@ -45,11 +46,17 @@ type config struct {
 	// logProcessors registers additional log processors, e.g. for custom log exporters.
 	logProcessors []sdklog.Processor
 
+	// metricReaders registers additional metric readers, e.g. for custom metric exporters.
+	metricReaders []sdkmetric.Reader
+
 	// tracerProvider overrides the default TracerProvider.
 	tracerProvider *sdktrace.TracerProvider
 
 	// loggerProvider overrides the default LoggerProvider.
 	loggerProvider *sdklog.LoggerProvider
+
+	// meterProvider overrides the default MeterProvider.
+	meterProvider *sdkmetric.MeterProvider
 }
 
 // Option configures adk telemetry.
@@ -119,6 +126,14 @@ func WithLogRecordProcessors(p ...sdklog.Processor) Option {
 	})
 }
 
+// WithMetricReaders registers additional metric readers.
+func WithMetricReaders(r ...sdkmetric.Reader) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.metricReaders = append(cfg.metricReaders, r...)
+		return nil
+	})
+}
+
 // WithTracerProvider overrides the default TracerProvider with preconfigured instance.
 func WithTracerProvider(tp *sdktrace.TracerProvider) Option {
 	return optionFunc(func(cfg *config) error {
@@ -131,6 +146,14 @@ func WithTracerProvider(tp *sdktrace.TracerProvider) Option {
 func WithLoggerProvider(lp *sdklog.LoggerProvider) Option {
 	return optionFunc(func(cfg *config) error {
 		cfg.loggerProvider = lp
+		return nil
+	})
+}
+
+// WithMeterProvider overrides the default MeterProvider with preconfigured instance.
+func WithMeterProvider(mp *sdkmetric.MeterProvider) Option {
+	return optionFunc(func(cfg *config) error {
+		cfg.meterProvider = mp
 		return nil
 	})
 }

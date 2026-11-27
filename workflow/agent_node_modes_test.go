@@ -179,6 +179,8 @@ type scriptedLLM struct {
 
 func (*scriptedLLM) Name() string { return "scripted-mock" }
 
+func (*scriptedLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (s *scriptedLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	idx := s.callIdx
 	s.callIdx++

@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/auth"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -51,8 +52,9 @@ type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageReques
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.SendMessageRequest, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
-// In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
-// decides to not emit an A2A event.
+// In streaming responses the callback is invoked for every request. The default converter passes a nil session event
+// with err on a transport or conversion failure, so a callback must check the event before use. An event returned
+// together with an error by a BeforeRequestCallbacks entry or a custom Converter is passed on as is.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error)
@@ -154,7 +156,13 @@ func validateCardInterfaceOrigins(card *a2a.AgentCard, source string) error {
 			return fmt.Errorf("%w: interface URL %q must use https, or http on a loopback host", ErrUntrustedCardInterface, iface.URL)
 		}
 		ifaceScheme, ifaceHost, ifacePort := urlOrigin(ifaceURL)
-		if ifaceScheme != sourceScheme || ifaceHost != sourceHost || ifacePort != sourcePort {
+		// A Google API's mTLS host counts as its plain host, as in
+		// adk-python's _card_target_origin: with a client certificate
+		// requests go to the mTLS host, so a card fetched from one may name
+		// the other. adk-python takes every *.mtls.googleapis.com name for
+		// one. This takes the mTLS names of hosts that have one.
+		sameHost := ifaceHost == sourceHost || googlemtls.Twins(ifaceURL.Hostname(), sourceURL.Hostname())
+		if ifaceScheme != sourceScheme || !sameHost || ifacePort != sourcePort {
 			return fmt.Errorf("%w: interface URL %q does not share the origin of the configured agent card source (%q)", ErrUntrustedCardInterface, iface.URL, source)
 		}
 	}
@@ -288,7 +296,7 @@ type A2AConfig struct {
 	// response, which would skip the actual remote agent call.
 	BeforeRequestCallbacks []BeforeA2ARequestCallback
 	// Converter is used to convert a2a.Event to session.Event. If not provided, adka2a.ToSessionEvent
-	// is used as the default implementation and errors are converted to events with error payload.
+	// is used as the default implementation and transport and conversion errors are returned from Run.
 	Converter A2AEventConverter
 	// AfterRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then
@@ -385,7 +393,8 @@ type A2AConfig struct {
 	// which is logged once per interface. A redirect that leaves the card's
 	// host, or downgrades its scheme, is refused, because the credential would
 	// follow it, and a card fetch that carries the credential must use https
-	// or a loopback host.
+	// or a loopback host. A *.googleapis.com host and its .mtls.googleapis.com
+	// name count as one host there, between https URLs.
 	//
 	// The provider is called once per invocation and its credential reused for
 	// every call that invocation makes, as adk-python caches it. It is called
@@ -430,6 +439,15 @@ type A2AConfig struct {
 
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
 // agent which can run in a different process or on a different host.
+//
+// Unless ClientProvider is set, an https request to a *.googleapis.com host
+// presents the client certificate the environment provides, if any, and goes
+// to the host's .mtls.googleapis.com name. Whether there is a certificate
+// follows the rule [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
+// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given, and so do the
+// multi-region *.us.rep and *.eu.rep hosts, which have no such name. The
+// agent card fetch does the same only with Auth: without it the fetch
+// presents no certificate.
 func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
 		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")
@@ -442,16 +460,18 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 	var authClient, cardClient *http.Client
 	if cfg.ClientProvider == nil {
-		var opts []a2aclient.FactoryOption
+		// Without Auth a bound token can still be sent, from a header the
+		// caller attaches, so both clients present the client certificate.
+		rpcClient := &http.Client{Timeout: a2aRequestTimeout, Transport: googlemtls.NewTransport(nil)}
 		if cfg.Auth != nil {
 			authClient = authHTTPClient(cfg.Auth)
 			cardClient = cardFetchHTTPClient(authClient)
-			opts = append(opts,
-				a2aclient.WithJSONRPCTransport(authClient),
-				a2aclient.WithRESTTransport(authClient),
-			)
+			rpcClient = authClient
 		}
-		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(opts...))
+		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(
+			a2aclient.WithJSONRPCTransport(rpcClient),
+			a2aclient.WithRESTTransport(rpcClient),
+		))
 	}
 
 	remoteAgent := &a2aAgent{
@@ -508,7 +528,7 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 		sendCtx := authSendContext(ctx, cfg, a.cardClient)
 		card, err := iremoteagent.ResolveAgentCard(sendCtx, a.serverConfig)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("agent card resolution failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("agent card resolution failed: %w", err))
 			return
 		}
 		if cfg.Auth != nil {
@@ -526,14 +546,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 
 		sender, err := cfg.ClientProvider(sendCtx, card)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("sender creation failed: %w", err))
 			return
 		}
 		defer destroy(ctx, sender)
 
 		msg, err := newMessage(ctx, cfg)
 		if err != nil {
-			yield(toErrorEvent(ctx, fmt.Errorf("message creation failed: %w", err)), nil)
+			yield(nil, fmt.Errorf("message creation failed: %w", err))
 			return
 		}
 
@@ -715,7 +735,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
-		msg.TaskID = a2a.TaskID(userFnCall.taskID)
+		msg.TaskID = userFnCall.taskID
 		msg.ContextID = userFnCall.contextID
 		return msg, nil
 	}
@@ -739,14 +759,6 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
 	msg.ContextID = contextID
 	return msg, nil
-}
-
-func toErrorEvent(ctx agent.InvocationContext, err error) *session.Event {
-	event := adka2a.NewRemoteAgentEvent(ctx)
-	event.ErrorMessage = err.Error()
-	event.CustomMetadata = map[string]any{adka2a.ToADKMetaKey("error"): err.Error()}
-	event.TurnComplete = true
-	return event
 }
 
 func destroy(ctx context.Context, client A2AClient) {

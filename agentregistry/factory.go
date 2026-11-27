@@ -26,6 +26,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
@@ -91,8 +92,8 @@ func WithA2AHeaders(h map[string]string) RemoteAgentOption {
 
 // WithMCPHTTPClient sets the HTTP client used to reach the MCP server. It
 // overrides the default (an Application Default Credentials client for
-// *.googleapis.com endpoints, else [http.DefaultClient]). The default has no
-// timeout; bound egress on the client's Transport rather than via
+// https://*.googleapis.com endpoints, else [http.DefaultClient]). The default
+// has no timeout; bound egress on the client's Transport rather than via
 // http.Client.Timeout, which is a deadline over the whole request and would
 // truncate streaming responses.
 func WithMCPHTTPClient(c *http.Client) MCPToolsetOption {
@@ -121,15 +122,26 @@ func (c *Client) egressClient(rawURL string, ec egressConfig) *http.Client {
 	return clientWithHeaders(base, ec.headers)
 }
 
-// isGoogleAPI reports whether rawURL points at a Google API endpoint. It mirrors
-// adk-python's _is_google_api.
+// isGoogleAPI reports whether a request to rawURL goes, over TLS, to a DNS name
+// under googleapis.com. It follows adk-python's is_googleapis_url and is
+// stricter in one way: the host may hold only the characters of a DNS name.
+// That leaves out an IP address, whose IPv6 zone can end in the suffix while
+// the address is anyone's. A URL with userinfo is rejected, because HTTP
+// clients disagree on which host it names.
 func isGoogleAPI(rawURL string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || u.Scheme != "https" || u.User != nil {
 		return false
 	}
+	const suffix = ".googleapis.com"
 	host := u.Hostname()
-	return host == "googleapis.com" || strings.HasSuffix(host, ".googleapis.com")
+	for i := range len(host) {
+		if c := host[i]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	i := len(host) - len(suffix)
+	return i >= 0 && strings.EqualFold(host[i:], suffix)
 }
 
 // clientWithHeaders returns a client that adds or overwrites the given static
@@ -197,66 +209,25 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 		Name:           agentName,
 		Description:    card.Description,
 		AgentCard:      card,
-		ClientProvider: remoteagent.NewA2AClientProvider(a2aClientFactory(card, egress)),
+		ClientProvider: remoteagent.NewA2AClientProvider(a2aClientFactory(egress)),
 	})
 }
 
-type transportKey struct {
-	binding a2a.TransportProtocol
-	version a2a.ProtocolVersion
-}
-
-// a2aClientFactory builds an A2A client factory for the given card and HTTP
-// client. Besides the SDK's current-version transports, it registers a
-// compatibility transport for each (binding, protocolVersion) the card
-// advertises. Agent Registry commonly reports an older A2A protocol version
-// (e.g. 0.3.0) than the SDK's current one, and the a2a-go factory matches
-// transports by (protocol, version); without a matching compat transport,
-// client creation fails with "no compatible transports found".
-func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.Factory {
-	opts := []a2aclient.FactoryOption{
+// a2aClientFactory builds an A2A client factory over httpClient that speaks
+// A2A 1.0 and 0.3. A registry record can carry a 0.3.x protocolVersion, and a
+// record without one is assumed to be 0.3.0. The 0.3 wire format differs from
+// 1.0 (the HTTP+JSON binding routes under "/v1", JSON-RPC uses different method
+// names, and both carry different payloads), so those interfaces need the a2av0
+// transports rather than the current ones. The a2a-go factory picks a transport
+// by exact version and otherwise by semver major, which maps 0.3.0 onto
+// a2av0.Version.
+func a2aClientFactory(httpClient *http.Client) *a2aclient.Factory {
+	return a2aclient.NewFactory(
 		a2aclient.WithJSONRPCTransport(httpClient),
 		a2aclient.WithRESTTransport(httpClient),
-	}
-	seen := make(map[transportKey]bool)
-	for _, iface := range card.SupportedInterfaces {
-		// The current-version transports above already cover a2a.Version.
-		if iface == nil || iface.ProtocolVersion == "" || iface.ProtocolVersion == a2a.Version {
-			continue
-		}
-		var factory a2aclient.TransportFactory
-		switch iface.ProtocolBinding {
-		case a2a.TransportProtocolJSONRPC:
-			factory = jsonrpcTransportFactory(httpClient)
-		case a2a.TransportProtocolHTTPJSON:
-			factory = restTransportFactory(httpClient)
-		default:
-			continue
-		}
-		key := transportKey{iface.ProtocolBinding, iface.ProtocolVersion}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		opts = append(opts, a2aclient.WithCompatTransport(iface.ProtocolVersion, iface.ProtocolBinding, factory))
-	}
-	return a2aclient.NewFactory(opts...)
-}
-
-func restTransportFactory(httpClient *http.Client) a2aclient.TransportFactory {
-	return a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
-		u, err := url.Parse(iface.URL)
-		if err != nil {
-			return nil, fmt.Errorf("agentregistry: parsing endpoint URL %q: %w", iface.URL, err)
-		}
-		return a2aclient.NewRESTTransport(u, httpClient), nil
-	})
-}
-
-func jsonrpcTransportFactory(httpClient *http.Client) a2aclient.TransportFactory {
-	return a2aclient.TransportFactoryFn(func(_ context.Context, _ *a2a.AgentCard, iface *a2a.AgentInterface) (a2aclient.Transport, error) {
-		return a2aclient.NewJSONRPCTransport(iface.URL, httpClient), nil
-	})
+		a2av0.WithJSONRPCTransport(a2av0.JSONRPCTransportConfig{Client: httpClient}),
+		a2av0.WithRESTTransport(a2av0.RESTTransportConfig{Client: httpClient}),
+	)
 }
 
 // agentCard resolves an [a2a.AgentCard] plus the cleaned agent name for a
@@ -340,9 +311,9 @@ func toA2ASkills(skills []Skill) []a2a.AgentSkill {
 // streamable-HTTP MCP connection. name is the full MCP server resource name.
 //
 // The endpoint is resolved preferring the JSONRPC binding, then HTTP_JSON. By
-// default, requests to *.googleapis.com endpoints are authenticated with the
-// registry's Application Default Credentials; use [WithMCPHTTPClient] and/or
-// [WithMCPHeaders] to override or augment egress.
+// default, requests to https://*.googleapis.com endpoints are authenticated
+// with the registry's Application Default Credentials; use [WithMCPHTTPClient]
+// and/or [WithMCPHeaders] to override or augment egress.
 //
 // Callers must close the returned toolset as described in [mcptoolset.New].
 func (c *Client) MCPToolset(ctx context.Context, name string, opts ...MCPToolsetOption) (tool.Toolset, error) {

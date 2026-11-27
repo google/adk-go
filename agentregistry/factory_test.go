@@ -15,9 +15,19 @@
 package agentregistry
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -28,19 +38,203 @@ func TestIsGoogleAPI(t *testing.T) {
 		url  string
 		want bool
 	}{
-		{url: "https://googleapis.com/v1", want: true},
 		{url: "https://agentregistry.googleapis.com/v1", want: true},
 		{url: "https://agentregistry.mtls.googleapis.com/v1", want: true},
+		{url: "https://us-central1-aiplatform.googleapis.com/mcp", want: true},
+		{url: "https://AgentRegistry.GoogleAPIs.com/v1", want: true},
+		{url: "HTTPS://agentregistry.googleapis.com/v1", want: true},
+		{url: "https://agentregistry.googleapis.com:443/v1", want: true},
+		{url: "https://AZaz09.googleapis.com/v1", want: true},
+		// No such host exists, but it has the suffix, as in adk-python.
+		{url: "https://.googleapis.com/v1", want: true},
 		{url: "https://evil.com/googleapis.com", want: false},
 		{url: "https://notgoogleapis.com", want: false},
+		{url: "https://googleapis.com.evil.com/v1", want: false},
 		{url: "https://example.com", want: false},
 		{url: "://bad", want: false},
+		{url: "", want: false},
+		// The apex is not a service endpoint.
+		{url: "https://googleapis.com/v1", want: false},
+		// Credentials do not go out in clear text.
+		{url: "http://agentregistry.googleapis.com/v1", want: false},
+		{url: "https://googleapis.com@evil.com/v1", want: false},
+		{url: "https://user:pw@agentregistry.googleapis.com/v1", want: false},
+		{url: `https://evil.com\.googleapis.com/v1`, want: false},
+		// The zone of an IPv6 address can end in the suffix, and the address
+		// is anyone's.
+		{url: "https://[::1%25.googleapis.com]/mcp", want: false},
+		{url: "https://[::1%25.googleapis.com]:8443/mcp", want: false},
+		{url: "https://[2001:db8::1%25.googleapis.com]/mcp", want: false},
+		// Not the characters of a DNS name.
+		{url: "https://evil.com,foo.googleapis.com/v1", want: false},
+		{url: "https://my_api.googleapis.com/v1", want: false},
+		{url: "https://\u0130.googleapis.com/v1", want: false},
+		{url: "https://agentregistry.googleapis.com./v1", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.url, func(t *testing.T) {
 			if got := isGoogleAPI(tc.url); got != tc.want {
 				t.Errorf("isGoogleAPI(%q) = %t, want %t", tc.url, got, tc.want)
 			}
+		})
+	}
+}
+
+var errDialed = errors.New("dialed")
+
+// Unless the caller sets a client, the registry's credentials go to every URL
+// that isGoogleAPI accepts, so a request to one has to connect to a DNS name
+// under googleapis.com. The URLs are every string of up to three pieces in
+// each template.
+func TestIsGoogleAPIDestinationIsDialed(t *testing.T) {
+	pieces := []string{"a", "A", "1", ".", "-", "_", ":", "%", "%25", "[", "]", "@", "/", "\\", ",", "#", "?", " ", "\u0130", "::1", "1.2.3.4"}
+	templates := []string{
+		"https://%s.googleapis.com/v1",
+		"https://%s.googleapis.com:443/v1",
+		"https://%sgoogleapis.com/v1",
+		"https://[%s.googleapis.com]/v1",
+		"https://[::1%s.googleapis.com]/v1",
+		"https://[::1%s.googleapis.com]:443/v1",
+		"https://%sx.googleapis.com/v1",
+		"https://x.googleapis.com%s",
+	}
+	dnsName := regexp.MustCompile(`^[a-z0-9.-]*\.googleapis\.com$`)
+
+	var prefixes []string
+	var walk func(prefix string, depth int)
+	walk = func(prefix string, depth int) {
+		prefixes = append(prefixes, prefix)
+		if depth == 0 {
+			return
+		}
+		for _, piece := range pieces {
+			walk(prefix+piece, depth-1)
+		}
+	}
+	walk("", 3)
+
+	newChecker := func(ctx context.Context) func(rawURL string) (accepted, connected bool, errs []string, fatal string) {
+		var dialed string
+		dial := func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, errDialed
+		}
+		client := &http.Client{Transport: &http.Transport{DialContext: dial, DialTLSContext: dial, DisableKeepAlives: true}}
+		return func(rawURL string) (accepted, connected bool, errs []string, fatal string) {
+			if !isGoogleAPI(rawURL) {
+				return false, false, nil, ""
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
+			if err != nil {
+				return true, false, nil, "" // No request can be sent there.
+			}
+			dialed = ""
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				return true, false, nil, fmt.Sprintf("request to %q was sent", rawURL)
+			}
+			if !errors.Is(err, errDialed) {
+				return true, false, nil, "" // Refused before any connection.
+			}
+			host, _, err := net.SplitHostPort(dialed)
+			if err != nil {
+				return true, true, []string{fmt.Sprintf("isGoogleAPI(%q) = true, and a request connects to %q, which is not host:port", rawURL, dialed)}, ""
+			}
+			if _, err := netip.ParseAddr(host); err == nil {
+				errs = append(errs, fmt.Sprintf("isGoogleAPI(%q) = true, and a request connects to the IP address %q", rawURL, dialed))
+			}
+			if !dnsName.MatchString(strings.ToLower(host)) {
+				errs = append(errs, fmt.Sprintf("isGoogleAPI(%q) = true, and a request connects to %q, which is not a DNS name under googleapis.com", rawURL, dialed))
+			}
+			return true, true, errs, ""
+		}
+	}
+
+	for _, mode := range []struct {
+		name, godebug string
+		// only is a URL that url.Parse takes only with godebug.
+		only string
+	}{
+		{name: "default"},
+		// Since Go 1.26 url.Parse refuses an http or https host that holds
+		// more than one colon. The setting turns that off.
+		{name: "colons in the host", godebug: "urlstrictcolons=0", only: "https://evil.com:443,foo.googleapis.com:443/v1"},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			ctx := t.Context()
+			if mode.godebug != "" {
+				t.Setenv("GODEBUG", mode.godebug)
+				if _, err := url.Parse(mode.only); err != nil {
+					t.Skipf("GODEBUG=%s has no effect: %v", mode.godebug, err)
+				}
+				accepted, _, errs, fatal := newChecker(ctx)(mode.only)
+				if fatal != "" {
+					t.Fatal(fatal)
+				}
+				for _, msg := range errs {
+					t.Error(msg)
+				}
+				if accepted {
+					t.Errorf("isGoogleAPI(%q) = true", mode.only)
+				}
+			}
+
+			workers := runtime.GOMAXPROCS(0)
+			type workerResult struct {
+				total    int
+				accepted int
+				connects int
+				errs     []string
+				fatal    string
+			}
+			results := make([]workerResult, workers)
+			var wg sync.WaitGroup
+			for w := range workers {
+				wg.Go(func() {
+					check := newChecker(ctx)
+					var res workerResult
+					for i := w; i < len(prefixes); i += workers {
+						prefix := prefixes[i]
+						for _, tmpl := range templates {
+							res.total++
+							accepted, connected, errs, fatal := check(fmt.Sprintf(tmpl, prefix))
+							if fatal != "" {
+								res.fatal = fatal
+								results[w] = res
+								return
+							}
+							if accepted {
+								res.accepted++
+							}
+							if connected {
+								res.connects++
+							}
+							res.errs = append(res.errs, errs...)
+						}
+					}
+					results[w] = res
+				})
+			}
+			wg.Wait()
+
+			var total, accepted, connects int
+			for _, res := range results {
+				if res.fatal != "" {
+					t.Fatal(res.fatal)
+				}
+				for _, msg := range res.errs {
+					t.Error(msg)
+				}
+				total += res.total
+				accepted += res.accepted
+				connects += res.connects
+			}
+			// Guards against a generator, or a dialer, that reaches nothing.
+			if total < 50000 || accepted < 500 || connects < accepted/2 {
+				t.Errorf("checked %d URLs, %d accepted, %d of those connecting: too few to mean anything", total, accepted, connects)
+			}
+			t.Logf("%d URLs, %d accepted, %d of those connecting", total, accepted, connects)
 		})
 	}
 }
@@ -70,6 +264,16 @@ func TestEgressClient(t *testing.T) {
 		{
 			name: "non-google uses default",
 			url:  "https://third-party.example/mcp",
+			want: http.DefaultClient,
+		},
+		{
+			name: "address with a googleapis.com zone uses default",
+			url:  "https://[::1%25.googleapis.com]/mcp",
+			want: http.DefaultClient,
+		},
+		{
+			name: "clear text uses default",
+			url:  "http://x.googleapis.com/mcp",
 			want: http.DefaultClient,
 		},
 	}
@@ -338,15 +542,19 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 	// Registry cards commonly advertise an older A2A protocol version than the
 	// SDK's current one. The factory must register a compatible transport so the
 	// client can be created (this failed with "no compatible transports found"
-	// before the compat transports were added).
+	// before the compat transports were added). A version with no registered
+	// transport, such as a future major, is refused rather than mapped onto one.
 	tests := []struct {
 		name    string
 		binding a2a.TransportProtocol
 		version a2a.ProtocolVersion
+		wantErr bool
 	}{
 		{name: "http+json old version", binding: a2a.TransportProtocolHTTPJSON, version: "0.3.0"},
 		{name: "jsonrpc old version", binding: a2a.TransportProtocolJSONRPC, version: "0.3.0"},
 		{name: "http+json current version", binding: a2a.TransportProtocolHTTPJSON, version: a2a.Version},
+		{name: "http+json unknown major", binding: a2a.TransportProtocolHTTPJSON, version: "2.0", wantErr: true},
+		{name: "jsonrpc unknown major", binding: a2a.TransportProtocolJSONRPC, version: "2.0", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,8 +566,15 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 					ProtocolVersion: tc.version,
 				}},
 			}
-			factory := a2aClientFactory(card, http.DefaultClient)
+			factory := a2aClientFactory(http.DefaultClient)
 			client, err := factory.CreateFromCard(t.Context(), card)
+			if tc.wantErr {
+				if err == nil {
+					_ = client.Destroy()
+					t.Fatalf("CreateFromCard(%s@%s) = client, want an error", tc.binding, tc.version)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("CreateFromCard(%s@%s) error = %v, want a client", tc.binding, tc.version, err)
 			}

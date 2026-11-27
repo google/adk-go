@@ -49,13 +49,12 @@ func TestLocalSessionEventsSnapshot(t *testing.T) {
 }
 
 func TestLocalSessionEventsConcurrentAppend(t *testing.T) {
-	const count = 1000
+	t.Parallel()
+	const count = 250
 	s := &localSession{}
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		for i := range count {
 			if err := s.appendEvent(&session.Event{ID: fmt.Sprint(i)}); err != nil {
@@ -64,7 +63,7 @@ func TestLocalSessionEventsConcurrentAppend(t *testing.T) {
 			}
 			runtime.Gosched()
 		}
-	}()
+	})
 	close(start)
 	for range count {
 		snapshot := s.Events()

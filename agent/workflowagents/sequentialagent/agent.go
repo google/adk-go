@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
@@ -38,6 +39,15 @@ type seqAgent struct {
 
 func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	return s.impl.RunLive(ctx)
+}
+
+// FindAgent returns the agent with the given name in s and its descendants.
+// For s's own name it returns s, not the embedded base agent.
+func (s *seqAgent) FindAgent(name string) agent.Agent {
+	if s.Name() == name {
+		return s
+	}
+	return s.FindSubAgent(name)
 }
 
 // New creates a SequentialAgent.
@@ -83,8 +93,12 @@ type liveRunner interface {
 
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for _, subAgent := range ctx.Agent().SubAgents() {
-			for event, err := range subAgent.Run(ctx) {
+		subAgents := ctx.Agent().SubAgents()
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
+		}
+		for _, subAgent := range subAgents {
+			for event, err := range subAgent.Run(utils.PassErrRelay(ctx, subAgent)) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {
@@ -103,30 +117,42 @@ type sequentialLiveSession struct {
 
 func (s *sequentialLiveSession) Send(req agent.LiveRequest) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed, activeSess := s.closed, s.activeSess
+	s.mu.Unlock()
+	if closed {
 		return fmt.Errorf("session is closed")
 	}
-	if s.activeSess == nil {
+	if activeSess == nil {
 		return fmt.Errorf("no active sub-agent live session")
 	}
-	return s.activeSess.Send(req)
+	return activeSess.Send(req)
 }
 
 func (s *sequentialLiveSession) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
-	if s.activeSess != nil {
-		return s.activeSess.Close()
+	activeSess := s.activeSess
+	s.mu.Unlock()
+	if activeSess != nil {
+		return activeSess.Close()
 	}
 	return nil
 }
 
-func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) {
+func (s *sequentialLiveSession) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closed
+}
+
+func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
 	s.activeSess = sess
+	return true
 }
 
 func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -155,6 +181,9 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	var injectSubAgents func(agents []agent.Agent)
 	injectSubAgents = func(agents []agent.Agent) {
 		for _, subAgent := range agents {
+			if llmAgent, ok := subAgent.(llminternal.Agent); ok && llminternal.Reveal(llmAgent).OutputArtifact != "" {
+				continue
+			}
 			if visited[subAgent] {
 				continue
 			}
@@ -197,6 +226,9 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
+			if seqSess.isClosed() {
+				return
+			}
 			liveAgent, ok := subAgent.(liveRunner)
 			if !ok {
 				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
@@ -214,15 +246,15 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 				return
 			}
 
-			seqSess.setActiveSession(subSess)
-
-			for ev, err := range innerIter {
-				// A failed sub-agent ends the sequence, as in Run.
-				if !yield(ev, err) || err != nil {
-					if err := subSess.Close(); err != nil {
-						log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
+			if seqSess.setActiveSession(subSess) {
+				for ev, err := range innerIter {
+					// A failed sub-agent ends the sequence, as in Run.
+					if !yield(ev, err) || err != nil {
+						if err := subSess.Close(); err != nil {
+							log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
+						}
+						return
 					}
-					return
 				}
 			}
 			if err := subSess.Close(); err != nil {

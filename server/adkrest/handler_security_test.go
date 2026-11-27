@@ -69,8 +69,7 @@ func TestServerRejectsOversizedBody(t *testing.T) {
 func TestMaxBytesMiddlewarePinsTheDefaultLimit(t *testing.T) {
 	handler := adkrest.MaxBytesMiddleware(0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.ReadAll(r.Body); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -104,6 +103,7 @@ func TestMaxBytesMiddlewarePinsTheDefaultLimit(t *testing.T) {
 // without it, MaxBytesReader would be installed with a limit of 0 and reject
 // that request too.
 func TestServerUsesDefaultMaxPayloadSize(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		max  int64
@@ -112,6 +112,7 @@ func TestServerUsesDefaultMaxPayloadSize(t *testing.T) {
 		{name: "negative", max: -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			srv, err := adkrest.NewServer(adkrest.ServerConfig{
 				SessionService: session.InMemoryService(),
 				MaxPayloadSize: tc.max,

@@ -457,6 +457,8 @@ type streamingTextModel struct {
 
 func (m *streamingTextModel) Name() string { return "streaming-text" }
 
+func (*streamingTextModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		for _, delta := range []string{"Hello ", "world."} {
@@ -1017,6 +1019,53 @@ func TestFunctionTool(t *testing.T) {
 	}
 }
 
+// transfer_to_agent returns no result of its own, so after-tool callbacks see
+// nil. The model is still sent {"result": null}.
+func TestAgentTransferAfterToolCallbackSeesNoResult(t *testing.T) {
+	model := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "sub_agent_1"}, "model"),
+		genai.NewContentFromText("response1", "model"),
+	}}
+	subAgent1, err := llmagent.New(llmagent.Config{
+		Name:  "sub_agent_1",
+		Model: model,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subAgent1: %v", err)
+	}
+	var calls int
+	var gotResult map[string]any
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:      "root_agent",
+		Model:     model,
+		SubAgents: []agent.Agent{subAgent1},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				calls++
+				gotResult = result
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create rootAgent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, rootAgent)
+	for _, err := range runner.Run(t, "session_id", "transfer") {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("after-tool callback ran %d times, want 1", calls)
+	}
+	if gotResult != nil {
+		t.Errorf("after-tool callback result = %v, want nil", gotResult)
+	}
+}
+
 func TestAgentTransfer(t *testing.T) {
 	// Helpers to create genai.Content conveniently.
 	transferCall := func(agentName string) *genai.Content {
@@ -1028,7 +1077,8 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	transferResponse := func() *genai.Content {
 		return genai.NewContentFromFunctionResponse(
-			"transfer_to_agent", map[string]any{}, "user")
+			"transfer_to_agent", map[string]any{"result": nil}, "user",
+		)
 	}
 	text := func(text string) *genai.Content {
 		return genai.NewContentFromText(
@@ -1070,10 +1120,10 @@ func TestAgentTransfer(t *testing.T) {
 
 	check := func(t *testing.T, rootAgent agent.Agent, wants [][]content) {
 		runner := testutil.NewTestAgentRunner(t, rootAgent)
-		for i := range len(wants) {
+		for i := range wants {
 			got, err := contents(runner.Run(t, "session_id", fmt.Sprintf("round %d", i)))
 			if err != nil {
-				t.Fatalf("[round $d]: stream ended with an error: %v", err)
+				t.Fatalf("[round %d]: stream ended with an error: %v", i, err)
 			}
 			if diff := cmp.Diff(wants[i], got); diff != "" {
 				t.Errorf("[round %d] events diff (-want, +got) = %v", i, diff)
@@ -1204,6 +1254,42 @@ func TestAgentTransfer(t *testing.T) {
 				// sub_agent_1_1 is single, so it should not be the current agent.
 				// Otherwise, the conversation will be tied to sub_agent_1_1 forever.
 				{"sub_agent_1", text("response2").Parts},
+			},
+		})
+	})
+
+	t.Run("unknown_agent_is_a_tool_error", func(t *testing.T) {
+		// root_agent -- sub_agent_1. The model names an agent outside the
+		// declared enum; it gets the error back and answers instead.
+		model := testModel(
+			transferCall("nobody"),
+			text("response1"))
+
+		subAgent1, err := llmagent.New(llmagent.Config{
+			Name:  "sub_agent_1",
+			Model: model,
+		})
+		if err != nil {
+			t.Fatalf("failed to create subAgent1: %v", err)
+		}
+
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "root_agent",
+			Model:     model,
+			SubAgents: []agent.Agent{subAgent1},
+		})
+		if err != nil {
+			t.Fatalf("failed to create rootAgent: %v", err)
+		}
+
+		errorResponse := genai.NewContentFromFunctionResponse("transfer_to_agent", map[string]any{
+			"error": `agent "nobody" is not a valid transfer target; available agents: sub_agent_1`,
+		}, "user")
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("nobody").Parts},
+				{"root_agent", errorResponse.Parts},
+				{"root_agent", text("response1").Parts},
 			},
 		})
 	})

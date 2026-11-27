@@ -16,18 +16,46 @@ package telemetry
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"io"
+	"maps"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -38,6 +66,7 @@ const (
 func TestTelemetrySmoke(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	logExporter := &inMemoryLogExporter{}
+	reader := sdkmetric.NewManualReader()
 	ctx := t.Context()
 
 	// Initialize telemetry.
@@ -53,6 +82,7 @@ func TestTelemetrySmoke(t *testing.T) {
 	providers, err := New(t.Context(),
 		WithSpanProcessors(sdktrace.NewSimpleSpanProcessor(exporter)),
 		WithLogRecordProcessors(sdklog.NewSimpleProcessor(logExporter)),
+		WithMetricReaders(reader),
 		WithGcpResourceProject(resourceProject),
 		WithGcpQuotaProject(quotaProject),
 		WithResource(r),
@@ -82,11 +112,30 @@ func TestTelemetrySmoke(t *testing.T) {
 	record.SetBody(attribute.StringValue(logBody))
 	logger.Emit(ctx, record)
 
+	// Record through the global meter provider, as ADK instrumentation does.
+	counter, err := otel.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("failed to create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+
 	if err := providers.TracerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush spans: %v", err)
 	}
 	if err := providers.LoggerProvider.ForceFlush(t.Context()); err != nil {
 		t.Fatalf("failed to flush logs: %v", err)
+	}
+
+	// Check the reader sees the metric, with the configured resource.
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("failed to collect metrics: %v", err)
+	}
+	if len(rm.ScopeMetrics) != 1 {
+		t.Fatalf("got %d scope metrics, want 1", len(rm.ScopeMetrics))
+	}
+	if got, _, _ := extractResourceAttributes(rm.Resource); got != resourceProject {
+		t.Errorf("metrics: want 'gcp.project_id' attribute %q, got %q", resourceProject, got)
 	}
 
 	// Check exporter contains the span.
@@ -123,6 +172,9 @@ func TestTelemetrySmoke(t *testing.T) {
 	}
 	if len(exporter.GetSpans()) != 0 {
 		t.Errorf("expected no spans after shutdown, got %d", len(exporter.GetSpans()))
+	}
+	if err := reader.Collect(ctx, &rm); !errors.Is(err, sdkmetric.ErrReaderShutdown) {
+		t.Errorf("Collect() after Shutdown error = %v, want %v", err, sdkmetric.ErrReaderShutdown)
 	}
 }
 
@@ -220,6 +272,618 @@ func TestTelemetryCustomLoggerProvider(t *testing.T) {
 	// Unused exporter should not have any logs.
 	if len(unusedLogExporter.records) != 0 {
 		t.Fatalf("got %d logs, want 0", len(unusedLogExporter.records))
+	}
+}
+
+func TestResolveResourceServiceInstanceID(t *testing.T) {
+	ctx := t.Context()
+	custom := resource.NewSchemaless(semconv.ServiceInstanceID("custom-instance"))
+
+	testCases := []struct {
+		name string
+		opts []Option
+		// want is nil when the resource must have no service.instance.id.
+		want *regexp.Regexp
+	}{
+		{
+			// adk-python's `<uuid4 hex>-<pid>` form.
+			name: "generated per process",
+			opts: []Option{WithOtelToCloud(true)},
+			want: regexp.MustCompile(`^[0-9a-f]{32}-` + strconv.Itoa(os.Getpid()) + `$`),
+		},
+		{
+			name: "overridden by the config resource",
+			opts: []Option{WithOtelToCloud(true), WithResource(custom)},
+			want: regexp.MustCompile(`^custom-instance$`),
+		},
+		{
+			name: "not set without export to Google Cloud",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := configFromOpts(tc.opts...)
+			if err != nil {
+				t.Fatalf("configFromOpts() unexpected error: %v", err)
+			}
+			r, err := resolveResource(ctx, cfg)
+			if err != nil {
+				t.Fatalf("resolveResource() unexpected error: %v", err)
+			}
+			got, ok := r.Set().Value(semconv.ServiceInstanceIDKey)
+			if tc.want == nil {
+				if ok {
+					t.Errorf("got 'service.instance.id' %q, want none", got.AsString())
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("resource has no 'service.instance.id' attribute")
+			}
+			if !tc.want.MatchString(got.AsString()) {
+				t.Errorf("got 'service.instance.id' %q, want a match for %v", got.AsString(), tc.want)
+			}
+		})
+	}
+}
+
+func TestTelemetryCustomMeterProvider(t *testing.T) {
+	mp := sdkmetric.NewMeterProvider()
+	providers, err := New(t.Context(), WithMeterProvider(mp), WithMetricReaders(sdkmetric.NewManualReader()))
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("telemetry.Shutdown() failed: %v", err)
+		}
+	})
+	if providers.MeterProvider != mp {
+		t.Errorf("got MeterProvider %p, want the one passed to WithMeterProvider %p", providers.MeterProvider, mp)
+	}
+}
+
+func TestTelemetryShutdownReturnsReaderErrors(t *testing.T) {
+	errShutdown := errors.New("exporter shutdown failed")
+	failing := func() sdkmetric.Reader {
+		return sdkmetric.NewPeriodicReader(&recordingMetricExporter{shutdownErr: errShutdown}, sdkmetric.WithInterval(time.Hour))
+	}
+	alreadyShutDown := func(t *testing.T) sdkmetric.Reader {
+		r := sdkmetric.NewManualReader()
+		if err := r.Shutdown(t.Context()); err != nil {
+			t.Fatalf("reader Shutdown() failed: %v", err)
+		}
+		return r
+	}
+	testCases := []struct {
+		name    string
+		readers func(t *testing.T) []sdkmetric.Reader
+	}{
+		{
+			name:    "alone",
+			readers: func(*testing.T) []sdkmetric.Reader { return []sdkmetric.Reader{failing()} },
+		},
+		{
+			// The SDK joins every reader's error, so this one comes back
+			// together with ErrReaderShutdown.
+			name:    "with a reader already shut down",
+			readers: func(t *testing.T) []sdkmetric.Reader { return []sdkmetric.Reader{failing(), alreadyShutDown(t)} },
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			providers, err := New(t.Context(), WithMetricReaders(tc.readers(t)...))
+			if err != nil {
+				t.Fatalf("failed to create telemetry: %v", err)
+			}
+			if err := providers.Shutdown(t.Context()); !errors.Is(err, errShutdown) {
+				t.Errorf("telemetry.Shutdown() error = %v, want %v", err, errShutdown)
+			}
+		})
+	}
+}
+
+func TestNewErrorLeavesNothingRunning(t *testing.T) {
+	// The named exporter rejects a certificate for a plain HTTP endpoint; those
+	// built before it succeed.
+	testCases := []struct {
+		name string
+		env  string
+	}{
+		{name: "metric exporter fails", env: "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE"},
+		{name: "log exporter fails", env: "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+			t.Setenv(tc.env, writeTestCertificate(t))
+			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "1")
+			var orphanTicks atomic.Int32
+			original := otel.GetErrorHandler()
+			otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+				if errors.Is(err, sdkmetric.ErrReaderNotRegistered) {
+					orphanTicks.Add(1)
+				}
+			}))
+			t.Cleanup(func() { otel.SetErrorHandler(original) })
+			before := batchProcessorGoroutines()
+
+			if _, err := New(t.Context()); err == nil {
+				t.Fatal("New() succeeded, want the exporter's error")
+			}
+			// An orphaned reader reports ErrReaderNotRegistered on every tick.
+			time.Sleep(100 * time.Millisecond)
+			if got := orphanTicks.Load(); got != 0 {
+				t.Errorf("got %d ticks of a metric reader New left running, want 0", got)
+			}
+			if got := batchProcessorGoroutines(); got > before {
+				t.Errorf("got %d batch processor goroutines after a failed New, want at most %d", got, before)
+			}
+		})
+	}
+}
+
+// batchProcessorGoroutines counts the running goroutines of span and log
+// batch processors.
+func batchProcessorGoroutines() int {
+	buf := make([]byte, 1<<20)
+	stacks := string(buf[:runtime.Stack(buf, true)])
+	return strings.Count(stacks, "trace.(*batchSpanProcessor).processQueue") + strings.Count(stacks, "log.(*BatchProcessor).process.func")
+}
+
+// writeTestCertificate writes a self-signed PEM certificate and returns its path.
+func writeTestCertificate(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatalf("failed to write certificate: %v", err)
+	}
+	return path
+}
+
+func TestTelemetryNoReadersNoMeterProvider(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	providers, err := New(t.Context())
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+	if providers.MeterProvider != nil {
+		t.Errorf("got MeterProvider %v, want nil without readers", providers.MeterProvider)
+	}
+	// No typed nil is installed globally.
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider())
+	providers.SetGlobalOtelProviders()
+	if mp, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok || mp == nil {
+		t.Errorf("otel.GetMeterProvider() = %#v, want the previous provider kept", otel.GetMeterProvider())
+	}
+}
+
+func TestOtlpEnvMetricExport(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	ctx := t.Context()
+
+	providers, err := New(ctx)
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+	if providers.MeterProvider == nil {
+		t.Fatal("MeterProvider is nil, want one for OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+	counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("failed to create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	if err := providers.MeterProvider.ForceFlush(ctx); err != nil {
+		t.Fatalf("failed to flush metrics: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d export requests on ForceFlush, want 1", got)
+	}
+
+	// Shutdown exports the metrics recorded after ForceFlush.
+	counter.Add(ctx, 1)
+	if err := providers.Shutdown(ctx); err != nil {
+		t.Fatalf("telemetry.Shutdown() failed: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("got %d export requests after Shutdown, want 2", got)
+	}
+}
+
+func TestOtlpEnvMetricShutdown(t *testing.T) {
+	for _, endpoint := range []string{"general", "metrics", "mixed with Google Cloud"} {
+		for _, record := range []bool{false, true} {
+			t.Run(endpoint+"/record="+strconv.FormatBool(record), func(t *testing.T) {
+				var mu sync.Mutex
+				var exports []*collectormetricspb.ExportMetricsServiceRequest
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/v1/metrics" {
+						http.NotFound(w, r)
+						return
+					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("reading metric export failed: %v", err)
+						return
+					}
+					req := new(collectormetricspb.ExportMetricsServiceRequest)
+					if err := proto.Unmarshal(body, req); err != nil {
+						t.Errorf("decoding metric export failed: %v", err)
+						return
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					exports = append(exports, req)
+				}))
+				t.Cleanup(srv.Close)
+				t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+				t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+				t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+				if endpoint == "general" {
+					t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+				} else {
+					t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", srv.URL+"/v1/metrics")
+				}
+				transport := &recordingTransport{}
+				ctx := context.WithValue(t.Context(), oauth2.HTTPClient, &http.Client{Transport: transport})
+				var opts []Option
+				if endpoint == "mixed with Google Cloud" {
+					opts = append(opts, WithOtelToCloud(true), WithGoogleCredentials(&google.Credentials{
+						ProjectID:   resourceProject,
+						TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}),
+					}))
+				}
+				providers, err := New(ctx, opts...)
+				if err != nil {
+					t.Fatalf("New() failed: %v", err)
+				}
+				t.Cleanup(func() {
+					if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
+						t.Errorf("Shutdown() failed: %v", err)
+					}
+				})
+				counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+				if err != nil {
+					t.Fatalf("creating counter failed: %v", err)
+				}
+				if record {
+					counter.Add(ctx, 7, metric.WithAttributes(attribute.String("case", "shutdown")))
+				}
+				if err := providers.Shutdown(ctx); err != nil {
+					t.Fatalf("Shutdown() failed: %v", err)
+				}
+				transport.mu.Lock()
+				defer transport.mu.Unlock()
+				if got := len(transport.requests); got != 0 {
+					t.Errorf("got %d Google Cloud requests on Shutdown, want 0", got)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				want := 0
+				if record {
+					want = 1
+				}
+				if len(exports) != want {
+					t.Fatalf("got %d OTLP exports on Shutdown, want %d", len(exports), want)
+				}
+				if !record {
+					return
+				}
+				rms := exports[0].GetResourceMetrics()
+				if len(rms) != 1 || len(rms[0].GetScopeMetrics()) != 1 {
+					t.Fatal("want one resource and one metric scope")
+				}
+				scope := rms[0].GetScopeMetrics()[0]
+				if scope.GetScope().GetName() != "test-meter" || len(scope.GetMetrics()) != 1 {
+					t.Fatal("want test-meter scope with one metric")
+				}
+				m := scope.GetMetrics()[0]
+				points := m.GetSum().GetDataPoints()
+				if m.GetName() != "test-counter" || len(points) != 1 || points[0].GetAsInt() != 7 {
+					t.Fatal("want test-counter with one value of 7")
+				}
+				attrs := points[0].GetAttributes()
+				if len(attrs) != 1 || attrs[0].GetKey() != "case" || attrs[0].GetValue().GetStringValue() != "shutdown" {
+					t.Fatal("want case=shutdown on the exported point")
+				}
+			})
+		}
+	}
+}
+
+func TestOtlpEnvMetricShutdownReturnsRejectedExport(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", srv.URL+"/v1/metrics")
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+	ctx := t.Context()
+	providers, err := New(ctx)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("Shutdown() failed: %v", err)
+		}
+	})
+	counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("creating counter failed: %v", err)
+	}
+	counter.Add(ctx, 1)
+	if err := providers.Shutdown(ctx); err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+		t.Errorf("Shutdown() error = %v, want the rejected export's 400 Bad Request error", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d OTLP requests on Shutdown, want 1", got)
+	}
+}
+
+func TestOtlpEnvMetricShutdownReturnsExportCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	received := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		// Shutdown must return before the handler can send a success response.
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", srv.URL+"/v1/metrics")
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+	providers, err := New(t.Context())
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+			t.Errorf("Shutdown() failed: %v", err)
+		}
+	})
+	counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("creating counter failed: %v", err)
+	}
+	counter.Add(ctx, 1)
+	go func() {
+		select {
+		case <-received:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if err := providers.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Shutdown() error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-received:
+	default:
+		t.Error("Shutdown returned without sending the metric export")
+	}
+}
+
+// recordingTransport captures every request and answers it with an empty success.
+type recordingTransport struct {
+	mu       sync.Mutex
+	requests []*http.Request
+}
+
+func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.requests = append(rt.requests, req)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
+		Request:    req,
+	}, nil
+}
+
+func TestGcpExporters(t *testing.T) {
+	transport := &recordingTransport{}
+	// oauth2.NewClient wraps the transport of the client found in the context.
+	ctx := context.WithValue(t.Context(), oauth2.HTTPClient, &http.Client{Transport: transport})
+	creds := &google.Credentials{
+		ProjectID:   resourceProject,
+		TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}),
+	}
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+
+	cfg, err := configure(ctx,
+		WithOtelToCloud(true),
+		WithGoogleCredentials(creds),
+		WithGcpQuotaProject(quotaProject),
+	)
+	if err != nil {
+		t.Fatalf("configure() unexpected error: %v", err)
+	}
+	if len(cfg.metricReaders) != 1 {
+		t.Fatalf("got %d metric readers, want 1", len(cfg.metricReaders))
+	}
+	// The literal, not the constant: Cloud Monitoring's floor is what the test pins.
+	if got := readerInterval(t, cfg.metricReaders[0]); got != 5*time.Second {
+		t.Errorf("got metric export interval %v, want 5s", got)
+	}
+
+	providers, err := newInternal(cfg)
+	if err != nil {
+		t.Fatalf("newInternal() unexpected error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("telemetry.Shutdown() failed: %v", err)
+		}
+	})
+
+	_, span := providers.TracerProvider.Tracer("test-tracer").Start(ctx, "test-span")
+	span.End()
+	counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("failed to create counter: %v", err)
+	}
+	counter.Add(ctx, 1)
+	if err := providers.TracerProvider.ForceFlush(ctx); err != nil {
+		t.Fatalf("failed to flush spans: %v", err)
+	}
+	if err := providers.MeterProvider.ForceFlush(ctx); err != nil {
+		t.Fatalf("failed to flush metrics: %v", err)
+	}
+
+	// Requests per endpoint; both exporters share the client, so headers are checked on each.
+	requests := func() map[string][]http.Header {
+		transport.mu.Lock()
+		defer transport.mu.Unlock()
+		got := make(map[string][]http.Header)
+		for _, req := range transport.requests {
+			got[req.URL.String()] = append(got[req.URL.String()], req.Header)
+		}
+		return got
+	}
+	got := requests()
+	for _, endpoint := range []string{gcpTracesEndpoint, gcpMetricsEndpoint} {
+		headers, ok := got[endpoint]
+		if !ok {
+			t.Errorf("no request to %s, got %v", endpoint, slices.Sorted(maps.Keys(got)))
+			continue
+		}
+		if len(headers) != 1 {
+			t.Errorf("%s: got %d requests, want 1", endpoint, len(headers))
+		}
+		for _, header := range headers {
+			if header.Get("Authorization") != "Bearer test-token" {
+				t.Errorf("%s: Authorization header does not carry the credentials' token", endpoint)
+			}
+			if header.Get("x-goog-user-project") != quotaProject {
+				t.Errorf("%s: got x-goog-user-project %q, want %q", endpoint, header.Get("x-goog-user-project"), quotaProject)
+			}
+		}
+	}
+
+	// Shutdown exports no further metrics.
+	if err := providers.Shutdown(ctx); err != nil {
+		t.Fatalf("telemetry.Shutdown() failed: %v", err)
+	}
+	if got := len(requests()[gcpMetricsEndpoint]); got != 1 {
+		t.Errorf("got %d metric requests after Shutdown, want still 1", got)
+	}
+}
+
+// readerInterval reads a periodic reader's interval off its logging view,
+// the only place the SDK exposes it.
+func readerInterval(t *testing.T, r sdkmetric.Reader) time.Duration {
+	t.Helper()
+	ml, ok := r.(interface{ MarshalLog() any })
+	if !ok {
+		t.Fatalf("reader %T has no MarshalLog", r)
+	}
+	field := reflect.ValueOf(ml.MarshalLog()).FieldByName("Interval")
+	if !field.IsValid() {
+		t.Fatalf("MarshalLog() of %T has no Interval field", r)
+	}
+	interval, ok := reflect.TypeAssert[time.Duration](field)
+	if !ok {
+		t.Fatalf("MarshalLog() Interval of %T is %T, want time.Duration", r, field.Interface())
+	}
+	return interval
+}
+
+// recordingMetricExporter counts calls; the exported data is irrelevant.
+type recordingMetricExporter struct {
+	mu          sync.Mutex
+	exports     int
+	shutdowns   int
+	shutdownErr error
+}
+
+func (e *recordingMetricExporter) Temporality(k sdkmetric.InstrumentKind) metricdata.Temporality {
+	return sdkmetric.DefaultTemporalitySelector(k)
+}
+
+func (e *recordingMetricExporter) Aggregation(k sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.DefaultAggregationSelector(k)
+}
+
+func (e *recordingMetricExporter) Export(context.Context, *metricdata.ResourceMetrics) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.exports++
+	return nil
+}
+
+func (e *recordingMetricExporter) ForceFlush(context.Context) error { return nil }
+
+func (e *recordingMetricExporter) Shutdown(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdowns++
+	return e.shutdownErr
+}
+
+func (e *recordingMetricExporter) counts() (exports, shutdowns int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.exports, e.shutdowns
+}
+
+func TestNoFinalExportReader(t *testing.T) {
+	ctx := t.Context()
+	exporter := &recordingMetricExporter{}
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(newNoFinalExportReader(exporter, sdkmetric.WithInterval(time.Hour))))
+	counter, err := mp.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("failed to create counter: %v", err)
+	}
+
+	// An instrument that has not recorded yields an empty collection, which
+	// is not exported.
+	if err := mp.ForceFlush(ctx); err != nil {
+		t.Fatalf("MeterProvider.ForceFlush() failed: %v", err)
+	}
+	if exports, _ := exporter.counts(); exports != 0 {
+		t.Errorf("got %d exports before any recording, want 0", exports)
+	}
+
+	counter.Add(ctx, 1)
+	if err := mp.ForceFlush(ctx); err != nil {
+		t.Fatalf("MeterProvider.ForceFlush() failed: %v", err)
+	}
+	if exports, _ := exporter.counts(); exports != 1 {
+		t.Errorf("got %d exports after ForceFlush, want 1", exports)
+	}
+	if err := mp.Shutdown(ctx); err != nil {
+		t.Fatalf("MeterProvider.Shutdown() failed: %v", err)
+	}
+	if exports, shutdowns := exporter.counts(); exports != 1 || shutdowns != 1 {
+		t.Errorf("after Shutdown got %d exports, %d exporter shutdowns; want 1, 1", exports, shutdowns)
 	}
 }
 
@@ -488,9 +1152,10 @@ func (e *inMemoryLogExporter) Shutdown(context.Context) error   { return nil }
 func (e *inMemoryLogExporter) ForceFlush(context.Context) error { return nil }
 
 type envVars struct {
-	OTEL_EXPORTER_OTLP_ENDPOINT        string
-	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT string
-	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT   string
+	OTEL_EXPORTER_OTLP_ENDPOINT         string
+	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  string
+	OTEL_EXPORTER_OTLP_METRICS_ENDPOINT string
+	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT    string
 }
 
 func TestConfigureExporters(t *testing.T) {
@@ -502,12 +1167,14 @@ func TestConfigureExporters(t *testing.T) {
 		// Accessing it via reflection is too brittle. The best thing we can do is a smoke test, which checks the number of created processors.
 		wantSpanProcessors int
 		wantLogProcessors  int
+		wantMetricReaders  int
 	}{
 		{
 			name:               "no processors",
 			envVars:            envVars{},
 			wantSpanProcessors: 0,
 			wantLogProcessors:  0,
+			wantMetricReaders:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -516,6 +1183,7 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  1,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -524,6 +1192,16 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  0,
+			wantMetricReaders:  0,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://localhost:4318/v1/metrics",
+			},
+			wantSpanProcessors: 0,
+			wantLogProcessors:  0,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
@@ -532,6 +1210,7 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 0,
 			wantLogProcessors:  1,
+			wantMetricReaders:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT and otel_to_cloud",
@@ -544,6 +1223,7 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 2,
 			wantLogProcessors:  1,
+			wantMetricReaders:  2,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and otel_to_cloud",
@@ -556,6 +1236,7 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 2,
 			wantLogProcessors:  0,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT and otel_to_cloud",
@@ -568,6 +1249,51 @@ func TestConfigureExporters(t *testing.T) {
 			},
 			wantSpanProcessors: 1,
 			wantLogProcessors:  1,
+			wantMetricReaders:  1,
+		},
+		// Nothing is built for a supplied provider: it would ignore it, and an
+		// unregistered periodic reader reports an error on every tick.
+		{
+			name: "OTEL_EXPORTER_OTLP_ENDPOINT, otel_to_cloud and WithTracerProvider",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
+			},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+				WithTracerProvider(sdktrace.NewTracerProvider()),
+			},
+			wantSpanProcessors: 0,
+			wantLogProcessors:  1,
+			wantMetricReaders:  2,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_ENDPOINT, otel_to_cloud and WithLoggerProvider",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
+			},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+				WithLoggerProvider(sdklog.NewLoggerProvider()),
+			},
+			wantSpanProcessors: 2,
+			wantLogProcessors:  0,
+			wantMetricReaders:  2,
+		},
+		{
+			name: "OTEL_EXPORTER_OTLP_ENDPOINT, otel_to_cloud and WithMeterProvider",
+			envVars: envVars{
+				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
+			},
+			opts: []Option{
+				WithOtelToCloud(true),
+				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
+				WithMeterProvider(sdkmetric.NewMeterProvider()),
+			},
+			wantSpanProcessors: 2,
+			wantLogProcessors:  1,
+			wantMetricReaders:  0,
 		},
 	}
 
@@ -575,6 +1301,7 @@ func TestConfigureExporters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_ENDPOINT)
 			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT)
 			t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", tc.envVars.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)
 			// Set the quota project needed to configure GCP exporters.
 			t.Setenv("GOOGLE_CLOUD_PROJECT", "test-project")
@@ -583,16 +1310,40 @@ func TestConfigureExporters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("configure() unexpected error: %v", err)
 			}
-			spanProcessors, logProcessors, err := configureExporters(ctx, cfg)
-			if err != nil {
-				t.Fatalf("configureExporters() unexpected error: %v", err)
+			shutdownBuilt(t, cfg)
+			if len(cfg.spanProcessors) != tc.wantSpanProcessors {
+				t.Errorf("got %d span processors, want %d", len(cfg.spanProcessors), tc.wantSpanProcessors)
 			}
-			if len(spanProcessors) != tc.wantSpanProcessors {
-				t.Errorf("got %d span processors, want %d", len(spanProcessors), tc.wantSpanProcessors)
+			if len(cfg.logProcessors) != tc.wantLogProcessors {
+				t.Errorf("got %d log processors, want %d", len(cfg.logProcessors), tc.wantLogProcessors)
 			}
-			if len(logProcessors) != tc.wantLogProcessors {
-				t.Errorf("got %d log processors, want %d", len(logProcessors), tc.wantLogProcessors)
+			if len(cfg.metricReaders) != tc.wantMetricReaders {
+				t.Errorf("got %d metric readers, want %d", len(cfg.metricReaders), tc.wantMetricReaders)
 			}
 		})
 	}
+}
+
+// shutdownBuilt stops the goroutines of the processors and readers the test
+// built but never registered with a provider.
+func shutdownBuilt(t *testing.T, cfg *config) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		for _, p := range cfg.spanProcessors {
+			if err := p.Shutdown(ctx); err != nil {
+				t.Errorf("span processor Shutdown() failed: %v", err)
+			}
+		}
+		for _, p := range cfg.logProcessors {
+			if err := p.Shutdown(ctx); err != nil {
+				t.Errorf("log processor Shutdown() failed: %v", err)
+			}
+		}
+		for _, r := range cfg.metricReaders {
+			if err := r.Shutdown(ctx); err != nil {
+				t.Errorf("reader Shutdown() failed: %v", err)
+			}
+		}
+	})
 }

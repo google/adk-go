@@ -17,9 +17,13 @@ package agentanalytics
 import (
 	"context"
 	"log"
+	"strconv"
 	"time"
 
 	"google.golang.org/api/option"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
 )
 
 const (
@@ -58,12 +62,16 @@ type Logger interface {
 // enabled), and the requests that BigQuery already confirmed are not resent. A
 // status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
 // ends the write of the batch without further retries when opening the stream
-// fails with it or BigQuery reports it in an AppendRowsResponse. When it
-// instead ends the stream, the server may not have read the request, so while
-// retries remain the request is resent on a fresh stream: always if an earlier
-// request opened that stream, and once per request if it was opened for the
-// request, after which the status ends the write. Each such resend uses up one
-// retry and its backoff.
+// fails with it or BigQuery reports it in an AppendRowsResponse, except that
+// when a response without AppendResult carries a nil or InvalidArgument status
+// and valid in-range AppendRowsResponse.RowErrors (and not after an ambiguous
+// send under ExactlyOnceDelivery), the rejected rows are dropped under
+// DropStats.RowErrorDrops and the surviving rows are resent up to 8 passes
+// per chunk. When a non-retryable status instead ends the stream, the server
+// may not have read the request, so while retries remain the request is resent
+// on a fresh stream: always if an earlier request opened that stream, and once
+// per request if it was opened for the request, after which the status ends the
+// write. Each such resend uses up one retry and its backoff.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
@@ -72,7 +80,9 @@ type Logger interface {
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
 // rows of the in-flight batch that BigQuery has not confirmed are deferred for
 // at most one retry in the next flush (background, run-end, or Close); the
-// rows of the split requests that it confirmed before then are not resent.
+// rows of the split requests that it confirmed before then are not resent, and
+// neither are the rows of a request that BigQuery may have committed without
+// confirming it (see [Config]), which count in DropStats.AppendFailureDrops.
 // This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
@@ -80,6 +90,8 @@ type Logger interface {
 // storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
 // batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_            struct{} `json:"-"`
 	MaxRetries   int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -96,44 +108,138 @@ type RetryConfig struct {
 // never written.
 type ContentFormatter func(payload any, eventType string) (any, error)
 
+// ToolResultDecision is the verdict of a [ToolResultClassifier] on the result
+// of a tool call.
+type ToolResultDecision int
+
+const (
+	// ToolResultAbstain leaves the result to the plugin's built-in rules,
+	// which record a result that a tool returned without an error as
+	// TOOL_ERROR when it is the answer with which a plugin/retryandreflect
+	// plugin registered before this one replaces a tool error, or when its
+	// top-level "isError" or "is_error" is true, as an MCP CallToolResult
+	// reports a failed call, and as TOOL_COMPLETED otherwise. It is the zero
+	// value, so a classifier abstains by returning ToolResultVerdict{}.
+	ToolResultAbstain ToolResultDecision = iota
+	// ToolResultOK records the call as TOOL_COMPLETED, whatever the result
+	// holds.
+	ToolResultOK
+	// ToolResultError records the call as TOOL_ERROR, the row of a tool call
+	// that returned an error, with [ToolResultVerdict.ErrorMessage] as its
+	// error_message.
+	ToolResultError
+)
+
+// String returns the name of d, or "ToolResultDecision(<n>)" for a value that
+// is not one of the defined decisions.
+func (d ToolResultDecision) String() string {
+	switch d {
+	case ToolResultAbstain:
+		return "ToolResultAbstain"
+	case ToolResultOK:
+		return "ToolResultOK"
+	case ToolResultError:
+		return "ToolResultError"
+	}
+	return "ToolResultDecision(" + strconv.Itoa(int(d)) + ")"
+}
+
+// ToolResultVerdict is what a [ToolResultClassifier] returns. The zero value
+// abstains.
+type ToolResultVerdict struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
+	// Decision says how the call is recorded; see [ToolResultDecision].
+	Decision ToolResultDecision
+	// ErrorMessage is written to error_message when Decision is
+	// ToolResultError and ignored otherwise. When it is empty, the fixed
+	// message "tool_result_classifier classified the tool result as an
+	// error." (the message that adk-python writes, so that rows from either
+	// language can be queried together) is written instead. The message is
+	// scrubbed of credentials like every other error_message unless
+	// DisableSensitiveKeyRedaction is set, and truncated to MaxContentLen
+	// unless CaptureFullMessageContent is set, but Config.ContentFormatter and
+	// Config.PayloadColumnDenylist do not apply to it, so copy tool output
+	// into it only where storing that output is acceptable.
+	ErrorMessage string
+}
+
+// ToolResultClassifier decides whether the result of a tool call that returned
+// without an error reports a failure. It is called from the plugin's
+// AfterToolCallback with the context, the tool, the arguments and the result
+// that the callback receives, after the checks that it cannot override: a tool
+// error that OnToolErrorCallback already recorded, an error that reached
+// AfterToolCallback unrecovered, and a plugin/retryandreflect recovery payload
+// (response_type == "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") are recorded
+// as TOOL_ERROR without calling it. A tool
+// call that waits for or was rejected by the user's confirmation reaches the
+// classifier with the result that ADK sends the model, a map with the
+// confirmation outcome under "error", as it does in adk-python. The classifier
+// must not modify args or result: the model and the agent use them next. It is
+// called synchronously on the agent's goroutine, so keep it fast, and it may be
+// called concurrently for parallel tool calls. A classifier that panics, or
+// that returns a Decision that is not one of the defined decisions, is skipped
+// for that call: the call is recorded as it is without a classifier, and the
+// warning logged to Config.Logger reports only the panic type or unusable
+// decision, omitting the tool name and result. [Config] describes the built-in
+// rules and their interaction with content controls.
+type ToolResultClassifier func(ctx agent.Context, t tool.Tool, args, result map[string]any) ToolResultVerdict
+
 // DropStats reports cumulative event-drop and formatter-failure counts across
 // the plugin's event processing pipeline.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 type DropStats struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
-	// construction panicked (each recovered callback panic counts as at most 1
-	// failed event write; counts are approximate under rare logger panics), a
-	// batch write was skipped before sending because its write deadline had
-	// already expired or its desynchronized committed stream could not be
-	// replaced (including while stream rotation is in cooldown), or a BigQuery
-	// Storage Write append was rejected by the server or exhausted its retries.
-	// If the last attempt's outcome was unknown (sent, but no response), the
-	// rows may in fact have been written, so this is an upper bound.
+	// construction panicked (a panic in both afterRun and one of its cleanup
+	// fallbacks can count the same run more than once), a batch write was
+	// skipped before sending because its write deadline had already expired or
+	// its desynchronized committed stream could not be replaced (including
+	// while stream rotation is in cooldown), or a BigQuery Storage Write append
+	// was rejected by the server or exhausted its retries. Because fallback
+	// panics in afterRun can increment alongside the callback panic and an
+	// unknown last-attempt outcome (sent, but no response) may in fact have
+	// been written, this is an upper bound.
 	AppendFailureDrops int64 `json:"append_failure_drops"`
+	// RowErrorDrops counts individual rows rejected by BigQuery Storage Write
+	// AppendRowsResponse.RowErrors and isolated from their batch so the
+	// remaining valid rows could still be written.
+	RowErrorDrops int64 `json:"row_error_drops"`
 	// FormatterFailureDrops counts events whose payload was replaced with
 	// "[FORMATTER_FAILED]" (or omitted from content_parts) because
 	// ContentFormatter returned an error or panicked; this does not itself
 	// discard a row.
 	FormatterFailureDrops int64 `json:"formatter_failure_drops"`
-	// ShutdownDrops counts events rejected because Append was called after Close,
-	// or queued events dropped during Close because ShutdownTimeout expired
-	// before their batch could be written.
+	// ShutdownDrops counts events logged after Close finishes stopping any
+	// in-flight view-creation wait and stops accepting new rows, plus queued
+	// events discarded when the ShutdownTimeout write budget expires.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
-	// not be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops).
+	// not be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+	// ShutdownDrops).
 	TotalDrops int64 `json:"total_drops"`
 }
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
-	// Path is the object name within the bucket; it already includes
-	// Config.GCSPathPrefix.
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
+	// Path is the object name within the bucket. When Config.GCSPathPrefix is
+	// non-empty after trimming leading and trailing '/', Path begins with the
+	// effective prefix followed by "/" — either the '/'-trimmed
+	// Config.GCSPathPrefix verbatim, or its rewritten "<base>~<sha256>" form
+	// when that '/'-trimmed prefix contains '~', control/line-separator
+	// characters, or invalid UTF-8, starts with the reserved
+	// ".well-known/acme-challenge" segments, or exceeds 750 bytes (see
+	// Config.GCSPathPrefix). Every condition is checked after the trimming, so
+	// a 752-byte "/" + 750 bytes + "/" does not exceed the limit.
 	Path string
 	// Data is the raw payload to store in the object.
 	Data []byte
@@ -145,11 +251,16 @@ type GCSUploadRequest struct {
 // Storage and returns the gs:// URI of the stored object.
 //
 // The plugin calls UploadContent from several goroutines at the same time.
-// GCSUploadRequest.Path is the object name within the bucket and already
-// includes Config.GCSPathPrefix. If UploadContent fails, a text part keeps its
-// inline text (truncated to MaxContentLen) in the BigQuery row, while a binary
-// part's text is set to "[UPLOAD FAILED]" and its raw bytes are not stored
-// inline.
+// GCSUploadRequest.Path is the object name within the bucket and already begins
+// with the effective prefix derived from Config.GCSPathPrefix: the '/'-trimmed
+// prefix verbatim when valid, or its rewritten "<base>~<sha256>" form when the
+// '/'-trimmed prefix contains '~', control/line-separator characters, or
+// invalid UTF-8, starts with the reserved ".well-known/acme-challenge"
+// segments, or exceeds 750 bytes (see Config.GCSPathPrefix), so raw and
+// rewritten prefix namespaces are strictly disjoint. If UploadContent fails, a
+// text part keeps its inline text (truncated to MaxContentLen) in the BigQuery
+// row, while a binary part's text is set to "[UPLOAD FAILED]" and its raw bytes
+// are not stored inline.
 // UploadContent must return soon after ctx is done: the plugin waits for the
 // uploads of a batch before writing it, and Close waits for that write.
 type GCSContentOffloader interface {
@@ -168,29 +279,32 @@ type GCSContentOffloader interface {
 // was split into several requests; see below), with two exceptions: if the
 // stream was rotated by an earlier batch and has not committed yet, Go drops
 // the batch and pauses rotation; if an earlier attempt of the request had an
-// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
-// duplicate delivery, and replace the stream before the next batch (pausing
-// rotation if the stream had not committed yet). adk-python drops the batch
-// after any of the three and replaces the stream before the next one. On an
-// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
-// carrying one of these codes is a server rejection), Go treats Unavailable,
-// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
-// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
-// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the request had an unknown
-// outcome, whereas adk-python also replaces it when the error is not a schema
-// mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
-// returns ten per-reason counts. adk-python uploads while it parses an event,
-// before the row is queued, with a Cloud Storage client built from the
-// credentials of the plugin, a fixed 32 KiB inline text limit and the
-// parallelism of its thread pool. This plugin queues payloads with rows and
-// uploads them at batch flush time, bounds upload concurrency and memory,
-// supports customizable offloaders, exposes atomic DropStats counters, and
-// optionally writes through a COMMITTED stream with explicit offsets when
-// ExactlyOnceDelivery is enabled. ExactlyOnceDelivery handles offset
-// desynchronization (rotating to a fresh stream without consuming append retry
-// attempts) and distinguishes ambiguous transport errors from definite server
-// rejections.
+// unknown outcome, OutOfRange or NotFound, or a response that reports
+// RowErrors, makes Go drop the batch, to prevent duplicate delivery, and
+// replace the stream before the next batch (pausing rotation if the stream
+// had not committed yet). adk-python drops the batch after OutOfRange,
+// NotFound, or an unexpected AlreadyExists (treating AlreadyExists after an
+// attempt with an unknown outcome as confirmation) and replaces the stream
+// before the next one. On
+// an RPC-level receive error after a successful Send (an
+// AppendRowsResponse.Error carrying one of these codes is a server
+// rejection), Go treats Unavailable, DeadlineExceeded, Canceled, Aborted,
+// Internal, and Unknown as unknown outcomes, whereas adk-python also treats
+// ResourceExhausted (TooManyRequests) as one. After an RPC-level
+// InvalidArgument or FailedPrecondition, Go replaces the stream only if an
+// earlier attempt of the request had an unknown outcome, whereas adk-python
+// also replaces it when the error is not a schema mismatch. DropStats has five
+// per-reason counters, whereas adk-python's get_drop_stats() returns ten.
+// adk-python uploads while it parses an event, before the row is queued, with a
+// Cloud Storage client built from the credentials of the plugin, a fixed 32 KiB
+// inline text limit and the parallelism of its thread pool. This plugin queues
+// payloads with rows and uploads them at batch flush time, bounds upload
+// concurrency and memory, supports customizable offloaders, exposes atomic
+// DropStats counters, and optionally writes through a COMMITTED stream with
+// explicit offsets when ExactlyOnceDelivery is enabled. ExactlyOnceDelivery
+// handles offset desynchronization (rotating to a fresh stream without
+// consuming append retry attempts) and distinguishes ambiguous transport errors
+// from definite server rejections.
 //
 // Go splits a batch whose rows are estimated at more than 8 MiB into several
 // AppendRows requests, and halves a multi-row request that serializes to more
@@ -204,22 +318,80 @@ type GCSContentOffloader interface {
 // retries remain if the code is Unavailable, ResourceExhausted, Internal,
 // DeadlineExceeded, or Aborted, whereas adk-python resends it only for
 // DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
-// other code.
+// other code. When AppendRowsResponse.RowErrors reports valid in-range row
+// indices without AppendResult alongside a nil or InvalidArgument status (and
+// not after an ambiguous send under ExactlyOnceDelivery), Go isolates the
+// rejected rows under DropStats.RowErrorDrops and resends surviving rows up to
+// 8 passes per chunk, counting any remaining unconfirmed rows under
+// AppendFailureDrops, whereas adk-python drops the entire batch when the
+// status is InvalidArgument and treats a response with no status set as
+// committed without inspecting row_errors. A response that carries both
+// AppendResult and RowErrors leaves the rows of its request possibly
+// committed, as RowErrors after an ambiguous send do, so Go counts those rows
+// under AppendFailureDrops and never sends them again, not even when a run-end
+// flush times out.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
-// [DefaultConfig] when a plugin or batch processor is constructed.
+// [DefaultConfig] when a plugin is constructed.
+//
+// ToolResultClassifier maps to adk-python's tool_result_classifier. As there,
+// an answer with which plugin/retryandreflect replaces a tool error
+// (response_type == "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") is recorded
+// as TOOL_ERROR before ToolResultClassifier runs, without calling it (using a
+// fixed fallback error_message when ContentFormatter is set or "content" is in
+// PayloadColumnDenylist, rather than copying error_details or error_type from
+// the recovery map), and any other result whose top-level "isError" or
+// "is_error" is true is recorded as TOOL_ERROR when the classifier is nil,
+// fails, or abstains, and as TOOL_COMPLETED when it returns ToolResultOK.
+//
+// OnSchemaReady and OnSchemaError map to adk-python's on_schema_ready and
+// on_schema_error. adk-python runs its table readiness pass, which creates the
+// views too, lazily on the first event and again on later events after a
+// failure, so its two schema callbacks can be called several times; this
+// plugin reads, creates, validates, or upgrades the table once, in the
+// constructor (calling OnSchemaError and returning the error on a table
+// failure), and creates the views in the background when enabled (where a
+// failed startup view logs a warning and returns without calling either
+// callback, while [BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors
+// directly), so each callback is called at most once per plugin.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
 // logging, redaction of sensitive keys and credentials, run-end flushing,
 // additive schema upgrades, and per-event view creation are enabled by default;
 // DisableSessionMetadata, DisableSensitiveKeyRedaction, DisableFlushOnRunEnd,
-// DisableSchemaUpgrade, and DisableCreateViews opt out of each. Created and
+// DisableSchemaUpgrade, and DisableCreateViews opt out of each, while
+// CreateEvalViews opts in to creating the pre-built evaluation views. Created and
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+//
+// While concurrent activations of the same agent on the same branch and node
+// path are open, an agent that one of them runs is placed under that
+// activation's span (parent_span_id): the activation whose context, or a
+// context derived from it, was passed to the agent's Run, whichever goroutine
+// runs the agent. Launch lineage follows Go standard library context wrappers
+// (context and os/signal.NotifyContext, except context.WithoutCancel), ADK
+// contexts that expose an exported Context or InvocationContext field
+// (callbackContextWrapper and toolContextWrapper hold their inner Context in an
+// unexported context field and stop the walk if encountered unwrapped), and
+// pointer wrappers whose sole field is an anonymously embedded context.Context
+// that must not be reassigned after handoff, up to 65536 steps. Multi-field
+// wrappers (such as struct{ context.Context; id string }) and wrappers with a
+// named Context field (such as struct{ Context context.Context }) are
+// intentionally not inspected because user-owned structs may guard fields with
+// a sibling or external lock. When a context derives through any other wrapper
+// or exceeds the step limit, goroutines decide instead: a child agent that runs
+// on an activation's goroutine, or on a goroutine that the activation starts
+// directly, is placed under that activation, and one launched across an
+// intermediate goroutine that runs no ADK callback is placed under the nearest
+// open span enclosing the concurrent activations that hold an open span its
+// branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
+
 	Enabled        bool
 	ProjectID      string
 	DatasetID      string
@@ -295,12 +467,45 @@ type Config struct {
 	// credentials in URIs, Authorization headers and Bearer or Basic
 	// credentials, sensitive keys in JSON embedded in text, and credentials in
 	// error_message are all written unredacted. When false, key names match
-	// regardless of case and of "_" or "-", so apiKey, APIKey and api-key are
-	// redacted like api_key.
+	// regardless of case and of "_", "-" or ".", so apiKey, APIKey, api-key and
+	// api.key are redacted like api_key. A compound name that ends in a
+	// credential name, such as DB_PASSWORD, dbPassword or
+	// spring.datasource.password, is redacted too, and so is a credential name
+	// or "temp:" key behind "user:" or "app:" state prefixes, stacked or not,
+	// such as user:api_key, app:user:token or user:temp:x. The "." and
+	// compound-name matching apply to map keys, to the keys of query,
+	// fragment and ";" parameter pairs of a URI, and to keys in text. They do
+	// not apply to URI path segments: only a segment that is a credential
+	// name itself, whatever its case and "_" or "-", or a "temp:" key, alone
+	// or behind "user:" or "app:" prefixes, redacts the segment after it, as
+	// in https://h/api_key/abc123, while https://h/api.key/abc123 and
+	// https://h/DB_PASSWORD/abc123 keep abc123, as file names and route slugs
+	// such as /private.key/download or /reset-password/confirm stay as they
+	// are. Cursor and tokenizer names that end in "token" are not redacted,
+	// in snake, camel or upper case: next_token, prev_token and
+	// previous_token; page_token, sync_token, continuation_token and
+	// resume_token, alone or after next, prev, previous, start or newStart,
+	// as nextPageToken, startPageToken or newStartPageToken; and pad_token,
+	// eos_token, eot_token, bos_token, unk_token, cls_token, sep_token and
+	// mask_token. Plural count names such as input_tokens and output_tokens
+	// are also kept because they end in "tokens", whereas singular or
+	// flag-style compound names that end in a sensitive credential suffix,
+	// such as input_token, output_token, has_password or is_secret, are
+	// redacted regardless of value type. Redaction also applies to declared
+	// Go types whose type name matches a sensitive key (generic or not): a
+	// non-struct value, or a struct whose value or pointer type has a
+	// MarshalJSON or MarshalText method, redacts whole as "[REDACTED]" with
+	// truncated=true; any other struct shows its exported fields, with the
+	// sensitive ones redacted, and omits unexported fields; and map keys of
+	// such a type collapse to "[REDACTED]":"[REDACTED]" with
+	// truncated=true (for example, map[SyntaxToken]int{1: 12, 2: 9} formats as
+	// {"[REDACTED]":"[REDACTED]"} with truncated=true). The adk-python plugin
+	// matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
-	// the content column is built.
+	// the content column is built. The evaluation views (see CreateEvalViews)
+	// need it to keep the content keys that they read.
 	ContentFormatter ContentFormatter
 	// DebugContentFormatterErrors includes error-shape metadata (such as error
 	// byte length) in the warning logged when ContentFormatter fails, without
@@ -308,13 +513,16 @@ type Config struct {
 	DebugContentFormatterErrors bool
 
 	// EventAllowlist, if non-empty, limits logging to the listed event types.
-	// The legacy umbrella name "EVENT" matches all session-event rows
-	// (such as STATE_DELTA, AGENT_TRANSFER, and AGENT_RESPONSE).
+	// The legacy umbrella name "EVENT" matches session-event emitters
+	// (STATE_DELTA, AGENT_TRANSFER, TOOL_PAUSED, HITL_*, OnEventCallback
+	// AGENT_RESPONSE, and resumed TOOL_COMPLETED); it does not match primary
+	// TOOL_COMPLETED rows or FinalResponseToolNames AGENT_RESPONSE rows.
 	EventAllowlist []string
 	// EventDenylist stops the listed event types from being logged. It takes
 	// precedence over EventAllowlist, including when "EVENT" is listed in
-	// EventAllowlist. The legacy umbrella name "EVENT" suppresses all
-	// session-event rows.
+	// EventAllowlist. The legacy umbrella name "EVENT" suppresses
+	// session-event emitters (including resumed TOOL_COMPLETED rows, though not
+	// primary TOOL_COMPLETED or FinalResponseToolNames AGENT_RESPONSE rows).
 	EventDenylist []string
 
 	// PayloadColumnDenylist names payload columns that are omitted from newly
@@ -326,11 +534,34 @@ type Config struct {
 	// CustomMetadataAllowlist selects the model response and event
 	// CustomMetadata keys written to attributes.custom_metadata. An entry
 	// ending in "*" matches keys by prefix; other entries match exactly.
+	// EventAgentStateCheckpoint rows read their reserved checkpoint keys
+	// directly from CustomMetadata, while attributes.custom_metadata still
+	// includes only allowlisted keys.
 	CustomMetadataAllowlist []string
 
 	// FinalResponseToolNames lists tools whose successful completion is also
 	// logged as an AGENT_RESPONSE event carrying the tool arguments.
 	FinalResponseToolNames []string
+
+	// ToolResultClassifier, if set, decides whether a tool result that was
+	// returned without an error (and is not a plugin/retryandreflect recovery
+	// answer, which is recorded as TOOL_ERROR before the classifier runs)
+	// reports a failure; see [ToolResultClassifier]. A ToolResultError verdict
+	// records the call as TOOL_ERROR instead of TOOL_COMPLETED, which also
+	// leaves out the AGENT_RESPONSE row of a tool in FinalResponseToolNames
+	// (while a runtime-successful finish_task completion still completes the
+	// task span because classification leaves the agent-facing result
+	// unchanged); a ToolResultOK verdict records TOOL_COMPLETED, whatever the
+	// result holds (while a finish_task completion whose top-level "isError" or
+	// "is_error" is true still ends the task span with AGENT_ERROR, for the
+	// same reason); and a ToolResultAbstain verdict (the zero value) leaves
+	// the result to the remaining built-in rules (see [ToolResultAbstain]).
+	// When nil, the built-in rules decide for every result that a tool
+	// returned without an error. The classifier is called even when
+	// EventAllowlist or EventDenylist drops the TOOL_COMPLETED and TOOL_ERROR
+	// rows, since its verdict also decides the AGENT_RESPONSE row of a tool in
+	// FinalResponseToolNames.
+	ToolResultClassifier ToolResultClassifier
 
 	// DisableFlushOnRunEnd stops the synchronous best-effort flush when an
 	// invocation completes. When false (the default), AfterRunCallback flushes
@@ -354,6 +585,45 @@ type Config struct {
 	// missing columns are added, which needs the bigquery.tables.update
 	// permission; a table that already has every column is not updated.
 	DisableSchemaUpgrade bool
+
+	// OnSchemaReady, if set, is called once the plugin's startup pass over the
+	// BigQuery schema has succeeded: the events table was read, created or
+	// upgraded during construction and, when startup view creation is enabled
+	// (DisableCreateViews is false or CreateEvalViews is true), the startup view
+	// creation pass has created every enabled view (see DisableCreateViews and
+	// CreateEvalViews). When DisableCreateViews is set and CreateEvalViews is
+	// false, view definitions are not validated at startup and OnSchemaReady is
+	// called synchronously from the constructor once table setup succeeds;
+	// otherwise it is called from the background view creation goroutine, at
+	// most once per plugin, so keep it fast and non-blocking, and expect it on
+	// another goroutine. It must not call Close, SyncViews, or SyncEvalViews on
+	// the plugin, nor wait for anything that does, since they wait for the
+	// callback to return first. A callback that never returns therefore keeps
+	// Close from returning, and Close drains the queued rows only after it has
+	// waited. It is not called when a startup view fails (which logs a warning
+	// and returns without calling OnSchemaError either), when the startup view
+	// pass is preempted by [BigQueryAgentAnalyticsPlugin.SyncViews] or
+	// [BigQueryAgentAnalyticsPlugin.SyncEvalViews] or ended by closing the
+	// plugin, when an enabled view group fails definition or configuration
+	// validation, when the plugin is disabled, or when the plugin was built with
+	// [NewBigQueryAgentAnalyticsPluginWithClients] and bqClient == nil, since no
+	// pass runs then; a SyncViews or SyncEvalViews call of its own never calls
+	// it either. A panic in the callback is recovered and logged (through
+	// Config.Logger when called from the constructor, and only through a
+	// non-default Logger when called from the background pass, as view failures
+	// are).
+	OnSchemaReady func()
+
+	// OnSchemaError, if set, is called with the error when the startup pass
+	// fails to read, create, validate, or upgrade the events table, right
+	// before the constructor returns that error. It is called at most once per
+	// constructor call, synchronously from the constructor, and never for a
+	// startup view that fails to be created (which logs a warning and returns
+	// without calling OnSchemaReady or OnSchemaError; SyncViews returns view
+	// errors directly), nor when the plugin is disabled or was built with
+	// bqClient == nil. A panic in the callback is recovered and logged through
+	// Config.Logger, and the constructor still returns the error.
+	OnSchemaError func(err error)
 
 	// EnableOTelCorrelation also writes the ambient OpenTelemetry trace and
 	// span IDs to attributes.otel.
@@ -379,7 +649,36 @@ type Config struct {
 	// GCSClientOptions configures the Cloud Storage client created for
 	// GCSBucketName. When empty, ClientOptions is used.
 	GCSClientOptions []option.ClientOption
-	// GCSPathPrefix is prepended to the names of offloaded objects.
+	// GCSPathPrefix is prepended, followed by "/", to the names of offloaded
+	// objects. Leading and trailing slashes are trimmed, so "/logs/" and
+	// "logs" are the same prefix and a prefix of only slashes adds nothing.
+	// The trimmed prefix is used verbatim when it is valid UTF-8 of at most
+	// 750 bytes; does not contain '~' (reserved as the rewrite hash
+	// delimiter); has no control character (U+0000 to U+001F and U+007F to
+	// U+009F, which include CR, LF and U+0085) and no Unicode line or
+	// paragraph separator (U+2028 or U+2029); and its first two "/"-separated
+	// segments are not, case-insensitively, ".well-known" and "acme-challenge",
+	// which Cloud Storage reserves (whole segments are compared, so
+	// ".well-known/acme-challenge-x" is kept verbatim). Valid characters and
+	// segments such as '\', spaces, '=', Unicode text, empty inner segments
+	// ("//"), and "." or ".." segments are kept unchanged.
+	//
+	// Any other prefix is rewritten to "<base>~<sha256>", and a warning with
+	// the rewrite reason and byte lengths (without logging prefix text) is
+	// logged to Logger when the plugin is constructed: each
+	// '~', each byte that is not valid UTF-8, and each of those control or
+	// line/paragraph-separator characters is replaced with '_', a leading
+	// ".well-known" segment before "acme-challenge" becomes "_well-known", the
+	// result is cut to at most 402 bytes on a UTF-8 rune boundary, and "~"
+	// followed by the 64 lowercase hex digits of the SHA-256 digest of the
+	// trimmed prefix is appended (at most 467 rewritten prefix bytes total),
+	// so distinct trimmed prefixes keep distinct destinations, the folder part
+	// of "<prefix>/<YYYY-MM-DD>/<trace_id>/" fits the 512-byte folder limit on
+	// hierarchical-namespace Cloud Storage buckets, assembled object names stay
+	// within Cloud Storage's 1,024-byte limit, and raw and rewritten prefix
+	// namespaces are strictly disjoint. Because '~' is reserved, passing a
+	// rewritten "<base>~<sha256>" output back into GCSPathPrefix rewrites it
+	// again rather than aliasing the original rewritten prefix.
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example
@@ -467,6 +766,48 @@ type Config struct {
 	// that start many instances may set DisableCreateViews and call SyncViews
 	// once at deploy time.
 	DisableCreateViews bool
+	// CreateEvalViews creates or replaces the two pre-built agent evaluation
+	// BigQuery views (see [Config.EvalViewDefinitions]), named
+	// "<ViewPrefix>_eval_session" and "<ViewPrefix>_eval_turn" (for example
+	// v_eval_session and v_eval_turn), in the dataset of the events table.
+	// When true (the default is false) and the plugin has a BigQuery client,
+	// the views are created in the background once the table is ready, after
+	// the per-event views when DisableCreateViews is false or on their own
+	// when DisableCreateViews is true; [BigQueryAgentAnalyticsPlugin.SyncEvalViews]
+	// creates or replaces the two evaluation views synchronously and returns
+	// the error even when CreateEvalViews is false, and
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] also includes them when
+	// CreateEvalViews is true.
+	//
+	// Both views reconstruct Vertex AI GenAI Evaluation AgentData trajectories
+	// (trace) and per-turn / per-session guardrail metrics from the content
+	// column and require USER_MESSAGE_RECEIVED, AGENT_STARTING, LLM_REQUEST,
+	// TOOL_STARTING, TOOL_COMPLETED, TOOL_PAUSED, AGENT_TRANSFER,
+	// HITL_CREDENTIAL_REQUEST, HITL_CONFIRMATION_REQUEST, HITL_INPUT_REQUEST,
+	// HITL_CREDENTIAL_REQUEST_COMPLETED, HITL_CONFIRMATION_REQUEST_COMPLETED,
+	// HITL_INPUT_REQUEST_COMPLETED, AGENT_RESPONSE, and INVOCATION_COMPLETED
+	// events. Enabling CreateEvalViews when "content" is in
+	// PayloadColumnDenylist or when EventDenylist / EventAllowlist filters out
+	// any active emitter of these required events (including "EVENT" in
+	// EventAllowlist without explicit AGENT_RESPONSE when FinalResponseToolNames
+	// is non-empty, or "EVENT" in EventDenylist) is a configuration error.
+	//
+	// A custom ContentFormatter must keep the content keys that the views read
+	// ($.text_summary, $.response, $.tool, $.args, and $.result, as well as
+	// $.from_agent and $.to_agent of AGENT_TRANSFER rows and $.usage of
+	// LLM_RESPONSE rows). Setting ContentFormatter also stops AGENT_RESPONSE
+	// rows from writing content_parts, so the views then take the reply text
+	// from $.response alone.
+	//
+	// A user message with a text part offloaded to Cloud Storage (see
+	// GCSBucketName and MaxInlineTextSize) has only a 200-rune preview of that
+	// part in the table, so the views reconstruct no user text for the
+	// message: its turn is not eval_ready, and neither is its session.
+	//
+	// Because the evaluation views aggregate per session or turn, filtering on
+	// session_start_timestamp or turn_start_timestamp does not prune the
+	// events table's timestamp partitions.
+	CreateEvalViews bool
 	// ViewPrefix is the name prefix of the created views. Empty means "v".
 	// It may contain only letters, digits, '_' and '-'. Give each events
 	// table that shares a dataset its own prefix.

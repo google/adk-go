@@ -53,10 +53,10 @@ func (s *forwardingService) Load(ctx context.Context, req *artifact.LoadRequest)
 	if s.parent == nil {
 		return nil, errArtifactServiceNotSet
 	}
-	if req.Version == 0 {
+	if req.Version == nil {
 		return s.parent.Load(ctx, req.FileName)
 	}
-	return s.parent.LoadVersion(ctx, req.FileName, int(req.Version))
+	return s.parent.LoadVersion(ctx, req.FileName, req.Version)
 }
 
 func (s *forwardingService) List(ctx context.Context, _ *artifact.ListRequest) (*artifact.ListResponse, error) {
@@ -108,7 +108,11 @@ func (s *forwardingService) parentStorage() (*Artifacts, error) {
 		case interface{ Unwrap() agent.Artifacts }:
 			parent = a.Unwrap()
 		default:
-			return nil, fmt.Errorf("parent artifacts do not expose a backing service: %w", errors.ErrUnsupported)
+			return nil, unwrapUnsupportedErr()
 		}
 	}
+}
+
+func unwrapUnsupportedErr() error {
+	return fmt.Errorf("parent artifacts do not expose a backing service: %w", errors.ErrUnsupported)
 }

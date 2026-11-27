@@ -16,8 +16,6 @@ package mcptoolset
 
 import (
 	"net/http"
-	"slices"
-	"strings"
 
 	"google.golang.org/adk/v2/internal/version"
 )
@@ -25,29 +23,17 @@ import (
 // trackingTransport puts the ADK client labels at the front of the user-agent
 // and x-goog-api-client headers of every request, so an MCP server can tell
 // ADK traffic from other clients. A value already on the request when it gets
-// here is kept after the ADK tokens, without duplicates, the rule adk-python's
-// merge_tracking_headers applies to its MCP headers. go-sdk sets neither header
-// itself, and base runs later, so a header base sets is not merged.
+// here is kept after the ADK tokens (see [version.WithTrackingHeaders]). go-sdk
+// sets neither header itself, and base runs later, so a header base sets is not
+// merged. The labels name the hosting runtime only on a request to a Google
+// API endpoint (see [version.TrackingHeader]).
 type trackingTransport struct {
 	base http.RoundTripper
 }
 
-// adkTokens is shared by every request, so RoundTrip clones it before appending.
-var adkTokens = strings.Fields(version.TrackingHeader())
-
 func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
-	for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
-		tokens := slices.Clone(adkTokens)
-		for _, v := range req.Header.Values(name) {
-			for _, tok := range strings.Fields(v) {
-				if !slices.Contains(tokens, tok) {
-					tokens = append(tokens, tok)
-				}
-			}
-		}
-		req.Header.Set(name, strings.Join(tokens, " "))
-	}
+	req.Header = version.WithTrackingHeaders(req.Header, req.URL)
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport

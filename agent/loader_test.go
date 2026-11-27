@@ -16,6 +16,7 @@ package agent
 
 import (
 	"iter"
+	"slices"
 	"testing"
 
 	"google.golang.org/adk/v2/session"
@@ -108,6 +109,28 @@ func TestDuplicateName(t *testing.T) {
 		_, err := NewMultiLoader(tt.root, tt.agents...)
 		if (err != nil) != tt.wantErr {
 			t.Errorf("NewMultiLoader() name=%v, error = %v, wantErr %v", tt.name, err, tt.wantErr)
+		}
+	}
+}
+
+func TestMultiLoaderListAgentsSorted(t *testing.T) {
+	names := []string{"transfer_agent", "sequential_agent", "hello_agent", "tools_agent", "agent_tool_agent", "loop_agent", "parallel_agent", "remote_agent", "template_agent"}
+	root := &testAgent{name: "root_agent"}
+	var agents []Agent
+	for _, name := range names {
+		agents = append(agents, &testAgent{name: name})
+	}
+	loader, err := NewMultiLoader(root, agents...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := slices.Sorted(slices.Values(append(names, root.name)))
+	// Map iteration order is randomized, so an unsorted result would show up
+	// in a few calls.
+	for range 20 {
+		if got := loader.ListAgents(); !slices.Equal(got, want) {
+			t.Fatalf("ListAgents() = %v, want %v", got, want)
 		}
 	}
 }

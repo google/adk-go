@@ -19,12 +19,14 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 )
@@ -126,6 +128,17 @@ func (m *apigeeModel) Name() string {
 	return m.name
 }
 
+func (m *apigeeModel) Capabilities() model.Capabilities {
+	if m == nil {
+		return model.Capabilities{}
+	}
+	return model.Capabilities{
+		AcceptsOutputSchemaAndTools: !googlellm.IsGeminiModel(m.name),
+	}
+}
+
+var _ model.LLM = (*apigeeModel)(nil)
+
 // GenerateContent calls the underlying model.
 func (m *apigeeModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	// The flow sets req.Model to Name(), the full "apigee/..." string, and the
@@ -192,9 +205,7 @@ func generateHTTPOptions(proxyURL, apiVersion string, customHeaders http.Header)
 	}
 	if customHeaders != nil {
 		httpOptions.Headers = make(http.Header)
-		for k, v := range customHeaders {
-			httpOptions.Headers[k] = v
-		}
+		maps.Copy(httpOptions.Headers, customHeaders)
 	}
 	if apiVersion != "" {
 		httpOptions.APIVersion = apiVersion

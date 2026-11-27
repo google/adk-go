@@ -24,8 +24,10 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -46,7 +48,7 @@ func TestInstrumentInvocation_FirstErrorAndEarlyStop(t *testing.T) {
 	}
 
 	seen := 0
-	for range InstrumentInvocation(t.Context(), testAgent{}, "s", run) {
+	for range InstrumentInvocation(t.Context(), testAgent{}, "s", run) { //nolint:errcheck // the run yields errors by design; the span status below carries the first one
 		if seen++; seen == 2 {
 			break
 		}
@@ -69,12 +71,79 @@ func TestInstrumentInvocation_NestedOpensNoSpan(t *testing.T) {
 	}
 
 	ctx, outer := startInvokeWorkflowSpan(t.Context(), "outer", "s")
-	for range InstrumentInvocation(ctx, testAgent{}, "s", run) {
+	for _, err := range InstrumentInvocation(ctx, testAgent{}, "s", run) {
+		if err != nil {
+			t.Fatalf("InstrumentInvocation() error = %v", err)
+		}
+	}
+	if !outer.IsRecording() {
+		t.Error("nested invocation ended the enclosing workflow span")
 	}
 	outer.End()
 
 	if got := len(exporter.GetSpans()); got != 1 {
 		t.Errorf("got %d spans, want only the outer one", got)
+	}
+}
+
+func TestInvocationWorkflowSpanOwnership(t *testing.T) {
+	for _, resumeChild := range []bool{false, true} {
+		name := "root"
+		if resumeChild {
+			name = "resumed_child"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+			exporter := setupTestTracer(t)
+			root := &fakeAgent{State: agentinternal.State{AgentType: agentinternal.TypeWorkflowAgent}, name: "root"}
+			child := &fakeAgent{State: agentinternal.State{AgentType: agentinternal.TypeWorkflowAgent}, name: "child"}
+			ictx := &fakeInvocationContext{t: t, sessionID: "s", invocationID: "i"}
+			var invocation trace.Span
+			for _, err := range InstrumentInvocation(t.Context(), root, "s", func(ctx context.Context) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					invocation = trace.SpanFromContext(ctx)
+					if !resumeChild {
+						var owned trace.Span
+						ctx, owned = StartNodeSpan(ctx, ictx, OperationAgent{Agent: root})
+						owned.End()
+						if !trace.SpanFromContext(ctx).IsRecording() {
+							t.Fatal("root workflow ended the runner's span")
+						}
+						if !trace.SpanContextFromContext(ctx).Equal(invocation.SpanContext()) {
+							t.Fatal("root workflow opened a duplicate span")
+						}
+					}
+					childCtx, childSpan := StartNodeSpan(ctx, ictx, OperationAgent{Agent: child})
+					if trace.SpanContextFromContext(childCtx).Equal(invocation.SpanContext()) {
+						t.Fatal("child workflow reused the root span")
+					}
+					childSpan.End()
+					if !invocation.IsRecording() {
+						t.Error("child workflow ended the runner's span")
+					}
+				}
+			}) {
+				if err != nil {
+					t.Fatalf("InstrumentInvocation() error = %v", err)
+				}
+			}
+			spans := exporter.GetSpans()
+			if len(spans) != 2 {
+				t.Fatalf("ended spans = %d, want 2", len(spans))
+			}
+			if !spans[0].Parent.Equal(invocation.SpanContext()) {
+				t.Error("child workflow lost its invocation parent")
+			}
+			var nested bool
+			for _, attr := range spans[0].Attributes {
+				if attr.Key == genAIWorkflowNested {
+					nested = attr.Value.AsBool()
+				}
+			}
+			if !nested {
+				t.Error("child workflow is not marked nested")
+			}
+		})
 	}
 }
 
@@ -92,7 +161,10 @@ func TestInstrumentGenerateContent_EarlyStop(t *testing.T) {
 	}
 	params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Stream: true}
 
-	for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+		if err != nil {
+			t.Fatalf("InstrumentGenerateContent() error = %v", err)
+		}
 		break
 	}
 
@@ -135,7 +207,10 @@ func TestInstrumentGenerateContent_UsageFromLatestReport(t *testing.T) {
 		}
 	}
 	params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Stream: true}
-	for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+		if err != nil {
+			t.Fatalf("InstrumentGenerateContent() error = %v", err)
+		}
 	}
 
 	var got int64
@@ -146,5 +221,101 @@ func TestInstrumentGenerateContent_UsageFromLatestReport(t *testing.T) {
 	}
 	if got != 10 {
 		t.Errorf("input tokens = %d, want 10", got)
+	}
+}
+
+func TestInstrumentGenerateContent_ResponseModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		schema    string
+		modelName string
+		stream    bool
+		chunks    []*model.LLMResponse
+		wantModel string
+	}{
+		{
+			name:      "non-streaming uses served model version on default schema",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			chunks:    []*model.LLMResponse{{ModelVersion: "served-model-v2", FinishReason: genai.FinishReasonStop}},
+			wantModel: "served-model-v2",
+		},
+		{
+			name:      "streaming falls back to requested model when chunks omit model version",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			stream:    true,
+			chunks: []*model.LLMResponse{
+				{Content: genai.NewContentFromText("hi", genai.RoleModel), Partial: true},
+				{FinishReason: genai.FinishReasonStop},
+			},
+			wantModel: "requested-model",
+		},
+		{
+			name:      "streaming picks latest non-empty model version across chunks",
+			schema:    "otel_semconv_1_44",
+			modelName: "requested-model",
+			stream:    true,
+			chunks: []*model.LLMResponse{
+				{ModelVersion: "served-v1", Partial: true},
+				{FinishReason: genai.FinishReasonStop},
+			},
+			wantModel: "served-v1",
+		},
+		{
+			name:      "legacy schema records served model version",
+			schema:    "otel_semconv_1_36",
+			modelName: "requested-model",
+			chunks:    []*model.LLMResponse{{ModelVersion: "served-legacy"}},
+			wantModel: "served-legacy",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			spans := setupTestTracer(t)
+			logs := &inMemoryExporter{}
+			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
+
+			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					for _, c := range tc.chunks {
+						if !yield(c, nil) {
+							return
+						}
+					}
+				}
+			}
+			params := GenerateContentParams{ModelName: tc.modelName, Request: &model.LLMRequest{}, Stream: tc.stream}
+			for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+				if err != nil {
+					t.Fatalf("InstrumentGenerateContent() error = %v", err)
+				}
+			}
+
+			var spanModel string
+			for _, kv := range spans.GetSpans()[0].Attributes {
+				if kv.Key == semconv.GenAIResponseModelKey {
+					spanModel = kv.Value.AsString()
+				}
+			}
+			if spanModel != tc.wantModel {
+				t.Errorf("span gen_ai.response.model = %q, want %q", spanModel, tc.wantModel)
+			}
+
+			if tc.schema == "otel_semconv_1_44" {
+				var logModel string
+				logs.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+					if kv.Key == semconv.GenAIResponseModelKey {
+						logModel = kv.Value.AsString()
+					}
+					return true
+				})
+				if logModel != tc.wantModel {
+					t.Errorf("log event gen_ai.response.model = %q, want %q", logModel, tc.wantModel)
+				}
+			}
+		})
 	}
 }

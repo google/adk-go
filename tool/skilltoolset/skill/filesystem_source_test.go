@@ -101,6 +101,118 @@ func TestFileSystemSource_ListFrontmatters(t *testing.T) {
 	}
 }
 
+func TestFileSystemSource_ListFrontmatters_OnListInvalidSkill(t *testing.T) {
+	filesystem := plainFS{fstest.MapFS{
+		"bad-yaml/SKILL.md":   &fstest.MapFile{Data: []byte("---[INVALID_YAML")},
+		"dir/not-skill.txt":   &fstest.MapFile{Data: []byte("a directory without SKILL.md")},
+		"math-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: math-skill\ndescription: test\n---\n")},
+		"renamed/SKILL.md":    &fstest.MapFile{Data: []byte("---\nname: other\ndescription: test\n---\n")},
+	}}
+
+	t.Run("nil return skips the skill", func(t *testing.T) {
+		reported := map[string]error{}
+		source, err := NewFileSystemSourceWithConfig(FileSystemSourceConfig{
+			FileSystem: filesystem,
+			OnListInvalidSkill: func(name string, err error) error {
+				reported[name] = err
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewFileSystemSourceWithConfig() error = %v", err)
+		}
+
+		got, err := source.ListFrontmatters(t.Context())
+		if err != nil {
+			t.Fatalf("ListFrontmatters() error = %v", err)
+		}
+		want := []*Frontmatter{{Name: "math-skill", Description: "test"}}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("ListFrontmatters() mismatch (-want +got):\n%s", diff)
+		}
+		wantReported := map[string]error{"bad-yaml": ErrInvalidFrontmatter, "renamed": ErrInvalidSkillName}
+		if diff := cmp.Diff(wantReported, reported, cmpopts.EquateErrors()); diff != "" {
+			t.Errorf("OnListInvalidSkill calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("non-nil return aborts the listing", func(t *testing.T) {
+		errStop := errors.New("stop")
+		var calls []string
+		source, err := NewFileSystemSourceWithConfig(FileSystemSourceConfig{
+			FileSystem: filesystem,
+			OnListInvalidSkill: func(name string, err error) error {
+				calls = append(calls, name)
+				return errStop
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewFileSystemSourceWithConfig() error = %v", err)
+		}
+
+		got, err := source.ListFrontmatters(t.Context())
+		if !errors.Is(err, errStop) {
+			t.Errorf("ListFrontmatters() error = %v, want %v", err, errStop)
+		}
+		if got != nil {
+			t.Errorf("ListFrontmatters() = %v, want nil", got)
+		}
+		if diff := cmp.Diff([]string{"bad-yaml"}, calls); diff != "" {
+			t.Errorf("OnListInvalidSkill calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("a SKILL.md that cannot be opened is not offered", func(t *testing.T) {
+		called := false
+		source, err := NewFileSystemSourceWithConfig(FileSystemSourceConfig{
+			FileSystem: deniedFS{FS: filesystem, denied: "math-skill/SKILL.md"},
+			OnListInvalidSkill: func(name string, err error) error {
+				called = called || name == "math-skill"
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewFileSystemSourceWithConfig() error = %v", err)
+		}
+
+		if _, err := source.ListFrontmatters(t.Context()); !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("ListFrontmatters() error = %v, want %v", err, fs.ErrPermission)
+		}
+		if called {
+			t.Error("OnListInvalidSkill was called for a SKILL.md that could not be opened")
+		}
+	})
+
+	t.Run("without a callback the first invalid skill fails the listing", func(t *testing.T) {
+		source, err := NewFileSystemSourceWithConfig(FileSystemSourceConfig{FileSystem: filesystem})
+		if err != nil {
+			t.Fatalf("NewFileSystemSourceWithConfig() error = %v", err)
+		}
+		if _, err := source.ListFrontmatters(t.Context()); !errors.Is(err, ErrInvalidFrontmatter) {
+			t.Errorf("ListFrontmatters() error = %v, want %v", err, ErrInvalidFrontmatter)
+		}
+	})
+}
+
+func TestNewFileSystemSourceWithConfig_RequiresFileSystem(t *testing.T) {
+	if _, err := NewFileSystemSourceWithConfig(FileSystemSourceConfig{}); err == nil {
+		t.Error("NewFileSystemSourceWithConfig() error = nil, want an error for a nil FileSystem")
+	}
+}
+
+// deniedFS is an fs.FS whose Open fails with fs.ErrPermission for one file.
+type deniedFS struct {
+	fs.FS
+	denied string
+}
+
+func (d deniedFS) Open(name string) (fs.File, error) {
+	if name == d.denied {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+	}
+	return d.FS.Open(name)
+}
+
 func TestFileSystemSource_LoadFrontmatter(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -163,6 +275,13 @@ func TestFileSystemSource_LoadInstructions(t *testing.T) {
 				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\nMath instructions.")},
 			}}),
 			want: "Math instructions.",
+		},
+		{
+			name: "Trims surrounding whitespace",
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
+				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n\n  # Math\n\n  - Add numbers.\n\n")},
+			}}),
+			want: "# Math\n\n  - Add numbers.",
 		},
 		{
 			name: "Name mismatch",

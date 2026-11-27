@@ -838,6 +838,8 @@ type parallelCallModel struct {
 
 func (*parallelCallModel) Name() string { return "parallel-call-model" }
 
+func (*parallelCallModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *parallelCallModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		defer func() { m.step++ }()
@@ -1099,7 +1101,7 @@ func TestSearch_OverlappingParallelCallsReportAlreadyAvailable(t *testing.T) {
 		}
 		return ft
 	}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		gated, err := New(&staticToolset{tools: []tool.Tool{newTool("zebra_tool"), newTool("apple_tool")}}, Config{})
 		if err != nil {
 			t.Fatalf("New() error = %v", err)

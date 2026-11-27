@@ -16,7 +16,10 @@ package util
 
 import (
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 )
@@ -126,9 +129,10 @@ func cmdArgs(value string) ([]string, error) {
 // unparseable exec form by silently rerunning the instruction as shell form, so
 // a gap here is not a build failure but a change of execution mode.
 func TestValidateDockerfileSafe_AcceptedValuesKeepCMDParseable(t *testing.T) {
+	t.Parallel()
 	// Every single byte, so that no control byte, escape character or invalid
 	// UTF-8 byte slips through unnoticed.
-	for b := 0; b < 0x100; b++ {
+	for b := range 0x100 {
 		value := "http://x" + string([]byte{byte(b)}) + "y"
 		if ValidateDockerfileSafe(value, "test value") != nil {
 			continue
@@ -147,21 +151,36 @@ func TestValidateDockerfileSafe_AcceptedValuesKeepCMDParseable(t *testing.T) {
 	// so that an accepted value also reaches the container as it was written.
 	// Up to utf8.MaxRune rather than the BMP, so a supplementary-plane
 	// character in a path (an emoji, CJK Ext-B) is covered by the claim above.
-	for r := rune(0); r <= utf8.MaxRune; r++ {
-		if !utf8.ValidRune(r) {
-			continue
-		}
-		value := "http://x" + string(r) + "y"
-		if ValidateDockerfileSafe(value, "test value") != nil {
-			continue
-		}
-		args, err := cmdArgs(value)
-		if err != nil {
-			t.Errorf("rune %U is accepted but makes the CMD line unparseable: %v", r, err)
-			continue
-		}
-		if got := args[len(args)-1]; got != value {
-			t.Errorf("rune %U is accepted but decodes to %q, want %q", r, got, value)
+	workers := runtime.GOMAXPROCS(0)
+	workerErrs := make([][]string, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			var errs []string
+			for r := rune(w); r <= utf8.MaxRune; r += rune(workers) {
+				if !utf8.ValidRune(r) {
+					continue
+				}
+				value := "http://x" + string(r) + "y"
+				if ValidateDockerfileSafe(value, "test value") != nil {
+					continue
+				}
+				args, err := cmdArgs(value)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("rune %U is accepted but makes the CMD line unparseable: %v", r, err))
+					continue
+				}
+				if got := args[len(args)-1]; got != value {
+					errs = append(errs, fmt.Sprintf("rune %U is accepted but decodes to %q, want %q", r, got, value))
+				}
+			}
+			workerErrs[w] = errs
+		})
+	}
+	wg.Wait()
+	for _, errs := range workerErrs {
+		for _, msg := range errs {
+			t.Error(msg)
 		}
 	}
 }
@@ -172,9 +191,10 @@ func TestValidateDockerfileSafe_AcceptedValuesKeepCMDParseable(t *testing.T) {
 // metacharacter or a Dockerfile token separator. A byte >= 0x80 outside a valid
 // rune is a different case and is rejected.
 func TestValidateShellArgSafe_ByteClass(t *testing.T) {
+	t.Parallel()
 	const allowedASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-"
 
-	for b := 0; b < 0x80; b++ {
+	for b := range 0x80 {
 		accepted := ValidateShellArgSafe(string([]byte{byte(b)}), "test value") == nil
 		want := strings.ContainsRune(allowedASCII, rune(b))
 		if accepted != want {
@@ -185,12 +205,27 @@ func TestValidateShellArgSafe_ByteClass(t *testing.T) {
 	// Up to utf8.MaxRune, not just the BMP: a supplementary-plane character in
 	// a directory name is as much a "valid non-ASCII rune" as a BMP one, and
 	// the claim above covers it.
-	for r := rune(0x80); r <= utf8.MaxRune; r++ {
-		if !utf8.ValidRune(r) {
-			continue
-		}
-		if err := ValidateShellArgSafe("agent"+string(r), "test value"); err != nil {
-			t.Errorf("rune %U rejected: %v", r, err)
+	workers := runtime.GOMAXPROCS(0)
+	workerErrs := make([][]string, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			var errs []string
+			for r := rune(0x80 + w); r <= utf8.MaxRune; r += rune(workers) {
+				if !utf8.ValidRune(r) {
+					continue
+				}
+				if err := ValidateShellArgSafe("agent"+string(r), "test value"); err != nil {
+					errs = append(errs, fmt.Sprintf("rune %U rejected: %v", r, err))
+				}
+			}
+			workerErrs[w] = errs
+		})
+	}
+	wg.Wait()
+	for _, errs := range workerErrs {
+		for _, msg := range errs {
+			t.Error(msg)
 		}
 	}
 
