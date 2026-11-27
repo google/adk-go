@@ -44,18 +44,27 @@
 //	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
 //	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
 //	Chat only   StopSequences, FrequencyPenalty, PresencePenalty, Seed
-//	Rejected    TopK, CandidateCount above one, Labels, SafetySettings, an
-//	            unsupported ResponseMIMEType, CachedContent, ResponseModalities,
-//	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
+//	Rejected    TopK, CandidateCount above one, any label in Labels other
+//	            than adk_agent_name, an empty non-nil Labels map,
+//	            SafetySettings, an unsupported ResponseMIMEType,
+//	            CachedContent, ResponseModalities, MediaResolution,
+//	            SpeechConfig, AudioTimestamp, ImageConfig,
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
 //	            and on Responses also a non-empty StopSequences, the
 //	            penalties and Seed
-//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
-//	            effect because these APIs never pause a generation with
-//	            CONTINUATION; and on Chat Completions
+//	Ignored     HTTPOptions.Headers; the adk_agent_name label, which the
+//	            agent flow adds to every request; AutomaticContinuation,
+//	            which has no effect because these APIs never pause a
+//	            generation with CONTINUATION; and on Chat Completions
 //	            ThinkingConfig.IncludeThoughts, which has no equivalent there
+//
+// The rejection of HTTPOptions fields and labels applies to values set on the
+// agent's GenerateContentConfig. From agent.RunConfig.HTTPOptions, which
+// applies to every agent of a run, the agent flow passes only a positive
+// Timeout and Headers to these models and drops the other fields; it drops
+// agent.RunConfig.Labels whole.
 //
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
@@ -65,6 +74,13 @@
 // "openai.terminal_response_conversion_failed" on the active OpenTelemetry span
 // for unsupported output items, unsupported message content, or invalid
 // function-call arguments. The event contains only an "error.type" category.
+//
+// A reported token count (input, output, total, cached or reasoning) outside
+// [0, math.MaxInt32] cannot describe a real request, so a response carrying
+// one reports no UsageMetadata at all, and "openai.usage_invalid" is recorded
+// on the active span with the provider's field name ("openai.usage.field") and
+// "negative" or "exceeds_int32" ("openai.usage.reason"). The count itself is
+// not recorded.
 //
 // On the Responses API, model reasoning is reported to the caller as thought
 // parts; Chat Completions responses are read for text, refusals and tool calls
@@ -77,6 +93,24 @@
 // something upstream has already rendered as ordinary text: a peer agent's
 // reply folded into context, a compacted transcript, or a memory recall all
 // arrive with the thought marker gone, and reach every model package alike.
+//
+// # Token Usage Metadata
+//
+// Both APIs report token usage on [model.LLMResponse.UsageMetadata] for
+// blocking responses and on the final streaming response, when available.
+// Prompt, cached prompt, and total token counts come from the provider.
+// CandidatesTokenCount and its text modality detail count non-reasoning
+// output; ThoughtsTokenCount counts reasoning. Their sum is the full output
+// count used in GenAI telemetry.
+//
+// OpenAI and compatible endpoints are assumed to include reasoning in their
+// reported output count. Chat Completions recognizes endpoints such as xAI
+// that report reasoning separately when total_tokens equals the sum of
+// prompt_tokens, completion_tokens, and positive reasoning_tokens. Without
+// a matching total, reasoning is subtracted from completion_tokens and is
+// capped at that count. Responses always treats output_tokens as inclusive.
+//
+// # Usage
 //
 // Clients construct a ClientConfig and pass it to NewModel:
 //

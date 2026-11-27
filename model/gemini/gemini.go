@@ -66,6 +66,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -73,6 +74,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/schemacache"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
@@ -284,7 +286,7 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // candidate. The genai SDK resumes a generation the model paused with
 // CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+	config := m.requestConfig(req)
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
@@ -302,7 +304,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+		config := m.requestConfig(req)
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
 			if err != nil {
 				yield(nil, err)
@@ -318,6 +320,20 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			yield(closeResult, nil)
 		}
 	}
+}
+
+// requestConfig returns the copy of req.Config sent to the backend. The copy
+// sent to the Gemini Developer API has no labels, because that API's v1
+// refuses the field, while req.Config keeps them for callbacks and plugins
+// that read the request.
+func (m *geminiModel) requestConfig(req *model.LLMRequest) *genai.GenerateContentConfig {
+	clientConfig := m.client.ClientConfig()
+	config := configPreservingEmptyTextThoughtSignatures(req.Config, clientConfig.HTTPOptions.ExtrasRequestProvider)
+	config.Tools = encodeToolSchemas(config.Tools)
+	if clientConfig.Backend == genai.BackendGeminiAPI {
+		config.Labels = nil
+	}
+	return config
 }
 
 // configPreservingEmptyTextThoughtSignatures works around googleapis/go-genai#931.
@@ -342,6 +358,57 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	httpOptions.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(httpOptions.ExtrasRequestProvider, fallbackProvider)
 	configCopy.HTTPOptions = httpOptions
 	return &configCopy
+}
+
+// encodeToolSchemas returns tools with each function declaration schema that
+// schemacache remembers replaced by its encoding, which genai sends as is
+// instead of encoding the schema again: genai marshals the whole request on
+// every call, and jsonschema.Schema's MarshalJSON dominates that for small
+// tools. The request's own tools are left alone, so callbacks and history
+// keep the schemas they set. Unchanged tools and declarations are shared, not
+// copied.
+func encodeToolSchemas(tools []*genai.Tool) []*genai.Tool {
+	var out []*genai.Tool
+	for i, t := range tools {
+		if t == nil {
+			continue
+		}
+		var decls []*genai.FunctionDeclaration
+		for j, d := range t.FunctionDeclarations {
+			if d == nil {
+				continue
+			}
+			params, paramsOK := schemacache.Encoded(d.ParametersJsonSchema)
+			response, responseOK := schemacache.Encoded(d.ResponseJsonSchema)
+			if !paramsOK && !responseOK {
+				continue
+			}
+			if decls == nil {
+				decls = slices.Clone(t.FunctionDeclarations)
+			}
+			encoded := *d
+			if paramsOK {
+				encoded.ParametersJsonSchema = params
+			}
+			if responseOK {
+				encoded.ResponseJsonSchema = response
+			}
+			decls[j] = &encoded
+		}
+		if decls == nil {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(tools)
+		}
+		withDecls := *t
+		withDecls.FunctionDeclarations = decls
+		out[i] = &withDecls
+	}
+	if out == nil {
+		return tools
+	}
+	return out
 }
 
 // providerPreservingEmptyTextThoughtSignatures returns an extras provider that

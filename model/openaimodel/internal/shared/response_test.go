@@ -15,10 +15,41 @@
 package shared
 
 import (
+	"math"
 	"testing"
 
 	"google.golang.org/genai"
 )
+
+func TestInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		counts     []UsageCount
+		wantName   string
+		wantReason string
+	}{
+		{name: "none"},
+		{name: "all valid", counts: []UsageCount{{"a", 0}, {"b", 1_000_000}, {"c", math.MaxInt32}}},
+		{name: "negative", counts: []UsageCount{{"a", 1}, {"b", -1}}, wantName: "b", wantReason: "negative"},
+		{name: "too large", counts: []UsageCount{{"a", math.MaxInt32 + 1}}, wantName: "a", wantReason: "exceeds_int32"},
+		{name: "first wins", counts: []UsageCount{{"a", -5}, {"b", math.MaxInt64}}, wantName: "a", wantReason: "negative"},
+		{name: "MinInt32", counts: []UsageCount{{"a", math.MinInt32}}, wantName: "a", wantReason: "negative"},
+		{name: "MaxInt64", counts: []UsageCount{{"a", math.MaxInt64}}, wantName: "a", wantReason: "exceeds_int32"},
+		// A blind int32 conversion would turn each of these into a plausible
+		// count.
+		{name: "wraps to MaxInt32", counts: []UsageCount{{"a", math.MinInt32 - 1}}, wantName: "a", wantReason: "negative"},
+		{name: "wraps to 1", counts: []UsageCount{{"a", -(1 << 32) + 1}}, wantName: "a", wantReason: "negative"},
+		{name: "wraps to 0", counts: []UsageCount{{"a", 1 << 32}}, wantName: "a", wantReason: "exceeds_int32"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			name, reason := InvalidUsage(tc.counts...)
+			if name != tc.wantName || reason != tc.wantReason {
+				t.Errorf("InvalidUsage() = (%q, %q), want (%q, %q)", name, reason, tc.wantName, tc.wantReason)
+			}
+		})
+	}
+}
 
 func TestCompletedContentSupersedes(t *testing.T) {
 	call := func(id, city string) *genai.Part {
