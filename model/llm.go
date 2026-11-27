@@ -76,8 +76,13 @@ type LLMRequest struct {
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content                              `json:"content,omitempty"`
-	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	Content          *genai.Content          `json:"content,omitempty"`
+	CitationMetadata *genai.CitationMetadata `json:"citationMetadata,omitempty"`
+	// GroundingMetadata is the grounding metadata of the model's first
+	// candidate. The Gemini model leaves it nil on a candidate that has no
+	// content parts and a finish reason other than STOP, including no finish
+	// reason. When streaming, the final non-partial response carries the last
+	// grounding metadata kept from the stream's chunks.
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`
