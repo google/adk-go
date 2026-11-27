@@ -66,6 +66,8 @@ type requestRecorder struct {
 func (r *requestRecorder) Name() string                       { return r.name }
 func (r *requestRecorder) GetGoogleLLMVariant() genai.Backend { return r.backend }
 
+func (*requestRecorder) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (r *requestRecorder) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	r.reqs = append(r.reqs, req)
 	text := r.reply
@@ -530,6 +532,8 @@ func TestAgentNode_CallbackEditDoesNotReachNextRun(t *testing.T) {
 type statelessLLM struct{}
 
 func (statelessLLM) Name() string { return "stateless" }
+
+func (statelessLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (statelessLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {

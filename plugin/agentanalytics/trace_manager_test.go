@@ -1557,6 +1557,7 @@ func TestTraceManager_UntrackedInvocations(t *testing.T) {
 // scriptedLLM is a model.LLM that answers requests with its responses, in
 // order.
 type scriptedLLM struct {
+	model.LLM
 	mu        sync.Mutex
 	responses []*model.LLMResponse
 }
@@ -2572,6 +2573,7 @@ func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
 // activations have entered GenerateContent, guaranteeing overlapping live
 // execution of two concurrent workflow.RunNode calls.
 type blockingLLM struct {
+	model.LLM
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
@@ -3373,6 +3375,7 @@ func TestTraceManager_UnrecoveredErrorKeying_TwoFailuresOneRecovers(t *testing.T
 }
 
 type failingLLM struct {
+	model.LLM
 	err error
 }
 
@@ -4133,6 +4136,7 @@ func TestTraceManager_FindAgent_DoesNotMatchDifferentNodePath(t *testing.T) {
 // leading holds partial responses, such as one that only reports token usage,
 // that it yields as soon as the stream opens, before the first pause.
 type streamingLLM struct {
+	model.LLM
 	leading []*model.LLMResponse
 	chunks  []string
 	pause   time.Duration
@@ -5862,6 +5866,7 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 // streamingPartialThenBlockLLM yields one partial streamed chunk with text and
 // then yields a final response if the caller continues reading.
 type streamingPartialThenBlockLLM struct {
+	model.LLM
 	chunkText string
 	finalText string
 }
@@ -5886,6 +5891,7 @@ func (m *streamingPartialThenBlockLLM) GenerateContent(_ context.Context, _ *mod
 // blockingUntilContextDoneLLM signals entered when GenerateContent begins and
 // blocks until ctx is done before returning.
 type blockingUntilContextDoneLLM struct {
+	model.LLM
 	entered chan struct{}
 	once    sync.Once
 }
@@ -5902,6 +5908,7 @@ func (m *blockingUntilContextDoneLLM) GenerateContent(ctx context.Context, _ *mo
 // waitThenStreamPartialLLM waits for ready to close before yielding a partial
 // streamed chunk, and then yields a final response if the caller keeps reading.
 type waitThenStreamPartialLLM struct {
+	model.LLM
 	ready     <-chan struct{}
 	chunkText string
 	finalText string
@@ -6212,6 +6219,7 @@ func TestRunner_StopReadingMidStream_IsNotAnError(t *testing.T) {
 // flakyOnFirstPassLLM fails with err on call 1 and returns text on
 // call 2+.
 type flakyOnFirstPassLLM struct {
+	model.LLM
 	mu    sync.Mutex
 	calls int
 	err   error
@@ -6517,6 +6525,7 @@ func TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinator
 
 // firstCallResponseThenErrLLM returns first on call 1 and yields err on call 2+.
 type firstCallResponseThenErrLLM struct {
+	model.LLM
 	mu    sync.Mutex
 	calls int
 	first *model.LLMResponse
@@ -6906,6 +6915,7 @@ func TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan(t *testing.T) {
 // transferModel answers its calls in order: transfer to `to` for each name in
 // script, then text.
 type transferModel struct {
+	model.LLM
 	calls  atomic.Int32
 	script []string
 }
@@ -7330,6 +7340,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 // singlePartialChunkLLM yields one streamed partial LLMResponse and stops if
 // the caller breaks out.
 type singlePartialChunkLLM struct {
+	model.LLM
 	chunk *model.LLMResponse
 }
 
@@ -8559,6 +8570,7 @@ func TestRunner_SequentialRootWithFailedCustomChild_EmitsErrorTerminalRows(t *te
 // until ctx is canceled, and then yields ctx.Err() as a real streaming/API
 // model does when parallelagent cancels subAgentsCtx on consumer break.
 type contextCanceledOnDoneLLM struct {
+	model.LLM
 	entered chan struct{}
 	once    sync.Once
 }
@@ -8873,7 +8885,9 @@ func TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError(t *testing.T) {
 // selfCancelingStreamLLM streams one partial chunk and then cancels a request
 // context of its own and fails with its error, as a model client does that
 // gives up on a request.
-type selfCancelingStreamLLM struct{}
+type selfCancelingStreamLLM struct {
+	model.LLM
+}
 
 func (m *selfCancelingStreamLLM) Name() string { return "self-canceling-stream-llm" }
 
@@ -9026,6 +9040,7 @@ func TestRunner_AgentCanceledSubAgentContextAfterPartial_EmitsErrorTerminalRows(
 // canceled, as a streaming model does while a parallel agent cancels the branch
 // that it runs in because a sibling failed.
 type streamThenWaitLLM struct {
+	model.LLM
 	acked chan struct{}
 }
 
@@ -9047,7 +9062,9 @@ func (m streamThenWaitLLM) GenerateContent(ctx context.Context, _ *model.LLMRequ
 // contentlessPartialLLM streams one partial chunk with no content, then blocks
 // until ctx.Done. It pins the canceledByStop exemption for an unresponded
 // activation that the consumer stop canceled.
-type contentlessPartialLLM struct{}
+type contentlessPartialLLM struct {
+	model.LLM
+}
 
 func (contentlessPartialLLM) Name() string { return "contentless-partial-llm" }
 
@@ -9063,6 +9080,7 @@ func (contentlessPartialLLM) GenerateContent(ctx context.Context, _ *model.LLMRe
 
 // streamThenErrorLLM streams one partial response, then returns an error.
 type streamThenErrorLLM struct {
+	model.LLM
 	partial *model.LLMResponse
 	err     error
 }
@@ -9170,6 +9188,7 @@ func newCustomStreamingAgent(t *testing.T, acked chan struct{}) agent.Agent {
 // errgroup, yield returns false and GenerateContent returns without calling
 // yield(nil, ctx.Err()), so no OnModelErrorCallback runs.
 type beforeAckStreamLLM struct {
+	model.LLM
 	exited chan struct{}
 }
 
@@ -9570,6 +9589,7 @@ func TestRunner_ParallelBranchFailsBeforePartialAck_EmitsErrorTerminalRows(t *te
 // context.DeadlineExceeded) before yielding a partial chunk and a final
 // response.
 type waitDoneStreamLLM struct {
+	model.LLM
 	waitCtx func() context.Context
 }
 
@@ -10539,6 +10559,7 @@ func TestRunner_CustomAgentHandlesParallelFailure_RecoveryModes(t *testing.T) {
 }
 
 type funcStreamLLM struct {
+	model.LLM
 	fn func(ctx context.Context, yield func(*model.LLMResponse, error) bool)
 }
 
@@ -12493,6 +12514,7 @@ func TestTraceManager_RetireAgentSkipsCollateralError(t *testing.T) {
 // liveTestLLM is a model for live runs whose genai client talks to a fake
 // Live server; RunLive calls Client instead of GenerateContent.
 type liveTestLLM struct {
+	model.LLM
 	client *genai.Client
 }
 
@@ -14791,6 +14813,7 @@ func TestConcurrencyRace_ConcurrentSilentCustomAgentRuns_EmitsInvocationComplete
 type concurrentFailRunKey struct{}
 
 type concurrentBarrierLLM struct {
+	model.LLM
 	name string
 	fn   func(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error)
 }
@@ -18437,6 +18460,7 @@ func TestRunner_RetriedParallelNodeWithSilentBranchFailure_EmitsBranchAgentError
 // gatedFlakyLLM fails its first request with err once ready is closed, after
 // calling enter, and answers later requests with reply.
 type gatedFlakyLLM struct {
+	model.LLM
 	calls atomic.Int32
 	enter func()
 	ready <-chan struct{}
@@ -18658,6 +18682,7 @@ func TestConcurrencyRace_ForwardedFinishTaskEventDoesNotEndRunningChild(t *testi
 // finishTaskLLM answers with a finish_task call, as a task-mode agent's model
 // does once its task is done, and closes called on its first request.
 type finishTaskLLM struct {
+	model.LLM
 	called chan struct{}
 	once   sync.Once
 }
@@ -19602,6 +19627,7 @@ func TestTraceManager_CompletedRunsWithOpenLateCallsStayBounded(t *testing.T) {
 // context is done, as a model that streams slowly does when its caller stops
 // reading, and returns without an error.
 type partialThenWaitLLM struct {
+	model.LLM
 	chunkText string
 }
 
@@ -20750,6 +20776,7 @@ func newTraceOnlyToolPlugin(t *testing.T, tm *traceManager) *baseplugin.Plugin {
 // toolThenTextLLM asks for a call of the tool toolName until the request ends
 // with a function response, and then answers with text.
 type toolThenTextLLM struct {
+	model.LLM
 	toolName string
 }
 
@@ -20774,6 +20801,7 @@ func (m *toolThenTextLLM) GenerateContent(_ context.Context, req *model.LLMReque
 
 // transferToLLM asks to transfer to the agent target.
 type transferToLLM struct {
+	model.LLM
 	target string
 }
 
@@ -21251,6 +21279,7 @@ func TestRepro_ParallelWorkerGuardrailPinsNothing(t *testing.T) {
 }
 
 type gatedLLM struct {
+	model.LLM
 	entered chan struct{}
 	release chan struct{}
 }
@@ -21268,7 +21297,10 @@ func (m *gatedLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ b
 	}
 }
 
-type waitLLM struct{ wait <-chan struct{} }
+type waitLLM struct {
+	model.LLM
+	wait <-chan struct{}
+}
 
 func (m *waitLLM) Name() string { return "wait" }
 
@@ -26797,6 +26829,7 @@ func runConcurrentLookalikeWorkflows(t *testing.T, p *baseplugin.Plugin, wf agen
 }
 
 type callbackLLM struct {
+	model.LLM
 	name string
 	fn   func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
 }
@@ -29642,6 +29675,7 @@ func (d *viewWithOwnCtxAndICDelta) WithICDelta(delta *agent.InvocationContextDel
 }
 
 type gatedViewLLM struct {
+	model.LLM
 	onCall func(ctx context.Context, call int32) *model.LLMResponse
 	calls  atomic.Int32
 }

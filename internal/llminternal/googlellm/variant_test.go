@@ -14,13 +14,7 @@
 
 package googlellm
 
-import (
-	"testing"
-
-	"google.golang.org/genai"
-
-	"google.golang.org/adk/v2/model"
-)
+import "testing"
 
 func TestIsGemini25OrLower(t *testing.T) {
 	testCases := []struct {
@@ -122,81 +116,3 @@ func TestIsGemini3xLive(t *testing.T) {
 		}
 	}
 }
-
-func TestNeedsOutputSchemaProcessor(t *testing.T) {
-	testCases := []struct {
-		name    string
-		model   string
-		variant genai.Backend
-		want    bool
-	}{
-		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, true},
-		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
-		// Gemini API never supports output schema + tools natively, so the
-		// processor is required regardless of version.
-		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, true},
-		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, false},
-		// Non-Vertex backends (incl. unspecified) need the processor too.
-		{"CustomGemini2", "gemini-2.0-hack", genai.BackendUnspecified, true},
-		{"CustomGemini3", "gemini-3.0-hack", genai.BackendUnspecified, true},
-		// Gemini 1.x on Vertex predates native combo support → processor.
-		{"Gemini1.5_Vertex", "gemini-1.5-pro", genai.BackendVertexAI, true},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := NeedsOutputSchemaProcessor(&mockGoogleLLM{
-				variant: tc.variant,
-				nameVal: tc.model,
-			})
-			if got != tc.want {
-				t.Errorf("NeedsOutputSchemaProcessor(%q) = %v, want %v", tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCanUseOutputSchemaWithTools(t *testing.T) {
-	testCases := []struct {
-		name    string
-		model   string
-		variant genai.Backend
-		want    bool
-	}{
-		{"Gemini2.0_Vertex", "gemini-2.0-flash", genai.BackendVertexAI, true},
-		{"Gemini3.0_Vertex", "gemini-3.0", genai.BackendVertexAI, true},
-		{"Gemini1.5_Vertex", "gemini-1.5-pro", genai.BackendVertexAI, false},
-		{"Gemini3.0_GeminiAPI", "gemini-3.0", genai.BackendGeminiAPI, false},
-		{"Gemini2.0_GeminiAPI", "gemini-2.0-flash", genai.BackendGeminiAPI, false},
-		{"NonGemini_Vertex", "not-a-gemini", genai.BackendVertexAI, false},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := CanUseOutputSchemaWithTools(&mockGoogleLLM{
-				variant: tc.variant,
-				nameVal: tc.model,
-			})
-			if got != tc.want {
-				t.Errorf("CanUseOutputSchemaWithTools(%q) = %v, want %v", tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
-type mockGoogleLLM struct {
-	model.LLM
-	variant genai.Backend
-	nameVal string
-}
-
-func (m *mockGoogleLLM) GetGoogleLLMVariant() genai.Backend {
-	return m.variant
-}
-
-func (m *mockGoogleLLM) Name() string {
-	return m.nameVal
-}
-
-var _ GoogleLLM = (*mockGoogleLLM)(nil)

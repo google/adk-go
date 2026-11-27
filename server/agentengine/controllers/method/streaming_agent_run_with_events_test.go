@@ -47,6 +47,8 @@ func (streamAwareLLM) Name() string {
 	return "stream-aware-llm"
 }
 
+func (streamAwareLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (streamAwareLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if stream {

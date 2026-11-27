@@ -753,6 +753,8 @@ type streamingMockModel struct {
 	callCount    int
 }
 
+func (*streamingMockModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *streamingMockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	m.callCount++
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -1006,6 +1008,8 @@ type twoFinalResponsesModel struct{ calls int }
 
 func (m *twoFinalResponsesModel) Name() string { return "two-finals-mock" }
 
+func (*twoFinalResponsesModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *twoFinalResponsesModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	m.calls++
 	responses := []*model.LLMResponse{{
@@ -1068,6 +1072,8 @@ func TestCompleteResponsesOfOneModelCallGetDistinctEventIDs(t *testing.T) {
 type errorMidStreamModel struct{ errResponse *model.LLMResponse }
 
 func (m *errorMidStreamModel) Name() string { return "error-mid-stream-mock" }
+
+func (*errorMidStreamModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *errorMidStreamModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -1253,6 +1259,8 @@ func TestProgressiveSSEPreservesPartOrdering(t *testing.T) {
 type partialFunctionCallMockModel struct{}
 
 func (m *partialFunctionCallMockModel) Name() string { return "partial-fc-mock" }
+
+func (*partialFunctionCallMockModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *partialFunctionCallMockModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
