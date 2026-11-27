@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"strings"
 	"testing"
 
@@ -2353,4 +2354,112 @@ func TestHandleFunctionCallsUnknownTool(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCallLLM_AgentNameLabelStampingAndPreservation(t *testing.T) {
+	type result struct {
+		modelCalls  int
+		modelLabels map[string]string
+	}
+	call := func(t *testing.T, a agent.Agent, req *model.LLMRequest, callbacks ...BeforeModelCallback) result {
+		t.Helper()
+		var res result
+		m := &mockModelForTest{
+			name: "test-model",
+			generateContent: func(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+				res.modelCalls++
+				if req.Config != nil {
+					res.modelLabels = maps.Clone(req.Config.Labels)
+				}
+				return func(yield func(*model.LLMResponse, error) bool) {
+					yield(&model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}, nil)
+				}
+			},
+		}
+		f := &Flow{Model: m, BeforeModelCallbacks: callbacks}
+		params := icontext.InvocationContextParams{}
+		if a != nil {
+			params.Agent = a
+		}
+		ctx := icontext.NewInvocationContext(t.Context(), params)
+		for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+			if err != nil {
+				t.Fatalf("callLLM() error = %v", err)
+			}
+		}
+		return res
+	}
+
+	t.Run("stamps_after_before_model_callback", func(t *testing.T) {
+		callbackSawNilConfig := false
+		recordConfig := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			callbackSawNilConfig = req.Config == nil
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, recordConfig)
+		if !callbackSawNilConfig {
+			t.Error("before-model callback saw a non-nil config, want the request without the label")
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("preserves_existing_adk_agent_name_label", func(t *testing.T) {
+		req := &model.LLMRequest{Config: &genai.GenerateContentConfig{Labels: map[string]string{"adk_agent_name": "custom_owner", "env": "prod"}}}
+		res := call(t, &mockAgent{name: "billing_agent"}, req)
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "custom_owner", "env": "prod"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("callback_map_not_modified", func(t *testing.T) {
+		shared := map[string]string{"team": "core"}
+		attach := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			req.Config = &genai.GenerateContentConfig{Labels: shared}
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, attach)
+		if diff := cmp.Diff(map[string]string{"team": "core"}, shared); diff != "" {
+			t.Errorf("callback's labels map changed (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent", "team": "core"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("callback_config_not_modified", func(t *testing.T) {
+		shared := &genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0.2)}
+		attach := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			req.Config = shared
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, attach)
+		if shared.Labels != nil {
+			t.Errorf("callback's config Labels = %v, want nil", shared.Labels)
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("short_circuit_does_not_stamp", func(t *testing.T) {
+		cached := func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+			return &model.LLMResponse{Content: genai.NewContentFromText("cached", genai.RoleModel)}, nil
+		}
+		req := &model.LLMRequest{}
+		res := call(t, &mockAgent{name: "test_agent"}, req, cached)
+		if req.Config != nil {
+			t.Errorf("request config = %+v after a short-circuit, want nil", req.Config)
+		}
+		if res.modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", res.modelCalls)
+		}
+	})
+	t.Run("nil_agent_does_not_panic_or_stamp", func(t *testing.T) {
+		req := &model.LLMRequest{}
+		res := call(t, nil, req)
+		if req.Config != nil {
+			t.Errorf("request config = %+v without an agent, want nil", req.Config)
+		}
+		if res.modelCalls != 1 {
+			t.Errorf("model called %d times, want 1", res.modelCalls)
+		}
+	})
 }

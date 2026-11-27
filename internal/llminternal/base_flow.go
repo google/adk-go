@@ -203,6 +203,45 @@ func isThoughtOnlyTurn(ev *session.Event) bool {
 	return true
 }
 
+// agentName returns the name of the invocation's agent, or "" without one.
+func agentName(ctx agent.InvocationContext) string {
+	if ctx == nil || ctx.Agent() == nil {
+		return ""
+	}
+	return ctx.Agent().Name()
+}
+
+// stampAgentNameLabel records the name of the invocation's agent in
+// req.Config.Labels under model.AgentNameLabel, so that billing reports can
+// be split per agent, as adk-python's call_llm_async does
+// (flows/llm_flows/core/_model_call.py). The name is used as it is, without
+// sanitizing, as in adk-python. It keeps a value already set under the key.
+// Neither the config nor the labels map found in the request is ever
+// modified: the label is added to a copy of the map, set on a shallow copy of
+// the config (a new config when req.Config is nil), and that copy replaces
+// req.Config, because a before-model callback may have attached a config or
+// map it shares with other invocations. Without an agent it does nothing.
+func stampAgentNameLabel(ctx agent.InvocationContext, req *model.LLMRequest) {
+	name := agentName(ctx)
+	if name == "" {
+		return
+	}
+	var cfg genai.GenerateContentConfig
+	if req.Config != nil {
+		if _, ok := req.Config.Labels[model.AgentNameLabel]; ok {
+			return
+		}
+		cfg = *req.Config
+	}
+	labels := maps.Clone(cfg.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[model.AgentNameLabel] = name
+	cfg.Labels = labels
+	req.Config = &cfg
+}
+
 type activeTask struct {
 	callID string
 	cancel context.CancelFunc
@@ -1138,8 +1177,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 
-		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
-		// to help with slicing the billing reports on a per-agent basis.
+		stampAgentNameLabel(ctx, req)
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		// Streaming mode comes from the invocation context's RunConfig rather than
