@@ -159,8 +159,15 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		memoryService = memoryinternal.NewForwardingService(parentMemory)
 	}
 
+	// Run under the caller's app, as adk-python does, so that a session the
+	// sub-agent adds to the shared memory is stored where the caller can find it.
+	childApp := toolCtx.AppName()
+	if childApp == "" {
+		childApp = t.agent.Name()
+	}
+
 	r, err := runner.New(runner.Config{
-		AppName:         t.agent.Name(),
+		AppName:         childApp,
 		Agent:           t.agent,
 		SessionService:  sessionService,
 		ArtifactService: artifactinternal.NewForwardingService(toolCtx.Artifacts()),
@@ -180,7 +187,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	subSession, err := sessionService.Create(toolCtx, &session.CreateRequest{
-		AppName: t.agent.Name(),
+		AppName: childApp,
 		UserID:  toolCtx.UserID(),
 		State:   stateMap,
 	})

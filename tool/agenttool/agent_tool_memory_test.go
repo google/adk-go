@@ -96,7 +96,10 @@ func TestAgentTool_Run_Memory(t *testing.T) {
 	if childAddErr != nil {
 		t.Fatalf("child AddSessionToMemory: %v", childAddErr)
 	}
-	added, err := store.SearchMemory(t.Context(), &memory.SearchRequest{AppName: childApp, UserID: "user", Query: "London"})
+	if childApp != "app" {
+		t.Errorf("child session app = %q, want the caller's app %q", childApp, "app")
+	}
+	added, err := store.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: "London"})
 	if err != nil {
 		t.Fatalf("SearchMemory: %v", err)
 	}
