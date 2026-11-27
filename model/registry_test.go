@@ -31,7 +31,8 @@ type stubLLM struct {
 	name string
 }
 
-func (s *stubLLM) Name() string { return s.name }
+func (s *stubLLM) Name() string               { return s.name }
+func (s *stubLLM) Capabilities() Capabilities { return Capabilities{} }
 
 func (s *stubLLM) GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error] {
 	return func(yield func(*LLMResponse, error) bool) {}

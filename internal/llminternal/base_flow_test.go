@@ -1535,6 +1535,8 @@ type alwaysThinkingModel struct{ calls int }
 
 func (m *alwaysThinkingModel) Name() string { return "always-thinking" }
 
+func (*alwaysThinkingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
@@ -1677,6 +1679,8 @@ type scriptedThinkingModel struct {
 }
 
 func (m *scriptedThinkingModel) Name() string { return "scripted-thinking" }
+
+func (*scriptedThinkingModel) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (m *scriptedThinkingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {

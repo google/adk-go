@@ -20,6 +20,40 @@
 // columns, and writes to that table fail until they exist. Applications that
 // manage the schema themselves instead of calling AutoMigrate must add those
 // columns before deploying the release that introduces them.
+//
+// A release may also add indexes. AutoMigrate creates a missing index without
+// CONCURRENTLY, so on PostgreSQL writes to the table block until the index is
+// built. Operators of a large existing events table should build the index
+// before rolling out the new release and while no replica is running
+// AutoMigrate (on PostgreSQL, AutoMigrate alters the timestamp column type
+// under an ACCESS EXCLUSIVE lock, which deadlocks with a concurrent build):
+//
+//	CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_app_user_session_ts_id
+//	    ON events (app_name, user_id, session_id, timestamp DESC, id DESC);
+//
+// AutoMigrate then finds an index of that name and skips it. If a concurrent
+// build is interrupted, PostgreSQL leaves an invalid index that AutoMigrate
+// still skips and IF NOT EXISTS ignores. Check that it is valid:
+//
+//	SELECT indisvalid FROM pg_index
+//	    WHERE indexrelid = 'idx_events_app_user_session_ts_id'::regclass;
+//
+// If indisvalid is false, run DROP INDEX CONCURRENTLY
+// idx_events_app_user_session_ts_id and build it again.
+//
+// On MySQL (InnoDB), idx_events_app_user_session_ts_id adds timestamp(6)
+// (8 bytes) to the four string columns of the primary key. The GORM MySQL
+// driver's default DefaultStringSize of 191 on utf8mb4 fits within InnoDB's
+// 3072-byte key limit (3064 bytes), but configurations where the primary key
+// leaves fewer than 8 bytes to spare fail AutoMigrate with Error 1071
+// ("Specified key was too long"): DefaultStringSize 192 on utf8mb4, 256 on
+// utf8mb3, or 767 on latin1. For those configurations, either lower
+// DefaultStringSize on a fresh database so four key columns plus 8 bytes fit
+// within 3072 bytes (at most 191 on utf8mb4, 255 on utf8mb3, or 766 on
+// latin1), or pre-create the index without id so AutoMigrate skips it by name:
+//
+//	CREATE INDEX idx_events_app_user_session_ts_id
+//	    ON events (app_name, user_id, session_id, timestamp DESC);
 package database
 
 import (
@@ -80,9 +114,10 @@ func NewSessionServiceFromDB(db *gorm.DB) (session.Service, error) {
 
 // AutoMigrate runs the GORM auto-migration tool to ensure the database schema
 // matches the internal storage models (e.g., storageSession, storageEvent).
-// It creates missing tables and columns, alters existing columns whose type,
-// size or nullability differs from the models, and never drops a column. It
-// can be called repeatedly and is meant to run on every startup.
+// It creates missing tables, columns and indexes, alters existing columns whose
+// type, size or nullability differs from the models, and never drops a column.
+// It can be called repeatedly and is meant to run on every startup. See the
+// package documentation for PostgreSQL and MySQL index caveats.
 //
 // NOTE: This function relies on a type assertion to the concrete *databaseService
 // implementation. It will return an error if the provided session.Service is
@@ -246,9 +281,13 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}
 
 	var storageEvents []storageEvent
-	if err := eventQuery.Find(&storageEvents).Error; err != nil {
-		// This is a system failure, not a "not found"
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
+	// Building eventQuery above sends nothing, so skipping Find skips the whole
+	// events read.
+	if !req.ExcludeEvents {
+		if err := eventQuery.Find(&storageEvents).Error; err != nil {
+			// This is a system failure, not a "not found"
+			return nil, fmt.Errorf("database error while fetching events: %w", err)
+		}
 	}
 
 	// fetch app and user states

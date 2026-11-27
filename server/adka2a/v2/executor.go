@@ -421,10 +421,12 @@ func (e *Executor) writeFinalTaskStatus(
 func (e *Executor) prepareSession(ctx context.Context, cfg RunnerConfig, meta invocationMeta) error {
 	service := cfg.SessionService
 
+	// The runner reads the events when the run starts, so this read skips them.
 	_, err := service.Get(ctx, &session.GetRequest{
-		AppName:   cfg.AppName,
-		UserID:    meta.userID,
-		SessionID: meta.sessionID,
+		AppName:       cfg.AppName,
+		UserID:        meta.userID,
+		SessionID:     meta.sessionID,
+		ExcludeEvents: true,
 	})
 	if err == nil {
 		return nil

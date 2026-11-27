@@ -361,6 +361,8 @@ func (f *FakeLLM) Name() string {
 	return "fake-llm"
 }
 
+func (*FakeLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
+
 func (f *FakeLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		f.callCounter++
@@ -389,6 +391,8 @@ type failingLLM struct {
 func (f *failingLLM) Name() string {
 	return "failing-llm"
 }
+
+func (*failingLLM) Capabilities() model.Capabilities { return model.Capabilities{} }
 
 func (f *failingLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
