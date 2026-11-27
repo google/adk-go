@@ -474,42 +474,69 @@ func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLM
 	}
 }
 
-func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
+func TestAfterModelCallbackReplacementControlsStreamingFields(t *testing.T) {
 	t.Parallel()
 
 	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 120, CandidatesTokenCount: 8, TotalTokenCount: 128}
-	ownUsage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1, CandidatesTokenCount: 1, TotalTokenCount: 2}
 
 	for _, tc := range []struct {
-		name        string
-		replacement func() *model.LLMResponse
-		wantUsage   []*genai.GenerateContentResponseUsageMetadata
+		name             string
+		replacement      func(orig *model.LLMResponse) *model.LLMResponse
+		wantPartial      []bool
+		wantTurnComplete []bool
+		wantUsage        []*genai.GenerateContentResponseUsageMetadata
+		wantPersisted    int
+		wantUniqueIDs    int
 	}{
 		{
-			name: "replacement without usage inherits it",
-			replacement: func() *model.LLMResponse {
+			name: "replacement does not inherit Partial, TurnComplete or UsageMetadata",
+			replacement: func(_ *model.LLMResponse) *model.LLMResponse {
 				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel)}
 			},
-			wantUsage: []*genai.GenerateContentResponseUsageMetadata{nil, nil, usage},
+			wantPartial:      []bool{false, false, false},
+			wantTurnComplete: []bool{false, false, false},
+			wantUsage:        []*genai.GenerateContentResponseUsageMetadata{nil, nil, nil},
+			wantPersisted:    3,
+			wantUniqueIDs:    3,
 		},
 		{
-			name: "replacement with its own usage keeps it",
-			replacement: func() *model.LLMResponse {
-				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel), UsageMetadata: ownUsage}
+			name: "replacement explicitly forwarding streaming and usage fields keeps them",
+			replacement: func(orig *model.LLMResponse) *model.LLMResponse {
+				return &model.LLMResponse{
+					Content:       genai.NewContentFromText("scrubbed", genai.RoleModel),
+					Partial:       orig.Partial,
+					TurnComplete:  orig.TurnComplete,
+					UsageMetadata: orig.UsageMetadata,
+				}
 			},
-			wantUsage: []*genai.GenerateContentResponseUsageMetadata{ownUsage, ownUsage, ownUsage},
+			wantPartial:      []bool{true, true, false},
+			wantTurnComplete: []bool{false, false, true},
+			wantUsage:        []*genai.GenerateContentResponseUsageMetadata{nil, nil, usage},
+			wantPersisted:    1,
+			wantUniqueIDs:    1,
+		},
+		{
+			name: "empty replacement drops a partial chunk without rotating event ID",
+			replacement: func(orig *model.LLMResponse) *model.LLMResponse {
+				if orig.Partial && len(orig.Content.Parts) > 0 && orig.Content.Parts[0].Text == "world." {
+					return &model.LLMResponse{}
+				}
+				return nil
+			},
+			wantPartial:      []bool{true, false},
+			wantTurnComplete: []bool{false, true},
+			wantUsage:        []*genai.GenerateContentResponseUsageMetadata{nil, usage},
+			wantPersisted:    1,
+			wantUniqueIDs:    1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var returned []*model.LLMResponse
 			a, err := llmagent.New(llmagent.Config{
 				Name:  "scrubbing_agent",
 				Model: &streamingTextModel{usage: usage},
 				AfterModelCallbacks: []llmagent.AfterModelCallback{
 					func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
-						r := tc.replacement()
-						returned = append(returned, r)
-						return r, nil
+						return tc.replacement(llmResponse), nil
 					},
 				},
 			})
@@ -525,23 +552,26 @@ func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
 
 			var gotPartial, gotTurnComplete []bool
 			var gotUsage []*genai.GenerateContentResponseUsageMetadata
+			seenIDs := make(map[string]struct{})
 			for _, ev := range events {
 				gotPartial = append(gotPartial, ev.Partial)
 				gotTurnComplete = append(gotTurnComplete, ev.TurnComplete)
 				gotUsage = append(gotUsage, ev.UsageMetadata)
+				seenIDs[ev.ID] = struct{}{}
 			}
-			if diff := cmp.Diff([]bool{true, true, false}, gotPartial); diff != "" {
+			if diff := cmp.Diff(tc.wantPartial, gotPartial); diff != "" {
 				t.Errorf("event Partial flags mismatch (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff([]bool{false, false, true}, gotTurnComplete); diff != "" {
+			if diff := cmp.Diff(tc.wantTurnComplete, gotTurnComplete); diff != "" {
 				t.Errorf("event TurnComplete flags mismatch (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(tc.wantUsage, gotUsage); diff != "" {
 				t.Errorf("event UsageMetadata mismatch (-want +got):\n%s", diff)
 			}
+			if len(seenIDs) != tc.wantUniqueIDs {
+				t.Errorf("got %d distinct event IDs, want %d", len(seenIDs), tc.wantUniqueIDs)
+			}
 
-			// Only the final response is a model turn; the deltas must not be
-			// persisted alongside it.
 			resp, err := runner.SessionService().Get(t.Context(), &session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "test_session"})
 			if err != nil {
 				t.Fatalf("session Get() error = %v", err)
@@ -552,15 +582,8 @@ func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
 					modelTurns++
 				}
 			}
-			if modelTurns != 1 {
-				t.Errorf("persisted %d agent events, want 1", modelTurns)
-			}
-
-			// The callback's own response objects are not modified.
-			for _, r := range returned {
-				if r.Partial || r.TurnComplete || (r.UsageMetadata != nil && r.UsageMetadata != ownUsage) {
-					t.Errorf("callback response was mutated: Partial=%v TurnComplete=%v UsageMetadata=%v", r.Partial, r.TurnComplete, r.UsageMetadata)
-				}
+			if modelTurns != tc.wantPersisted {
+				t.Errorf("persisted %d agent events, want %d", modelTurns, tc.wantPersisted)
 			}
 		})
 	}

@@ -2354,3 +2354,150 @@ func TestHandleFunctionCallsUnknownTool(t *testing.T) {
 		})
 	}
 }
+
+func TestCallLLMEventIDFollowsAfterModelReplacement(t *testing.T) {
+	t.Parallel()
+
+	text := func(s string) *genai.Content {
+		return genai.NewContentFromText(s, genai.RoleModel)
+	}
+	boom := errors.New("boom")
+
+	type yielded struct {
+		resp *model.LLMResponse
+		err  error
+	}
+
+	for _, tc := range []struct {
+		name            string
+		responses       []yielded
+		onErrorCallback OnModelErrorCallback
+		callback        AfterModelCallback
+		wantIDs         []string
+		wantDraws       int
+	}{
+		{
+			name: "replacement completes a partial chunk",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("chunk"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("final")}},
+			},
+			callback: func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				if resp.Partial {
+					return &model.LLMResponse{Content: text("redacted")}, nil
+				}
+				return nil, nil
+			},
+			wantIDs:   []string{"id-1", "id-2"},
+			wantDraws: 2,
+		},
+		{
+			name: "replacement marks a complete response partial",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("first")}},
+				{resp: &model.LLMResponse{Content: text("second")}},
+			},
+			callback: func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				if resp.Content.Parts[0].Text == "first" {
+					return &model.LLMResponse{Content: text("first"), Partial: true}, nil
+				}
+				return nil, nil
+			},
+			wantIDs:   []string{"id-1", "id-1"},
+			wantDraws: 1,
+		},
+		{
+			name: "replacement keeps chunk partial",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("chunk"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("final")}},
+			},
+			callback: func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				if resp.Partial {
+					return &model.LLMResponse{Content: text("redacted"), Partial: true}, nil
+				}
+				return nil, nil
+			},
+			wantIDs:   []string{"id-1", "id-1"},
+			wantDraws: 1,
+		},
+		{
+			name: "on-model-error recovery into partial keeps event ID open",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("chunk"), Partial: true}},
+				{err: boom},
+				{resp: &model.LLMResponse{Content: text("final")}},
+			},
+			onErrorCallback: func(_ agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: text("recovered"), Partial: true}, nil
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-1"},
+			wantDraws: 1,
+		},
+		{
+			name: "on-model-error recovery into complete response ends event ID",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("chunk"), Partial: true}},
+				{err: boom},
+				{resp: &model.LLMResponse{Content: text("final")}},
+			},
+			onErrorCallback: func(_ agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: text("recovered")}, nil
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-2"},
+			wantDraws: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draws := 0
+			ctx := platform.WithUUIDProvider(t.Context(), func() string {
+				draws++
+				return fmt.Sprintf("id-%d", draws)
+			})
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				InvocationID: "inv-1",
+				Agent:        &mockAgent{name: "agent-1"},
+				RunConfig:    &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			})
+			var afterCallbacks []AfterModelCallback
+			if tc.callback != nil {
+				afterCallbacks = []AfterModelCallback{tc.callback}
+			}
+			var onErrorCallbacks []OnModelErrorCallback
+			if tc.onErrorCallback != nil {
+				onErrorCallbacks = []OnModelErrorCallback{tc.onErrorCallback}
+			}
+			f := &Flow{
+				Model: &mockModelForTest{
+					name: "test-model",
+					generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							for _, r := range tc.responses {
+								if !yield(r.resp, r.err) {
+									return
+								}
+							}
+						}
+					},
+				},
+				AfterModelCallbacks:   afterCallbacks,
+				OnModelErrorCallbacks: onErrorCallbacks,
+			}
+
+			var gotIDs []string
+			for resp, err := range f.callLLM(invCtx, &model.LLMRequest{}, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() error = %v", err)
+				}
+				gotIDs = append(gotIDs, resp.eventID)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, gotIDs); diff != "" {
+				t.Errorf("event ids mismatch (-want +got):\n%s", diff)
+			}
+			if draws != tc.wantDraws {
+				t.Errorf("drew %d ids from the provider, want %d", draws, tc.wantDraws)
+			}
+		})
+	}
+}

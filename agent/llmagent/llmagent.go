@@ -449,10 +449,7 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
-// is replaced with the returned response/error. A replacement keeps the
-// Partial, TurnComplete and UsageMetadata of the response it replaces unless
-// it sets them itself; since Partial and TurnComplete are bools, setting them
-// to false has no effect.
+// is replaced with the returned response/error.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.

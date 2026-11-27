@@ -956,6 +956,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
 			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
+				resp.dropped = true
 				continue
 			}
 
@@ -1113,7 +1114,7 @@ func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error
 }
 
 func newResponseWithEventID(ctx context.Context, resp *model.LLMResponse) *responseWithEventID {
-	return &responseWithEventID{resp, platform.NewUUID(ctx)}
+	return &responseWithEventID{LLMResponse: resp, eventID: platform.NewUUID(ctx)}
 }
 
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64) iter.Seq2[*responseWithEventID, error] {
@@ -1170,10 +1171,8 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 					yield(nil, err)
 					return
 				}
-				resp = &responseWithEventID{
-					LLMResponse: cbResp,
-					eventID:     resp.eventID,
-				}
+				resp.LLMResponse = cbResp
+				resp.recovered = true
 				err = cbErr
 			}
 			// Function call ID is optional in genai API and some models do not use the field.
@@ -1188,10 +1187,9 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 
 			if callbackResp != nil {
-				resp := &responseWithEventID{
-					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
-					eventID:     resp.eventID,
-				}
+				// generateContent decides whether the event id ends from this
+				// value once the yield returns, so it holds the emitted response.
+				resp.LLMResponse = keepCacheMetadata(resp.LLMResponse, callbackResp)
 				if !yield(resp, nil) {
 					return
 				}
@@ -1211,60 +1209,34 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 	}
 }
 
-// inheritModelFields carries fields that describe the model call, rather than
-// the response content, from a response onto the after-model callback's
-// replacement for it.
+// keepCacheMetadata carries CacheMetadata from a model response onto an
+// after-model callback's replacement when the replacement leaves it unset.
 //
-// A callback that rebuilds the response, for example to scrub its text, is
-// still answering the same model call. If the replacement drops Partial, every
-// streamed delta looks final: SSE clients render each delta as a complete
-// turn and the runner persists each one as a separate session event. If it
-// drops TurnComplete, clients never see the turn end. If it drops
-// UsageMetadata, the call disappears from token accounting, and context
-// caching, which sizes a cache from the previous prompt's token count, never
-// creates one. If it drops CacheMetadata, the session loses track of the cache
-// the call used: the next turn creates another instead of reusing it.
-//
-// Partial and TurnComplete are plain bools, so an unset value cannot be told
-// apart from an explicit false; a delta is never final while the stream
-// continues, so a partial original keeps its replacement partial, and a
-// response that ended the turn keeps its replacement ending it. UsageMetadata
-// and CacheMetadata set on the replacement are respected. The replacement is
-// copied rather than modified, and returned as is when nothing needs filling.
-//
-// adk-python carries the first three fields but not the cache state
-// (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
-// callback that replaces every reply leaves it caching nothing.
-func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
-	if original == nil {
-		return replacement
-	}
-	inheritPartial := original.Partial && !replacement.Partial
-	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
-	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
-	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
-	if !inheritPartial && !inheritTurnComplete && !inheritUsage && !inheritCache {
+// CacheMetadata tracks the active context cache for the session. Without it,
+// a callback that rewrites or fills in a reply causes the session to lose
+// track of the cache the model call used, so the runner deletes the active
+// cache or creates a new one on the next turn. CacheMetadata set on the
+// replacement is respected. The replacement is copied rather than modified,
+// and returned as is when nothing needs filling.
+func keepCacheMetadata(original, replacement *model.LLMResponse) *model.LLMResponse {
+	if original == nil || original.CacheMetadata == nil || replacement.CacheMetadata != nil {
 		return replacement
 	}
 	merged := *replacement
-	if inheritPartial {
-		merged.Partial = true
-	}
-	if inheritTurnComplete {
-		merged.TurnComplete = true
-	}
-	if inheritUsage {
-		merged.UsageMetadata = original.UsageMetadata
-	}
-	if inheritCache {
-		merged.CacheMetadata = original.CacheMetadata
-	}
+	merged.CacheMetadata = original.CacheMetadata
 	return &merged
 }
 
+// responseWithEventID pairs a response with the id of the event it belongs to.
+// callLLM updates LLMResponse when an on-model-error or after-model callback
+// replaces it, and runOneStep marks dropped when no event is emitted;
+// generateContent reads those fields back after yield returns to decide
+// whether the event id ends.
 type responseWithEventID struct {
 	*model.LLMResponse
-	eventID string
+	eventID   string
+	recovered bool
+	dropped   bool
 }
 
 // generateContent wraps the LLM call with tracing and logging.
@@ -1286,6 +1258,11 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			// and so does an error, because an on-model-error callback may turn
 			// it into a saved event. A new id is drawn when the next response
 			// arrives, never ahead of one.
+			//
+			// Whether a response is complete is read after the yield returns,
+			// from the response the flow emitted, because an after-model
+			// replacement can complete a partial chunk or mark a complete
+			// response partial.
 			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
@@ -1295,11 +1272,13 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 				if eventID == "" {
 					eventID = platform.NewUUID(ctx)
 				}
-				if !yield(&responseWithEventID{resp, eventID}, err) {
+				emitted := &responseWithEventID{LLMResponse: resp, eventID: eventID}
+				if !yield(emitted, err) {
 					return
 				}
-				// resp is non-nil whenever err is nil; the empty case is skipped above.
-				if err != nil || !resp.Partial {
+				// emitted holds a non-nil response whenever err is nil or
+				// emitted.recovered is true; the empty case is skipped above.
+				if (err != nil && !emitted.recovered) || (!emitted.dropped && !emitted.Partial) {
 					eventID = ""
 				}
 			}
