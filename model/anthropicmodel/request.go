@@ -254,6 +254,14 @@ func (m *anthropicModel) convertContentParts(
 				continue
 			}
 			if len(part.ThoughtSignature) > 0 {
+				if part.PartMetadata[contentBlockTypeMetadataKey] == "thinking" {
+					// The part came from a thinking block with empty text (see
+					// convertContentBlock); replay the block the model sent.
+					// Its signature is not redacted data, and some backends
+					// reject it inside a redacted_thinking block.
+					blocks = append(blocks, anthropic.NewThinkingBlock(string(part.ThoughtSignature), part.Text))
+					continue
+				}
 				blocks = append(blocks, anthropic.NewRedactedThinkingBlock(string(part.ThoughtSignature)))
 				continue
 			}

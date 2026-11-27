@@ -412,7 +412,29 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// Context cache state has no column either. Without it the next
 		// invocation cannot find the cache the last one created, and creates
 		// another while the first stays on the provider until its TTL runs out.
-		event.CacheMetadata != nil
+		event.CacheMetadata != nil ||
+		// PartMetadata on a content part has no column either:
+		// aiplatformpb.Part carries only the part data, the thought flag and
+		// the thought signature. anthropicmodel records the original block
+		// type there for a thinking block with empty text, so without
+		// raw_event the part reloads without it and replays as a
+		// redacted_thinking block instead of a thinking block.
+		contentHasPartMetadata(event.Content)
+}
+
+// contentHasPartMetadata reports whether any part of the content carries
+// PartMetadata, which the structured SessionEvent content columns cannot
+// represent.
+func contentHasPartMetadata(content *genai.Content) bool {
+	if content == nil {
+		return false
+	}
+	for _, part := range content.Parts {
+		if part != nil && len(part.PartMetadata) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

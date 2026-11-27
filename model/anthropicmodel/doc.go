@@ -205,7 +205,10 @@
 // [ClientConfig.Effort] (`output_config.effort`). Claude `thinking` blocks are
 // returned as `genai.Part{Thought: true, Text: ..., ThoughtSignature: ...}` and
 // `redacted_thinking` blocks as
-// `genai.Part{Thought: true, ThoughtSignature: ...}`. When replaying assistant
+// `genai.Part{Thought: true, ThoughtSignature: ...}`. A `thinking` block with
+// empty text records its block type in the part's `PartMetadata`, because the
+// part alone cannot be told apart from a `redacted_thinking` block; it
+// replays as `thinking`, not `redacted_thinking`. When replaying assistant
 // history, signed `thinking` and `redacted_thinking` blocks are placed at the
 // start of the assistant message as Claude requires, while unsigned thought
 // parts and content-free foreign signatures are stripped.
