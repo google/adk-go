@@ -261,6 +261,14 @@ func TestBuildContents_ResponseInSuffixToOtherAgentCallBeforeIt(t *testing.T) {
 			want:   []*genai.Content{done},
 		},
 		{
+			// As the last event, a response whose call the agent does not see
+			// is dropped the same way as mid-history, not failing the build.
+			name:   "call outside the agent's branch, response last",
+			branch: "root.after",
+			events: []*session.Event{start, event("b", "root.wf", call("b1")), event("user", "", response("b1"))},
+			want:   []*genai.Content{genai.NewContentFromText("start", genai.RoleUser)},
+		},
+		{
 			// The whole build skips an event whose content has no role, so its
 			// call does not pair with the response there either.
 			name:   "call event without a role",
