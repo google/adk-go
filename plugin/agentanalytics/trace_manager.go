@@ -4740,7 +4740,9 @@ func (inv *invocationTrace) launcherLockedCounted(act any, excluded []bool) (int
 //     peers of the member that runs on goid (or has a non-excluded open span
 //     in its subtree that does) or, failing that, started goid (origin.parent),
 //     keeping the winning member, its ancestors, and any earlier activations
-//     on its goroutine unexcluded.
+//     on its goroutine unexcluded; and
+//   - when the incoming run would create the first lookalike pair, the
+//     existing peer and its subtree if the known launcher is outside it.
 //
 // When no open activation is on the context chain and the resolved parent (or
 // any ancestor of it) belongs to an unmatched multi-member concurrent lookalike
@@ -5531,15 +5533,15 @@ func (s maxSegTree) query(l, r int) int {
 // excludePeerLookalikesLocked inspects non-excluded open agent activations on
 // inv.agentStack[1:] grouped by lookalikeKey in O(N log N) worst-case time
 // (O(N + G log G) when no witness node is excluded mid-pass), and in O(1)
-// time without allocating while no two open activations share a lookalikeKey
-// (see lookalikes). When an open activation is on the context chain of the
-// run whose activation key is activation (see launcherLocked), every member
-// of every group that neither is nor encloses it is excluded with the agents
-// under it, and no group is left unmatched: the context that the run was
-// started with tells the members apart better than any goroutine does, as a
-// lookalike can stay open on a goroutine while suspended in yield or after
-// its BeforeAgentCallback answered for it, and a goroutine can run work that
-// any activation hands it after the one that created it. Otherwise, groups
+// time without allocating when neither the open activations nor the incoming
+// run with id share a lookalikeKey (see lookalikes). When an open activation
+// is on the context chain of the run with key activation (see launcherLocked),
+// every member of every group that neither is nor encloses it is excluded
+// with the agents under it. This includes a singleton that matches id. No
+// group is left unmatched: the launch context tells members apart better than
+// any goroutine does, as a lookalike can stay open while suspended in yield
+// or after its BeforeAgentCallback answered for it, and a goroutine can run
+// work that any activation hands it after the one that created it. Otherwise, groups
 // with a live goroutine match (goid in Pass 1, then origin.parent in Pass 2)
 // are resolved in outer-to-inner topological order over the SCC condensation
 // DAG of group dependencies, excluding losing peers (while keeping the winner,
@@ -5554,10 +5556,10 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map
 	if (goid == 0 && activation == nil) || len(inv.agentStack) <= 2 {
 		return exclude, nil, nil, nil
 	}
-	if inv.syncLookalikesLocked(); inv.lookalikeDups == 0 {
+	idKey := lookalikeKey{name: id.agentName, branch: id.branch, path: id.path}
+	if inv.syncLookalikesLocked(); inv.lookalikeDups == 0 && (activation == nil || inv.lookalikes[idKey] == 0) {
 		return exclude, nil, nil, nil
 	}
-	idKey := lookalikeKey{name: id.agentName, branch: id.branch, path: id.path}
 	n := len(inv.agentStack)
 	firstIdx := make(map[lookalikeKey]int, n-1)
 	var multiKeys []lookalikeKey
@@ -5582,7 +5584,13 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map
 			}
 		}
 	}
-	if len(multiKeys) == 0 {
+	// A matching singleton is a prospective peer. The launcher context
+	// distinguishes a sibling launch from a nested run sharing Go's open spans.
+	var incomingPeer int
+	if activation != nil && len(groups[idKey]) == 0 {
+		incomingPeer = firstIdx[idKey]
+	}
+	if len(multiKeys) == 0 && incomingPeer == 0 {
 		return exclude, nil, nil, nil
 	}
 
@@ -5623,17 +5631,23 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map
 
 	if launcher := inv.launcherLocked(activation, excluded); launcher > 0 {
 		var excludeRoot []bool
+		excludePeer := func(mIdx int) {
+			inv.lastLauncherExcludeVisits++
+			if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
+				return
+			}
+			if excludeRoot == nil {
+				excludeRoot = make([]bool, n)
+				ensureExcludeMutable()
+			}
+			excludeRoot[mIdx] = true
+		}
+		if incomingPeer != 0 {
+			excludePeer(incomingPeer)
+		}
 		for _, k := range multiKeys {
 			for _, mIdx := range groups[k] {
-				inv.lastLauncherExcludeVisits++
-				if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
-					continue
-				}
-				if excludeRoot == nil {
-					excludeRoot = make([]bool, n)
-					ensureExcludeMutable()
-				}
-				excludeRoot[mIdx] = true
+				excludePeer(mIdx)
 			}
 		}
 		if excludeRoot != nil {
@@ -5648,7 +5662,7 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(id identity, exclude map
 		}
 		return exclude, nil, nil, tree
 	}
-	if goid == 0 {
+	if goid == 0 || len(multiKeys) == 0 {
 		return exclude, nil, nil, nil
 	}
 
