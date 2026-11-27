@@ -362,17 +362,19 @@ func TestRunner_ContextCacheReplaced(t *testing.T) {
 }
 
 // TestRunner_ContextCacheSurvivesRewrittenReply checks that an after-model
-// callback building a new reply, with neither usage nor cache state, still
-// lets the agent cache. The flow carries both onto the replacement. Without
-// the cache state, no turn records a fingerprint, so no cache is ever
-// created; without the usage, no turn has a prompt size to create one from.
+// callback building a new reply with usage metadata but no cache state still
+// lets the agent cache. The flow carries CacheMetadata onto the replacement;
+// without it, no turn records a fingerprint, so no cache is ever created.
 func TestRunner_ContextCacheSurvivesRewrittenReply(t *testing.T) {
 	api := &cachingGeminiAPI{}
 	rewrite := func(ctx agent.Context, resp *model.LLMResponse, err error) (*model.LLMResponse, error) {
 		if err != nil || resp == nil {
 			return nil, err
 		}
-		return &model.LLMResponse{Content: genai.NewContentFromText("[redacted]", genai.RoleModel)}, nil
+		return &model.LLMResponse{
+			Content:       genai.NewContentFromText("[redacted]", genai.RoleModel),
+			UsageMetadata: resp.UsageMetadata,
+		}, nil
 	}
 	root := cachingAgent(t, api, llmagent.Config{AfterModelCallbacks: []llmagent.AfterModelCallback{rewrite}})
 	r, sessionService := newCachingRunner(t, root, &model.ContextCacheConfig{})

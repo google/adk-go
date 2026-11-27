@@ -322,7 +322,7 @@ func TestCloneHTTPOptionsCoversEveryField(t *testing.T) {
 	}
 }
 
-func TestInheritModelFields(t *testing.T) {
+func TestKeepCacheMetadata(t *testing.T) {
 	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5000}
 	cache := &model.CacheMetadata{CacheName: "c/1", Fingerprint: "fp"}
 	ownCache := &model.CacheMetadata{Fingerprint: "own"}
@@ -335,14 +335,8 @@ func TestInheritModelFields(t *testing.T) {
 		want        *model.LLMResponse
 	}{
 		{
-			name:        "cache state and usage are carried onto a replacement without them",
-			original:    &model.LLMResponse{UsageMetadata: usage, CacheMetadata: cache},
-			replacement: &model.LLMResponse{Content: text},
-			want:        &model.LLMResponse{Content: text, UsageMetadata: usage, CacheMetadata: cache},
-		},
-		{
-			name:        "cache state alone is carried",
-			original:    &model.LLMResponse{CacheMetadata: cache},
+			name:        "only cache state is carried onto a replacement without it",
+			original:    &model.LLMResponse{Partial: true, TurnComplete: true, UsageMetadata: usage, CacheMetadata: cache},
 			replacement: &model.LLMResponse{Content: text},
 			want:        &model.LLMResponse{Content: text, CacheMetadata: cache},
 		},
@@ -358,15 +352,21 @@ func TestInheritModelFields(t *testing.T) {
 			replacement: &model.LLMResponse{Content: text},
 			want:        &model.LLMResponse{Content: text},
 		},
+		{
+			name:        "nil original",
+			original:    nil,
+			replacement: &model.LLMResponse{Content: text},
+			want:        &model.LLMResponse{Content: text},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			before := *tt.replacement
 
-			got := inheritModelFields(tt.original, tt.replacement)
+			got := keepCacheMetadata(tt.original, tt.replacement)
 
 			if diff := cmp.Diff(tt.want, got); diff != "" {
-				t.Errorf("inheritModelFields() mismatch (-want +got):\n%s", diff)
+				t.Errorf("keepCacheMetadata() mismatch (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(&before, tt.replacement); diff != "" {
 				t.Errorf("the callback's replacement was modified (-before +after):\n%s", diff)
