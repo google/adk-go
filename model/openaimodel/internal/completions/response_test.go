@@ -309,8 +309,9 @@ func TestConvertUsage_DoesNotTreatOverflowedTotalAsSeparateReasoning(t *testing.
 		CompletionTokens:        math.MaxInt64,
 		CompletionTokensDetails: openai.CompletionUsageCompletionTokensDetails{ReasoningTokens: 2},
 	})
-	if got.CandidatesTokenCount != math.MaxInt32-2 || got.ThoughtsTokenCount != 2 {
-		t.Errorf("candidate and thought tokens = (%d, %d), want (%d, 2)", got.CandidatesTokenCount, got.ThoughtsTokenCount, math.MaxInt32-2)
+	// Counts beyond int32 make the usage unknown before any split is tried.
+	if got != nil {
+		t.Errorf("convertUsage() = %+v, want nil", got)
 	}
 }
 
