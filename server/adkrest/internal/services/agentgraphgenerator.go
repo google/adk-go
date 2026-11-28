@@ -400,6 +400,26 @@ func isWorkflowStartNode(node workflow.Node) bool {
 	return node == nil || node.Name() == workflow.Start.Name()
 }
 
+// graphElementID returns the identifier used for the element in DOT. Clusters
+// and nodes live in separate DOT namespaces, so a node may share its name with
+// the cluster that contains it.
+func graphElementID(instance any) string {
+	name := nodeName(instance)
+	if shouldBuildAgentCluster(instance) {
+		return "cluster_" + name
+	}
+	return name
+}
+
+func graphElementVisited(instance any, visitedNodes map[string]bool) bool {
+	// Preserve the existing preference for a plain node when an agent with the
+	// same name is also exposed as a tool.
+	if shouldBuildAgentCluster(instance) && visitedNodes[nodeName(instance)] {
+		return true
+	}
+	return visitedNodes[graphElementID(instance)]
+}
+
 func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
@@ -407,7 +427,7 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 	highlighted := highlighted(name, highlightedPairs)
 	isCluster := shouldBuildAgentCluster(instance)
 
-	visitedNodes[name] = true
+	visitedNodes[graphElementID(instance)] = true
 	if isCluster {
 		agent, ok := instance.(agent.Agent)
 		if !ok {
@@ -467,11 +487,10 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 }
 
 func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
-	namedInstance, ok := instance.(namedInstance)
-	if !ok {
+	if _, ok := instance.(namedInstance); !ok {
 		return nil
 	}
-	if visitedNodes[namedInstance.Name()] {
+	if graphElementVisited(instance, visitedNodes) {
 		return nil
 	}
 

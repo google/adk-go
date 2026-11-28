@@ -502,7 +502,7 @@ func TestDrawClusterNode(t *testing.T) {
 	if cluster.Attrs["style"] != "rounded" {
 		t.Errorf("Cluster style mismatch: got %s", cluster.Attrs["style"])
 	}
-	if !visitedNodes["MyClusterAgent"] {
+	if !visitedNodes[clusterName] {
 		t.Error("Cluster agent not marked as visited")
 	}
 }
@@ -980,6 +980,28 @@ func TestWorkflowAgentGraphUsesAgentNodeIdentity(t *testing.T) {
 		node := g.Nodes.Lookup["writer"]
 		if node == nil || node.Attrs["shape"] != "box" || node.Attrs["label"] != "\"writer\"" {
 			t.Fatalf("writer node = %v, want the function node box\n%s", node, dot)
+		}
+	})
+
+	t.Run("function node with parent workflow name", func(t *testing.T) {
+		functionNode := workflow.NewFunctionNode("flow", passThrough, workflow.NodeConfig{})
+		next := workflow.NewFunctionNode("next", passThrough, workflow.NodeConfig{})
+		flow := newTestWorkflowAgent(t, "flow", nil, workflow.Chain(workflow.Start, functionNode, next))
+
+		dot, err := GetAgentGraph(context.Background(), flow, nil)
+		if err != nil {
+			t.Fatalf("GetAgentGraph: %v", err)
+		}
+		g := parseGraph(t, dot)
+		node := g.Nodes.Lookup["flow"]
+		if node == nil || node.Attrs["shape"] != "box" || node.Attrs["label"] != "\"flow\"" {
+			t.Fatalf("flow node = %v, want the function node box\n%s", node, dot)
+		}
+		if parents := g.Relations.ChildToParents["flow"]; !parents["cluster_flow"] {
+			t.Fatalf("flow node parents = %v, want cluster_flow\n%s", parents, dot)
+		}
+		if lookupEdge(t, g, "flow", "next") == nil {
+			t.Fatalf("missing workflow edge flow -> next\n%s", dot)
 		}
 	})
 
