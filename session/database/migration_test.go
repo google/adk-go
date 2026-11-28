@@ -253,13 +253,40 @@ func TestAutoMigrateReturnsLaterErrorAfterConcurrentCreation(t *testing.T) {
 	}
 }
 
-func TestAutoMigrateCanceledContext(t *testing.T) {
+func TestAutoMigrateCanceledDuringRetry(t *testing.T) {
 	s := privateService(t, nil)
+	peer := migrationPeer(t, s.db)
+	if err := s.db.Migrator().DropIndex(&storageEvent{}, eventsIndex); err != nil {
+		t.Fatalf("preparing missing index: %v", err)
+	}
+	if err := s.db.Migrator().DropTable(&storageUserState{}); err != nil {
+		t.Fatalf("preparing later table: %v", err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	defer cancel()
 	s.db = s.db.WithContext(ctx)
+	indexCalls, tableCalls := 0, 0
+	s = withMigrationHook(s, func(kind string, value any, name string) error {
+		if kind == "index" {
+			indexCalls++
+			if peer.Migrator().HasIndex(value, name) {
+				t.Fatal("competing index already exists")
+			}
+			if err := peer.Migrator().CreateIndex(value, name); err != nil {
+				t.Fatalf("competing index creation: %v", err)
+			}
+		}
+		if _, ok := value.(*storageUserState); ok && kind == "table" {
+			tableCalls++
+			cancel()
+		}
+		return nil
+	})
 	if err := AutoMigrate(s); !errors.Is(err, context.Canceled) {
 		t.Errorf("AutoMigrate() error = %v, want context.Canceled", err)
+	}
+	if indexCalls != 1 || tableCalls != 1 {
+		t.Errorf("index/table creation calls = %d/%d, want 1/1 across the retry", indexCalls, tableCalls)
 	}
 }
 

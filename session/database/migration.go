@@ -15,6 +15,7 @@
 package database
 
 import (
+	"database/sql"
 	"slices"
 
 	"gorm.io/gorm"
@@ -30,11 +31,20 @@ func autoMigrate(db *gorm.DB, models ...any) error {
 	if err != nil {
 		return err
 	}
+	abortBatch, err := migrationBatchAbort(migrator)
+	if err != nil {
+		return err
+	}
 	missing := slices.DeleteFunc(checks, func(exists func() bool) bool { return exists() })
 	for {
 		err := migrator.AutoMigrate(models...)
 		if err == nil {
 			return nil
+		}
+		// Spanner can leave a DDL batch open on failure. Clear it before
+		// inspecting or retrying; a failed cleanup must not mask this error.
+		if abortBatch != nil && abortBatch() != nil {
+			return err
 		}
 		before := len(missing)
 		missing = slices.DeleteFunc(missing, func(exists func() bool) bool { return exists() })
@@ -47,6 +57,37 @@ func autoMigrate(db *gorm.DB, models ...any) error {
 		// requires another missing object to appear, bounding the loop without
 		// matching dialect-specific error messages or hiding persistent errors.
 	}
+}
+
+// migrationBatchAbort only clears batches owned by this migration. Spanner's
+// AutoMigrate can fail before starting a batch if the caller already has one.
+func migrationBatchAbort(migrator gorm.Migrator) (func() error, error) {
+	batch, ok := migrator.(interface {
+		migrationQueryProvider
+		AbortBatch() error
+	})
+	if !ok {
+		return nil, nil
+	}
+	queryDB, _ := batch.GetQueryAndExecTx()
+	if conn, ok := queryDB.Statement.ConnPool.(*sql.Conn); ok {
+		var callerBatch bool
+		if err := conn.Raw(func(raw any) error {
+			if state, ok := raw.(interface {
+				InDDLBatch() bool
+				InDMLBatch() bool
+			}); ok {
+				callerBatch = state.InDDLBatch() || state.InDMLBatch()
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		if callerBatch {
+			return nil, nil
+		}
+	}
+	return batch.AbortBatch, nil
 }
 
 // migrationChecks describes objects GORM may create, using the caller's naming
@@ -69,7 +110,7 @@ func migrationChecks(migrator gorm.Migrator, models ...any) ([]func() bool, erro
 		if err := stmt.Parse(model); err != nil {
 			return nil, err
 		}
-		checks = append(checks, func() bool { return m.HasTable(model) })
+		// Model columns also account for a newly created table.
 		for _, name := range stmt.Schema.DBNames {
 			if !stmt.Schema.FieldsByDBName[name].IgnoreMigration {
 				checks = append(checks, func() bool { return m.HasColumn(model, name) })
