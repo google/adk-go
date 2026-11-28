@@ -115,6 +115,8 @@ func NewSessionServiceFromDB(db *gorm.DB) (session.Service, error) {
 // type, size or nullability differs from the models, and never drops a column.
 // It can be called repeatedly and is meant to run on every startup. See the
 // package documentation for PostgreSQL and MySQL index caveats.
+// If another instance creates a missing schema object during migration, it
+// retries with fresh metadata. Errors persist when no missing object appears.
 //
 // NOTE: This function relies on a type assertion to the concrete *databaseService
 // implementation. It will return an error if the provided session.Service is
@@ -124,7 +126,7 @@ func AutoMigrate(service session.Service) error {
 	if !ok {
 		return fmt.Errorf("invalid session service type")
 	}
-	err := dbservice.db.AutoMigrate(&storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
+	err := autoMigrate(dbservice.db, &storageSession{}, &storageEvent{}, &storageAppState{}, &storageUserState{})
 	if err != nil {
 		return fmt.Errorf("auto migrate failed: %w", err)
 	}
