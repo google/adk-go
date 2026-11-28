@@ -79,6 +79,10 @@ func canFallback(err error, input any) bool {
 // A failed conversion may have stopped before visiting another field. Check
 // the whole value before handing it to encoding/json.
 func withinJSONDepth(v reflect.Value, remaining int) bool {
+	if v.Kind() == reflect.Interface {
+		// Counted like convertSnakeValue: an interface costs no depth step.
+		v = v.Elem()
+	}
 	if !v.IsValid() {
 		return true
 	}
@@ -87,7 +91,7 @@ func withinJSONDepth(v reflect.Value, remaining int) bool {
 	}
 	remaining--
 	switch v.Kind() {
-	case reflect.Interface, reflect.Pointer:
+	case reflect.Pointer:
 		return withinJSONDepth(v.Elem(), remaining)
 	case reflect.Array, reflect.Slice:
 		for i := range v.Len() {
