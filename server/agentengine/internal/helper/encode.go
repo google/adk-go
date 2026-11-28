@@ -141,8 +141,9 @@ func convertSnakeValue(path string, v reflect.Value, depth int, active map[snake
 			// encoding/json never omits a struct for omitempty, and omits a
 			// pointer or interface only when nil, which already yields a nil
 			// val. So a marshaled netip.Addr{}, or a non-nil pointer to one,
-			// stays as "".
-			if k := fvt.Type.Kind(); k == reflect.Pointer || k == reflect.Interface || isOpaque(fvt.Type) {
+			// stays as "". An interface holding a nil map or slice keeps
+			// omitempty, so it is still omitted as before.
+			if k := fvt.Type.Kind(); k == reflect.Pointer || k == reflect.Interface && !holdsNilContainer(fv) || isOpaque(fvt.Type) {
 				omitEmpty = false
 			}
 			if val != nil && (!omitEmpty || notEmpty(val)) {
@@ -272,8 +273,15 @@ func isOpaque(t reflect.Type) bool {
 // its type defines json.Marshaler or encoding.TextMarshaler. Examples are
 // uuid.UUID, netip.Addr and *big.Int. It is not applied to other structs:
 // their own MarshalJSON would replace the snake_case keys. ok is false when
-// the value has neither method.
+// the value has neither method, or when the method panics, such as one
+// promoted through a nil embedded pointer: this runs on the handler
+// goroutine, so the caller falls back to the field walk instead.
 func marshalOpaque(v reflect.Value) (val any, ok bool, err error) {
+	defer func() {
+		if recover() != nil {
+			val, ok, err = nil, false, nil
+		}
+	}()
 	if !v.CanInterface() {
 		return nil, false, nil
 	}
@@ -296,6 +304,16 @@ func marshalOpaque(v reflect.Value) (val any, ok bool, err error) {
 		return string(b), true, nil
 	}
 	return nil, false, nil
+}
+
+// holdsNilContainer reports whether v is an interface holding a nil map or
+// slice.
+func holdsNilContainer(v reflect.Value) bool {
+	if v.Kind() != reflect.Interface || v.IsNil() {
+		return false
+	}
+	e := v.Elem()
+	return (e.Kind() == reflect.Map || e.Kind() == reflect.Slice) && e.IsNil()
 }
 
 func hasMarshaler(t reflect.Type) bool {

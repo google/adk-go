@@ -161,6 +161,15 @@ func TestConvertSnakeOpaqueValues(t *testing.T) {
 			want: map[string]any{"a": ""},
 		},
 		{
+			name: "omitempty_omits_interface_holding_nil_map_or_slice",
+			value: struct {
+				M any `json:"m,omitempty"`
+				S any `json:"s,omitempty"`
+				K any `json:"k"`
+			}{M: map[string]any(nil), S: []int(nil), K: map[string]any(nil)},
+			want: map[string]any{"k": map[string]any{}},
+		},
+		{
 			name: "omitempty_keeps_marshaled_struct",
 			value: struct {
 				A netip.Addr `json:"a,omitempty"` //nolint:modernize // checks that omitempty has no effect, as in encoding/json
@@ -213,6 +222,14 @@ type textInnerWithField struct {
 
 type selfEmbed struct{ *selfEmbed }
 
+type nilEmbedText struct{ *textInner }
+
+type promotedInner struct{ OrderID string }
+
+type promotedOnly struct{ *promotedInner }
+
+func (promotedOnly) MarshalJSON() ([]byte, error) { return []byte(`{"camelCase":true}`), nil }
+
 type anyChain struct {
 	Next any `json:"next"`
 	V    int `json:"v"`
@@ -241,6 +258,20 @@ func TestConvertSnakeGuards(t *testing.T) {
 			name:  "unexported_embedded_value_marshaler",
 			value: struct{ E textInnerWithField }{textInnerWithField{textInner{v: "x"}, 1}},
 			want:  map[string]any{"e": map[string]any{"x": int64(1)}},
+		},
+		{
+			// MarshalText is promoted through a nil embedded pointer and panics
+			// when called, so the walk is used, as on main.
+			name:  "marshaler_promoted_through_nil_embedded_pointer",
+			value: struct{ H nilEmbedText }{},
+			want:  map[string]any{"h": map[string]any{}},
+		},
+		{
+			// The struct's own MarshalJSON is not used: its only fields are
+			// promoted through an embedded pointer, so it keeps snake_case keys.
+			name:  "promoted_fields_through_embedded_pointer_beat_own_marshaler",
+			value: struct{ P promotedOnly }{promotedOnly{&promotedInner{OrderID: "o1"}}},
+			want:  map[string]any{"p": map[string]any{"order_id": "o1"}},
 		},
 		{
 			name:  "self_embedding_field_type",
